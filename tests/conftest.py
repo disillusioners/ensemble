@@ -116,6 +116,11 @@ mock_slack_bolt_adapter_socket_mode_aiohttp = create_mock_module("slack_bolt.ada
 mock_slack_bolt.App = MagicMock()
 mock_slack_bolt.WorkflowApp = MagicMock()
 
+# Mock slack_bolt.async_app (required by slack adapter)
+mock_slack_bolt_async_app = create_mock_module("slack_bolt.async_app", {
+    "AsyncApp": MagicMock()
+})
+
 # Create mock slack_sdk modules
 mock_slack_sdk = create_mock_module("slack_sdk", {"__path__": ["slack_sdk"]})
 mock_slack_sdk.WebClient = MagicMock()
@@ -229,6 +234,7 @@ _mock_modules = {
     "slack_bolt.adapter": mock_slack_bolt_adapter,
     "slack_bolt.adapter.socket_mode": mock_slack_bolt_adapter_socket_mode,
     "slack_bolt.adapter.socket_mode.aiohttp": mock_slack_bolt_adapter_socket_mode_aiohttp,
+    "slack_bolt.async_app": mock_slack_bolt_async_app,
     # Mock slack_sdk modules
     "slack_sdk": mock_slack_sdk,
 }

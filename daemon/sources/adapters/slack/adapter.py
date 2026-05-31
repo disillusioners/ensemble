@@ -9,7 +9,7 @@ from collections import OrderedDict
 from typing import Any, Callable, Awaitable
 
 import aiohttp
-from slack_bolt import App
+from slack_bolt.async_app import AsyncApp
 from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 
 from daemon.sources.base import (
@@ -98,7 +98,7 @@ class SlackAdapter(MessageSourceAdapter):
         self._default_agent = config.config.get("default_agent", "leader")
 
         # State
-        self._app: App | None = None
+        self._app: AsyncApp | None = None
         self._handler: AsyncSocketModeHandler | None = None
         self._workspace_id: str | None = None
         self._workspace_name: str | None = None
@@ -189,7 +189,7 @@ class SlackAdapter(MessageSourceAdapter):
 
         try:
             # Create AsyncApp for Socket Mode
-            self._app = App(token=self._bot_token)
+            self._app = AsyncApp(token=self._bot_token)
 
             # Register event handlers
             self._app.event("message")(self._handle_message_event)
@@ -299,19 +299,15 @@ class SlackAdapter(MessageSourceAdapter):
         if not self._app:
             raise RuntimeError("Adapter not started - no Slack app")
 
-        # Use the app's client (sync - run in thread pool)
+        # Use the app's AsyncWebClient (awaitable)
         client = self._app.client
 
-        def _call():
-            # Token is already set on the App's client
-            return client.api_call(
+        try:
+            # AsyncWebClient.api_call() returns a coroutine
+            response = await client.api_call(
                 api_method=method,
                 **kwargs
             )
-
-        try:
-            # Run synchronous API call in thread pool
-            response = await asyncio.to_thread(_call)
 
             if not response.get("ok"):
                 error = response.get("error", "unknown_error")

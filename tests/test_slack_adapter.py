@@ -214,7 +214,7 @@ class TestSlackAdapterStart:
         self, slack_config, mock_on_message, mock_slack_app
     ):
         """start() should create App with bot_token."""
-        with patch("daemon.sources.adapters.slack.adapter.App", return_value=mock_slack_app) as mock_app_class:
+        with patch("daemon.sources.adapters.slack.adapter.AsyncApp", return_value=mock_slack_app) as mock_app_class:
             adapter = SlackAdapter(slack_config, mock_on_message)
 
             # Mock authentication
@@ -269,7 +269,7 @@ class TestSlackAdapterStart:
             return_value=mock_handler
         ):
             with patch(
-                "daemon.sources.adapters.slack.adapter.App",
+                "daemon.sources.adapters.slack.adapter.AsyncApp",
                 return_value=mock_app
             ):
                 await adapter.start()
