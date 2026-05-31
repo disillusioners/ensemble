@@ -279,6 +279,18 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         if pid:
             explorer_message += f"\nProject: {pid}"
 
+        # Derive context_key the same way auto-save does, and pass the dir path
+        context_key = None
+        try:
+            context_key = manager._instance_repository.get_tree_root_id(current_instance_id)
+            if not context_key:
+                context_key = current_instance_id
+        except Exception:
+            context_key = current_instance_id
+        if context_key:
+            context_dir = str(Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key)
+            explorer_message += f"\nShared context dir: {context_dir}"
+
         try:
             result = await invoke_agent_and_wait(
                 manager=manager,

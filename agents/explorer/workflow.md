@@ -26,7 +26,18 @@ Step-by-step process for exploring project knowledge.
 
 ---
 
-## Step 2: Query RAG
+## Step 2: Check shared context directory (if available)
+
+- If ENSEMBLE_SHARED_CONTEXT_DIR is set in your system prompt, use list_directory to check for existing .md files
+- Read any files whose filenames (slugs) are relevant to the current query
+- Evaluate relevance: does a prior result directly answer the current query with HIGH confidence?
+  - YES → Return the prior result, adding "Source: shared context" attribution. Skip RAG.
+  - PARTIAL → Use prior result as foundation, proceed to RAG only for gaps (Step 3)
+  - NO relevant files → Proceed to RAG as normal (Step 3)
+
+---
+
+## Step 3: Query RAG
 
 Call `rag_query_data` with the parsed query and selected mode. This returns raw entity-relation data for YOU to synthesize — no extra LLM call.
 
@@ -58,7 +69,7 @@ rag_query_data("explain the API endpoints", "hybrid")
 
 ---
 
-## Step 2b: Extract Experiences
+## Step 3b: Extract Experiences
 
 After receiving RAG results, scan for experience-type entities:
 
@@ -81,17 +92,17 @@ This is judgment-based. Don't do this for every query — only when experiences 
 
 ---
 
-## Step 3: Assess Confidence
+## Step 4: Assess Confidence
 
 Rate the RAG response quality based on signal strength:
 
 | Signal | Confidence | Interpretation | Action |
 |--------|------------|-----------------|--------|
-| Multiple relevant entities with good descriptions, relations connecting them | **HIGH** | Rich material — synthesize and return | → Step 4a |
-| Some entities found but sparse or partial descriptions | **MEDIUM** | Good start, may need file fallback for details | → Step 4b |
-| Few entities, no relations, weak/missing descriptions | **LOW** | RAG doesn't have good coverage — browse files | → Step 4b |
-| RAG returns "no results" or clearly wrong answer | **LOW** | Browse files more broadly, report what you found | → Step 4b |
-| RAG error or not configured | **NONE** | Go straight to file browsing | → Step 4b |
+| Multiple relevant entities with good descriptions, relations connecting them | **HIGH** | Rich material — synthesize and return | → Step 5a |
+| Some entities found but sparse or partial descriptions | **MEDIUM** | Good start, may need file fallback for details | → Step 5b |
+| Few entities, no relations, weak/missing descriptions | **LOW** | RAG doesn't have good coverage — browse files | → Step 5b |
+| RAG returns "no results" or clearly wrong answer | **LOW** | Browse files more broadly, report what you found | → Step 5b |
+| RAG error or not configured | **NONE** | Go straight to file browsing | → Step 5b |
 
 **Confidence Decision Tree:**
 ```
@@ -122,19 +133,19 @@ now     1-2      broadly  broadly
 
 ---
 
-## Step 4a: HIGH Confidence Path (Fast Path)
+## Step 5a: HIGH Confidence Path (Fast Path)
 
 **Execute only if confidence is HIGH:**
 
 1. Format the answer with sources
 2. Return immediately — do NOT browse files
-3. Skip to Step 5 for formatting
+3. Skip to Step 6 for formatting
 
 **Why skip file browsing?** Trust the knowledge base. Speed matters.
 
 ---
 
-## Step 4b: LOW/MEDIUM Confidence Path (File Fallback)
+## Step 5b: LOW/MEDIUM Confidence Path (File Fallback)
 
 **Execute if confidence is MEDIUM or LOW:**
 
@@ -148,7 +159,7 @@ now     1-2      broadly  broadly
 
 ---
 
-## Step 5: Combine & Format
+## Step 6: Combine & Format
 
 **BOTH `## Confidence:` and `## Need Update KB:` headings are MANDATORY in EVERY response. Never omit either one. They must always appear together at the top of your response, before any body content.**
 
@@ -235,6 +246,12 @@ Start: Query received
         │
         ▼
 ┌───────────────┐
+│ Check shared  │ → list_directory + read relevant .md
+│ context dir   │ → YES/PARTIAL/NO → appropriate action
+└───────────────┘
+        │
+        ▼
+┌───────────────┐
 │ Query RAG     │ → rag_query_data(query, mode)
 └───────────────┘
         │
@@ -252,7 +269,7 @@ Start: Query received
         │
    ┌────┴────┐
    │         │
-HIGH      MEDIUM/LOW
+ HIGH      MEDIUM/LOW
    │         │
    ▼         ▼
 ┌───────────────┐   ┌───────────────┐
@@ -265,9 +282,9 @@ HIGH      MEDIUM/LOW
                     │ Combine +     │
                     │ Format        │
                      └───────────────┘
-                            │
-                            ▼
-                        Return to caller
+                           │
+                           ▼
+                       Return to caller
 ```
 
 ---
@@ -280,6 +297,6 @@ HIGH      MEDIUM/LOW
 | MEDIUM/LOW path | 2-4 (RAG + 1-2 files) |
 | Total before return | 3 max (prefer 2) |
 
-**Shared speed budget:** Follow-up experience queries (Step 2b) and file browsing (Step 4b) share the same budget — they don't stack. If you used follow-up queries, reduce file browsing calls accordingly.
+**Shared speed budget:** Follow-up experience queries (Step 3b) and file browsing (Step 5b) share the same budget — they don't stack. If you used follow-up queries, reduce file browsing calls accordingly.
 
 **Remember:** Someone is waiting. Don't over-research.

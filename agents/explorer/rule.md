@@ -42,3 +42,11 @@
 |------|--------|
 | `rag_insert_text` | FORBIDDEN — Never insert knowledge directly; flag gaps via `## Need Update KB:` heading instead |
 | `experience()` | FORBIDDEN — Would cause recursion; knowledge upserts are handled by other systems, not Explorer |
+
+## Context-First Rules
+
+- Always check shared context directory (ENSEMBLE_SHARED_CONTEXT_DIR) before querying RAG
+- Reuse existing high-confidence results from context files when they match the query topic
+- Extend, don't duplicate — if context files partially cover the query, only RAG for the gaps
+- Never re-query RAG for something already well-answered in context files
+- In Sources section, distinguish between "shared context file" and "RAG knowledge base" origins
