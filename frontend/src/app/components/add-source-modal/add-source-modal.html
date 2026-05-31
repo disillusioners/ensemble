@@ -70,6 +70,44 @@
         </div>
       </div>
 
+      <!-- Setup Guide Section -->
+      @if (hasSetupGuide()) {
+        <div class="setup-guide-section">
+          <button
+            type="button"
+            (click)="toggleSetupGuide()"
+            class="setup-guide-btn"
+            [class.expanded]="showSetupGuide()"
+            [attr.aria-expanded]="showSetupGuide()"
+            aria-controls="setup-guide-panel"
+          >
+            <span>📖 Setup Guide</span>
+            <svg class="chevron-icon" [class.rotated]="showSetupGuide()" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          @if (showSetupGuide()) {
+            <div id="setup-guide-panel" role="region" class="setup-guide-panel">
+              @if (currentGuideContent(); as guide) {
+                <h4 class="guide-title">{{ guide.title }}</h4>
+                <ol class="guide-steps">
+                  @for (step of guide.steps; track $index) {
+                    <li class="guide-step">
+                      <span class="guide-step-number">{{ $index + 1 }}</span>
+                      <div class="guide-step-content">
+                        <span class="guide-step-title">{{ step.title }}</span>
+                        <p class="guide-step-desc" [innerHTML]="step.description"></p>
+                      </div>
+                    </li>
+                  }
+                </ol>
+              }
+            </div>
+          }
+        </div>
+      }
+
       <!-- Source Configuration Section -->
       <div class="form-group config-section">
         <label class="form-label">Source Configuration</label>

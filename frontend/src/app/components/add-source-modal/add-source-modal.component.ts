@@ -6,6 +6,18 @@ import { Inject } from '@angular/core';
 import type { SourceCreate, SourceType, Agent } from '../../models';
 import { ApiService } from '../../services/api.service';
 
+// Setup guide step interface
+interface SetupGuideStep {
+  title: string;
+  description: string;
+}
+
+// Setup guide content interface
+interface SetupGuideContent {
+  title: string;
+  steps: SetupGuideStep[];
+}
+
 type ConfigTab = 'simple' | 'json';
 
 interface SourceTypeOption {
@@ -67,6 +79,49 @@ export class AddSourceModalComponent implements OnInit {
   
   // Agent list for select dropdown
   protected readonly agents = signal<Agent[]>([]);
+
+  // Setup guide state
+  protected readonly showSetupGuide = signal(false);
+
+  // Setup guide content for supported source types
+  protected readonly setupGuideContent: Partial<Record<SourceType, SetupGuideContent>> = {
+    slack: {
+      title: 'Slack Setup Guide',
+      steps: [
+        { title: 'Create App', description: 'Go to <a href="https://api.slack.com/apps" target="_blank" rel="noopener noreferrer">api.slack.com/apps</a> → "Create New App" → "From scratch"' },
+        { title: 'Enable Socket Mode', description: 'Left sidebar → Socket Mode → Toggle ON' },
+        { title: 'Add Bot Scopes', description: 'OAuth & Permissions → Bot Token Scopes → Add: <code>chat:write</code>, <code>channels:history</code>, <code>groups:history</code>, <code>im:history</code>, <code>im:write</code>, <code>reactions:write</code>, <code>reactions:read</code>, <code>commands</code>, <code>users:read</code>, <code>files:read</code>' },
+        { title: 'Install to Workspace', description: 'OAuth & Permissions → "Install to Workspace" → Copy the <strong>Bot Token</strong> (<code>xoxb-...</code>)' },
+        { title: 'Generate App Token', description: 'Basic Information → App-Level Tokens → "Generate Token and Scopes" → Add scope <code>connections:write</code> → Copy the <strong>App Token</strong> (<code>xapp-...</code>)' },
+        { title: 'Enable Events', description: 'Event Subscriptions → Toggle ON → Subscribe to bot events: <code>message.channels</code>, <code>message.groups</code>, <code>message.im</code>, <code>app_mention</code>' },
+        { title: 'Enable Interactivity', description: 'Interactivity & Shortcuts → Toggle ON' },
+      ]
+    },
+    telegram: {
+      title: 'Telegram Setup Guide',
+      steps: [
+        { title: 'Create a Bot', description: 'Message <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer">@BotFather</a> on Telegram' },
+        { title: 'Send /newbot', description: 'Follow the prompts to name your bot' },
+        { title: 'Copy the Bot Token', description: 'BotFather provides a token like <code>123456:ABC-DEF...</code>' },
+        { title: 'Get Chat ID', description: 'Message your bot, then visit <code>https://api.telegram.org/bot&lt;TOKEN&gt;/getUpdates</code>' },
+      ]
+    }
+  };
+
+  // Computed: whether current source type has a setup guide
+  protected readonly hasSetupGuide = computed(() => {
+    return this.sourceType() in this.setupGuideContent;
+  });
+
+  // Computed: get current guide content
+  protected readonly currentGuideContent = computed(() => {
+    return this.setupGuideContent[this.sourceType()] ?? null;
+  });
+
+  // Toggle setup guide visibility
+  protected toggleSetupGuide(): void {
+    this.showSetupGuide.update(v => !v);
+  }
 
   // Base source type configurations (without dynamic options)
   private readonly baseSourceTypeConfigs: Record<SourceType, Omit<SourceTypeConfig, 'fields'> & { fields: SimpleField[] }> = {
@@ -223,6 +278,8 @@ export class AddSourceModalComponent implements OnInit {
   // Initialize simple fields with default values when source type changes
   protected onSourceTypeChange(type: SourceType): void {
     this.sourceType.set(type);
+    // Reset setup guide when switching types
+    this.showSetupGuide.set(false);
     // Reset simple field values and apply defaults
     const defaults: Record<string, string | number | boolean> = {};
     const fields = this.sourceTypeConfigs[type]?.fields ?? [];
