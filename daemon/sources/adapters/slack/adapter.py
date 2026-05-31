@@ -181,6 +181,9 @@ class SlackAdapter(MessageSourceAdapter):
         if self._status == SourceStatus.RUNNING:
             return
 
+        # Reset circuit breaker for fresh start (prevents stale state from reused adapters)
+        self._circuit_breaker.reset()
+
         self._status = SourceStatus.STARTING
         self._error = None
 
@@ -279,7 +282,6 @@ class SlackAdapter(MessageSourceAdapter):
         )
 
         if not success:
-            await self._circuit_breaker.record_failure()
             raise SlackAPIError(f"Rate limit timeout for {method}")
 
         return result
@@ -297,16 +299,19 @@ class SlackAdapter(MessageSourceAdapter):
         if not self._app:
             raise RuntimeError("Adapter not started - no Slack app")
 
-        # Use the app's client
+        # Use the app's client (sync - run in thread pool)
         client = self._app.client
 
-        try:
-            # Call using Slack SDK
-            response = await client.api_call(
+        def _call():
+            # Token is already set on the App's client
+            return client.api_call(
                 api_method=method,
-                token=self._bot_token,
                 **kwargs
             )
+
+        try:
+            # Run synchronous API call in thread pool
+            response = await asyncio.to_thread(_call)
 
             if not response.get("ok"):
                 error = response.get("error", "unknown_error")

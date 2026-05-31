@@ -65,3 +65,14 @@ class CircuitBreaker:
     def get_state(self) -> str:
         """Get current state as string."""
         return self.state.value
+
+    def reset(self) -> None:
+        """Reset the circuit breaker to initial closed state.
+
+        This clears all failure tracking and allows fresh start.
+        Used when restarting an adapter to ensure circuit breaker
+        state doesn't persist from previous failed attempts.
+        """
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.last_failure_time = 0.0
