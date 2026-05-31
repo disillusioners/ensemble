@@ -166,24 +166,43 @@ class TestCleanupCachedInstances:
         """Verify cleanup correctly identifies and releases expired instances.
         
         This test verifies the core cleanup loop logic: expired instances
-        (cached > TTL ago) should be identified for release.
-        We verify this by checking the time comparison logic.
+        (cached > TTL ago) should be identified and released.
+        We verify by calling the cleanup method and checking release is invoked.
         """
-        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
+        from daemon.manager import InstanceManager, INSTANCE_CACHE_TTL_HOURS
         
         ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
         instance_id = "expired-instance"
         
-        # Create instance that was cached >TTL ago
-        expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 60)).isoformat()
-        mock_instance = self._make_cached_instance(instance_id, expired_time)
+        # Create instance that's in memory
+        mock_graph = MagicMock()
+        mock_manager.instances[instance_id] = (mock_graph, "/agents/test")
         
-        # Verify the instance would be considered expired
-        cached_at = datetime.fromisoformat(mock_instance.updated_at)
-        diff = (datetime.utcnow() - cached_at).total_seconds()
-        assert diff > ttl_seconds, "Instance should be considered expired"
+        # Create cached instance that was cached >TTL ago
+        # Use timezone-aware datetime (+00:00) to match production code's datetime.now(timezone.utc)
+        expired_time = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 60)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        mock_instance = self._make_cached_instance(instance_id, expired_time, status="paused")
+        mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
         
-        # The cleanup loop should identify this instance as needing release
+        # Mock _release_cached_instance to track calls
+        released_instances = []
+        def track_release(iid):
+            released_instances.append(iid)
+            if iid in mock_manager.instances:
+                del mock_manager.instances[iid]
+        mock_manager._release_cached_instance = MagicMock(side_effect=track_release)
+        
+        # Run cleanup once
+        mock_manager._shutting_down = False
+        
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
+        
+        # Verify the expired instance WAS released (expired and in non-active status)
+        assert instance_id not in mock_manager.instances
+        assert instance_id in released_instances
 
     @pytest.mark.asyncio
     async def test_cleanup_skips_recent_paused_instances(self, mock_manager):
@@ -312,29 +331,58 @@ class TestCleanupCachedInstances:
     async def test_cleanup_handles_multiple_instances(self, mock_manager):
         """Verify cleanup correctly handles multiple instances with different ages.
         
-        We verify the time comparison logic works correctly for different ages.
+        We verify that expired instances are released while recent ones are kept,
+        by calling the cleanup method and checking the results.
         """
-        from daemon.manager import INSTANCE_CACHE_TTL_HOURS
+        from daemon.manager import InstanceManager, INSTANCE_CACHE_TTL_HOURS
         
         ttl_seconds = INSTANCE_CACHE_TTL_HOURS * 3600
         
         # Create instances with different update times
-        expired_time1 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 300)).isoformat()
-        expired_time2 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 600)).isoformat()
-        recent_time = (datetime.utcnow() - timedelta(minutes=30)).isoformat()
+        # Use timezone-aware datetime (+00:00) to match production code's datetime.now(timezone.utc)
+        expired_time1 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 300)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        expired_time2 = (datetime.utcnow() - timedelta(seconds=ttl_seconds + 600)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        recent_time = (datetime.utcnow() - timedelta(minutes=30)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        
+        # Put all instances in memory
+        mock_graph = MagicMock()
+        mock_manager.instances["expired-1"] = (mock_graph, "/agents/test")
+        mock_manager.instances["expired-2"] = (mock_graph, "/agents/test")
+        mock_manager.instances["recent"] = (mock_graph, "/agents/test")
         
         instance1 = self._make_cached_instance("expired-1", expired_time1)
         instance2 = self._make_cached_instance("expired-2", expired_time2)
         recent_instance = self._make_cached_instance("recent", recent_time)
         
-        # Verify time comparisons
-        diff1 = (datetime.utcnow() - datetime.fromisoformat(expired_time1)).total_seconds()
-        diff2 = (datetime.utcnow() - datetime.fromisoformat(expired_time2)).total_seconds()
-        diff_recent = (datetime.utcnow() - datetime.fromisoformat(recent_time)).total_seconds()
+        mock_manager._instance_repository.list.return_value = (
+            [instance1, instance2, recent_instance], 3
+        )
         
-        assert diff1 > ttl_seconds, "expired-1 should be expired"
-        assert diff2 > ttl_seconds, "expired-2 should be expired"
-        assert diff_recent < ttl_seconds, "recent should NOT be expired"
+        # Mock _release_cached_instance to actually remove from memory
+        released_instances = []
+        def track_release(iid):
+            released_instances.append(iid)
+            if iid in mock_manager.instances:
+                del mock_manager.instances[iid]
+        mock_manager._release_cached_instance = MagicMock(side_effect=track_release)
+        
+        # Run cleanup once
+        mock_manager._shutting_down = False
+        
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
+        
+        # Verify expired instances were released
+        assert "expired-1" not in mock_manager.instances
+        assert "expired-2" not in mock_manager.instances
+        assert "expired-1" in released_instances
+        assert "expired-2" in released_instances
+        
+        # Verify recent instance was kept
+        assert "recent" in mock_manager.instances
+        assert "recent" not in released_instances
 
     @pytest.mark.parametrize("status", ["completed", "error", "terminated", "failed", "paused"])
     @pytest.mark.asyncio
