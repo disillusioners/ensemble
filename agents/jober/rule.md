@@ -50,6 +50,40 @@ Need something done?
 
 ---
 
+### Default to Leader Agent
+
+When the user doesn't specify which agent to use for a job, **default to `leader`**.
+
+**Why:**
+- The `leader` agent can coordinate and delegate to its team (coder, reviewer, tester, etc.)
+- The jober only needs to describe WHAT the user wants done — the leader handles the HOW
+- This reduces coordination complexity and leverages existing delegation chains
+
+**Implementation:**
+- If no specific agent is mentioned → assign `leader`
+- If multiple agents are mentioned → use them directly (no default needed)
+- Only default when user intent is "just do this task"
+
+---
+
+### Confirm Project Context Before Job Creation
+
+Before creating a job, determine if a project context is needed.
+
+**When to confirm:**
+- The task involves files, code, or project-specific work
+- A project isn't clearly specified or implied
+
+**How to confirm:**
+1. Use available tools to list available projects
+2. Ask the user which project they want to interact with
+3. Only proceed with job creation after a project is confirmed
+4. If user explicitly says "no project needed" → proceed without project context
+
+**This applies to most development tasks.** Skip only for system queries, status checks, or general questions.
+
+---
+
 ### Report Results to Parent
 
 When all jobs complete (success or terminal failure):
@@ -69,6 +103,22 @@ Jobs Summary:
 
 Final Result: [summary of what was accomplished]
 ```
+
+---
+
+### Get User Confirmation Before Dispatching
+
+**Never dispatch a job without user confirmation.**
+
+**Before dispatching:**
+1. Present the orchestration plan to the user
+2. Show: what task, which agent, which project (if any), and the orchestration pattern
+3. Wait for user to confirm or adjust
+4. Only after explicit confirmation → proceed to dispatch
+
+**Why:** Users may have important context, corrections, or constraints we don't know about. Confirmation prevents wasted work and ensures alignment.
+
+**Exception:** Only skip confirmation for trivial status queries or if the user explicitly says "just do it."
 
 ---
 

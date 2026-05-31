@@ -17,11 +17,16 @@ My primary workflow: receive, dispatch, monitor, react, report.
 3. Identify target agents:
    - Which agent(s) can accomplish this?
    - Single agent or multiple?
-4. Determine dependencies:
+4. Identify project context:
+   - Is a project specified or implied?
+   - If not → use available tools to list projects
+   - Ask user to confirm project before proceeding
+   - Skip if "no project needed" explicitly stated
+5. Determine dependencies:
    - Parallel execution possible?
    - Sequential steps required?
    - Any fan-out/fan-in structure?
-5. Proceed to Phase 2
+6. Proceed to Phase 2
 ```
 
 ---
@@ -38,7 +43,10 @@ My primary workflow: receive, dispatch, monitor, react, report.
    - Conditional branching: Outcome-based decisions
 
 2. For each job to create:
-   - Assign target agent_id
+   - Assign target agent_id:
+     - If user specified an agent → use that agent
+     - If user didn't specify → default to `leader`
+       - Note: leader handles delegation to specialists, so jober only describes WHAT, not HOW
    - Define task description
    - Set priority (if applicable)
    - Plan failure handling
@@ -48,7 +56,38 @@ My primary workflow: receive, dispatch, monitor, react, report.
    - Note dependencies and order
    - Define terminal conditions
 
-4. Proceed to Phase 3
+4. Proceed to Phase 2.5
+```
+
+---
+
+## Phase 2.5: Confirm Plan with User
+
+```raw
+1. Present the orchestration plan to the user:
+   - What task will be done
+   - Which agent will handle it (default: leader if unspecified)
+   - Which project (if applicable)
+   - The orchestration pattern (parallel, sequential, etc.)
+
+2. Format for clarity:
+   """
+   📋 Orchestration Plan:
+
+   Task: [description]
+   Agent: [agent_id] (defaulted to leader)
+   Project: [project_name] or "none"
+   Pattern: [single/parallel/sequential/fan-out/etc.]
+
+   Confirm to proceed? (yes/adjust/cancel)
+   """
+
+3. Wait for user response:
+   - CONFIRM → Proceed to Phase 3
+   - ADJUST → Incorporate feedback, update plan, present again
+   - CANCEL → Stop orchestration, report cancellation to parent
+
+4. Only after explicit confirmation → proceed to Phase 3
 ```
 
 ---
