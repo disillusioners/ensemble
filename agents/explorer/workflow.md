@@ -259,10 +259,20 @@ Start: Query received
 └───────────────┘
         │
         ▼
-┌───────────────┐
-│ Check shared  │ → list_directory + read relevant .md
-│ context dir   │ → YES/PARTIAL/NO → appropriate action
-└───────────────┘
+┌───────────────────────────────────────┐
+│ Check Pre-loaded Context              │ → Auto-injected by system (primary)
+│ (auto-injected by system)             │
+└───────────────────────────────────────┘
+        │
+   ┌────┴────┐
+   │         │
+   ▼         ▼ (if insufficient)
+┌───────────────┐    ┌───────────────────────────────┐
+│ Sufficient?   │NO  │ Use list_directory to find    │
+└───────────────┘    │ additional .md files (rare)   │
+   │                 └───────────────────────────────┘
+  YES
+   │
         │
         ▼
 ┌───────────────┐
