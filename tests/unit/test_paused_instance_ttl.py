@@ -8,7 +8,7 @@ Tests the TTL-based release of in-memory graphs for cached instances, including:
 
 import pytest
 import asyncio
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
 
 from daemon.cancellation import CancellationReason
@@ -207,10 +207,15 @@ class TestCleanupCachedInstances:
         diff = (datetime.utcnow() - cached_at).total_seconds()
         assert diff < ttl_seconds, "Instance should NOT be considered expired"
         
-        # Run cleanup once - instance should remain in memory
-        mock_manager._shutting_down = True
+        # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
+        mock_manager._shutting_down = False
         from daemon.manager import InstanceManager
-        await InstanceManager._cleanup_cached_instances(mock_manager)
+        
+        # Mock asyncio.sleep to exit loop after first iteration by setting _shutting_down=True
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # Verify instance was NOT released (still in memory)
         assert instance_id in mock_manager.instances
@@ -231,9 +236,13 @@ class TestCleanupCachedInstances:
         mock_instance = self._make_cached_instance(instance_id, recent_time)
         mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
         
-        # Run cleanup once
-        mock_manager._shutting_down = True
-        await InstanceManager._cleanup_cached_instances(mock_manager)
+        # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
+        mock_manager._shutting_down = False
+        
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # Verify instance was NOT released (still in memory)
         assert instance_id in mock_manager.instances
@@ -253,9 +262,13 @@ class TestCleanupCachedInstances:
         mock_instance = self._make_cached_instance(instance_id, expired_time)
         mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
         
-        # Run cleanup once
-        mock_manager._shutting_down = True
-        await InstanceManager._cleanup_cached_instances(mock_manager)
+        # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
+        mock_manager._shutting_down = False
+        
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # No crash - instances not in memory are skipped
 
@@ -265,9 +278,10 @@ class TestCleanupCachedInstances:
         from daemon.manager import InstanceManager
         
         # Create multiple instances with various invalid updated_at values
+        # valid_instance is 2h ago (within 4h TTL), so it should be kept
         valid_instance = self._make_cached_instance(
             "valid-instance",
-            (datetime.utcnow() - timedelta(hours=5)).isoformat()
+            (datetime.utcnow() - timedelta(hours=2)).isoformat()
         )
         none_instance = self._make_cached_instance("none-instance", None)
         empty_instance = self._make_cached_instance("empty-instance", "")
@@ -281,12 +295,15 @@ class TestCleanupCachedInstances:
             4
         )
         
-        # Run cleanup once
-        mock_manager._shutting_down = True
-        # Should not raise any exception
-        await InstanceManager._cleanup_cached_instances(mock_manager)
+        # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
+        mock_manager._shutting_down = False
         
-        # Only valid instance should have been processed
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
+        
+        # Only valid instance should have been processed (and kept, since it's within TTL)
         assert "valid-instance" in mock_manager.instances  # Still there (within TTL check passes)
         
         # Verify no crash occurred for invalid instances
@@ -319,6 +336,41 @@ class TestCleanupCachedInstances:
         assert diff2 > ttl_seconds, "expired-2 should be expired"
         assert diff_recent < ttl_seconds, "recent should NOT be expired"
 
+    @pytest.mark.parametrize("status", ["completed", "error", "terminated", "failed", "paused"])
+    @pytest.mark.asyncio
+    async def test_cleanup_releases_expired_by_status(self, mock_manager, status):
+        """Verify cleanup releases expired instances for all non-active statuses."""
+        from daemon.manager import InstanceManager
+        
+        instance_id = f"expired-{status}-instance"
+        
+        # Create instance that's in memory with the given status
+        mock_graph = MagicMock()
+        mock_manager.instances[instance_id] = (mock_graph, "/agents/test")
+        
+        # Create cached instance that was updated 5 hours ago (past 4h TTL)
+        # Use timezone-aware datetime (+00:00) to match production code's datetime.now(timezone.utc)
+        expired_time = (datetime.utcnow() - timedelta(hours=5)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        mock_instance = self._make_cached_instance(instance_id, expired_time, status=status)
+        mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
+        
+        # Mock _release_cached_instance to actually delete from mock_manager.instances
+        def release_instance(instance_id_to_release):
+            if instance_id_to_release in mock_manager.instances:
+                del mock_manager.instances[instance_id_to_release]
+        mock_manager._release_cached_instance = MagicMock(side_effect=release_instance)
+        
+        # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
+        mock_manager._shutting_down = False
+        
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
+        
+        # Verify instance WAS released (expired and in non-active status)
+        assert instance_id not in mock_manager.instances
+
     @pytest.mark.asyncio
     async def test_cleanup_handles_empty_list(self, mock_manager):
         """Verify cleanup handles empty instances list gracefully."""
@@ -326,9 +378,13 @@ class TestCleanupCachedInstances:
         
         mock_manager._instance_repository.list.return_value = ([], 0)
         
-        # Run cleanup once
-        mock_manager._shutting_down = True
-        await InstanceManager._cleanup_cached_instances(mock_manager)
+        # Run cleanup once - set _shutting_down=False so loop enters, mock sleep to break after one iteration
+        mock_manager._shutting_down = False
+        
+        async def break_after_one_iteration(*args, **kwargs):
+            mock_manager._shutting_down = True
+        with patch("daemon.manager.asyncio.sleep", new_callable=AsyncMock, side_effect=break_after_one_iteration):
+            await InstanceManager._cleanup_cached_instances(mock_manager)
         
         # No crash - just empty iteration
 
