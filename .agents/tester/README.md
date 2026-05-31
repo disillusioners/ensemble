@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-30 vision-always-on)
+## Test Results (Latest: 2026-05-31 instance-limit-per-parent)
+
+### Instance Limit Per-Parent Feature (2026-05-31)
+- **Branch**: `feature/instance-limit-per-parent`
+- **Targeted Tests**: 54/54 PASS (spawn tests, config, count_children, edge cases)
+- **Regression**: 879/879 PASS (662 core + 217 API, 8 skipped, 0 regressions)
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Quick Fixes**: 1 (test name typo in migration API, commit `935f823`)
+- **New Tests**: 16 (7 count_children validation + 9 spawn limit edge cases)
+- **Commits**: `2969e6b`, `78618ce`, `7bdb76b`, `935f823`
+- **Status**: ✅ READY
 
 ### Vision Always-On + Compaction Multimodal Fix (2026-05-30)
 - **Branch**: `feature/vision-always-on`
