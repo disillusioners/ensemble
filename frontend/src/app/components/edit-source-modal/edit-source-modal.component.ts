@@ -55,6 +55,9 @@ export class EditSourceModalComponent implements OnInit {
   protected readonly isLoading = signal(false);
   protected readonly error = signal<string | null>(null);
   
+  // Track if source has credentials stored (for showing masked values)
+  protected readonly hasCredentials = signal(false);
+  
   // Test connection state
   protected readonly isTesting = signal(false);
   protected readonly testResult = signal<{ success: boolean; message: string } | null>(null);
@@ -165,6 +168,24 @@ export class EditSourceModalComponent implements OnInit {
     return value !== undefined ? String(value) : '';
   }
   
+  // Helper method to get placeholder for credential fields (show masked if credentials exist)
+  protected getCredentialPlaceholder(key: string, originalPlaceholder: string): string {
+    // If credentials exist and field is a password type, show masked placeholder
+    if (this.hasCredentials()) {
+      return '•••••••• (leave empty to keep current)';
+    }
+    return originalPlaceholder;
+  }
+  
+  // Check if credential field should show masked value (indicating existing credential)
+  protected hasCredentialValue(key: string): boolean {
+    const field = this.currentFields().find(f => f.key === key);
+    if (!field || field.section !== 'credentials' || field.type !== 'password') {
+      return false;
+    }
+    return this.hasCredentials() && !this.simpleFieldValues()[key];
+  }
+  
   // Helper method to get field value as boolean (for checkbox fields)
   protected getFieldChecked(key: string, defaultValue: string | number | boolean | undefined): boolean {
     const value = this.simpleFieldValues()[key];
@@ -199,6 +220,9 @@ export class EditSourceModalComponent implements OnInit {
     this.sourceType.set(source.source_type);
     this.name.set(source.name);
     this.enabled.set(source.enabled);
+    
+    // Track if source has credentials stored
+    this.hasCredentials.set(source.has_credentials ?? false);
     
     // Set JSON fields
     if (source.config && Object.keys(source.config).length > 0) {

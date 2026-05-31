@@ -92,6 +92,7 @@ class SourceInfo(BaseModel):
     error_message: str | None = Field(default=None, description="Error message if status is 'error'")
     created_at: datetime = Field(..., description="Source creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
+    has_credentials: bool = Field(default=False, description="Whether this source has credentials configured")
 
     model_config = ConfigDict(
         json_schema_extra={

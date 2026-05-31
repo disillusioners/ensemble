@@ -121,6 +121,21 @@
                             <option [value]="option.value">{{ option.label }}</option>
                           }
                         </select>
+                      } @else if (field.type === 'password') {
+                        @if (hasCredentialValue(field.key)) {
+                          <!-- Show masked indicator when credential exists -->
+                          <div class="credential-masked-field">
+                            <span class="credential-masked-value">••••••••••••</span>
+                            <span class="credential-masked-hint">Credential stored. Enter new value to replace.</span>
+                          </div>
+                        }
+                        <input
+                          [type]="field.type"
+                          [value]="getFieldValue(field.key)"
+                          (input)="onSimpleFieldChange(field.key, $event)"
+                          [placeholder]="getCredentialPlaceholder(field.key, field.placeholder)"
+                          class="form-input"
+                        />
                       } @else {
                         <input
                           [type]="field.type"
@@ -130,7 +145,7 @@
                           class="form-input"
                         />
                       }
-                      @if (field.hint && field.type !== 'checkbox') {
+                      @if (field.hint && field.type !== 'checkbox' && field.type !== 'password') {
                         <p class="form-hint">{{ field.hint }}</p>
                       }
                     </div>

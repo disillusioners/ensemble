@@ -77,6 +77,7 @@ def _source_to_info(source) -> SourceInfo:
         error_message=source.error_message,
         created_at=parse_utc_datetime(source.created_at),
         updated_at=parse_utc_datetime(source.updated_at),
+        has_credentials=bool(source.credentials),
     )
 
 

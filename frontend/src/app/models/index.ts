@@ -146,6 +146,7 @@ export interface Source {
   error_message?: string;
   created_at: string;
   updated_at?: string;
+  has_credentials?: boolean;
 }
 
 export interface SourceCreate {
