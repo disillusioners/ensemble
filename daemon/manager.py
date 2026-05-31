@@ -61,6 +61,7 @@ from .services.error_reporting import ErrorReportingService
 from .services.cancellation import CancellationService
 from .services.title_generation import TitleGenerationService
 from .services.event_publisher import EventPublisherService
+from .services.maintenance import MaintenanceService, CheckpointCleanupJob
 from .cancellation import (
     CancellationToken,
     CancellationTokenSource,
@@ -586,6 +587,9 @@ class InstanceManager:
         # Warm-up pool background task reference
         self._warmup_task: asyncio.Task | None = None
 
+        # Maintenance service for periodic cleanup tasks
+        self._maintenance_service: MaintenanceService | None = None
+
         # Bootstrap built-in MCP servers
         self._bootstrap_builtin_servers()
 
@@ -863,6 +867,27 @@ class InstanceManager:
         if self.config.mcp_pool.enabled and self._warmup_task is None:
             self._warmup_task = asyncio.create_task(self._warmup_and_report())
             logger.debug("MCP warmup task started from initialize()")
+
+        # Initialize maintenance service with checkpoint cleanup
+        self._maintenance_service = MaintenanceService(
+            check_interval_minutes=self.config.persistence.maintenance_check_interval_minutes
+        )
+        self._maintenance_service.set_job_queue_service(self._job_queue_service)
+        self._maintenance_service.set_request_registry(self._request_registry._requests)
+
+        # Register checkpoint cleanup job
+        checkpoint_cleanup = CheckpointCleanupJob(
+            config=self.config.persistence,
+            checkpointer=self._checkpointer,
+            instance_repo=self._instance_repository,
+        )
+        self._maintenance_service.register(
+            "checkpoint_cleanup",
+            self.config.persistence.checkpoint_cleanup_interval,
+            checkpoint_cleanup.execute,
+        )
+        await self._maintenance_service.start()
+
         logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
 
     async def _cleanup_stale_completions(self) -> None:
@@ -2312,6 +2337,7 @@ class InstanceManager:
             ("wait_inflight", self._wait_for_inflight(grace_period)),
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
+            ("shutdown_maintenance_service", self._maintenance_service.stop() if self._maintenance_service else asyncio.sleep(0)),
             ("drain_mcp_pool", self._drain_warmup_pool()),
             ("shutdown_mcp_service", self._mcp_service.close_all_connections()),
         ]

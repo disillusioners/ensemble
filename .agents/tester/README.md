@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-31 instance-limit-per-parent)
+## Test Results (Latest: 2026-05-31 maintenance-checkpoint-cleanup)
+
+### MaintenanceService + CheckpointCleanup Feature (2026-05-31)
+- **Branch**: `feature/checkpoint-cleanup`
+- **Feature Tests**: 37/37 PASS (maintenance service lifecycle, cleanup operations A-D, config defaults)
+- **Regression**: 871/871 PASS (662 core + 209 API, 8 skipped, 0 regressions)
+- **ensure.md**: PASS (dev.sh stable 30s, maintenance service registered and running)
+- **Quick Fixes**: 1 (config field rename checkpoint_max_count → max_instance_history, commit `09f7853`)
+- **Commits**: `2f21670`, `202d7a5`, `cdd6522`, `09f7853`
+- **Edge Cases Verified**: No checkpoint DB, no threads, all active instances, mid-cleanup stop
+- **Status**: ✅ READY
 
 ### Instance Limit Per-Parent Feature (2026-05-31)
 - **Branch**: `feature/instance-limit-per-parent`

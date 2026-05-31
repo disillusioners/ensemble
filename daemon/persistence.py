@@ -50,6 +50,8 @@ async def get_checkpointer(db_path: Path) -> AsyncSqliteSaver:
     """
     # Create connection directly - don't use async context manager
     conn = await aiosqlite.connect(str(db_path))
+    await conn.execute("PRAGMA busy_timeout=5000")
+    await conn.execute("PRAGMA synchronous=NORMAL")
     return AsyncSqliteSaver(conn)
 
 

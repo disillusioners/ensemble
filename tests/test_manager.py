@@ -77,7 +77,7 @@ def mock_config():
             checkpoint_interval=1,
             checkpoint_ttl_hours=168,
             checkpoint_cleanup_interval=24,
-            checkpoint_max_count=1000
+            max_instance_history=300
         ),
         daemon=DaemonConfig(host="0.0.0.0", port=8079),
         agents=AgentsConfig(directory="./agents")
