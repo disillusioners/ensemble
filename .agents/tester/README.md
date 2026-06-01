@@ -60,7 +60,19 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-06-01 job-report-format)
+## Test Results (Latest: 2026-06-01 explorer-rag-checkpoint-detection)
+
+### Explorer RAG Checkpoint Detection (2026-06-01)
+- **Branch**: `feature/explorer-rag-checkpoint-detection`
+- **Knowledge Tools**: 85/85 PASS (13 checkpoint detection + 6 explore integration tests)
+- **Completion Registry**: 33/33 PASS (5 return_instance_id tests)
+- **Explorer Auto-Save**: 58/58 PASS (no regressions from explore() flow changes)
+- **Core Regression**: 662/662 PASS
+- **API Regression**: 209/209 PASS (8 skipped)
+- **Integration Verification**: All 5 key behaviors VERIFIED in source code
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Quick Fixes**: 0 (none needed)
+- **Status**: ✅ READY
 
 ### Job Event Notification Format (2026-06-01)
 - **Branch**: `feature/job-report-format`
