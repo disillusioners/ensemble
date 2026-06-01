@@ -433,15 +433,15 @@ def get_shared_context(context_key: str, query: str) -> str | None:
 
         matched = _match_context_files(query, context_dir)
         if not matched:
-            logger.info("Context auto-injection: no matches for query '%s' (tokens: %s)", query[:50], query_tokens)
+            logger.debug("Context auto-injection: no matches for query '%s' (tokens: %s)", query[:50], query_tokens)
             return None
 
         injection = _format_injection(matched)
         if not injection:
-            logger.info("Context auto-injection: no injection content for query '%s' (matched %d files)", query[:50], len(matched))
+            logger.debug("Context auto-injection: no injection content for query '%s' (matched %d files)", query[:50], len(matched))
             return None
 
-        logger.info("Context auto-injection: %d files matched for query '%s'", len(matched), query[:50])
+        logger.debug("Context auto-injection: %d files matched for query '%s'", len(matched), query[:50])
         return injection
     except Exception as e:
         logger.debug(f"Error in get_shared_context: {e}")

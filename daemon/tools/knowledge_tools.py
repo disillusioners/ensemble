@@ -298,7 +298,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 injection = await asyncio.to_thread(get_shared_context, context_key, query)
                 if injection:
                     explorer_message += f"\n\n{injection}"
-                    logger.info(
+                    logger.debug(
                         "Context auto-injection: matched files for query '%s'",
                         query[:50],
                     )
