@@ -91,7 +91,8 @@ def _match_score(query_tokens: set[str], slug_tokens: set[str]) -> float:
     """Compute match score between query and slug tokens.
 
     Recall-oriented asymmetric scoring: len(intersection) / len(query_tokens).
-    Jaccard fallback: when both sets >= 3 tokens, use len(intersection) / len(union).
+    This measures what fraction of the query tokens are found in the slug,
+    which is appropriate for query-to-slug matching.
 
     Args:
         query_tokens: Tokenized query tokens.
@@ -107,12 +108,7 @@ def _match_score(query_tokens: set[str], slug_tokens: set[str]) -> float:
     if not intersection:
         return 0.0
 
-    # Use Jaccard fallback when both sets have >= 3 tokens
-    if len(query_tokens) >= 3 and len(slug_tokens) >= 3:
-        union = query_tokens | slug_tokens
-        return len(intersection) / len(union)
-
-    # Default: recall-oriented asymmetric scoring
+    # Recall-oriented: what fraction of query tokens match slug tokens
     return len(intersection) / len(query_tokens)
 
 
@@ -340,6 +336,13 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
                     matched.sections["Answer"],
                     TOKEN_LIMIT_HIGH
                 )
+            elif "Concise" in matched.sections:
+                content = _truncate_to_tokens(
+                    matched.sections["Concise"],
+                    TOKEN_LIMIT_HIGH
+                )
+            elif matched.first_sentence:
+                content = matched.first_sentence
             else:
                 continue
             limit = TOKEN_LIMIT_HIGH
@@ -430,15 +433,15 @@ def get_shared_context(context_key: str, query: str) -> str | None:
 
         matched = _match_context_files(query, context_dir)
         if not matched:
+            logger.info("Context auto-injection: no matches for query '%s' (tokens: %s)", query[:50], query_tokens)
             return None
 
         injection = _format_injection(matched)
         if not injection:
+            logger.info("Context auto-injection: no injection content for query '%s' (matched %d files)", query[:50], len(matched))
             return None
 
-        query_snippet = query[:50] + "..." if len(query) > 50 else query
-        logger.debug(f"Context injection: {len(matched)} matches for query '{query_snippet}'")
-
+        logger.info("Context auto-injection: %d files matched for query '%s'", len(matched), query[:50])
         return injection
     except Exception as e:
         logger.debug(f"Error in get_shared_context: {e}")

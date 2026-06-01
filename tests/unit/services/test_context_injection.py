@@ -102,14 +102,13 @@ class TestMatchScore:
         # intersection = {"auth"}, len(query) = 2
         assert result == 0.5
 
-    def test_long_sets_use_jaccard(self):
-        """Sets with 3+ tokens both sides use Jaccard similarity."""
-        # Both sets >= 3 tokens -> Jaccard: len(intersection) / len(union)
+    def test_long_sets_use_recall(self):
+        """Sets with 3+ tokens both sides use recall-oriented scoring."""
+        # All sets use recall: len(intersection) / len(query)
         query_tokens = {"auth", "module", "system"}
         slug_tokens = {"auth", "module", "jwt", "tokens"}
         intersection = {"auth", "module"}  # 2 elements
-        union = {"auth", "module", "system", "jwt", "tokens"}  # 5 elements
-        expected = len(intersection) / len(union)
+        expected = len(intersection) / len(query_tokens)  # 2/3 = 0.666...
         result = _match_score(query_tokens, slug_tokens)
         assert result == expected
 
