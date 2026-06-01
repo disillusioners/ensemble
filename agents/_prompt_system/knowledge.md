@@ -90,4 +90,28 @@ When controlling external agent systems (opencode, etc.), you MUST include the f
 
 The `{{ENSEMBLE_CONTEXT_KEY}}` and `{{ENSEMBLE_SHARED_CONTEXT_DIR}}` placeholders are automatically resolved when your system prompt is assembled.
 
+---
+
+## Exploration Priority Rules
+
+Agents sometimes bypass the internal `explore()` tool and use external agent systems (opencode, etc.) directly for codebase exploration. This is **wrong** — `explore()` has a critical side-effect that benefits the entire system.
+
+### Why This Matters
+
+When you call `explore(query)`, the results are written to the shared context directory (`{{ENSEMBLE_SHARED_CONTEXT_DIR}}`). External agent systems automatically read this directory before starting work. If you skip `explore()` and use external tools directly, the shared context stays empty — both your agent and external systems lose accumulated knowledge.
+
+### Rules
+
+1. **`explore()` is MANDATORY before external exploration.** Before using any external agent system (opencode_skill, etc.) to explore or understand code/project state, you MUST first call `explore(query)` for the same topic. No exceptions.
+
+2. **Do not re-explore what `explore()` already answered.** If `explore()` provides sufficient information, do not duplicate the same query via external tools. Only use external tools for follow-up details that `explore()` could not provide.
+
+3. **Follow the explore-first workflow:**
+   - Call `explore(query)` with your question
+   - Assess whether the result is sufficient for your needs
+   - If insufficient, THEN use external tools for deeper investigation
+   - Record any new findings with `experience()` so future sessions benefit
+
+4. **This rule is NON-NEGOTIABLE.** Even if external tools seem faster, `explore()` must come first. The shared context benefit for the entire multi-agent system outweighs any perceived speed advantage.
+
 
