@@ -427,8 +427,22 @@ class TestFormatInjection:
         # Second sentence should not appear
         assert "This is the second sentence" not in result
 
-    def test_file_index_appended(self):
-        """File index table is appended to output."""
+    def test_file_index_appended(self, tmp_path):
+        """File index table is appended to output with new 3-column format."""
+        # Create context directory with files
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create matching files
+        auth_file = context_dir / "auth-module_20260531.md"
+        auth_file.write_text("""## Concise
+Concise content.
+""")
+        other_file = context_dir / "other-file_20260531.md"
+        other_file.write_text("""## Concise
+Other content.
+""")
+
         matched = [
             MatchedFile(
                 filename="auth-module_20260531.md",
@@ -445,11 +459,14 @@ class TestFormatInjection:
                 first_sentence="Other content.",
             ),
         ]
-        result = _format_injection(matched)
-        assert "### File Index" in result
-        assert "| File | Summary |" in result
+        result = _format_injection(matched, context_dir=context_dir)
+        assert "## Available Context Files" in result
+        assert "(2 files total, 2 matched)" in result
+        assert "| File | Match | Summary |" in result
         assert "| auth-module_20260531.md |" in result
         assert "| other-file_20260531.md |" in result
+        assert "70%" in result  # Match score for auth-module
+        assert "50%" in result  # Match score for other-file
 
     def test_high_tier_file_limit_enforced(self):
         """When more than MAX_HIGH_TIER_FILES exist, output is capped by file count."""
@@ -590,4 +607,4 @@ High
         assert result is not None
         assert "## Pre-loaded Context" in result
         assert "auth-module" in result
-        assert "File Index" in result
+        assert "Available Context Files" in result

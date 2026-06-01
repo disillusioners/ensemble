@@ -295,7 +295,10 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
     return matched_files
 
 
-def _format_injection(matched_files: list[MatchedFile]) -> str:
+def _format_injection(
+    matched_files: list[MatchedFile],
+    context_dir: Path | None = None,
+) -> str:
     """Format matched files into injection string.
 
     HIGH (>=0.80): Answer section, truncated to TOKEN_LIMIT_HIGH, max MAX_HIGH_TIER_FILES files
@@ -307,6 +310,7 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
 
     Args:
         matched_files: List of matched files to format.
+        context_dir: Directory containing context files (for full file index).
 
     Returns:
         Formatted injection string, or empty string if no matches.
@@ -317,10 +321,12 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
     # Track token budget
     remaining_budget = INJECTION_TOKEN_CAP
     entries: list[str] = []
-    file_index_entries: list[str] = []
 
     # Count high tier files (limit to MAX_HIGH_TIER_FILES)
     high_tier_count = 0
+
+    # Build score lookup from matched files
+    matched_dict: dict[str, MatchedFile] = {m.filename: m for m in matched_files}
 
     for matched in matched_files:
         # Stop if budget exhausted
@@ -391,10 +397,51 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
         entries.append(f"### {matched.slug} ({score_pct}% match)\n{content}\n")
         remaining_budget -= estimated_tokens
 
-    # Build file index from ALL matched files (up to 30) - independent of injection loop
-    for matched in matched_files[:30]:
-        summary = matched.first_sentence[:80] if matched.first_sentence else matched.slug
-        file_index_entries.append(f"| {matched.filename} | {summary} |")
+    # Build full file index from ALL files in context_dir (up to 30)
+    file_index_entries: list[tuple[float, str, str]] = []  # (score, filename, summary)
+    if context_dir is not None and context_dir.is_dir():
+        try:
+            md_files = sorted(
+                context_dir.glob("*.md"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )[:50]  # Scan up to 50 files for index
+
+            for file_path in md_files[:30]:  # Index cap at 30
+                try:
+                    # Get matched file if exists
+                    matched = matched_dict.get(file_path.name)
+                    if matched is not None:
+                        score = matched.score
+                        summary = matched.first_sentence[:80] if matched.first_sentence else matched.slug
+                    else:
+                        # Score unmatched files
+                        slug = _extract_slug_from_filename(file_path.name)
+                        slug_tokens = _tokenize_slug(slug)
+                        if not slug_tokens:
+                            continue
+                        # For unmatched files in the index, we default to 0%
+                        # since we don't have access to query tokens here
+                        score = 0.0
+
+                        # Extract summary from file content
+                        content = file_path.read_text(encoding="utf-8", errors="replace")
+                        sections = _parse_sections(content)
+                        if "Concise" in sections:
+                            summary = _extract_first_sentence(sections["Concise"])[:80]
+                        elif "Answer" in sections:
+                            summary = _extract_first_sentence(sections["Answer"])[:80]
+                        else:
+                            summary = slug
+
+                    file_index_entries.append((score, file_path.name, summary))
+                except Exception:
+                    continue
+        except OSError:
+            pass
+
+        # Sort by score descending
+        file_index_entries.sort(key=lambda x: x[0], reverse=True)
 
     if not entries:
         return ""
@@ -407,10 +454,16 @@ def _format_injection(matched_files: list[MatchedFile]) -> str:
 
     # Add file index (does NOT count toward cap)
     if file_index_entries:
-        lines.append("\n### File Index\n")
-        lines.append("| File | Summary |\n")
-        lines.append("|------|----------|\n")
-        lines.extend(file_index_entries)
+        total_files = len(file_index_entries)
+        matched_count = len(matched_files)
+        lines.append("\n## Available Context Files")
+        lines.append(f"({total_files} files total, {matched_count} matched)\n")
+        lines.append("> ⚠️ Match scores are heuristic-based and may not reflect true relevance. Do not fully trust them — verify with your own judgment.\n")
+        lines.append("| File | Match | Summary |\n")
+        lines.append("|------|-------|----------|\n")
+        for score, filename, summary in file_index_entries:
+            score_pct = int(score * 100)
+            lines.append(f"| {filename} | {score_pct}% | {summary} |")
 
     return "".join(lines)
 
@@ -433,10 +486,10 @@ def get_shared_context(context_key: str, query: str) -> str | None:
 
         matched = _match_context_files(query, context_dir)
         if not matched:
-            logger.debug("Context auto-injection: no matches for query '%s' (tokens: %s)", query[:50], query_tokens)
+            logger.debug("Context auto-injection: no matches for query '%s'", query[:50])
             return None
 
-        injection = _format_injection(matched)
+        injection = _format_injection(matched, context_dir=context_dir)
         if not injection:
             logger.debug("Context auto-injection: no injection content for query '%s' (matched %d files)", query[:50], len(matched))
             return None
