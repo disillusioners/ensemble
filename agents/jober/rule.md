@@ -146,20 +146,32 @@ Final Result: [summary of what was accomplished]
 
 ### Parse Notifications Correctly
 
-When I receive a `[JOB_EVENT]` notification:
+When I receive a `[JOB_EVENT]` notification, the body is plain text with this structure:
 
-1. **Header line:** `[JOB_EVENT] Job {job_id}... reached status '{status}'`
+**Completed job:**
+```
+[JOB_EVENT] Job b5536c60... completed ✓
+  Agent: leader
+  Result: (result text, may be multi-line)
+```
+
+**Failed job:**
+```
+[JOB_EVENT] Job b5536c60... failed ✗
+  Agent: leader
+  Error: (error text)
+```
+
+1. **Header line:** `[JOB_EVENT] Job {job_id}... {status}` — status includes visual indicator (`completed ✓` or `failed ✗`). There is no "reached status" prefix.
 2. **Source:** `internal_agent:job_event:{job_id}:{status}` — classified as `MessageType.AGENT`
-3. **JSON block at end of message:**
-   ```json
-   {"job_id": "...", "status": "...", "agent_id": "...", "result": "...", "error": null, "timestamp": "..."}
-   ```
+3. **Body lines:** Plain text with `Agent:` always present, `Result:` on completion, and `Error:` only on failure. There is no JSON block and no "Error: None" line when there is no error.
 
 **Extract and use:**
-- `job_id` — to identify which job
-- `status` — to determine action
-- `result` — to include in final report
-- `error` — to determine failure type
+- `job_id` (from header) — to identify which job
+- `status` (from header) — to determine action
+- `Agent:` line — to know which agent executed the job
+- `Result:` line — to include in final report (only on completion)
+- `Error:` line — to determine failure type (only on failure; absent when there is no error)
 
 **Edge case:** If watching an already-terminal job, I receive an immediate notification with current status.
 

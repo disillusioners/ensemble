@@ -16,7 +16,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 3. job_create(agent_id=[target], task=[description], watch=True)
 4. watch_job(job_id)  # if not using watch=True
 5. Wait for [JOB_EVENT] notification
-6. Parse JSON for status and result
+6. Parse the body for status, Agent line, and Result/Error
 7. send_message to parent with result
 ```
 
@@ -35,7 +35,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 4. watch_jobs([all job_ids])  # ensure all watched
 5. Wait for all [JOB_EVENT] notifications
 6. For each notification:
-   Parse JSON for job_id, status, result
+   Parse the body for job_id, status, Agent line, and Result/Error
    Record outcome
 7. Aggregate results
 8. send_message to parent with complete summary
@@ -142,45 +142,47 @@ When a job reaches a terminal status, I must decide how to react:
 
 ## Notification Format
 
-When watching a job, notifications arrive with this structure:
+When watching a job, notifications arrive as plain text with this structure:
 
-**Header:**
+**Completed job:**
 ```
-[JOB_EVENT] Job {job_id}... reached status '{status}'
+[JOB_EVENT] Job b5536c60... completed ✓
+  Agent: leader
+  Result: (result text, may be multi-line)
 ```
+
+**Failed job:**
+```
+[JOB_EVENT] Job b5536c60... failed ✗
+  Agent: leader
+  Error: (error text)
+```
+
+**Header:** `[JOB_EVENT] Job {job_id}... {status}` — the status word appears directly with a visual indicator (`completed ✓` or `failed ✗`). There is no "reached status" prefix.
 
 **Source:** `internal_agent:job_event:{job_id}:{status}`
 - Classified as `MessageType.AGENT`
 - This distinguishes it from user messages
 
-**Body:** Plain text description of the event
-
-**End of message:** JSON block
-```json
-{
-  "job_id": "abc123",
-  "status": "completed",
-  "agent_id": "coder",
-  "result": "Task completed successfully",
-  "error": null,
-  "timestamp": "2024-01-15T10:30:00Z"
-}
-```
+**Body:** Plain text lines:
+- `Agent:` line is always present
+- `Result:` line is present on completion (may be multi-line)
+- `Error:` line is present only on failure (absent — not "Error: None" — when there is no error)
+- There is no JSON block at the end of the message
 
 ---
 
 ## Notification Parsing
 
-Extract from JSON block:
+Extract from the notification text:
 
-| Field | Use |
-|-------|-----|
-| `job_id` | Identify which job this is for |
-| `status` | Determine action (completed, failed, etc.) |
-| `agent_id` | Know which agent executed it |
-| `result` | Include in final report |
-| `error` | Determine failure type for retry decisions |
-| `timestamp` | For logging and ordering |
+| Field | Source | Use |
+|-------|--------|-----|
+| `job_id` | Header | Identify which job this is for |
+| `status` | Header | Determine action (completed, failed, etc.) |
+| `agent_id` | `Agent:` line | Know which agent executed it |
+| `result` | `Result:` line | Include in final report (only on completion) |
+| `error` | `Error:` line | Determine failure type for retry decisions (only on failure) |
 
 ---
 
