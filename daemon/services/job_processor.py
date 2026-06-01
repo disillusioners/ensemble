@@ -98,6 +98,16 @@ class JobProcessor:
                 source_dispatcher=self._instance_manager.source_dispatcher,
             )
             self._queue_service._message_job_handler = self._message_job_handler
+
+    async def _capture_result_summary(self, instance_id: str, job_id: str, job_type_label: str) -> str | None:
+        """Try to capture agent response content for result_summary."""
+        result_summary = None
+        if hasattr(self._instance_manager, '_get_last_assistant_message_raw'):
+            try:
+                result_summary = await self._instance_manager._get_last_assistant_message_raw(instance_id)
+            except Exception as e:
+                logger.warning(f"Failed to get result_summary for {job_type_label} job {job_id[:8]}...: {e}")
+        return result_summary
     
     async def start(self) -> None:
         """Start the background processing loop."""
@@ -257,16 +267,9 @@ class JobProcessor:
                                             f"completed by finished instance (status={status_display})"
                                         )
                                         # Try to get the actual response content
-                                        result_summary = None
-                                        if hasattr(self._instance_manager, '_get_last_assistant_message_raw'):
-                                            try:
-                                                result_summary = await self._instance_manager._get_last_assistant_message_raw(
-                                                    proc_job.instance_id
-                                                )
-                                            except Exception as e:
-                                                logger.warning(
-                                                    f"Failed to get result_summary for MESSAGE job {proc_job.job_id[:8]}...: {e}"
-                                                )
+                                        result_summary = await self._capture_result_summary(
+                                            proc_job.instance_id, proc_job.job_id, "MESSAGE"
+                                        )
                                         await self._queue_service.complete_job(
                                             proc_job.job_id,
                                             demand_state=DemandState.COMPLETED,
@@ -360,17 +363,9 @@ class JobProcessor:
                                                     f"instance {proc_job.instance_id[:8]}... is completed, "
                                                     f"completing job"
                                                 )
-                                                # Try to get the actual response content
-                                                result_summary = None
-                                                if hasattr(self._instance_manager, '_get_last_assistant_message_raw'):
-                                                    try:
-                                                        result_summary = await self._instance_manager._get_last_assistant_message_raw(
-                                                            proc_job.instance_id
-                                                        )
-                                                    except Exception as e:
-                                                        logger.warning(
-                                                            f"Failed to get result_summary for TASK job {proc_job.job_id[:8]}...: {e}"
-                                                        )
+                                                result_summary = await self._capture_result_summary(
+                                                    proc_job.instance_id, proc_job.job_id, "TASK"
+                                                )
                                                 await self._queue_service.complete_job(
                                                     proc_job.job_id,
                                                     demand_state=DemandState.COMPLETED,
