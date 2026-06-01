@@ -791,7 +791,8 @@ class InstanceMessagingService:
             is_completion_report = (
                 message_source is not None and (
                     message_source.startswith("internal_report:") or
-                    message_source.startswith("internal_error_report:")
+                    message_source.startswith("internal_error_report:") or
+                    message_source.startswith("internal_agent:job_event:")
                 )
             )
             
