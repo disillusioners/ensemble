@@ -394,6 +394,165 @@ class TestJoberWatchIntegration:
         assert "```" not in message
         assert "job_event_data" not in message
 
+    @pytest.mark.asyncio
+    async def test_notification_format_failed_with_error(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
+        """Verify notification format for failed status with error, no result."""
+        mock_job_item.status = "failed"
+        mock_job_item.error_message = "Something went wrong"
+        mock_job_item.result_summary = None
+
+        watcher_repo.add_watch(mock_job_item.job_id, "test-instance")
+        job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
+
+        await job_queue_service.notify_watchers(mock_job_item.job_id, "failed", "Something went wrong")
+
+        assert instance_manager.enqueue_message.called
+        call_args = instance_manager.enqueue_message.call_args[1]
+
+        assert call_args["source"].startswith("internal_agent:job_event:")
+        assert "failed" in call_args["source"]
+
+        message = call_args["message"]
+
+        # Verify [JOB_EVENT] prefix and failed status with icon
+        assert "[JOB_EVENT]" in message
+        assert "failed ✗" in message
+        assert "reached status" not in message
+
+        # Verify Agent line with indentation
+        assert "  Agent: coder" in message
+
+        # No Result line since result_summary is None
+        assert "  Result:" not in message
+
+        # Error line present
+        assert "  Error: Something went wrong" in message
+
+        # No JSON block
+        assert "```json" not in message
+        assert "```" not in message
+        assert "job_event_data" not in message
+
+    @pytest.mark.asyncio
+    async def test_notification_format_cancelled(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
+        """Verify notification format for cancelled status with result_summary, no error."""
+        mock_job_item.status = "cancelled"
+        mock_job_item.error_message = None
+        mock_job_item.result_summary = "Job was cancelled"
+
+        watcher_repo.add_watch(mock_job_item.job_id, "test-instance")
+        job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
+
+        await job_queue_service.notify_watchers(mock_job_item.job_id, "cancelled", None)
+
+        assert instance_manager.enqueue_message.called
+        call_args = instance_manager.enqueue_message.call_args[1]
+
+        assert call_args["source"].startswith("internal_agent:job_event:")
+        assert "cancelled" in call_args["source"]
+
+        message = call_args["message"]
+
+        # Verify [JOB_EVENT] prefix and raw cancelled status (no icon)
+        assert "[JOB_EVENT]" in message
+        assert "cancelled" in message
+        assert "cancelled ✓" not in message
+        assert "cancelled ✗" not in message
+        assert "reached status" not in message
+
+        # Verify Agent line with indentation
+        assert "  Agent: coder" in message
+
+        # Result line present
+        assert "  Result:" in message
+        assert "Job was cancelled" in message
+
+        # No Error line since error is None
+        assert "  Error:" not in message
+
+        # No JSON block
+        assert "```json" not in message
+        assert "```" not in message
+
+    @pytest.mark.asyncio
+    async def test_notification_format_empty_result(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
+        """Verify notification format for completed status with no result_summary."""
+        mock_job_item.status = "completed"
+        mock_job_item.error_message = None
+        mock_job_item.result_summary = None
+
+        watcher_repo.add_watch(mock_job_item.job_id, "test-instance")
+        job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
+
+        await job_queue_service.notify_watchers(mock_job_item.job_id, "completed", None)
+
+        assert instance_manager.enqueue_message.called
+        call_args = instance_manager.enqueue_message.call_args[1]
+
+        assert call_args["source"].startswith("internal_agent:job_event:")
+        assert "completed" in call_args["source"]
+
+        message = call_args["message"]
+
+        # Verify [JOB_EVENT] prefix and completed status with icon
+        assert "[JOB_EVENT]" in message
+        assert "completed ✓" in message
+        assert "reached status" not in message
+
+        # Verify Agent line with indentation
+        assert "  Agent: coder" in message
+
+        # No Result line since result_summary is None
+        assert "  Result:" not in message
+
+        # No Error line
+        assert "  Error:" not in message
+
+        # No JSON block
+        assert "```json" not in message
+        assert "```" not in message
+        assert "job_event_data" not in message
+
+    @pytest.mark.asyncio
+    async def test_notification_format_failed_with_result_and_error(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
+        """Verify notification format for failed status with both result_summary and error."""
+        mock_job_item.status = "failed"
+        mock_job_item.error_message = "Timeout exceeded"
+        mock_job_item.result_summary = "Partial work done"
+
+        watcher_repo.add_watch(mock_job_item.job_id, "test-instance")
+        job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
+
+        await job_queue_service.notify_watchers(mock_job_item.job_id, "failed", "Timeout exceeded")
+
+        assert instance_manager.enqueue_message.called
+        call_args = instance_manager.enqueue_message.call_args[1]
+
+        assert call_args["source"].startswith("internal_agent:job_event:")
+        assert "failed" in call_args["source"]
+
+        message = call_args["message"]
+
+        # Verify [JOB_EVENT] prefix and failed status with icon
+        assert "[JOB_EVENT]" in message
+        assert "failed ✗" in message
+        assert "reached status" not in message
+
+        # Verify Agent line with indentation
+        assert "  Agent: coder" in message
+
+        # Result line present
+        assert "  Result:" in message
+        assert "Partial work done" in message
+
+        # Error line present
+        assert "  Error: Timeout exceeded" in message
+
+        # No JSON block
+        assert "```json" not in message
+        assert "```" not in message
+        assert "job_event_data" not in message
+
     # ==================== TASK 4 & 5: REGRESSION + TOOL REGISTRATION ====================
 
     def test_tool_registration(self):
