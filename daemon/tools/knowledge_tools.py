@@ -99,16 +99,16 @@ async def _check_rag_queried_via_checkpoint(
         messages = state.get("channel_values", {}).get("messages", [])
         scanned = 0
         for msg in messages:
+            scanned += 1
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
                     name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
                     if name in RAG_TOOL_NAMES:
                         logger.info(
                             "Checkpoint inspection: RAG tool '%s' found (scanned %d messages)",
-                            name, scanned + 1,
+                            name, scanned,
                         )
                         return True
-            scanned += 1
 
         logger.info("Checkpoint inspection: no RAG tools found (scanned %d messages)", scanned)
         return False
