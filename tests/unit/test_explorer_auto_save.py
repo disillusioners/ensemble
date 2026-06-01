@@ -2,7 +2,7 @@
 
 Tests cover:
 - _save_explorer_result(): file creation, content format, slug generation, timestamps
-- _parse_should_save(): parsing ## Need Save: true/false from responses
+- _parse_rag_queried(): parsing ## Did you query RAG: yes/no from responses
 - _extract_concise_section(): extracting ## Concise: section from content
 - _is_duplicate_concise(): dedup checking with Jaccard similarity
 - append_context_key(): placeholder resolution ({{ENSEMBLE_CONTEXT_KEY}}, {{ENSEMBLE_SHARED_CONTEXT_DIR}})
@@ -19,10 +19,10 @@ import re
 
 from daemon.tools.knowledge_tools import (
     _save_explorer_result,
-    _parse_should_save,
+    _parse_rag_queried,
     _extract_concise_section,
     _is_duplicate_concise,
-    _SHOULD_SAVE_PATTERN,
+    _RAG_QUERIED_PATTERN,
 )
 from daemon.services.instance_lifecycle import append_context_key
 
@@ -517,86 +517,85 @@ class TestSaveExplorerResultIntegration:
 
 
 # =============================================================================
-# Test Class for _parse_should_save()
+# Test Class for _parse_rag_queried()
 # =============================================================================
 
-class TestParseShouldSave:
-    """Tests for _parse_should_save() flag parsing function."""
+class TestParseRagQueried:
+    """Tests for _parse_rag_queried() flag parsing function."""
 
-    def test_parse_should_save_true(self):
-        """Heading with Need Save: true returns True."""
-        response = "Some response\n## Need Save: true\nMore text"
-        assert _parse_should_save(response) is True
+    def test_parse_rag_queried_yes(self):
+        """Heading with Did you query RAG: yes returns True."""
+        response = "Some response\n## Did you query RAG: yes\nMore text"
+        assert _parse_rag_queried(response) is True
 
-    def test_parse_should_save_false(self):
-        """Heading with Need Save: false returns False."""
-        response = "Some response\n## Need Save: false\nMore text"
-        assert _parse_should_save(response) is False
+    def test_parse_rag_queried_no(self):
+        """Heading with Did you query RAG: no returns False."""
+        response = "Some response\n## Did you query RAG: no\nMore text"
+        assert _parse_rag_queried(response) is False
 
-    def test_parse_should_save_missing(self):
+    def test_parse_rag_queried_missing(self):
         """No heading in response returns False (default)."""
         response = "## Answer\nSome text\n## Confidence: HIGH"
-        assert _parse_should_save(response) is False
+        assert _parse_rag_queried(response) is False
 
-    def test_parse_should_save_case_insensitive(self):
+    def test_parse_rag_queried_case_insensitive(self):
         """Flag parsing is case-insensitive."""
-        assert _parse_should_save("## Need Save: TRUE") is True
-        assert _parse_should_save("## Need Save: True") is True
-        assert _parse_should_save("## Need Save: TRUE") is True
-        assert _parse_should_save("## NEED SAVE: TRUE") is True
+        assert _parse_rag_queried("## Did you query RAG: YES") is True
+        assert _parse_rag_queried("## Did you query RAG: Yes") is True
+        assert _parse_rag_queried("## DID YOU QUERY RAG: YES") is True
+        assert _parse_rag_queried("## did you query rag: yes") is True
 
-    def test_parse_should_save_malformed(self):
+    def test_parse_rag_queried_malformed(self):
         """Malformed flag values return False."""
-        response = "## Need Save: maybe"
-        assert _parse_should_save(response) is False
+        response = "## Did you query RAG: maybe"
+        assert _parse_rag_queried(response) is False
 
-    def test_parse_should_save_with_extra_whitespace(self):
+    def test_parse_rag_queried_with_extra_whitespace(self):
         """Heading with extra whitespace/newlines still parses correctly."""
-        response = "## Need Save: true  \nMore text"
-        assert _parse_should_save(response) is True
+        response = "## Did you query RAG: yes  \nMore text"
+        assert _parse_rag_queried(response) is True
 
-    def test_parse_should_save_bold_true(self):
-        """Bold formatting **true** parses correctly as True."""
-        response = "## Need Save: **true**\nMore text"
-        assert _parse_should_save(response) is True
+    def test_parse_rag_queried_bold_yes(self):
+        """Bold formatting **yes** parses correctly as True."""
+        response = "## Did you query RAG: **yes**\nMore text"
+        assert _parse_rag_queried(response) is True
 
-    def test_parse_should_save_bold_false(self):
-        """Bold formatting **false** parses correctly as False."""
-        response = "## Need Save: **false**\nMore text"
-        assert _parse_should_save(response) is False
+    def test_parse_rag_queried_bold_no(self):
+        """Bold formatting **no** parses correctly as False."""
+        response = "## Did you query RAG: **no**\nMore text"
+        assert _parse_rag_queried(response) is False
 
-    def test_parse_should_save_italic_true(self):
-        """Italic formatting *true* parses correctly as True."""
-        response = "## Need Save: *true*\nMore text"
-        assert _parse_should_save(response) is True
+    def test_parse_rag_queried_italic_yes(self):
+        """Italic formatting *yes* parses correctly as True."""
+        response = "## Did you query RAG: *yes*\nMore text"
+        assert _parse_rag_queried(response) is True
 
-    def test_parse_should_save_italic_false(self):
-        """Italic formatting *false* parses correctly as False."""
-        response = "## Need Save: *false*\nMore text"
-        assert _parse_should_save(response) is False
+    def test_parse_rag_queried_italic_no(self):
+        """Italic formatting *no* parses correctly as False."""
+        response = "## Did you query RAG: *no*\nMore text"
+        assert _parse_rag_queried(response) is False
 
-    def test_parse_should_save_heading_stripped_from_response(self):
+    def test_parse_rag_queried_heading_stripped_from_response(self):
         """Heading is properly stripped from response text."""
-        response = "Some response\n## Need Save: true\nMore text"
-        stripped = _SHOULD_SAVE_PATTERN.sub("", response).strip()
-        # Heading including newlines is removed
-        assert "Need Save" not in stripped
+        response = "Some response\n## Did you query RAG: yes\nMore text"
+        stripped = _RAG_QUERIED_PATTERN.sub("", response).strip()
+        assert "Did you query RAG" not in stripped
         assert "Some response" in stripped
         assert "More text" in stripped
 
-    def test_parse_should_save_bold_heading_stripped(self):
+    def test_parse_rag_queried_bold_heading_stripped(self):
         """Bold heading is stripped including bold markers."""
-        response = "Some response\n## Need Save: **true**\nMore text"
-        stripped = _SHOULD_SAVE_PATTERN.sub("", response).strip()
-        assert "Need Save" not in stripped
-        assert "**true**" not in stripped
+        response = "Some response\n## Did you query RAG: **yes**\nMore text"
+        stripped = _RAG_QUERIED_PATTERN.sub("", response).strip()
+        assert "Did you query RAG" not in stripped
+        assert "**yes**" not in stripped
         assert "Some response" in stripped
         assert "More text" in stripped
 
-    def test_parse_should_save_response_without_heading_unchanged(self):
+    def test_parse_rag_queried_response_without_heading_unchanged(self):
         """Response without heading is returned unchanged."""
-        response = "Some response without Need Save"
-        stripped = _SHOULD_SAVE_PATTERN.sub("", response).strip()
+        response = "Some response without the heading"
+        stripped = _RAG_QUERIED_PATTERN.sub("", response).strip()
         assert stripped == response
 
 

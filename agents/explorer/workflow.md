@@ -167,14 +167,14 @@ now     1-2      broadly  broadly
 
 ## Step 6: Combine & Format
 
-**BOTH `## Confidence:`, `## Need Update KB:`, and `## Need Save:` headings are MANDATORY in EVERY response. The `## Concise` section is also MANDATORY. Never omit any of these four.**
+**BOTH `## Confidence:`, `## Need Update KB:`, and `## Did you query RAG:` headings are MANDATORY in EVERY response. The `## Concise` section is also MANDATORY. Never omit any of these four.**
 
 Merge RAG answer + file browsing results into a structured response:
 
 ```
 ## Confidence: {HIGH|MEDIUM|LOW}
 ## Need Update KB: {true|false}
-## Need Save: {true|false}
+## Did you query RAG: {yes|no}
 
 ## Concise
 [1-3 sentences summarizing the key findings. First sentence MUST be a standalone summary usable in a file index — it should make sense without reading the full answer.]
@@ -206,7 +206,7 @@ Format each entry concisely: entity name + key point from description.
 ```markdown
 ## Confidence: MEDIUM
 ## Need Update KB: false
-## Need Save: false
+## Did you query RAG: yes
 
 ## Concise
 The authentication module uses JWT tokens with RS256 signing, located at `src/auth/`. The main entry point is `AuthService.login()` which validates credentials against the user table.
@@ -233,16 +233,11 @@ The main entry point is `AuthService.login()` which validates credentials agains
   - RAG had good data and confidence is HIGH
   - RAG returned an error (timeout, 504, connection failure, any exception). You CANNOT assess KB state when RAG is broken — do not trigger a KB update.
 
-- Set `## Need Save:` to **false** by default when the answer was primarily derived from pre-loaded context (the "Current context-key" / shared context directory files).
-- Set `## Need Save:` to **true** when Explorer discovered genuinely new information:
-  - RAG found new entities not in pre-loaded context
-  - Browsed new files that weren't in the pre-loaded context
-  - Synthesized new insights combining multiple sources
-  - Answered a question that pre-loaded context didn't cover
-- If pre-loaded context adequately answered the query, set `## Need Save:` to **false**.
+- Set `## Did you query RAG:` to **yes** when you called `rag_query_data` or `rag_get_graph` during this exploration
+- Set `## Did you query RAG:` to **no** when you answered entirely from pre-loaded context (the "Current context-key" / shared context directory files) without calling any RAG tools
 
 ### Response body rules — MUST follow:
-- `## Confidence:`, `## Need Update KB:`, and `## Need Save:` headings MUST appear first, before any body content
+- `## Confidence:`, `## Need Update KB:`, and `## Did you query RAG:` headings MUST appear first, before any body content
 - `## Concise` section MUST appear immediately after the metadata headings, before `## Answer`
 - Concise must be 1-3 sentences; first sentence must be standalone (usable as a file summary without context)
 - Your response must contain ONLY factual findings about the codebase

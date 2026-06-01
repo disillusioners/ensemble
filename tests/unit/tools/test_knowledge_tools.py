@@ -1233,7 +1233,7 @@ class TestKnowledgeToolsConditionalCreation:
 
 
 class TestExploreAutoSave:
-    """Tests for explore() auto-save feature triggered by ## Need Save: flag."""
+    """Tests for explore() auto-save feature triggered by ## Did you query RAG: flag."""
 
     @pytest.fixture
     def mock_manager_for_save(self, configured_env, mock_manager):
@@ -1252,11 +1252,11 @@ class TestExploreAutoSave:
         return mock_manager
 
     @pytest.mark.asyncio
-    async def test_explore_need_save_true_triggers_save(self, mock_manager_for_save, tmp_path):
-        """## Need Save: true causes _save_explorer_result to be called."""
+    async def test_explore_rag_queried_yes_triggers_save(self, mock_manager_for_save, tmp_path):
+        """## Did you query RAG: yes causes _save_explorer_result to be called."""
         explorer_response = (
             "## Answer\nFound important information.\n\n"
-            "## Need Save: true"
+            "## Did you query RAG: yes"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1278,11 +1278,11 @@ class TestExploreAutoSave:
                     assert call_kwargs["context_key"] == "tree-root-for-save-test"
 
     @pytest.mark.asyncio
-    async def test_explore_need_save_false_skips_save(self, mock_manager_for_save, tmp_path):
-        """## Need Save: false means _save_explorer_result is NOT called."""
+    async def test_explore_rag_queried_no_skips_save(self, mock_manager_for_save, tmp_path):
+        """## Did you query RAG: no means _save_explorer_result is NOT called."""
         explorer_response = (
             "## Answer\nNo need to save this.\n\n"
-            "## Need Save: false"
+            "## Did you query RAG: no"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1300,11 +1300,11 @@ class TestExploreAutoSave:
                     mock_save.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_explore_need_save_stripped_from_response(self, mock_manager_for_save, tmp_path):
-        """## Need Save: heading is stripped from the returned response."""
+    async def test_explore_rag_queried_stripped_from_response(self, mock_manager_for_save, tmp_path):
+        """## Did you query RAG: heading is stripped from the returned response."""
         explorer_response = (
             "## Answer\nFound information.\n\n"
-            "## Need Save: true"
+            "## Did you query RAG: yes"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1318,17 +1318,17 @@ class TestExploreAutoSave:
                 with patch("daemon.tools.knowledge_tools._save_explorer_result"):
                     result = await explore_tool.ainvoke({"query": "What is X?"})
 
-                # Need Save heading should be stripped from returned result
-                assert "Need Save" not in result
-                assert "## Need Save" not in result
+                # Did you query RAG heading should be stripped from returned result
+                assert "Did you query RAG" not in result
+                assert "## Did you query RAG" not in result
                 assert "Found information" in result
 
     @pytest.mark.asyncio
-    async def test_explore_need_save_false_stripped_from_response(self, mock_manager_for_save, tmp_path):
-        """## Need Save: false heading is stripped from the returned response."""
+    async def test_explore_rag_queried_no_stripped_from_response(self, mock_manager_for_save, tmp_path):
+        """## Did you query RAG: no heading is stripped from the returned response."""
         explorer_response = (
             "## Answer\nNo need to save.\n\n"
-            "## Need Save: false"
+            "## Did you query RAG: no"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1341,13 +1341,13 @@ class TestExploreAutoSave:
 
                 result = await explore_tool.ainvoke({"query": "Quick question"})
 
-                # Need Save heading should be stripped
-                assert "Need Save" not in result
+                # Did you query RAG heading should be stripped
+                assert "Did you query RAG" not in result
                 assert "No need to save" in result
 
     @pytest.mark.asyncio
-    async def test_explore_missing_need_save_defaults_to_no_save(self, mock_manager_for_save, tmp_path):
-        """When ## Need Save: is absent, save is NOT triggered."""
+    async def test_explore_missing_rag_queried_defaults_to_no_save(self, mock_manager_for_save, tmp_path):
+        """When ## Did you query RAG: is absent, save is NOT triggered."""
         explorer_response = (
             "## Answer\nRegular response without save flag."
         )
@@ -1373,7 +1373,7 @@ class TestExploreAutoSave:
 
         explorer_response = (
             "## Answer\nData to save.\n\n"
-            "## Need Save: true"
+            "## Did you query RAG: yes"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1397,7 +1397,7 @@ class TestExploreAutoSave:
         """If _save_explorer_result raises, explore still returns successfully."""
         explorer_response = (
             "## Answer\nImportant information.\n\n"
-            "## Need Save: true"
+            "## Did you query RAG: yes"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1414,7 +1414,7 @@ class TestExploreAutoSave:
 
                 # Explore should still return the response
                 assert "Important information" in result
-                assert "Need Save" not in result
+                assert "Did you query RAG" not in result
 
 
 # =============================================================================
@@ -1464,7 +1464,7 @@ JWT tokens for authentication.
 ## Concise:
 The authentication system uses JWT tokens for user authentication with refresh tokens for security.
 
-## Need Save: true"""
+## Did you query RAG: yes"""
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=explorer_response):
@@ -1503,7 +1503,7 @@ Full details here.
 
         explorer_response = (
             "## Answer\nThe database uses PostgreSQL.\n\n"
-            "## Need Save: true"
+            "## Did you query RAG: yes"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1541,7 +1541,7 @@ Some valid concise content about authentication.
 
         explorer_response = (
             "## Answer\nNew information to save.\n\n"
-            "## Need Save: true"
+            "## Did you query RAG: yes"
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",

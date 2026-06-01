@@ -34,9 +34,9 @@ _SHOULD_UPDATE_KB_PATTERN = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
-# Pattern to match ## Need Save: true|false heading (with optional bold/italic)
-_SHOULD_SAVE_PATTERN = re.compile(
-    r"^##\s+Need\s+Save:\s*\*{0,2}(true|false)\*{0,2}\s*$",
+# Pattern to match ## Did you query RAG: yes|no heading (with optional bold/italic)
+_RAG_QUERIED_PATTERN = re.compile(
+    r"^##\s+Did\s+you\s+query\s+RAG:\s*\*{0,2}(yes|no)\*{0,2}\s*$",
     re.MULTILINE | re.IGNORECASE,
 )
 
@@ -57,11 +57,11 @@ def _parse_should_update_kb(response: str) -> bool:
     return False
 
 
-def _parse_should_save(response: str) -> bool:
-    """Parse ## Need Save: true/false from Explorer response."""
-    match = _SHOULD_SAVE_PATTERN.search(response)
+def _parse_rag_queried(response: str) -> bool:
+    """Parse ## Did you query RAG: yes/no from Explorer response."""
+    match = _RAG_QUERIED_PATTERN.search(response)
     if match:
-        return match.group(1).lower() == "true"
+        return match.group(1).lower() == "yes"
     return False
 
 
@@ -382,8 +382,8 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         # Parse response for should_update_kb flag (use original result, before stripping)
         should_update_kb = _parse_should_update_kb(result)
 
-        # Parse response for should_save flag (use original result, before stripping)
-        should_save = _parse_should_save(result)
+        # Parse response for rag_queried flag (use original result, before stripping)
+        rag_queried = _parse_rag_queried(result)
 
         # Fire-and-forget: create job for kb-importer if knowledge update needed
         # Pass original result so kb-importer has full context including the flag heading
@@ -410,12 +410,12 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 except Exception as e:
                     logger.warning("Failed to schedule kb-importer job: %s", e)
 
-        # Strip the Need Update KB and Need Save headings from the response before returning
+        # Strip the Need Update KB and RAG Queried headings from the response before returning
         result = _SHOULD_UPDATE_KB_PATTERN.sub("", result)
-        result = _SHOULD_SAVE_PATTERN.sub("", result).strip()
+        result = _RAG_QUERIED_PATTERN.sub("", result).strip()
 
         # Auto-save explorer result to shared context directory (fire-and-forget)
-        if should_save:
+        if rag_queried:
             try:
                 root_id = manager._instance_repository.get_tree_root_id(current_instance_id)
                 context_key = root_id or current_instance_id or "default"
