@@ -914,7 +914,7 @@ class TestExploreAutoInjection:
         self, mock_manager_for_injection
     ):
         """When get_shared_context returns injection text, message includes it."""
-        injection_text = "## Pre-loaded Context (auto-matched)\n\n### test-file (85% match)\nAnswer content here."
+        injection_text = "# Shared Context\n## Context dir: /tmp/ensemble/context/tree-root\n\n## Pre-loaded Context (auto-matched)\n\n### test-file (85% match)\nAnswer content here.\n"
 
         with patch(
             "daemon.tools.knowledge_tools.asyncio.to_thread",
@@ -944,20 +944,23 @@ class TestExploreAutoInjection:
                 mock_invoke.assert_called_once()
                 message = mock_invoke.call_args.kwargs["message"]
                 assert injection_text in message
+                assert "# Shared Context" in message
                 assert "## Pre-loaded Context" in message
 
                 # Verify final result is returned
                 assert result == "Explorer result."
 
     @pytest.mark.asyncio
-    async def test_explore_no_injection_when_service_returns_none(
+    async def test_explore_includes_empty_format_when_no_matches(
         self, mock_manager_for_injection
     ):
-        """When get_shared_context returns None, message has no injection."""
+        """When get_shared_context returns empty format (no matches), message includes it."""
+        empty_format = "# Shared Context\n## Context dir: /tmp/ensemble/context/tree-root\n\n## Pre-loaded Context\nThere is no context yet."
+
         with patch(
             "daemon.tools.knowledge_tools.asyncio.to_thread",
             new_callable=AsyncMock,
-            return_value=None,
+            return_value=empty_format,
         ):
             with patch(
                 "daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -971,10 +974,11 @@ class TestExploreAutoInjection:
 
                 result = await explore_tool.ainvoke({"query": "Test query"})
 
-                # Verify message does NOT contain injection text
+                # Verify message includes empty format (no matches)
                 mock_invoke.assert_called_once()
                 message = mock_invoke.call_args.kwargs["message"]
-                assert "Pre-loaded Context" not in message
+                assert "# Shared Context" in message
+                assert "There is no context yet" in message
 
                 # Verify explore still works
                 assert result == "Explorer result."
@@ -1056,7 +1060,7 @@ class TestExploreAutoInjection:
         self, mock_manager_for_injection
     ):
         """Verify asyncio.to_thread is used for get_shared_context."""
-        mock_to_thread = AsyncMock(return_value="## Pre-loaded Context\nContent.")
+        mock_to_thread = AsyncMock(return_value="# Shared Context\n## Context dir: /tmp\n\n## Pre-loaded Context\nContent.")
 
         with patch("daemon.tools.knowledge_tools.asyncio.to_thread", mock_to_thread):
             with patch(

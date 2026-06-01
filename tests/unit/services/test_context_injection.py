@@ -387,6 +387,8 @@ class TestFormatInjection:
             )
         ]
         result = _format_injection(matched)
+        assert "# Shared Context" in result
+        assert "## Context dir:" in result
         assert "### auth-module (87% match)" in result
         assert "This is the full answer" in result
         assert "## Pre-loaded Context" in result
@@ -465,6 +467,7 @@ Unrelated content.
             ),
         ]
         result = _format_injection(matched, context_dir=context_dir)
+        assert "# Shared Context" in result
         assert "## Available Context Files" in result
         # Header format: (remaining files, pre-loaded files)
         # 1 remaining file (unrelated), 2 pre-loaded (auth-module, other-file)
@@ -475,6 +478,8 @@ Unrelated content.
         assert "| other-file_20260531_120001.md |" not in result
         # Only unmatched file should appear
         assert "| unrelated_20260531_120002.md |" in result
+        # Separator should be present
+        assert "\n---\n\n" in result
 
     def test_high_tier_file_limit_enforced(self):
         """When more than MAX_HIGH_TIER_FILES exist, output is capped by file count."""
@@ -492,6 +497,7 @@ Unrelated content.
             )
         result = _format_injection(matched)
         # Should include header and at least one entry
+        assert "# Shared Context" in result
         assert "## Pre-loaded Context" in result
         # But limited by MAX_HIGH_TIER_FILES = 3
         entries = result.count("### file")  # Count file entries
@@ -515,6 +521,7 @@ Unrelated content.
             )
         result = _format_injection(matched)
         # Total ~10000 tokens exceeds 2000 cap, output should be truncated
+        assert "# Shared Context" in result
         assert "## Pre-loaded Context" in result
         # Not all 4 files should appear in full - content is too large
         # Check that result is smaller than sum of all inputs
@@ -555,6 +562,7 @@ Other content.
         ]
         result = _format_injection(matched, context_dir=context_dir)
         # Pre-loaded content should appear
+        assert "# Shared Context" in result
         assert "## Pre-loaded Context" in result
         assert "auth-module" in result
         assert "other-file" in result
@@ -633,21 +641,27 @@ High
             result = get_shared_context("test-key", "auth module")
 
         assert result is not None
+        assert "# Shared Context" in result
+        assert "## Context dir:" in result
         assert "## Pre-loaded Context" in result
         assert "auth-module" in result
 
-    def test_returns_none_for_empty_dir(self, tmp_path):
-        """Empty context directory returns None."""
+    def test_returns_empty_format_for_empty_dir(self, tmp_path):
+        """Empty context directory returns empty format string."""
         context_dir = tmp_path / "ensemble" / "context" / "empty-key"
         context_dir.mkdir(parents=True)
 
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("empty-key", "auth module")
 
-        assert result is None
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "## Context dir:" in result
+        assert "## Pre-loaded Context" in result
+        assert "There is no context yet" in result
 
-    def test_returns_none_for_no_matches(self, tmp_path):
-        """Directory with no matching files returns None."""
+    def test_returns_empty_format_for_no_matches(self, tmp_path):
+        """Directory with no matching files returns empty format string."""
         context_dir = tmp_path / "ensemble" / "context" / "no-match-key"
         context_dir.mkdir(parents=True)
 
@@ -658,26 +672,35 @@ High
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("no-match-key", "zzzzz yyyyy")
 
-        assert result is None
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "## Context dir:" in result
+        assert "There is no context yet" in result
 
-    def test_returns_none_on_error(self):
-        """OSError during file operations returns None."""
+    def test_returns_empty_format_on_error(self):
+        """OSError during file operations returns empty format string."""
         with patch("tempfile.gettempdir", side_effect=OSError("Permission denied")):
             result = get_shared_context("test-key", "auth module")
 
-        assert result is None
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "There is no context yet" in result
 
-    def test_returns_none_for_nonexistent_context_key(self, tmp_path):
-        """Nonexistent context key returns None."""
+    def test_returns_empty_format_for_nonexistent_context_key(self, tmp_path):
+        """Nonexistent context key returns empty format string."""
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("nonexistent-key-12345", "auth module")
 
-        assert result is None
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "There is no context yet" in result
 
-    def test_context_key_none(self):
-        """None context_key returns None gracefully."""
+    def test_returns_empty_format_for_none_context_key(self):
+        """None context_key returns empty format string gracefully."""
         result = get_shared_context(None, "auth module")
-        assert result is None
+        assert result is not None
+        assert "# Shared Context" in result
+        assert "There is no context yet" in result
 
     def test_happy_path_real_filesystem(self, tmp_path):
         """Integration test with real file operations."""
@@ -705,6 +728,8 @@ Other information.
             result = get_shared_context("test-project", "auth module")
 
         assert result is not None
+        assert "# Shared Context" in result
+        assert "## Context dir:" in result
         assert "## Pre-loaded Context" in result
         assert "auth-module" in result
         # Since auth-module is pre-loaded, it should not appear in index

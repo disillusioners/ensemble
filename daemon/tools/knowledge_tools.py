@@ -293,7 +293,6 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
 
         if context_key:
             context_dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
-            explorer_message += f"\nShared context dir: {str(context_dir_path)}"
 
             logger.debug("[Explorer] Context dir path: %s", context_dir_path)
             logger.debug("[Explorer] Context dir exists: %s", context_dir_path.exists())
