@@ -69,13 +69,17 @@ class TestDoubleEventDelivery:
         # Set up lock repo mock
         mock_lock_repo = MagicMock(spec=LockRepository)
 
+        # Set up instance manager mock
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
 
         event = {
@@ -166,13 +170,16 @@ class TestDoubleEventDelivery:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
 
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
 
         event = {

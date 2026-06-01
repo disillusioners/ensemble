@@ -254,11 +254,21 @@ class JobFeedbackObserver:
         try:
             if status == "completed":
                 # Use atomic_transition for PROCESSING -> COMPLETED
+                # Get agent's raw response from instance checkpoint for result_summary
+                # Use _get_last_assistant_message_raw to match MessageJobHandler's
+                # result_summary=result.content format (no formatting prefix)
+                result_summary = await self._instance_manager._get_last_assistant_message_raw(
+                    instance_id
+                )
+                # Fallback if no response content available
+                if not result_summary:
+                    result_summary = "Job completed (no agent response captured)"
                 self._job_repo.atomic_transition(
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
                     to_status=JobStatus.COMPLETED.value,
                     completed_at=now,
+                    result_summary=result_summary,
                 )
                 logger.info(
                     f"Observer: completed job {job.job_id[:8]}... "

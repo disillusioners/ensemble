@@ -94,16 +94,18 @@ class TestObserverCompletesJob:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.return_value = 1
-        
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Agent response content")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
-        
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -112,16 +114,59 @@ class TestObserverCompletesJob:
                 "error": None,
             }
         }
-        
+
         await observer._process_event(event)
-        
+
         mock_job_repo.atomic_transition.assert_called_once_with(
             job_id="job-123",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
             completed_at=ANY,
+            result_summary="Agent response content",
         )
         mock_lock_repo.release_by_instance.assert_called_once_with("instance-456")
+
+    @pytest.mark.asyncio
+    async def test_observer_uses_fallback_when_no_response(self):
+        """When _get_last_assistant_message_raw returns None, use fallback message."""
+        mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
+        mock_job_repo = MagicMock(spec=JobRepository)
+        mock_lock_repo = MagicMock(spec=LockRepository)
+        mock_lock_repo.release_by_instance.return_value = 1
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value=None)  # No response
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=mock_job_repo,
+            lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+
+        event = {
+            "event_type": "instance_lifecycle",
+            "data": {
+                "instance_id": "instance-456",
+                "status": "completed",
+                "error": None,
+            }
+        }
+
+        await observer._process_event(event)
+
+        # Should use fallback message
+        mock_job_repo.atomic_transition.assert_called_once_with(
+            job_id="job-123",
+            from_status=JobStatus.PROCESSING.value,
+            to_status=JobStatus.COMPLETED.value,
+            completed_at=ANY,
+            result_summary="Job completed (no agent response captured)",
+        )
 
 
 class TestObserverFailsJob:
@@ -333,16 +378,18 @@ class TestObserverLockRelease:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.return_value = 2  # Released 2 locks
-        
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
-        
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -351,9 +398,9 @@ class TestObserverLockRelease:
                 "error": None,
             }
         }
-        
+
         await observer._process_event(event)
-        
+
         # Lock should be released after successful transition
         mock_lock_repo.release_by_instance.assert_called_once_with("instance-456")
 
@@ -409,16 +456,18 @@ class TestObserverExceptionHandling:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_lock_repo.release_by_instance.side_effect = Exception("Lock release failed")
-        
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
-        
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -427,10 +476,10 @@ class TestObserverExceptionHandling:
                 "error": None,
             }
         }
-        
+
         # Should not raise
         await observer._process_event(event)
-        
+
         # atomic_transition was still called successfully
         mock_job_repo.atomic_transition.assert_called_once()
 
@@ -645,13 +694,15 @@ class TestObserverStartStop:
     async def test_observer_stop_drains_pending_events(self):
         """Stop drains pending events from queue before cancelling task."""
         import asyncio
-        
+
         mock_event_bus = MagicMock()
         mock_queue = asyncio.Queue()
         mock_event_bus.subscribe_all.return_value = mock_queue
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         # Create jobs for the events we'll queue
         mock_job_1 = create_mock_job(job_id="job-1", status="processing", instance_id="instance-1")
         mock_job_2 = create_mock_job(job_id="job-2", status="processing", instance_id="instance-2")
@@ -660,21 +711,21 @@ class TestObserverStartStop:
             side_effect=[mock_job_1, mock_job_2]
         )
         mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
-        
+
         observer = JobFeedbackObserver(
             event_bus=mock_event_bus,
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
-        
+
         # Set up queue manually (don't start to avoid event loop interference)
         observer._queue = mock_queue
         observer._running = False
         observer._task = None  # No task - we're testing drain only
-        
+
         # Put events in the queue
         event1 = {
             "event_type": "instance_lifecycle",
@@ -686,26 +737,28 @@ class TestObserverStartStop:
         }
         await mock_queue.put(event1)
         await mock_queue.put(event2)
-        
+
         # Stop should drain events
         await observer.stop()
-        
+
         # Both events should have been processed
         assert mock_job_queue_service.get_job_by_instance.call_count == 2
         assert mock_job_repo.atomic_transition.call_count == 2
-        
+
         # Verify job completions
         mock_job_repo.atomic_transition.assert_any_call(
             job_id="job-1",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
             completed_at=ANY,
+            result_summary="Test response",
         )
         mock_job_repo.atomic_transition.assert_any_call(
             job_id="job-2",
             from_status=JobStatus.PROCESSING.value,
             to_status=JobStatus.COMPLETED.value,
             completed_at=ANY,
+            result_summary="Test response",
         )
 
 
@@ -762,16 +815,18 @@ class TestObserverLifecycleResilience:
             to_status="completed",
         )
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
-        
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -780,16 +835,16 @@ class TestObserverLifecycleResilience:
                 "error": None,
             }
         }
-        
+
         # Should not raise - InvalidTransitionError is caught within _process_event
         try:
             await observer._process_event(event)
         except InvalidTransitionError:
             pytest.fail("_process_event should catch InvalidTransitionError")
-        
+
         # atomic_transition was called
         mock_job_repo.atomic_transition.assert_called_once()
-        
+
         # Lock should NOT be released because transition failed
         mock_lock_repo.release_by_instance.assert_not_called()
 
@@ -803,16 +858,18 @@ class TestObserverLifecycleResilience:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_job_repo.atomic_transition.side_effect = RuntimeError("Unexpected DB error")
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
-        
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -821,16 +878,16 @@ class TestObserverLifecycleResilience:
                 "error": None,
             }
         }
-        
+
         # Should not raise - exceptions are caught within _process_event
         try:
             await observer._process_event(event)
         except RuntimeError:
             pytest.fail("_process_event should catch RuntimeError from atomic_transition")
-        
+
         # atomic_transition was called
         mock_job_repo.atomic_transition.assert_called_once()
-        
+
         # Lock should NOT be released because transition failed
         mock_lock_repo.release_by_instance.assert_not_called()
 
@@ -844,16 +901,18 @@ class TestObserverLifecycleResilience:
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_job_repo.atomic_transition.side_effect = RuntimeError("Unexpected DB error")
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
-        
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -862,16 +921,16 @@ class TestObserverLifecycleResilience:
                 "error": None,
             }
         }
-        
+
         # Should not raise - the event loop catches exceptions
         try:
             await observer._process_event(event)
         except Exception as e:
             pytest.fail(f"_process_event should not raise, but got: {e}")
-        
+
         # Verify atomic_transition was called
         mock_job_repo.atomic_transition.assert_called_once()
-        
+
         # Lock should NOT be released because transition failed
         mock_lock_repo.release_by_instance.assert_not_called()
 

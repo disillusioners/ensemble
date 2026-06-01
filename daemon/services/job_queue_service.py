@@ -38,9 +38,10 @@ TERMINAL_STATUSES = frozenset([
     InstanceStatus.FAILED.value,
 ])
 
+# TERMINAL_CANCEL_STATUSES contains instance statuses that represent abnormal termination
+# (not a normal completion). COMPLETED is NOT here because it's a normal completion.
 TERMINAL_CANCEL_STATUSES = frozenset([
     InstanceStatus.TERMINATED.value,
-    InstanceStatus.COMPLETED.value,
 ])
 
 

@@ -245,18 +245,45 @@ class JobProcessor:
                                         proc_job.instance_id
                                     )
                                     # Instance exists — check if it's still alive or finished
-                                    if instance_meta.status in (InstanceStatus.COMPLETED, InstanceStatus.TERMINATED):
+                                    if instance_meta.status == InstanceStatus.COMPLETED:
                                         # Instance finished its work — complete the job (not orphan).
                                         # The JobFeedbackObserver event may have missed firing due to
                                         # race condition, event bus issue, etc.
+                                        # Note: result_summary not passed here — the service applies
+                                        # "Job completed successfully" fallback, which is appropriate
+                                        # for the fallback recovery path.
                                         status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
                                         logger.info(
                                             f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... "
                                             f"completed by finished instance (status={status_display})"
                                         )
+                                        # Try to get the actual response content
+                                        result_summary = None
+                                        if hasattr(self._instance_manager, '_get_last_assistant_message_raw'):
+                                            try:
+                                                result_summary = await self._instance_manager._get_last_assistant_message_raw(
+                                                    proc_job.instance_id
+                                                )
+                                            except Exception as e:
+                                                logger.warning(
+                                                    f"Failed to get result_summary for MESSAGE job {proc_job.job_id[:8]}...: {e}"
+                                                )
                                         await self._queue_service.complete_job(
                                             proc_job.job_id,
                                             demand_state=DemandState.COMPLETED,
+                                            result_summary=result_summary,
+                                        )
+                                        continue
+                                    elif instance_meta.status == InstanceStatus.TERMINATED:
+                                        # Instance was terminated — complete the job as CANCELLED
+                                        logger.info(
+                                            f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... "
+                                            f"terminated (instance status=terminated)"
+                                        )
+                                        await self._queue_service.complete_job(
+                                            proc_job.job_id,
+                                            demand_state=DemandState.CANCELLED,
+                                            error="Instance terminated during message processing",
                                         )
                                         continue
                                     elif instance_meta.status == InstanceStatus.ERROR:
@@ -328,7 +355,18 @@ class JobProcessor:
                                         )
                                         if instance_meta is not None:
                                             # Instance exists in DB — check its status
-                                            if instance_meta.status in TERMINAL_CANCEL_STATUSES:
+                                            if instance_meta.status == InstanceStatus.COMPLETED:
+                                                logger.info(
+                                                    f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
+                                                    f"instance {proc_job.instance_id[:8]}... is completed, "
+                                                    f"completing job"
+                                                )
+                                                await self._queue_service.complete_job(
+                                                    proc_job.job_id,
+                                                    demand_state=DemandState.COMPLETED,
+                                                )
+                                                continue
+                                            elif instance_meta.status in TERMINAL_CANCEL_STATUSES:
                                                 status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
                                                 logger.info(
                                                     f"JobProcessor: TASK job {proc_job.job_id[:8]}... "

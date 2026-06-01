@@ -535,22 +535,36 @@ Provide a concise summary:"""
         # Get the report prefix
         prefix = self._get_instance_report_prefix(instance_id, agent_id)
         
+        raw_content = await self._get_last_assistant_message_raw(instance_id)
+        
+        if raw_content:
+            return f"{prefix}, below is the response:\n{raw_content}"
+        return None
+
+    async def _get_last_assistant_message_raw(self, instance_id: str) -> str | None:
+        """Get the raw last assistant message content (no formatting).
+        
+        Returns just the actual agent response content, matching the format
+        used by MessageJobHandler when setting result_summary=result.content.
+        
+        Args:
+            instance_id: The instance ID to get message from.
+            
+        Returns:
+            The raw assistant message content, or None if not found.
+        """
         if self._checkpointer:
             messages = await get_instance_messages(self._checkpointer, instance_id)
         else:
             messages = []
         
-        # Find the last assistant message
-        last_assistant_content = None
+        # Find the last assistant message with actual content
         for msg in reversed(messages):
             if msg.get("role") == "assistant":
                 content = msg.get("content", "")
                 if content and content.strip():
-                    last_assistant_content = content.strip()
-                    break
+                    return content.strip()
         
-        if last_assistant_content:
-            return f"{prefix}, below is the response:\n{last_assistant_content}"
         return None
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:

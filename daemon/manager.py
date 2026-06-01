@@ -1595,6 +1595,20 @@ class InstanceManager:
         """
         return await self._child_reports_service._get_last_assistant_message(instance_id, agent_id)
 
+    async def _get_last_assistant_message_raw(self, instance_id: str) -> str | None:
+        """Get the raw last assistant message content (no formatting).
+        
+        Returns just the actual agent response content, matching the format
+        used by MessageJobHandler when setting result_summary=result.content.
+        
+        Args:
+            instance_id: The instance ID to get message from.
+            
+        Returns:
+            The raw assistant message content, or None if not found.
+        """
+        return await self._child_reports_service._get_last_assistant_message_raw(instance_id)
+
         
     async def _generate_and_broadcast_title(
         self, instance_id: str, message_content: str

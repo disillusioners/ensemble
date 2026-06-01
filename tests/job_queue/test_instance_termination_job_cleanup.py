@@ -966,11 +966,16 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_processor_cancels_orphan_task_job_for_completed_instance(
+    async def test_processor_completes_orphan_task_job_for_completed_instance(
         self, processor, mock_queue_service, mock_instance_manager,
         mock_project_repo, mock_queue_repo
     ):
-        """Test that JobProcessor cancels TASK jobs for COMPLETED instances."""
+        """Test that JobProcessor COMPLETES TASK jobs for COMPLETED instances.
+
+        COMPLETED instances should complete the job (not cancel it), since the
+        instance finished successfully. The job should show "Job completed successfully"
+        as the result_summary (via the service's fallback).
+        """
         project = MagicMock()
         project.project_id = "project-1"
         project.job_queue_paused = False
@@ -1009,7 +1014,7 @@ class TestJobProcessorOrphanDetection:
 
         mock_queue_service.complete_job.assert_called()
         call_args = mock_queue_service.complete_job.call_args
-        assert call_args.kwargs.get("demand_state") == DemandState.CANCELLED
+        assert call_args.kwargs.get("demand_state") == DemandState.COMPLETED
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.asyncio
