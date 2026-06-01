@@ -233,11 +233,16 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
     Returns:
         List of MatchedFile objects sorted by score descending.
     """
+    logger.debug("[Explorer] _match_context_files: context_dir=%s", context_dir)
+
     if not context_dir.is_dir():
+        logger.debug("[Explorer] _match_context_files: context_dir is not a directory")
         return []
 
     query_tokens = _tokenize_query(query)
+    logger.debug("[Explorer] _match_context_files: query_tokens=%s", query_tokens)
     if not query_tokens:
+        logger.debug("[Explorer] _match_context_files: no query tokens after filtering")
         return []
 
     # Get all .md files sorted by mtime (most recent first), cap at 50
@@ -251,6 +256,8 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
         logger.debug(f"Failed to list context files: {e}")
         return []
 
+    logger.info("[Explorer] _match_context_files: found %d .md files", len(md_files))
+
     matched_files: list[MatchedFile] = []
 
     for file_path in md_files:
@@ -259,8 +266,10 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
             slug = _extract_slug_from_filename(file_path.name)
             slug_tokens = _tokenize_slug(slug)
             if not slug_tokens:
+                logger.debug("[Explorer] _match_context_files: file %s has no slug tokens", file_path.name)
                 continue
             score = _match_score(query_tokens, slug_tokens)
+            logger.debug("[Explorer] _match_context_files: file %s score=%.2f (threshold=%.2f)", file_path.name, score, TIER_LOW)
 
             # Skip if below low tier threshold
             if score < TIER_LOW:
@@ -286,12 +295,14 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
                 sections=sections,
                 first_sentence=first_sentence,
             ))
+            logger.debug("[Explorer] _match_context_files: added %s with score %.2f", slug, score)
         except Exception as e:
-            logger.debug(f"Error processing file {file_path.name}: {e}")
+            logger.debug(f"[Explorer] _match_context_files: Error processing file {file_path.name}: {e}")
             continue
 
     # Sort by score descending
     matched_files.sort(key=lambda m: m.score, reverse=True)
+    logger.info("[Explorer] _match_context_files: returning %d matched files", len(matched_files))
     return matched_files
 
 
@@ -315,7 +326,10 @@ def _format_injection(
     Returns:
         Formatted injection string, or empty string if no matches.
     """
+    logger.debug("[Explorer] _format_injection called with %d matched files", len(matched_files))
+
     if not matched_files:
+        logger.debug("[Explorer] _format_injection: no matched files, returning empty string")
         return ""
 
     # Track token budget and injected slugs
@@ -493,21 +507,33 @@ def get_shared_context(context_key: str, query: str) -> str | None:
     Returns:
         Injection string on success, None on failure or no matches.
     """
+    logger.info("[Explorer] get_shared_context called: context_key=%s, query=%s", context_key, query[:100])
     try:
         context_dir = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
 
+        logger.debug("[Explorer] Context dir: %s", context_dir)
+        logger.debug("[Explorer] Context dir exists: %s", context_dir.exists())
+        if not context_dir.exists():
+            logger.info("[Explorer] Context dir does not exist, returning None")
+            return None
+
         matched = _match_context_files(query, context_dir)
+        logger.info("[Explorer] _match_context_files returned %d matches", len(matched))
+
         if not matched:
             logger.debug("Context auto-injection: no matches for query '%s'", query[:50])
             return None
 
         injection = _format_injection(matched, context_dir=context_dir)
+        logger.debug("[Explorer] _format_injection returned length: %d", len(injection) if injection else 0)
+
         if not injection:
             logger.debug("Context auto-injection: no injection content for query '%s' (matched %d files)", query[:50], len(matched))
             return None
 
         logger.debug("Context auto-injection: %d files matched for query '%s'", len(matched), query[:50])
+        logger.info("[Explorer] Returning injection of length %d", len(injection))
         return injection
     except Exception as e:
-        logger.debug(f"Error in get_shared_context: {e}")
+        logger.debug(f"[Explorer] Error in get_shared_context: {e}")
         return None

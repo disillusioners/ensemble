@@ -288,22 +288,31 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 context_key = current_instance_id
         except Exception:
             context_key = current_instance_id
+
+        logger.info("[Explorer] Context auto-injection: context_key=%s", context_key)
+
         if context_key:
             context_dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
             explorer_message += f"\nShared context dir: {str(context_dir_path)}"
+
+            logger.debug("[Explorer] Context dir path: %s", context_dir_path)
+            logger.debug("[Explorer] Context dir exists: %s", context_dir_path.exists())
 
             # Auto-inject relevant context files via reusable service
             # Run on thread pool to avoid blocking the async event loop with sync I/O
             try:
                 injection = await asyncio.to_thread(get_shared_context, context_key, query)
+                logger.info("[Explorer] get_shared_context returned: %s", type(injection).__name__)
                 if injection:
                     explorer_message += f"\n\n{injection}"
                     logger.debug(
-                        "Context auto-injection: matched files for query '%s'",
-                        query[:50],
+                        "Context auto-injection: matched files for query '%s', injection length: %d",
+                        query[:50], len(injection),
                     )
+                else:
+                    logger.info("[Explorer] Context auto-injection: no injection (returned None or empty)")
             except Exception as e:
-                logger.debug("Context auto-injection failed (non-critical): %s", e)
+                logger.info("[Explorer] Context auto-injection failed (exception): %s", e)
 
         try:
             result = await invoke_agent_and_wait(
