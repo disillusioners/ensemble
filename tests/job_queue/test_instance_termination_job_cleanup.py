@@ -1169,3 +1169,212 @@ class TestJobProcessorOrphanDetection:
         # Job should be re-spawned (recovered)
         mock_instance_manager.spawn_instance_with_mcp.assert_called()
         mock_instance_manager.enqueue_message.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_processor_completes_orphan_message_job_for_completed_instance(
+        self, processor, mock_queue_service, mock_instance_manager,
+        mock_project_repo, mock_queue_repo
+    ):
+        """Test that JobProcessor COMPLETES MESSAGE jobs for COMPLETED instances.
+        
+        When a PROCESSING MESSAGE job has instance_id pointing to a COMPLETED
+        instance, it should be completed (not cancelled). The result_summary
+        should be captured from the actual agent response.
+        """
+        project = MagicMock()
+        project.project_id = "project-1"
+        project.job_queue_paused = False
+
+        queue = MagicMock()
+        queue.queue_id = "queue-1"
+        queue.project_id = "project-1"
+        queue.queue_name = "default"
+        queue.is_paused = False
+        queue.queue_type = "fifo"
+
+        completed_instance_id = "completed-message-instance-123"
+
+        # PROCESSING MESSAGE job with COMPLETED instance
+        message_job = MagicMock()
+        message_job.job_id = "message-job-completed"
+        message_job.agent_id = "coder"
+        message_job.project_id = "project-1"
+        message_job.queue_id = "queue-1"
+        message_job.status = JobStatus.PROCESSING.value
+        message_job.instance_id = completed_instance_id
+        message_job.job_type = "message"
+        message_job.message = "test message"
+        message_job.source = "api"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = []
+        mock_queue_service._repository.list_by_queue.return_value = ([message_job], None)
+
+        mock_instance_manager.get_instance.side_effect = KeyError("not found")
+        completed_instance = MagicMock()
+        completed_instance.status = InstanceStatus.COMPLETED.value
+        mock_instance_manager._instance_repository.get.return_value = completed_instance
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
+            return_value="Agent response for message job"
+        )
+
+        await processor._process_next_job()
+
+        # Job should be completed, not cancelled
+        mock_queue_service.complete_job.assert_called()
+        call_args = mock_queue_service.complete_job.call_args
+        assert call_args.kwargs.get("demand_state") == DemandState.COMPLETED
+        assert call_args.kwargs.get("result_summary") == "Agent response for message job"
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_processor_cancels_orphan_message_job_for_terminated_instance(
+        self, processor, mock_queue_service, mock_instance_manager,
+        mock_project_repo, mock_queue_repo
+    ):
+        """Test that JobProcessor CANCELS MESSAGE jobs for TERMINATED instances.
+        
+        When a PROCESSING MESSAGE job has instance_id pointing to a TERMINATED
+        instance, it should be cancelled (not completed).
+        """
+        project = MagicMock()
+        project.project_id = "project-1"
+        project.job_queue_paused = False
+
+        queue = MagicMock()
+        queue.queue_id = "queue-1"
+        queue.project_id = "project-1"
+        queue.queue_name = "default"
+        queue.is_paused = False
+        queue.queue_type = "fifo"
+
+        terminated_instance_id = "terminated-message-instance-123"
+
+        # PROCESSING MESSAGE job with TERMINATED instance
+        message_job = MagicMock()
+        message_job.job_id = "message-job-terminated"
+        message_job.agent_id = "coder"
+        message_job.project_id = "project-1"
+        message_job.queue_id = "queue-1"
+        message_job.status = JobStatus.PROCESSING.value
+        message_job.instance_id = terminated_instance_id
+        message_job.job_type = "message"
+        message_job.message = "test message"
+        message_job.source = "api"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = []
+        mock_queue_service._repository.list_by_queue.return_value = ([message_job], None)
+
+        mock_instance_manager.get_instance.side_effect = KeyError("not found")
+        terminated_instance = MagicMock()
+        terminated_instance.status = InstanceStatus.TERMINATED.value
+        mock_instance_manager._instance_repository.get.return_value = terminated_instance
+
+        await processor._process_next_job()
+
+        # Job should be cancelled
+        mock_queue_service.complete_job.assert_called()
+        call_args = mock_queue_service.complete_job.call_args
+        assert call_args.kwargs.get("demand_state") == DemandState.CANCELLED
+        assert "terminated" in call_args.kwargs.get("error", "").lower()
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_processor_completes_message_job_with_completed_instance_even_when_get_message_fails(
+        self, processor, mock_queue_service, mock_instance_manager,
+        mock_project_repo, mock_queue_repo
+    ):
+        """Test that MESSAGE job completes with result_summary=None when _get_last_assistant_message_raw fails.
+        
+        When _get_last_assistant_message_raw raises an exception, the MESSAGE job
+        should still be completed with DemandState.COMPLETED and result_summary=None
+        (the service applies a default message).
+        """
+        project = MagicMock()
+        project.project_id = "project-1"
+        project.job_queue_paused = False
+
+        queue = MagicMock()
+        queue.queue_id = "queue-1"
+        queue.project_id = "project-1"
+        queue.queue_name = "default"
+        queue.is_paused = False
+        queue.queue_type = "fifo"
+
+        completed_instance_id = "completed-message-instance-456"
+
+        # PROCESSING MESSAGE job with COMPLETED instance
+        message_job = MagicMock()
+        message_job.job_id = "message-job-completed-fail"
+        message_job.agent_id = "coder"
+        message_job.project_id = "project-1"
+        message_job.queue_id = "queue-1"
+        message_job.status = JobStatus.PROCESSING.value
+        message_job.instance_id = completed_instance_id
+        message_job.job_type = "message"
+        message_job.message = "test message"
+        message_job.source = "api"
+
+        mock_project_repo.list_projects.return_value = [project]
+        mock_queue_repo.list_by_project.return_value = [queue]
+        mock_queue_service._repository.list_pending_by_queue.return_value = []
+        mock_queue_service._repository.list_by_queue.return_value = ([message_job], None)
+
+        mock_instance_manager.get_instance.side_effect = KeyError("not found")
+        completed_instance = MagicMock()
+        completed_instance.status = InstanceStatus.COMPLETED.value
+        mock_instance_manager._instance_repository.get.return_value = completed_instance
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
+            side_effect=Exception("DB error")
+        )
+
+        await processor._process_next_job()
+
+        # Job should be completed with result_summary=None (graceful fallback)
+        mock_queue_service.complete_job.assert_called()
+        call_args = mock_queue_service.complete_job.call_args
+        assert call_args.kwargs.get("demand_state") == DemandState.COMPLETED
+        assert call_args.kwargs.get("result_summary") is None
+        mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
+
+
+# =============================================================================
+# Test Group 4: TERMINAL_CANCEL_STATUSES Constant
+# =============================================================================
+
+
+class TestTerminalCancelStatuses:
+    """Tests for TERMINAL_CANCEL_STATUSES constant correctness."""
+
+    def test_completed_not_in_terminal_cancel_statuses(self):
+        """COMPLETED should NOT be in TERMINAL_CANCEL_STATUSES.
+        
+        This was the root cause bug: COMPLETED was wrongly included,
+        causing TASK jobs with successfully completed instances to be
+        cancelled instead of completed.
+        """
+        from daemon.services.job_queue_service import TERMINAL_CANCEL_STATUSES
+        from daemon.models import InstanceStatus
+        
+        assert InstanceStatus.COMPLETED.value not in TERMINAL_CANCEL_STATUSES
+
+    def test_terminated_in_terminal_cancel_statuses(self):
+        """TERMINATED should be in TERMINAL_CANCEL_STATUSES."""
+        from daemon.services.job_queue_service import TERMINAL_CANCEL_STATUSES
+        from daemon.models import InstanceStatus
+        
+        assert InstanceStatus.TERMINATED.value in TERMINAL_CANCEL_STATUSES
+
+    def test_terminal_cancel_statuses_only_contains_terminated(self):
+        """TERMINAL_CANCEL_STATUSES should only contain TERMINATED.
+        
+        After the fix, this set should be {terminated} only.
+        ERROR and FAILED are in TERMINAL_STATUSES but not TERMINAL_CANCEL_STATUSES.
+        """
+        from daemon.services.job_queue_service import TERMINAL_CANCEL_STATUSES
+        from daemon.models import InstanceStatus
+        
+        assert TERMINAL_CANCEL_STATUSES == frozenset([InstanceStatus.TERMINATED.value])

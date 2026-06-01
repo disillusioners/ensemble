@@ -249,9 +249,8 @@ class JobProcessor:
                                         # Instance finished its work — complete the job (not orphan).
                                         # The JobFeedbackObserver event may have missed firing due to
                                         # race condition, event bus issue, etc.
-                                        # Note: result_summary not passed here — the service applies
-                                        # "Job completed successfully" fallback, which is appropriate
-                                        # for the fallback recovery path.
+                                        # Try to capture the actual response content for result_summary.
+                                        # Falls back to None if unavailable — the service applies a default message.
                                         status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
                                         logger.info(
                                             f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... "
@@ -361,9 +360,21 @@ class JobProcessor:
                                                     f"instance {proc_job.instance_id[:8]}... is completed, "
                                                     f"completing job"
                                                 )
+                                                # Try to get the actual response content
+                                                result_summary = None
+                                                if hasattr(self._instance_manager, '_get_last_assistant_message_raw'):
+                                                    try:
+                                                        result_summary = await self._instance_manager._get_last_assistant_message_raw(
+                                                            proc_job.instance_id
+                                                        )
+                                                    except Exception as e:
+                                                        logger.warning(
+                                                            f"Failed to get result_summary for TASK job {proc_job.job_id[:8]}...: {e}"
+                                                        )
                                                 await self._queue_service.complete_job(
                                                     proc_job.job_id,
                                                     demand_state=DemandState.COMPLETED,
+                                                    result_summary=result_summary,
                                                 )
                                                 continue
                                             elif instance_meta.status in TERMINAL_CANCEL_STATUSES:
