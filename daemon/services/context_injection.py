@@ -318,15 +318,16 @@ def _format_injection(
     if not matched_files:
         return ""
 
-    # Track token budget
+    # Track token budget and injected slugs
     remaining_budget = INJECTION_TOKEN_CAP
     entries: list[str] = []
+    injected_slugs: set[str] = set()  # Track slugs that were actually injected
 
     # Count high tier files (limit to MAX_HIGH_TIER_FILES)
     high_tier_count = 0
 
-    # Build score lookup from matched files
-    matched_dict: dict[str, MatchedFile] = {m.filename: m for m in matched_files}
+    # Build slug lookup from matched files (keyed by slug for index lookups)
+    matched_by_slug: dict[str, MatchedFile] = {m.slug: m for m in matched_files}
 
     for matched in matched_files:
         # Stop if budget exhausted
@@ -396,9 +397,11 @@ def _format_injection(
         score_pct = int(matched.score * 100)
         entries.append(f"### {matched.slug} ({score_pct}% match)\n{content}\n")
         remaining_budget -= estimated_tokens
+        injected_slugs.add(matched.slug)  # Track this slug as injected
 
-    # Build full file index from ALL files in context_dir (up to 30)
+    # Build file index from files NOT already injected (up to 30)
     file_index_entries: list[tuple[float, str, str]] = []  # (score, filename, summary)
+    preloaded_in_context_count = 0  # Count of pre-loaded files that are in context_dir
     if context_dir is not None and context_dir.is_dir():
         try:
             md_files = sorted(
@@ -409,14 +412,20 @@ def _format_injection(
 
             for file_path in md_files[:30]:  # Index cap at 30
                 try:
-                    # Get matched file if exists
-                    matched = matched_dict.get(file_path.name)
+                    # Extract slug to check if already injected and for lookups
+                    slug = _extract_slug_from_filename(file_path.name)
+                    # Skip files that were already injected into Pre-loaded Context
+                    if slug in injected_slugs:
+                        preloaded_in_context_count += 1
+                        continue
+
+                    # Get matched file if exists (lookup by slug)
+                    matched = matched_by_slug.get(slug)
                     if matched is not None:
                         score = matched.score
                         summary = matched.first_sentence[:80] if matched.first_sentence else matched.slug
                     else:
                         # Score unmatched files
-                        slug = _extract_slug_from_filename(file_path.name)
                         slug_tokens = _tokenize_slug(slug)
                         if not slug_tokens:
                             continue
@@ -452,12 +461,15 @@ def _format_injection(
     # Add entries
     lines.extend(entries)
 
-    # Add file index (does NOT count toward cap)
+    # Add file index (does NOT count toward cap) - only if there are remaining files
     if file_index_entries:
-        total_files = len(file_index_entries)
-        matched_count = len(matched_files)
+        remaining_count = len(file_index_entries)
         lines.append("\n## Available Context Files")
-        lines.append(f"({total_files} files total, {matched_count} matched)\n")
+        # Format: "(N files)" or "(N files, M pre-loaded)"
+        if preloaded_in_context_count == 0:
+            lines.append(f"({remaining_count} files)\n")
+        else:
+            lines.append(f"({remaining_count} files, {preloaded_in_context_count} pre-loaded)\n")
         lines.append("> ⚠️ Match scores are heuristic-based and may not reflect true relevance. Do not fully trust them — verify with your own judgment.\n")
         lines.append("| File | Match | Summary |\n")
         lines.append("|------|-------|----------|\n")

@@ -428,31 +428,36 @@ class TestFormatInjection:
         assert "This is the second sentence" not in result
 
     def test_file_index_appended(self, tmp_path):
-        """File index table is appended to output with new 3-column format."""
+        """File index table is appended to output with pre-loaded exclusion and new header format."""
         # Create context directory with files
         context_dir = tmp_path / "context"
         context_dir.mkdir()
 
-        # Create matching files
-        auth_file = context_dir / "auth-module_20260531.md"
+        # Create matching files (2 that match, 1 that doesn't)
+        # Use proper timestamp format: _YYYYMMDD_HHMMSS
+        auth_file = context_dir / "auth-module_20260531_120000.md"
         auth_file.write_text("""## Concise
 Concise content.
 """)
-        other_file = context_dir / "other-file_20260531.md"
+        other_file = context_dir / "other-file_20260531_120001.md"
         other_file.write_text("""## Concise
 Other content.
+""")
+        unmatched_file = context_dir / "unrelated_20260531_120002.md"
+        unmatched_file.write_text("""## Concise
+Unrelated content.
 """)
 
         matched = [
             MatchedFile(
-                filename="auth-module_20260531.md",
+                filename="auth-module_20260531_120000.md",
                 slug="auth-module",
                 score=0.70,
                 sections={"Concise": "Concise content."},
                 first_sentence="Concise content.",
             ),
             MatchedFile(
-                filename="other-file_20260531.md",
+                filename="other-file_20260531_120001.md",
                 slug="other-file",
                 score=0.50,
                 sections={"Concise": "Other content."},
@@ -461,12 +466,15 @@ Other content.
         ]
         result = _format_injection(matched, context_dir=context_dir)
         assert "## Available Context Files" in result
-        assert "(2 files total, 2 matched)" in result
+        # Header format: (remaining files, pre-loaded files)
+        # 1 remaining file (unrelated), 2 pre-loaded (auth-module, other-file)
+        assert "(1 files, 2 pre-loaded)" in result
         assert "| File | Match | Summary |" in result
-        assert "| auth-module_20260531.md |" in result
-        assert "| other-file_20260531.md |" in result
-        assert "70%" in result  # Match score for auth-module
-        assert "50%" in result  # Match score for other-file
+        # Pre-loaded files should NOT appear in index
+        assert "| auth-module_20260531_120000.md |" not in result
+        assert "| other-file_20260531_120001.md |" not in result
+        # Only unmatched file should appear
+        assert "| unrelated_20260531_120002.md |" in result
 
     def test_high_tier_file_limit_enforced(self):
         """When more than MAX_HIGH_TIER_FILES exist, output is capped by file count."""
@@ -512,6 +520,93 @@ Other content.
         # Check that result is smaller than sum of all inputs
         total_input = sum(len(m.sections["Answer"]) for m in matched)
         assert len(result) < total_input
+
+    def test_all_files_preloaded_skips_index(self, tmp_path):
+        """When all files in context_dir are pre-loaded, index section is skipped."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create only matching files (both will be pre-loaded)
+        # Use proper timestamp format: _YYYYMMDD_HHMMSS
+        auth_file = context_dir / "auth-module_20260531_120000.md"
+        auth_file.write_text("""## Concise
+Auth content.
+""")
+        other_file = context_dir / "other-file_20260531_120001.md"
+        other_file.write_text("""## Concise
+Other content.
+""")
+
+        matched = [
+            MatchedFile(
+                filename="auth-module_20260531_120000.md",
+                slug="auth-module",
+                score=0.85,
+                sections={"Concise": "Auth content."},
+                first_sentence="Auth content.",
+            ),
+            MatchedFile(
+                filename="other-file_20260531_120001.md",
+                slug="other-file",
+                score=0.75,
+                sections={"Concise": "Other content."},
+                first_sentence="Other content.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        # Pre-loaded content should appear
+        assert "## Pre-loaded Context" in result
+        assert "auth-module" in result
+        assert "other-file" in result
+        # Index should be skipped (all files were pre-loaded)
+        assert "## Available Context Files" not in result
+
+    def test_no_files_preloaded_simple_header(self, tmp_path):
+        """When no files are pre-loaded, header shows simple count (no pre-loaded mention)."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create files that don't match the query (so they won't be pre-loaded)
+        # Use proper timestamp format: _YYYYMMDD_HHMMSS
+        file1 = context_dir / "alpha-beta_20260531_120000.md"
+        file1.write_text("""## Concise
+Alpha beta content.
+""")
+        file2 = context_dir / "gamma-delta_20260531_120001.md"
+        file2.write_text("""## Concise
+Gamma delta content.
+""")
+
+        # Create a matched file that will be pre-loaded
+        matched = [
+            MatchedFile(
+                filename="auth-module_20260531_120002.md",
+                slug="auth-module",
+                score=0.85,
+                sections={"Concise": "Auth content."},
+                first_sentence="Auth content.",
+            ),
+        ]
+
+        # Without context_dir, no index is built anyway, so this test doesn't apply
+        # Test with unmatched files in context_dir
+        matched_only_above = [
+            MatchedFile(
+                filename="only-matched_20260531_120002.md",
+                slug="only-matched",
+                score=0.85,
+                sections={"Concise": "Only matched content."},
+                first_sentence="Only matched content.",
+            ),
+        ]
+        result = _format_injection(matched_only_above, context_dir=context_dir)
+        # Header should show (2 files) since no pre-loaded files are in the index
+        assert "(2 files)" in result
+        # Pre-loaded file should NOT appear in index
+        assert "| only-matched_20260531_120002.md |" not in result
+        # Other files should appear
+        assert "| gamma-delta_20260531_120001.md |" in result
+        assert "| alpha-beta_20260531_120000.md |" in result
 
 
 # ─── TestGetSharedContext (PUBLIC API) ──────────────────────────────────────────
@@ -600,6 +695,11 @@ Full answer about authentication module with detailed information.
 ## Confidence
 High
 """)
+        # Create an additional file to ensure index is shown
+        other_file = context_dir / "other-info_20260531_231256.md"
+        other_file.write_text("""## Concise
+Other information.
+""")
 
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("test-project", "auth module")
@@ -607,4 +707,8 @@ High
         assert result is not None
         assert "## Pre-loaded Context" in result
         assert "auth-module" in result
-        assert "Available Context Files" in result
+        # Since auth-module is pre-loaded, it should not appear in index
+        assert "## Available Context Files" in result
+        # Only other-file should appear in index
+        assert "| other-info_20260531_231256.md |" in result
+        assert "| auth-module_20260531_231255.md |" not in result
