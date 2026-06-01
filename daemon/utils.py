@@ -495,15 +495,16 @@ async def invoke_agent_and_wait(
     instance_name: str | None = None,
     parent_id: str | None = None,
     timeout: float = 300.0,
-) -> str:
+    return_instance_id: bool = False,
+) -> str | tuple[str, str]:
     """Spawn an agent, send a message, and synchronously wait for the result.
-    
+
     This is the primary mechanism for synchronous agent invocation.
     Used by knowledge tools to implement explore().
-    
+
     DEADLOCK PREVENTION: Uses an asyncio.Semaphore capped at WORKER_POOL_SIZE - 1
     to ensure at least 1 worker thread remains free to process the spawned agent.
-    
+
     Args:
         manager: The InstanceManager instance.
         agent_id: Agent ID to spawn (e.g., 'explorer', 'experiencer').
@@ -512,22 +513,32 @@ async def invoke_agent_and_wait(
         instance_name: Optional name for the spawned instance.
         parent_id: Optional parent instance ID (for hierarchy).
         timeout: Maximum seconds to wait for completion.
-    
+        return_instance_id: When True, the return value is always a
+            ``(content, instance_id)`` tuple, including all error and
+            exception paths. When False (default), returns a plain ``str``
+            for backward compatibility.
+
     Returns:
-        The agent's final response content (on success).
-        Error string prefixed with "Error:" on failure or timeout.
+        On success: the agent's final response content (a ``str``) when
+        ``return_instance_id`` is False, otherwise ``(content, instance_id)``.
+        On failure or timeout: a ``"Error: ..."`` string when
+        ``return_instance_id`` is False, otherwise
+        ``(error_string, instance_id)``.
     """
     from .services.completion_registry import get_completion_registry
-    
+
     semaphore = _get_invoke_semaphore()
     registry = get_completion_registry()
-    
+
     # Acquire semaphore — ensures we don't consume all workers
     await semaphore.acquire()
-    
+
     # Generate instance_id upfront so MCP preload can use it
     instance_id = str(uuid.uuid4())
-    
+
+    def _return(value: str) -> str | tuple[str, str]:
+        return (value, instance_id) if return_instance_id else value
+
     try:
         # 1. Spawn instance with MCP preload + cleanup on failure (synchronous — creates instance in DB)
         instance_id = await manager.spawn_instance_with_mcp(
@@ -538,44 +549,44 @@ async def invoke_agent_and_wait(
             instance_name=instance_name,
             invoked_as_tool=True,
         )
-        
+
         # 2. Register IMMEDIATELY after spawn (before enqueue)
         # Buffered completion handles race if complete() fires before this
         registry.register(instance_id)
-        
+
         # 3. Enqueue message (creates Task in DB + notify_work())
         await manager.enqueue_message(
             instance_id=instance_id,
             message=message,
             source=f"internal_invoke_and_wait:{parent_id or 'system'}",
         )
-        
+
         # 4. Re-register if resuming from checkpoint (child may have completed while unregisterd)
         if not registry.is_registered(instance_id):
             registry.register(instance_id)
-        
+
         # 5. Wait for completion (success or error)
         result = await registry.wait_for(instance_id, timeout=timeout)
-        
+
         if result is None:
             # Timeout — agent is still running. Best-effort terminate.
             _try_terminate_orphan(manager, instance_id)
-            return (
+            return _return(
                 f"Error: Agent timed out after {timeout}s. "
                 f"Instance {instance_id[:8]}... may still be running."
             )
-        
+
         if result.is_error:
             # Agent errored out — it's already in ERROR status
-            return f"Error: Agent failed. {result.content}"
-        
+            return _return(f"Error: Agent failed. {result.content}")
+
         # Success
-        return result.content or ""
-    
+        return _return(result.content or "")
+
     except Exception as e:
         logger_utils.error(f"invoke_agent_and_wait failed: {e}", exc_info=True)
         _try_terminate_orphan(manager, instance_id)
-        return f"Error: {e}"
+        return _return(f"Error: {e}")
     finally:
         # 5. Always cleanup
         if instance_id is not None:

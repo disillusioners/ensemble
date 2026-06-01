@@ -676,3 +676,186 @@ async def test_semaphore_released_on_exception_path(reset_semaphore):
 
     assert len(releases) == 1, f"Semaphore should be released on exception, got {len(releases)}"
     assert "Error:" in result
+
+
+# ─── invoke_agent_and_wait return_instance_id Tests ────────────────────────────
+
+
+class TestInvokeAgentAndWaitReturnInstanceId:
+    """Tests for invoke_agent_and_wait(return_instance_id=True) tuple behavior."""
+
+    @pytest.mark.asyncio
+    async def test_return_instance_id_success(self, reset_semaphore):
+        """Returns (content, instance_id) on success path."""
+        from daemon.utils import invoke_agent_and_wait
+
+        mock_manager = MagicMock()
+        mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="success-instance-xyz")
+        mock_manager.enqueue_message = AsyncMock()
+        mock_manager.terminate_instance = AsyncMock()
+
+        registry = get_completion_registry()
+        registry.wait_for = AsyncMock(
+            return_value=CompletionResult(content="All good", is_error=False)
+        )
+
+        with patch("daemon.utils._get_invoke_semaphore") as mock_sem, \
+             patch(
+                 "daemon.services.completion_registry.get_completion_registry",
+                 return_value=registry,
+                 create=True,
+             ):
+            mock_sem.return_value = asyncio.Semaphore(2)
+
+            result = await invoke_agent_and_wait(
+                mock_manager,
+                agent_id="test-agent",
+                message="Hello",
+                return_instance_id=True,
+            )
+
+        # Must be a tuple, not a plain string
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        content, instance_id = result
+        assert content == "All good"
+        assert instance_id == "success-instance-xyz"
+
+    @pytest.mark.asyncio
+    async def test_return_instance_id_timeout(self, reset_semaphore):
+        """Returns (error_string, instance_id) on timeout."""
+        from daemon.utils import invoke_agent_and_wait
+
+        mock_manager = MagicMock()
+        mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="timeout-instance-abc")
+        mock_manager.enqueue_message = AsyncMock()
+        mock_manager.terminate_instance = AsyncMock()
+
+        registry = get_completion_registry()
+        registry.wait_for = AsyncMock(return_value=None)  # timeout
+
+        with patch("daemon.utils._get_invoke_semaphore") as mock_sem, \
+             patch(
+                 "daemon.services.completion_registry.get_completion_registry",
+                 return_value=registry,
+                 create=True,
+             ):
+            mock_sem.return_value = asyncio.Semaphore(2)
+
+            result = await invoke_agent_and_wait(
+                mock_manager,
+                agent_id="test-agent",
+                message="Hello",
+                timeout=0.1,
+                return_instance_id=True,
+            )
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        content, instance_id = result
+        assert "Error" in content
+        assert "timed out" in content.lower()
+        assert instance_id == "timeout-instance-abc"
+        mock_manager.terminate_instance.assert_called_once_with("timeout-instance-abc")
+
+    @pytest.mark.asyncio
+    async def test_return_instance_id_exception(self, reset_semaphore):
+        """Returns (error_string, instance_id) on exception path."""
+        from daemon.utils import invoke_agent_and_wait
+
+        mock_manager = MagicMock()
+        # Generate UUID for instance_id, but spawn fails after that
+        mock_manager.spawn_instance_with_mcp = AsyncMock(
+            side_effect=RuntimeError("Kaboom")
+        )
+        mock_manager.enqueue_message = AsyncMock()
+        mock_manager.terminate_instance = AsyncMock()
+
+        with patch("daemon.utils._get_invoke_semaphore") as mock_sem:
+            mock_sem.return_value = asyncio.Semaphore(2)
+
+            result = await invoke_agent_and_wait(
+                mock_manager,
+                agent_id="test-agent",
+                message="Hello",
+                return_instance_id=True,
+            )
+
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        content, instance_id = result
+        assert "Error" in content
+        assert "Kaboom" in content
+        # instance_id is the UUID generated before spawn failed
+        assert isinstance(instance_id, str)
+        assert len(instance_id) == 36  # UUID4 format
+
+    @pytest.mark.asyncio
+    async def test_no_return_instance_id_default(self, reset_semaphore):
+        """When return_instance_id=False (default), returns plain str (backward compat)."""
+        from daemon.utils import invoke_agent_and_wait
+
+        mock_manager = MagicMock()
+        mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="plain-instance-1")
+        mock_manager.enqueue_message = AsyncMock()
+        mock_manager.terminate_instance = AsyncMock()
+
+        registry = get_completion_registry()
+        registry.wait_for = AsyncMock(
+            return_value=CompletionResult(content="Just a string", is_error=False)
+        )
+
+        with patch("daemon.utils._get_invoke_semaphore") as mock_sem, \
+             patch(
+                 "daemon.services.completion_registry.get_completion_registry",
+                 return_value=registry,
+                 create=True,
+             ):
+            mock_sem.return_value = asyncio.Semaphore(2)
+
+            result = await invoke_agent_and_wait(
+                mock_manager,
+                agent_id="test-agent",
+                message="Hello",
+            )
+
+        # Backward compat: plain str, NOT a tuple
+        assert isinstance(result, str)
+        assert result == "Just a string"
+
+    @pytest.mark.asyncio
+    async def test_return_instance_id_agent_error(self, reset_semaphore):
+        """Returns (error_string, instance_id) when agent errors out (is_error=True)."""
+        from daemon.utils import invoke_agent_and_wait
+
+        mock_manager = MagicMock()
+        mock_manager.spawn_instance_with_mcp = AsyncMock(return_value="errored-instance-9")
+        mock_manager.enqueue_message = AsyncMock()
+        mock_manager.terminate_instance = AsyncMock()
+
+        registry = get_completion_registry()
+        registry.wait_for = AsyncMock(
+            return_value=CompletionResult(content="Agent crashed mid-run", is_error=True)
+        )
+
+        with patch("daemon.utils._get_invoke_semaphore") as mock_sem, \
+             patch(
+                 "daemon.services.completion_registry.get_completion_registry",
+                 return_value=registry,
+                 create=True,
+             ):
+            mock_sem.return_value = asyncio.Semaphore(2)
+
+            result = await invoke_agent_and_wait(
+                mock_manager,
+                agent_id="test-agent",
+                message="Hello",
+                return_instance_id=True,
+            )
+
+        assert isinstance(result, tuple)
+        content, instance_id = result
+        assert "Error" in content
+        assert "Agent failed" in content
+        assert "Agent crashed" in content
+        assert instance_id == "errored-instance-9"

@@ -12,13 +12,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daemon.tools.knowledge_tools import (
+    _check_rag_queried_via_checkpoint,
     _enqueue_experience_job,
     _enqueue_kb_update_job,
     _generate_experience_idempotency_key,
     _generate_idempotency_key,
     _parse_should_update_kb,
+    _RAG_QUERIED_PATTERN,
     _SHOULD_UPDATE_KB_PATTERN,
     create_knowledge_tools,
+    RAG_TOOL_NAMES,
 )
 from daemon.services.context_injection import get_shared_context
 
@@ -138,8 +141,7 @@ class TestExploreTool:
         mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock,
-                   return_value="Explorer found relevant information about the project."):
+                   new_callable=AsyncMock, return_value=("Explorer found relevant information about the project.", "test-child-id")):
             tools = create_knowledge_tools(mock_manager, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -170,7 +172,7 @@ class TestExploreTool:
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock,
-                   return_value=None):
+                   return_value=(None, "test-child-id")):
             tools = create_knowledge_tools(mock_manager, "test-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -188,7 +190,7 @@ class TestExploreTool:
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock,
-                   return_value="Result") as mock_invoke:
+                   return_value=("Result", "test-child-id")) as mock_invoke:
             tools = create_knowledge_tools(mock_manager, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
             await explore_tool.ainvoke({"query": "Test"})
@@ -206,7 +208,7 @@ class TestExploreTool:
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock,
-                   return_value="Result") as mock_invoke:
+                   return_value=("Result", "test-child-id")) as mock_invoke:
             tools = create_knowledge_tools(mock_manager, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -716,7 +718,7 @@ class TestExploreJobEnqueue:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -735,7 +737,7 @@ class TestExploreJobEnqueue:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -760,7 +762,7 @@ class TestExploreJobEnqueue:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -788,7 +790,7 @@ class TestExploreJobEnqueue:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -813,7 +815,7 @@ class TestExploreJobEnqueue:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -841,7 +843,7 @@ class TestExploreJobEnqueue:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -867,7 +869,7 @@ class TestExploreJobEnqueue:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
@@ -924,7 +926,7 @@ class TestExploreAutoInjection:
             with patch(
                 "daemon.tools.knowledge_tools.invoke_agent_and_wait",
                 new_callable=AsyncMock,
-                return_value="Explorer result.",
+                return_value=("Explorer result.", "test-child-id"),
             ) as mock_invoke:
                 tools = create_knowledge_tools(
                     mock_manager_for_injection, "parent-instance-id"
@@ -965,7 +967,7 @@ class TestExploreAutoInjection:
             with patch(
                 "daemon.tools.knowledge_tools.invoke_agent_and_wait",
                 new_callable=AsyncMock,
-                return_value="Explorer result.",
+                return_value=("Explorer result.", "test-child-id"),
             ) as mock_invoke:
                 tools = create_knowledge_tools(
                     mock_manager_for_injection, "parent-instance-id"
@@ -1006,7 +1008,7 @@ class TestExploreAutoInjection:
             with patch(
                 "daemon.tools.knowledge_tools.invoke_agent_and_wait",
                 new_callable=AsyncMock,
-                return_value="Explorer result.",
+                return_value=("Explorer result.", "test-child-id"),
             ) as mock_invoke:
                 tools = create_knowledge_tools(mock_manager, "parent-instance-id")
                 explore_tool = next(t for t in tools if t.name == "explore")
@@ -1041,7 +1043,7 @@ class TestExploreAutoInjection:
             with patch(
                 "daemon.tools.knowledge_tools.invoke_agent_and_wait",
                 new_callable=AsyncMock,
-                return_value="Explorer succeeded despite injection failure.",
+                return_value=("Explorer succeeded despite injection failure.", "test-child-id"),
             ) as mock_invoke:
                 tools = create_knowledge_tools(
                     mock_manager_for_injection, "parent-instance-id"
@@ -1066,7 +1068,7 @@ class TestExploreAutoInjection:
             with patch(
                 "daemon.tools.knowledge_tools.invoke_agent_and_wait",
                 new_callable=AsyncMock,
-                return_value="Result",
+                return_value=("Result", "test-child-id"),
             ):
                 tools = create_knowledge_tools(
                     mock_manager_for_injection, "parent-instance-id"
@@ -1249,6 +1251,19 @@ class TestExploreAutoSave:
             return_value="tree-root-for-save-test"
         )
 
+        # Set up checkpointer to report a RAG tool was called (Phase 1: checkpoint
+        # is the source of truth for rag_queried; tests using "## Did you query
+        # RAG: yes" must also have the checkpoint agree).
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                ]
+            }
+        })
+        mock_manager._checkpointer = mock_checkpointer
+
         return mock_manager
 
     @pytest.mark.asyncio
@@ -1260,7 +1275,7 @@ class TestExploreAutoSave:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1285,8 +1300,13 @@ class TestExploreAutoSave:
             "## Did you query RAG: no"
         )
 
+        # Checkpoint agrees: no RAG tool called
+        mock_manager_for_save._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [_make_message([_make_tool_call("bash")])]}
+        })
+
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1308,7 +1328,7 @@ class TestExploreAutoSave:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1332,7 +1352,7 @@ class TestExploreAutoSave:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1352,8 +1372,13 @@ class TestExploreAutoSave:
             "## Answer\nRegular response without save flag."
         )
 
+        # Checkpoint agrees: no RAG tool called
+        mock_manager_for_save._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [_make_message([_make_tool_call("bash")])]}
+        })
+
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1377,7 +1402,7 @@ class TestExploreAutoSave:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1401,7 +1426,7 @@ class TestExploreAutoSave:
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1437,6 +1462,18 @@ class TestExploreAutoSaveDedup:
             return_value="dedup-test-context"
         )
 
+        # Set up checkpointer to report a RAG tool was called (Phase 1: checkpoint
+        # is the source of truth for rag_queried).
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                ]
+            }
+        })
+        mock_manager._checkpointer = mock_checkpointer
+
         return mock_manager
 
     @pytest.mark.asyncio
@@ -1467,7 +1504,7 @@ The authentication system uses JWT tokens for user authentication with refresh t
 ## Did you query RAG: yes"""
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1507,7 +1544,7 @@ Full details here.
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1545,7 +1582,7 @@ Some valid concise content about authentication.
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=explorer_response):
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
             with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
                 mock_tempfile.gettempdir.return_value = str(tmp_path)
 
@@ -1562,3 +1599,396 @@ Some valid concise content about authentication.
                 # Should have saved the file (corrupted files don't block saving)
                 files = list(context_dir.glob("*.md"))
                 assert len(files) == 2
+
+
+# =============================================================================
+# Checkpoint RAG Detection Helper Tests
+# =============================================================================
+
+
+def _make_message(tool_calls):
+    """Build a mock message with a given list of tool calls."""
+    msg = MagicMock()
+    msg.tool_calls = tool_calls
+    return msg
+
+
+def _make_tool_call(name):
+    """Build a tool call dict (as LangGraph stores them)."""
+    return {"name": name, "args": {}, "id": f"call_{name}"}
+
+
+class TestCheckRagQueriedViaCheckpoint:
+    """Tests for _check_rag_queried_via_checkpoint() helper."""
+
+    @pytest.mark.asyncio
+    async def test_rag_tool_found(self):
+        """Returns True when messages contain rag_query_data tool call."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                ]
+            }
+        })
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_rag_get_graph_found(self):
+        """Returns True when messages contain rag_get_graph tool call."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_get_graph")]),
+                ]
+            }
+        })
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_no_rag_tools(self):
+        """Returns False when no RAG tool calls in messages."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                    _make_message([_make_tool_call("read_file")]),
+                ]
+            }
+        })
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_exception(self):
+        """Returns False when checkpointer raises (graceful degradation)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_none(self):
+        """Returns False when checkpoint state is None."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value=None)
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_empty_messages(self):
+        """Returns False when state is valid but messages list is empty."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": []}
+        })
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_multiple_tools_one_rag(self):
+        """Returns True when many tool calls include one RAG call."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                    _make_message([_make_tool_call("read_file")]),
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_message([_make_tool_call("write_file")]),
+                ]
+            }
+        })
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_tool_call_object_with_attr(self):
+        """Returns True when tool_call is an object with .name attribute (not a dict)."""
+        tc_obj = MagicMock()
+        tc_obj.name = "rag_query_data"
+
+        msg = MagicMock()
+        msg.tool_calls = [tc_obj]
+
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [msg]}
+        })
+
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_rag_tool_names_constant(self):
+        """RAG_TOOL_NAMES is a frozenset with the expected tool names."""
+        assert isinstance(RAG_TOOL_NAMES, frozenset)
+        assert "rag_query_data" in RAG_TOOL_NAMES
+        assert "rag_get_graph" in RAG_TOOL_NAMES
+
+
+# =============================================================================
+# Explore() Checkpoint Integration Tests
+# =============================================================================
+
+
+class TestExploreCheckpointIntegration:
+    """Tests for explore()'s use of checkpoint-based RAG detection."""
+
+    @pytest.fixture
+    def mock_manager_with_checkpointer(self, configured_env, mock_manager):
+        """Mock manager with a checkpointer attached and instance metadata set up."""
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+        mock_manager._instance_repository.get_tree_root_id = MagicMock(
+            return_value="tree-root-for-checkpoint"
+        )
+
+        # Checkpointer returns no RAG tools by default; tests override per case.
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.aget = AsyncMock(return_value=None)
+        mock_manager._checkpointer = mock_checkpointer
+
+        return mock_manager
+
+    @pytest.mark.asyncio
+    async def test_explore_checkpoint_rag_found_saves(
+        self, mock_manager_with_checkpointer, tmp_path
+    ):
+        """Checkpoint says RAG was called → _save_explorer_result is triggered."""
+        # Checkpoint shows a RAG tool call was made
+        mock_manager_with_checkpointer._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                ]
+            }
+        })
+
+        # No heading in response — checkpoint is the source of truth
+        explorer_response = (
+            "## Answer\nFound important information."
+        )
+
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=(explorer_response, "test-child-id"),
+        ):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(
+                    mock_manager_with_checkpointer, "parent-instance-id"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                    await explore_tool.ainvoke({"query": "What is the auth?"})
+
+                    # _save_explorer_result should have been called (checkpoint says RAG)
+                    mock_save.assert_called_once()
+                    call_kwargs = mock_save.call_args.kwargs
+                    assert call_kwargs["query"] == "What is the auth?"
+                    assert call_kwargs["context_key"] == "tree-root-for-checkpoint"
+
+    @pytest.mark.asyncio
+    async def test_explore_checkpoint_rag_not_found_skips(
+        self, mock_manager_with_checkpointer, tmp_path
+    ):
+        """Checkpoint says no RAG → _save_explorer_result is NOT called."""
+        # Checkpoint shows no RAG tool calls
+        mock_manager_with_checkpointer._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                ]
+            }
+        })
+
+        # Heading says yes (deliberate mismatch) — checkpoint wins
+        explorer_response = (
+            "## Answer\nContent.\n\n## Did you query RAG: yes"
+        )
+
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=(explorer_response, "test-child-id"),
+        ):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(
+                    mock_manager_with_checkpointer, "parent-instance-id"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                    await explore_tool.ainvoke({"query": "Quick question"})
+
+                    # Save should NOT be triggered (checkpoint says no RAG)
+                    mock_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_error_still_checks_checkpoint(
+        self, mock_manager_with_checkpointer, tmp_path
+    ):
+        """Even when agent errors, checkpoint is inspected — if RAG was called, save triggers."""
+        # Checkpoint shows RAG was called BEFORE the error
+        mock_manager_with_checkpointer._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_message([_make_tool_call("bash")]),
+                ]
+            }
+        })
+
+        # Agent errors out
+        error_response = "Error: Agent failed. Something broke at the end."
+
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=(error_response, "test-child-id"),
+        ):
+            tools = create_knowledge_tools(
+                mock_manager_with_checkpointer, "parent-instance-id"
+            )
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                result = await explore_tool.ainvoke({"query": "Some query"})
+
+                # The error should be returned to the caller
+                assert "Error" in result
+
+                # No save on error path — we return BEFORE the save block
+                mock_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_checkpoint_mismatch_logged(
+        self, mock_manager_with_checkpointer, tmp_path, caplog
+    ):
+        """Mismatch between heading and checkpoint is logged at INFO."""
+        # Checkpoint says NO RAG
+        mock_manager_with_checkpointer._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                ]
+            }
+        })
+
+        # Heading says YES — mismatch
+        explorer_response = (
+            "## Answer\nContent.\n\n## Did you query RAG: yes"
+        )
+
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=(explorer_response, "test-child-id"),
+        ):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(
+                    mock_manager_with_checkpointer, "parent-instance-id"
+                )
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with caplog.at_level("INFO", logger="daemon.tools.knowledge_tools"):
+                    await explore_tool.ainvoke({"query": "Test"})
+
+                # Mismatch should be logged at INFO
+                assert any(
+                    "RAG detection mismatch" in record.message
+                    for record in caplog.records
+                ), f"Expected mismatch log; got: {[r.message for r in caplog.records]}"
+                # Log should mention both values
+                mismatch_records = [
+                    r for r in caplog.records
+                    if "RAG detection mismatch" in r.message
+                ]
+                assert "checkpoint=False" in mismatch_records[0].message
+                assert "heading=True" in mismatch_records[0].message
+
+    @pytest.mark.asyncio
+    async def test_explore_no_checkpointer_attribute(
+        self, configured_env, mock_manager, tmp_path
+    ):
+        """When manager has no _checkpointer attribute, falls back gracefully."""
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project"}
+        mock_instance_meta.project_id = "test-project"
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # No _checkpointer set on the manager
+        if hasattr(mock_manager, "_checkpointer"):
+            del mock_manager._checkpointer
+
+        explorer_response = (
+            "## Answer\nFound info.\n\n## Did you query RAG: yes"
+        )
+
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=(explorer_response, "test-child-id"),
+        ):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                    # Should not raise; with no checkpointer, rag_queried=False
+                    await explore_tool.ainvoke({"query": "What?"})
+                    mock_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_returns_tuple_from_invoke(
+        self, mock_manager_with_checkpointer
+    ):
+        """invoke_agent_and_wait is called with return_instance_id=True."""
+        with patch(
+            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
+            new_callable=AsyncMock,
+            return_value=("Result", "test-child-id"),
+        ) as mock_invoke:
+            tools = create_knowledge_tools(
+                mock_manager_with_checkpointer, "parent-instance-id"
+            )
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What?"})
+
+            # Verify the call was made with return_instance_id=True
+            mock_invoke.assert_called_once()
+            call_kwargs = mock_invoke.call_args.kwargs
+            assert call_kwargs["return_instance_id"] is True

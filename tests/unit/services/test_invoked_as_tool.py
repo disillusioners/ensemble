@@ -125,7 +125,7 @@ async def test_explore_passes_invoked_as_tool_true(configured_env, mock_manager)
 
     with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                new_callable=AsyncMock,
-               return_value="Explorer result"):
+               return_value=("Explorer result", "test-child-id")):
         await explore_tool.ainvoke({"query": "Test query"})
 
     # Verify explore calls invoke_agent_and_wait (which passes invoked_as_tool=True)
@@ -292,7 +292,7 @@ async def test_full_explore_flow_with_invoked_as_tool(configured_env, mock_manag
     # Patch invoke_agent_and_wait to capture the call
     with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                new_callable=AsyncMock,
-               return_value="Found relevant information") as mock_invoke:
+               return_value=("Found relevant information", "test-child-id")) as mock_invoke:
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         explore_tool = next(t for t in tools if t.name == "explore")
 

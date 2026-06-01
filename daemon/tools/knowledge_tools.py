@@ -65,6 +65,58 @@ def _parse_rag_queried(response: str) -> bool:
     return False
 
 
+# RAG tool names whose invocation indicates the explorer queried the KB.
+# Used for deterministic RAG detection via checkpoint inspection.
+RAG_TOOL_NAMES = frozenset({"rag_query_data", "rag_get_graph"})
+
+
+async def _check_rag_queried_via_checkpoint(
+    checkpointer,
+    instance_id: str,
+) -> bool:
+    """Check if RAG tools were actually called by inspecting checkpoint messages.
+
+    Queries the LangGraph checkpointer for the agent's message history
+    and looks for rag_query_data or rag_get_graph tool calls. This is the
+    deterministic, source-of-truth signal for whether RAG was queried —
+    it does not depend on the LLM self-reporting a flag.
+
+    Args:
+        checkpointer: AsyncSqliteSaver instance from the manager.
+        instance_id: The child agent's instance ID (used as thread_id).
+
+    Returns:
+        True if any RAG tool was called, False otherwise (including on any
+        error — graceful degradation, never raises).
+    """
+    try:
+        config = {"configurable": {"thread_id": instance_id}}
+        state = await checkpointer.aget(config)
+        if not state:
+            logger.debug("Checkpoint inspection: no state found for %s", instance_id[:8])
+            return False
+
+        messages = state.get("channel_values", {}).get("messages", [])
+        scanned = 0
+        for msg in messages:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
+                    if name in RAG_TOOL_NAMES:
+                        logger.info(
+                            "Checkpoint inspection: RAG tool '%s' found (scanned %d messages)",
+                            name, scanned + 1,
+                        )
+                        return True
+            scanned += 1
+
+        logger.info("Checkpoint inspection: no RAG tools found (scanned %d messages)", scanned)
+        return False
+    except Exception:
+        logger.debug("Failed to check RAG tool calls from checkpoint", exc_info=True)
+        return False
+
+
 def _generate_idempotency_key(query: str, project_id: str) -> str:
     """Generate a deterministic idempotency key for kb-importer jobs."""
     content = f"explorer-kb-update:{project_id}:{query.lower().strip()}"
@@ -363,27 +415,53 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
             except Exception as e:
                 logger.info("[Explorer] Context auto-injection failed (exception): %s", e)
 
-        try:
-            result = await invoke_agent_and_wait(
-                manager=manager,
-                agent_id="explorer",
-                message=explorer_message,
-                project_id=pid,
-                parent_id=current_instance_id,
-                instance_name=f"explore-{query[:30]}",
-                timeout=300.0,
-            )
-        except Exception as e:
-            return f"Explorer agent failed: {e}"
+        # Invoke explorer agent — always returns (content, child_instance_id) tuple
+        # No try/except wrapper: errors propagate to the registry path below
+        # so we can still inspect the checkpoint before bailing.
+        result, child_instance_id = await invoke_agent_and_wait(
+            manager=manager,
+            agent_id="explorer",
+            message=explorer_message,
+            project_id=pid,
+            parent_id=current_instance_id,
+            instance_name=f"explore-{query[:30]}",
+            timeout=300.0,
+            return_instance_id=True,
+        )
 
+        # Handle error results — but check checkpoint BEFORE returning
+        # (child may have called RAG tools before failing)
+        is_error = result is None or (isinstance(result, str) and result.startswith("Error:"))
         if result is None:
-            return "Explorer agent timed out or failed. Try a simpler query."
+            result = "Explorer agent timed out or failed. Try a simpler query."
+
+        # Deterministic RAG detection via checkpoint (runs for BOTH success and error paths)
+        rag_queried_checkpoint = False
+        if child_instance_id and hasattr(manager, "_checkpointer") and manager._checkpointer:
+            rag_queried_checkpoint = await _check_rag_queried_via_checkpoint(
+                manager._checkpointer, child_instance_id
+            )
+
+        # [Phase 1 only] Keep heading-based detection for log comparison
+        rag_queried_heading = _parse_rag_queried(result) if isinstance(result, str) else False
+
+        if rag_queried_checkpoint != rag_queried_heading:
+            logger.info(
+                "RAG detection mismatch: checkpoint=%s, heading=%s, instance=%s",
+                rag_queried_checkpoint,
+                rag_queried_heading,
+                child_instance_id[:8] if child_instance_id else "N/A",
+            )
+
+        # Use checkpoint result as source of truth
+        rag_queried = rag_queried_checkpoint
+
+        # Return early if error (AFTER checkpoint inspection)
+        if is_error:
+            return result
 
         # Parse response for should_update_kb flag (use original result, before stripping)
         should_update_kb = _parse_should_update_kb(result)
-
-        # Parse response for rag_queried flag (use original result, before stripping)
-        rag_queried = _parse_rag_queried(result)
 
         # Fire-and-forget: create job for kb-importer if knowledge update needed
         # Pass original result so kb-importer has full context including the flag heading
