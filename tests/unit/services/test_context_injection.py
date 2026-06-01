@@ -6,11 +6,8 @@ from unittest.mock import patch, MagicMock
 
 from daemon.services.context_injection import (
     MatchedFile,
-    TIER_HIGH,
-    TIER_MEDIUM,
-    TIER_LOW,
     INJECTION_TOKEN_CAP,
-    MAX_HIGH_TIER_FILES,
+    MATCH_THRESHOLD,
     _tokenize_slug,
     _tokenize_query,
     _match_score,
@@ -304,7 +301,7 @@ High
         result = _match_context_files("auth module", tmp_path)
         assert len(result) == 1
         assert result[0].slug == "auth-module-jwt"
-        assert result[0].score >= TIER_LOW
+        assert result[0].score >= MATCH_THRESHOLD
 
     def test_no_matching_files(self, tmp_path):
         """No files matching query return empty list."""
@@ -351,7 +348,7 @@ Medium
         # Good file should be matched despite corrupt file failing
         assert len(result) == 1
         assert result[0].slug == "auth-module"
-        assert result[0].score >= TIER_LOW
+        assert result[0].score >= MATCH_THRESHOLD
 
     def test_short_query_matches_long_slug(self, tmp_path):
         """Short 2-token query matches 4-token slug with full recall."""
@@ -375,59 +372,189 @@ class TestFormatInjection:
         result = _format_injection([])
         assert result == ""
 
-    def test_high_tier_injection(self):
-        """High tier (>=0.80) uses Answer section."""
+    def test_top_match_always_included(self, tmp_path):
+        """Match 1 is ALWAYS included regardless of score."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create file with low score - should still be included as #1
+        file = context_dir / "low-score-file_20260531_120000.md"
+        file.write_text("This is the full content of the file.")
+
         matched = [
             MatchedFile(
-                filename="auth-module_20260531.md",
-                slug="auth-module",
-                score=0.87,
-                sections={"Answer": "This is the full answer about authentication."},
-                first_sentence="This is the full answer.",
+                filename="low-score-file_20260531_120000.md",
+                slug="low-score-file",
+                score=0.15,  # Very low score
+                sections={},
+                first_sentence="First sentence.",
             )
         ]
-        result = _format_injection(matched)
+        result = _format_injection(matched, context_dir=context_dir)
         assert "# Shared Context" in result
-        assert "## Context dir:" in result
-        assert "### auth-module (87% match)" in result
-        assert "This is the full answer" in result
-        assert "## Pre-loaded Context" in result
+        assert "### low-score-file (15% match)" in result
+        assert "This is the full content of the file." in result
 
-    def test_medium_tier_uses_concise(self):
-        """Medium tier (>=0.60) uses Concise section, not Answer."""
+    def test_top_match_truncated_only_if_exceeds_cap(self, tmp_path):
+        """Match 1 is truncated only if its content alone exceeds INJECTION_TOKEN_CAP."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create file with large content (~2500+ tokens)
+        large_content = "Word " * 4000  # ~20000 chars ~= 2500 tokens
+        file = context_dir / "large-file_20260531_120000.md"
+        file.write_text(large_content)
+
         matched = [
             MatchedFile(
-                filename="auth-module_20260531.md",
-                slug="auth-module",
-                score=0.65,
-                sections={
-                    "Concise": "This is the concise answer.",
-                    "Answer": "This is the long full answer section.",
-                },
-                first_sentence="This is the concise answer.",
+                filename="large-file_20260531_120000.md",
+                slug="large-file",
+                score=0.90,
+                sections={},
+                first_sentence="Large content.",
             )
         ]
-        result = _format_injection(matched)
-        assert "This is the concise answer" in result
-        assert "This is the long full answer" not in result
+        result = _format_injection(matched, context_dir=context_dir)
+        assert "# Shared Context" in result
+        # Content should be truncated (ends with ...)
+        assert "..." in result
+        # Full content should NOT be present
+        assert len(result) < len(large_content) + 200  # Allow for header
 
-    def test_low_tier_first_sentence_only(self):
-        """Low tier (>=0.40) uses only first sentence."""
+    def test_second_match_included_only_if_score_gt_60(self, tmp_path):
+        """Match 2 is ONLY included if score > 60%."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create two files
+        file1 = context_dir / "match1_20260531_120000.md"
+        file1.write_text("Content of first match.")
+        file2 = context_dir / "match2_20260531_120001.md"
+        file2.write_text("Content of second match.")
+
         matched = [
             MatchedFile(
-                filename="auth-module_20260531.md",
-                slug="auth-module",
-                score=0.45,
-                sections={
-                    "Concise": "This is the first sentence. This is the second sentence that should be cut.",
-                },
-                first_sentence="This is the first sentence.",
+                filename="match1_20260531_120000.md",
+                slug="match1",
+                score=0.90,
+                sections={},
+                first_sentence="First.",
+            ),
+            MatchedFile(
+                filename="match2_20260531_120001.md",
+                slug="match2",
+                score=0.65,  # Exactly 65% - should be included (strictly > 60%)
+                sections={},
+                first_sentence="Second.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        assert "### match1 (90% match)" in result
+        assert "### match2 (65% match)" in result
+        assert "Content of first match." in result
+        assert "Content of second match." in result
+
+    def test_second_match_not_included_if_score_lte_60(self, tmp_path):
+        """Match 2 is NOT included if score <= 60%."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create two files
+        file1 = context_dir / "match1_20260531_120000.md"
+        file1.write_text("Content of first match.")
+        file2 = context_dir / "match2_20260531_120001.md"
+        file2.write_text("Content of second match - should not appear.")
+
+        matched = [
+            MatchedFile(
+                filename="match1_20260531_120000.md",
+                slug="match1",
+                score=0.90,
+                sections={},
+                first_sentence="First.",
+            ),
+            MatchedFile(
+                filename="match2_20260531_120001.md",
+                slug="match2",
+                score=0.60,  # Exactly 60% - should NOT be included
+                sections={},
+                first_sentence="Second.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        assert "### match1 (90% match)" in result
+        assert "### match2" not in result  # Second match should not appear
+        assert "Content of second match" not in result
+
+    def test_third_match_never_included(self, tmp_path):
+        """Match 3 and beyond are NEVER included in pre-loaded context."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create three files
+        for i in range(1, 4):
+            file = context_dir / f"match{i}_20260531_12000{i}.md"
+            file.write_text(f"Content of match {i}.")
+
+        matched = [
+            MatchedFile(
+                filename="match1_20260531_120001.md",
+                slug="match1",
+                score=0.90,
+                sections={},
+                first_sentence="First.",
+            ),
+            MatchedFile(
+                filename="match2_20260531_120002.md",
+                slug="match2",
+                score=0.75,  # > 60%, should be included
+                sections={},
+                first_sentence="Second.",
+            ),
+            MatchedFile(
+                filename="match3_20260531_120003.md",
+                slug="match3",
+                score=0.50,
+                sections={},
+                first_sentence="Third - should not appear.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        assert "### match1 (90% match)" in result
+        assert "### match2 (75% match)" in result
+        assert "### match3" not in result  # Third match should not appear
+
+    def test_full_file_content_used_not_section_based(self, tmp_path):
+        """Full file content is used, not section-based extraction."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create file with sections
+        file = context_dir / "sectioned-file_20260531_120000.md"
+        file.write_text("""## Concise
+Concise section content.
+
+## Answer
+Full answer section content that is different.
+
+## Confidence
+High
+""")
+
+        matched = [
+            MatchedFile(
+                filename="sectioned-file_20260531_120000.md",
+                slug="sectioned-file",
+                score=0.90,
+                sections={"Concise": "Concise section content.", "Answer": "Full answer section content that is different."},
+                first_sentence="Concise section content.",
             )
         ]
-        result = _format_injection(matched)
-        assert "This is the first sentence" in result
-        # Second sentence should not appear
-        assert "This is the second sentence" not in result
+        result = _format_injection(matched, context_dir=context_dir)
+        # Full file content should be used, including all sections
+        assert "## Concise" in result
+        assert "## Answer" in result
+        assert "## Confidence" in result
 
     def test_file_index_appended(self, tmp_path):
         """File index table is appended to output with pre-loaded exclusion and new header format."""
@@ -435,34 +562,28 @@ class TestFormatInjection:
         context_dir = tmp_path / "context"
         context_dir.mkdir()
 
-        # Create matching files (2 that match, 1 that doesn't)
+        # Create matching files (1 high score that matches, 1 low score that doesn't pre-load, 1 unmatched)
         # Use proper timestamp format: _YYYYMMDD_HHMMSS
         auth_file = context_dir / "auth-module_20260531_120000.md"
-        auth_file.write_text("""## Concise
-Concise content.
-""")
+        auth_file.write_text("Auth content.")
         other_file = context_dir / "other-file_20260531_120001.md"
-        other_file.write_text("""## Concise
-Other content.
-""")
+        other_file.write_text("Other content.")
         unmatched_file = context_dir / "unrelated_20260531_120002.md"
-        unmatched_file.write_text("""## Concise
-Unrelated content.
-""")
+        unmatched_file.write_text("Unrelated content.")
 
         matched = [
             MatchedFile(
                 filename="auth-module_20260531_120000.md",
                 slug="auth-module",
                 score=0.70,
-                sections={"Concise": "Concise content."},
-                first_sentence="Concise content.",
+                sections={},
+                first_sentence="Auth content.",
             ),
             MatchedFile(
                 filename="other-file_20260531_120001.md",
                 slug="other-file",
-                score=0.50,
-                sections={"Concise": "Other content."},
+                score=0.50,  # <= 60%, won't be pre-loaded but appears in index (above threshold)
+                sections={},
                 first_sentence="Other content.",
             ),
         ]
@@ -470,63 +591,53 @@ Unrelated content.
         assert "# Shared Context" in result
         assert "## Available Context Files" in result
         # Header format: (remaining files, pre-loaded files)
-        # 1 remaining file (unrelated), 2 pre-loaded (auth-module, other-file)
-        assert "(1 files, 2 pre-loaded)" in result
+        # other-file (50%) and unrelated (0%) = 2 remaining, 1 pre-loaded (auth-module)
+        assert "(2 files, 1 pre-loaded)" in result
         assert "| File | Match | Summary |" in result
-        # Pre-loaded files should NOT appear in index
+        # Pre-loaded file should NOT appear in index
         assert "| auth-module_20260531_120000.md |" not in result
-        assert "| other-file_20260531_120001.md |" not in result
-        # Only unmatched file should appear
+        # other-file and unrelated should appear in index
+        assert "| other-file_20260531_120001.md |" in result
         assert "| unrelated_20260531_120002.md |" in result
         # Separator should be present
         assert "\n---\n\n" in result
 
-    def test_high_tier_file_limit_enforced(self):
-        """When more than MAX_HIGH_TIER_FILES exist, output is capped by file count."""
-        # Create 5 high-tier matches with short content
-        matched = []
-        for i in range(5):
-            matched.append(
-                MatchedFile(
-                    filename=f"file{i}_20260531.md",
-                    slug=f"file{i}",
-                    score=0.90,  # High tier
-                    sections={"Answer": "This is answer number " + str(i) + "."},
-                    first_sentence="Answer sentence.",
-                )
-            )
-        result = _format_injection(matched)
-        # Should include header and at least one entry
-        assert "# Shared Context" in result
-        assert "## Pre-loaded Context" in result
-        # But limited by MAX_HIGH_TIER_FILES = 3
-        entries = result.count("### file")  # Count file entries
-        assert entries <= MAX_HIGH_TIER_FILES
+    def test_global_token_cap_enforced(self, tmp_path):
+        """When total content exceeds INJECTION_TOKEN_CAP, second match is truncated."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
 
-    def test_global_token_cap_enforced(self):
-        """When total content exceeds INJECTION_TOKEN_CAP, output is truncated."""
-        # Create files with large content (~2500+ tokens each)
-        # "Word " * 4000 = ~20000 chars ~= 2500 tokens per file
-        large_content = "Word " * 4000
-        matched = []
-        for i in range(4):
-            matched.append(
-                MatchedFile(
-                    filename=f"large{i}_20260531.md",
-                    slug=f"large{i}",
-                    score=0.85,
-                    sections={"Answer": large_content},
-                    first_sentence="Large content file.",
-                )
-            )
-        result = _format_injection(matched)
-        # Total ~10000 tokens exceeds 2000 cap, output should be truncated
-        assert "# Shared Context" in result
-        assert "## Pre-loaded Context" in result
-        # Not all 4 files should appear in full - content is too large
-        # Check that result is smaller than sum of all inputs
-        total_input = sum(len(m.sections["Answer"]) for m in matched)
-        assert len(result) < total_input
+        # Create files with large content (~1200+ tokens each)
+        # "Word " * 2000 = ~10000 chars ~= 1250 tokens per file
+        large_content = "Word " * 2000
+        file1 = context_dir / "large1_20260531_120000.md"
+        file1.write_text(large_content)
+        file2 = context_dir / "large2_20260531_120001.md"
+        file2.write_text(large_content)
+
+        matched = [
+            MatchedFile(
+                filename="large1_20260531_120000.md",
+                slug="large1",
+                score=0.90,
+                sections={},
+                first_sentence="Large content file.",
+            ),
+            MatchedFile(
+                filename="large2_20260531_120001.md",
+                slug="large2",
+                score=0.70,  # > 60%
+                sections={},
+                first_sentence="Large content file 2.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        # Match 1 should be present
+        assert "### large1 (90% match)" in result
+        # Match 2 should be present but truncated
+        assert "### large2 (70% match)" in result
+        # Total content should fit within cap - second should be truncated
+        assert "..." in result  # Some truncation occurred
 
     def test_all_files_preloaded_skips_index(self, tmp_path):
         """When all files in context_dir are pre-loaded, index section is skipped."""
@@ -536,27 +647,23 @@ Unrelated content.
         # Create only matching files (both will be pre-loaded)
         # Use proper timestamp format: _YYYYMMDD_HHMMSS
         auth_file = context_dir / "auth-module_20260531_120000.md"
-        auth_file.write_text("""## Concise
-Auth content.
-""")
+        auth_file.write_text("Auth content.")
         other_file = context_dir / "other-file_20260531_120001.md"
-        other_file.write_text("""## Concise
-Other content.
-""")
+        other_file.write_text("Other content.")
 
         matched = [
             MatchedFile(
                 filename="auth-module_20260531_120000.md",
                 slug="auth-module",
-                score=0.85,
-                sections={"Concise": "Auth content."},
+                score=0.90,
+                sections={},
                 first_sentence="Auth content.",
             ),
             MatchedFile(
                 filename="other-file_20260531_120001.md",
                 slug="other-file",
-                score=0.75,
-                sections={"Concise": "Other content."},
+                score=0.75,  # > 60%
+                sections={},
                 first_sentence="Other content.",
             ),
         ]
@@ -577,42 +684,15 @@ Other content.
         # Create files that don't match the query (so they won't be pre-loaded)
         # Use proper timestamp format: _YYYYMMDD_HHMMSS
         file1 = context_dir / "alpha-beta_20260531_120000.md"
-        file1.write_text("""## Concise
-Alpha beta content.
-""")
+        file1.write_text("Alpha beta content.")
         file2 = context_dir / "gamma-delta_20260531_120001.md"
-        file2.write_text("""## Concise
-Gamma delta content.
-""")
+        file2.write_text("Gamma delta content.")
 
-        # Create a matched file that will be pre-loaded
-        matched = [
-            MatchedFile(
-                filename="auth-module_20260531_120002.md",
-                slug="auth-module",
-                score=0.85,
-                sections={"Concise": "Auth content."},
-                first_sentence="Auth content.",
-            ),
-        ]
-
-        # Without context_dir, no index is built anyway, so this test doesn't apply
-        # Test with unmatched files in context_dir
-        matched_only_above = [
-            MatchedFile(
-                filename="only-matched_20260531_120002.md",
-                slug="only-matched",
-                score=0.85,
-                sections={"Concise": "Only matched content."},
-                first_sentence="Only matched content.",
-            ),
-        ]
-        result = _format_injection(matched_only_above, context_dir=context_dir)
-        # Header should show (2 files) since no pre-loaded files are in the index
+        # Don't create matched files - test the index with no pre-loaded files
+        result = _format_injection([], context_dir=context_dir)
+        # Header should show (2 files) since no pre-loaded files exist
         assert "(2 files)" in result
-        # Pre-loaded file should NOT appear in index
-        assert "| only-matched_20260531_120002.md |" not in result
-        # Other files should appear
+        # Both files should appear in index
         assert "| gamma-delta_20260531_120001.md |" in result
         assert "| alpha-beta_20260531_120000.md |" in result
 

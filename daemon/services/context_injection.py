@@ -1,6 +1,6 @@
 """Context auto-injection for the Explorer agent.
 
-Matches queries against shared context files and returns tiered injection text.
+Matches queries against shared context files and returns top-2 injection text.
 """
 
 import logging
@@ -11,21 +11,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# Tier thresholds
-TIER_HIGH = 0.80
-TIER_MEDIUM = 0.60
-TIER_LOW = 0.40
-
-# Token limits per tier (individual file limits)
-TOKEN_LIMIT_HIGH = 800
-TOKEN_LIMIT_MEDIUM = 200
-TOKEN_LIMIT_LOW = 50
-
 # Global injection token cap
 INJECTION_TOKEN_CAP = 2000
 
-# Max files to inject at high tier
-MAX_HIGH_TIER_FILES = 3
+# Minimum score threshold for a file to appear in the file index
+MATCH_THRESHOLD = 0.10
 
 _STOP_WORDS = frozenset({
     "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
@@ -269,10 +259,10 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
                 logger.debug("[Explorer] _match_context_files: file %s has no slug tokens", file_path.name)
                 continue
             score = _match_score(query_tokens, slug_tokens)
-            logger.debug("[Explorer] _match_context_files: file %s score=%.2f (threshold=%.2f)", file_path.name, score, TIER_LOW)
+            logger.debug("[Explorer] _match_context_files: file %s score=%.2f (threshold=%.2f)", file_path.name, score, MATCH_THRESHOLD)
 
-            # Skip if below low tier threshold
-            if score < TIER_LOW:
+            # Skip if below match threshold
+            if score < MATCH_THRESHOLD:
                 continue
 
             # Read content
@@ -312,106 +302,74 @@ def _format_injection(
 ) -> str:
     """Format matched files into injection string.
 
-    HIGH (>=0.80): Answer section, truncated to TOKEN_LIMIT_HIGH, max MAX_HIGH_TIER_FILES files
-    MEDIUM (>=0.60): Concise section, truncated to TOKEN_LIMIT_MEDIUM
-    LOW (>=0.40): First sentence only, capped at TOKEN_LIMIT_LOW * 4 chars
+    Pre-loads top 2 matches only:
+    - Match 1 (highest score): ALWAYS included, full content (truncated to cap if alone exceeds it).
+    - Match 2 (2nd highest): ONLY if score > 60%, full content truncated to remaining budget.
 
-    Global token cap tracked via estimated tokens (len(content) // 4).
-    File index table (up to 30 files) does NOT count toward cap.
+    Files 3+ are NOT pre-loaded but appear in the Available Context Files index.
 
     Args:
-        matched_files: List of matched files to format.
-        context_dir: Directory containing context files (for full file index).
+        matched_files: List of matched files to format (sorted by score desc).
+        context_dir: Directory containing context files (for file index).
 
     Returns:
-        Formatted injection string, or empty string if no matches.
+        Formatted injection string, or empty string if no entries and no file index.
     """
     logger.debug("[Explorer] _format_injection called with %d matched files", len(matched_files))
 
-    if not matched_files:
-        logger.debug("[Explorer] _format_injection: no matched files, returning empty string")
-        return ""
-
-    # Track token budget and injected slugs
     remaining_budget = INJECTION_TOKEN_CAP
     entries: list[str] = []
-    injected_slugs: set[str] = set()  # Track slugs that were actually injected
-
-    # Count high tier files (limit to MAX_HIGH_TIER_FILES)
-    high_tier_count = 0
-
-    # Build slug lookup from matched files (keyed by slug for index lookups)
+    injected_slugs: set[str] = set()
     matched_by_slug: dict[str, MatchedFile] = {m.slug: m for m in matched_files}
 
-    for matched in matched_files:
-        # Stop if budget exhausted
-        if remaining_budget <= 0:
+    for i, matched in enumerate(matched_files[:2]):  # Only top 2
+        if i == 0:
+            # Match 1: ALWAYS include, full content (read from file)
+            file_path = context_dir / matched.filename if context_dir else None
+            if file_path is None or not file_path.exists():
+                logger.debug("[Explorer] _format_injection: context_dir not available for match 1, skipping")
+                continue
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                logger.debug("[Explorer] _format_injection: error reading match 1: %s", e)
+                continue
+            if not content:
+                continue
+            # Safety: truncate to cap if alone exceeds it
+            estimated_tokens = len(content) // 4
+            if estimated_tokens > INJECTION_TOKEN_CAP:
+                content = _truncate_to_tokens(content, INJECTION_TOKEN_CAP)
+                estimated_tokens = INJECTION_TOKEN_CAP
+            remaining_budget -= estimated_tokens
+        elif i == 1:
+            # Match 2: ONLY if score > 60%
+            if matched.score <= 0.60:
+                break
+            file_path = context_dir / matched.filename if context_dir else None
+            if file_path is None or not file_path.exists():
+                logger.debug("[Explorer] _format_injection: context_dir not available for match 2, skipping")
+                break
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                logger.debug("[Explorer] _format_injection: error reading match 2: %s", e)
+                break
+            if not content:
+                break
+            estimated_tokens = len(content) // 4
+            if estimated_tokens > remaining_budget:
+                content = _truncate_to_tokens(content, remaining_budget)
+                estimated_tokens = len(content) // 4
+            if estimated_tokens > remaining_budget:
+                break
+            remaining_budget -= estimated_tokens
+        else:
             break
 
-        # Determine tier and content
-        content = ""
-        if matched.score >= TIER_HIGH and high_tier_count < MAX_HIGH_TIER_FILES:
-            high_tier_count += 1
-            if "Answer" in matched.sections:
-                content = _truncate_to_tokens(
-                    matched.sections["Answer"],
-                    TOKEN_LIMIT_HIGH
-                )
-            elif "Concise" in matched.sections:
-                content = _truncate_to_tokens(
-                    matched.sections["Concise"],
-                    TOKEN_LIMIT_HIGH
-                )
-            elif matched.first_sentence:
-                content = matched.first_sentence
-            else:
-                continue
-            limit = TOKEN_LIMIT_HIGH
-        elif matched.score >= TIER_HIGH:
-            # Skip HIGH tier files beyond the limit
-            continue
-        elif matched.score >= TIER_MEDIUM:
-            if "Concise" in matched.sections:
-                content = _truncate_to_tokens(
-                    matched.sections["Concise"],
-                    TOKEN_LIMIT_MEDIUM
-                )
-            elif matched.first_sentence:
-                content = matched.first_sentence
-            else:
-                continue
-            limit = TOKEN_LIMIT_MEDIUM
-        elif matched.score >= TIER_LOW:
-            # First sentence only, char limit only
-            first = matched.first_sentence
-            char_limit = TOKEN_LIMIT_LOW * 4
-            if len(first) > char_limit:
-                first = first[:char_limit].rsplit(" ", 1)[0] + "..."
-            content = first
-            limit = TOKEN_LIMIT_LOW
-        else:
-            continue
-
-        if not content:
-            continue
-
-        # Estimate tokens and adjust if approaching budget limit
-        estimated_tokens = len(content) // 4
-        if estimated_tokens > remaining_budget:
-            # Proportionally reduce
-            if remaining_budget < limit:
-                limit = max(10, remaining_budget)  # At least 10 tokens
-            content = _truncate_to_tokens(content, limit)
-            estimated_tokens = len(content) // 4
-
-        if estimated_tokens > remaining_budget:
-            continue  # Still over budget, skip this file
-
-        # Add entry
         score_pct = int(matched.score * 100)
         entries.append(f"### {matched.slug} ({score_pct}% match)\n{content}\n")
-        remaining_budget -= estimated_tokens
-        injected_slugs.add(matched.slug)  # Track this slug as injected
+        injected_slugs.add(matched.slug)
 
     # Build file index from files NOT already injected (up to 30)
     file_index_entries: list[tuple[float, str, str]] = []  # (score, filename, summary)
@@ -466,7 +424,7 @@ def _format_injection(
         # Sort by score descending
         file_index_entries.sort(key=lambda x: x[0], reverse=True)
 
-    if not entries:
+    if not entries and not file_index_entries:
         return ""
 
     # Build final output
