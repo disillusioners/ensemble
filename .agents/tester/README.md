@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-05-31 context-auto-inject)
+## Test Results (Latest: 2026-06-01 job-report-format)
+
+### Job Event Notification Format (2026-06-01)
+- **Branch**: `feature/job-report-format`
+- **Notification Format Tests**: 5/5 PASS (completed, failed, cancelled, empty result, failed with result+error)
+- **Job Queue Pack**: 1178/1179 PASS (1 pre-existing env failure — port 8079 occupied)
+- **Implementation Verification**: ✅ Clean structured text, no JSON remnants
+- **Stale Reference Check**: ✅ No old JSON format references found
+- **ensure.md**: PASS (dev.sh stable)
+- **Quick Fixes**: 0 (none needed)
+- **Status**: ✅ READY
 
 ### Explorer Context Auto-Injection Feature (2026-05-31)
 - **Branch**: `feature/context-auto-inject`
