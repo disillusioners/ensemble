@@ -1746,6 +1746,49 @@ class TestCheckRagQueriedViaCheckpoint:
         assert "rag_query_data" in RAG_TOOL_NAMES
         assert "rag_get_graph" in RAG_TOOL_NAMES
 
+    @pytest.mark.asyncio
+    async def test_checkpoint_state_is_not_dict(self):
+        """Returns False when state is a non-dict object (graceful degradation)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value="unexpected string")
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_channel_values_no_messages_key(self):
+        """Returns False when state has channel_values dict but no messages key."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"other_key": "value"}
+        })
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_empty_tool_calls_list(self):
+        """Returns False when message has tool_calls = [] (empty list, no items)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([]),  # empty tool_calls list
+                ]
+            }
+        })
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_message_without_tool_calls_attribute(self):
+        """Returns False when message has no tool_calls attribute at all."""
+        msg = MagicMock(spec=[])  # spec=[] forbids any attribute access
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [msg]}
+        })
+        result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
 
 # =============================================================================
 # Explore() Checkpoint Integration Tests
@@ -1885,6 +1928,9 @@ class TestExploreCheckpointIntegration:
 
                 # The error should be returned to the caller
                 assert "Error" in result
+
+                # Checkpoint was inspected even though the agent errored
+                mock_manager_with_checkpointer._checkpointer.aget.assert_called_once()
 
                 # No save on error path — we return BEFORE the save block
                 mock_save.assert_not_called()

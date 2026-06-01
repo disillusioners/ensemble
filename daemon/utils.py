@@ -537,6 +537,7 @@ async def invoke_agent_and_wait(
     instance_id = str(uuid.uuid4())
 
     def _return(value: str) -> str | tuple[str, str]:
+        # On exception path, instance_id is the pre-generated UUID (spawn never completed)
         return (value, instance_id) if return_instance_id else value
 
     try:
