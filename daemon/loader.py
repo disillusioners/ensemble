@@ -21,6 +21,7 @@ else:
     _base_dir = Path(__file__).parent.parent
 PROJECT_EXPERIENCE_FILE = _base_dir / "agents" / "_prompt_system" / "project-experience.md"
 KNOWLEDGE_FILE = _base_dir / "agents" / "_prompt_system" / "knowledge.md"
+KNOWLEDGE_NO_FORCE_EXPLORE_FILE = _base_dir / "agents" / "_prompt_system" / "knowledge_no_force_explore.md"
 
 
 def _ensure_tool_metadata_populated() -> None:
@@ -175,14 +176,21 @@ def load_project_experience() -> str:
     return ""
 
 
-def load_shared_knowledge() -> str:
+def load_shared_knowledge(no_force_explore: bool = False) -> str:
     """Load shared knowledge base instructions. Only loaded when RAG is enabled.
     
+    Args:
+        no_force_explore: If True, load knowledge_no_force_explore.md instead
+                         (for leader/orchestrator agents that delegate exploration).
+    
     Returns:
-        Content of knowledge.md or empty string if not found/disabled.
+        Content of knowledge file or empty string if not found/disabled.
     """
-    if is_rag_enabled() and KNOWLEDGE_FILE.exists():
-        return KNOWLEDGE_FILE.read_text(encoding="utf-8")
+    if not is_rag_enabled():
+        return ""
+    knowledge_file = KNOWLEDGE_NO_FORCE_EXPLORE_FILE if no_force_explore else KNOWLEDGE_FILE
+    if knowledge_file.exists():
+        return knowledge_file.read_text(encoding="utf-8")
     return ""
 
 
@@ -569,10 +577,6 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mc
     if PROJECT_EXPERIENCE_FILE.exists():
         current_mtimes["project-experience.md"] = PROJECT_EXPERIENCE_FILE.stat().st_mtime
     
-    # Always track knowledge.md mtime for cache invalidation
-    if KNOWLEDGE_FILE.exists():
-        current_mtimes["knowledge.md"] = KNOWLEDGE_FILE.stat().st_mtime
-    
     # Load meta.json ONCE with mtime tracking and error handling
     meta_path = agent_dir / "meta.json"
     meta = None
@@ -583,6 +587,12 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mc
         except (json.JSONDecodeError, OSError):
             logger.warning(f"Failed to parse {meta_path}")
             meta = None
+
+    # Track knowledge file mtime for cache invalidation (variant depends on agent meta)
+    no_force_explore = bool(meta and meta.get("no_force_explore"))
+    knowledge_file = KNOWLEDGE_NO_FORCE_EXPLORE_FILE if no_force_explore else KNOWLEDGE_FILE
+    if knowledge_file.exists():
+        current_mtimes[knowledge_file.name] = knowledge_file.stat().st_mtime
 
     for filename in prompt_files:
         filepath = agent_dir / filename
@@ -641,7 +651,7 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mc
     dynamic_tools = load_tools_doc_for_agent(agent_id, mcp_tool_names)
     project_experience = load_project_experience()
     recent_memories = load_recent_memories(agent_dir)
-    shared_knowledge = load_shared_knowledge()
+    shared_knowledge = load_shared_knowledge(no_force_explore=no_force_explore)
     system_prompt = compose_system_prompt(prompts, skills, dynamic_tools, project_experience, recent_memories, shared_knowledge)
     tokens = estimate_tokens(system_prompt)
     
