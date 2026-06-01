@@ -12,7 +12,7 @@ The RAG knowledge system stores **agent knowledge about projects**. It persists 
 
 Search the RAG knowledge base for project-specific knowledge.
 
-```
+```raw
 explore(query="What database does this project use?")
 explore(query="How is authentication implemented?")
 ```
@@ -21,7 +21,7 @@ explore(query="How is authentication implemented?")
 
 Record new knowledge about the current project.
 
-```
+```raw
 experience(text="The project uses PostgreSQL with SQLAlchemy ORM for database access")
 experience(text="Authentication is JWT-based with 1-hour token expiry")
 ```
@@ -49,7 +49,7 @@ When working, you have a duty to keep the KB accurate. Call `experience()` in th
 
 ### How
 
-```
+```raw
 experience(text="Architecture: The job queue uses a 7-state lifecycle with lock-first pattern for concurrency")
 experience(text="Gotcha: queue_id must propagate through all layers (router → service → repository → SQL)")
 ```
@@ -90,12 +90,4 @@ When controlling external agent systems (opencode, etc.), you MUST include the f
 
 The `{{ENSEMBLE_CONTEXT_KEY}}` and `{{ENSEMBLE_SHARED_CONTEXT_DIR}}` placeholders are automatically resolved when your system prompt is assembled.
 
----
 
-## Important Notes
-
-- The `.agents/` directory is **project-specific** — each project has its own
-- It is **separate** from your agent persona (which lives in `agents/` of the ensemble system)
-- **NOT your personality or rules** — this is project experience stored in RAG
-- Use `read_file`, `write_file` tools with project `workdir` to access `.agents/shared/`
-- Use `explore()` and `experience()` tools for project knowledge access
