@@ -7,7 +7,6 @@ This follows the detailed test plan in .agents/shared/planning/jober-agent/phase
 """
 
 import pytest
-import json
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime
@@ -356,7 +355,7 @@ class TestJoberWatchIntegration:
 
     @pytest.mark.asyncio
     async def test_notification_format(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
-        """Task 3: Verify notification has correct format with internal_agent prefix and JSON block."""
+        """Task 3: Verify notification has correct clean format (no JSON block)."""
         watcher_repo.add_watch(mock_job_item.job_id, "test-instance")
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
 
@@ -369,19 +368,31 @@ class TestJoberWatchIntegration:
         # Task 3 requirements
         assert call_args["source"].startswith("internal_agent:job_event:")
         assert "completed" in call_args["source"]
-        assert "[JOB_EVENT]" in call_args["message"]
-        assert "```json" in call_args["message"]
 
-        # Extract JSON block
-        json_start = call_args["message"].find("```json")
-        json_end = call_args["message"].find("```", json_start + 6)
-        if json_start != -1 and json_end != -1:
-            json_str = call_args["message"][json_start + 7:json_end].strip()
-            parsed = json.loads(json_str)
-            assert parsed["job_id"] == mock_job_item.job_id
-            assert parsed["status"] == "completed"
-            assert parsed["agent_id"] == mock_job_item.agent_id
-            assert "timestamp" in parsed
+        message = call_args["message"]
+
+        # Verify [JOB_EVENT] prefix is present
+        assert "[JOB_EVENT]" in message
+
+        # Verify new clean format: status word directly (with ✓ for completed)
+        assert "completed ✓" in message
+        assert "reached status" not in message  # Old format should be gone
+
+        # Verify Agent line with indentation
+        assert "  Agent: coder" in message
+
+        # Verify Result line with indentation, content on next line
+        assert "  Result:" in message
+        assert "Test job completed successfully" in message
+
+        # No Error line when error is None
+        assert "Error:" not in message
+        assert "Error: None" not in message
+
+        # No JSON block in new format
+        assert "```json" not in message
+        assert "```" not in message
+        assert "job_event_data" not in message
 
     # ==================== TASK 4 & 5: REGRESSION + TOOL REGISTRATION ====================
 

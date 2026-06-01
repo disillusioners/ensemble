@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import enum
-import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -177,24 +176,23 @@ class JobQueueService:
                 if status not in watcher.watch_events:
                     continue
                 
-                job_event_data = {
-                    'job_id': job_id,
-                    'status': status,
-                    'agent_id': job.agent_id,
-                    'result': job.result_summary or '',
-                    'error': error,
-                    'timestamp': datetime.now(timezone.utc).isoformat()
-                }
-                notification = (
-                    f"[JOB_EVENT] Job {job_id[:8]}... reached status '{status}'.\n"
-                    f"Agent: {job.agent_id}\n"
-                    f"Result: {job.result_summary or 'N/A'}\n"
-                    f"Error: {error or 'None'}\n"
-                    f"\n"
-                    f"```json\n"
-                    f"{json.dumps(job_event_data, ensure_ascii=False)}\n"
-                    f"```"
-                )
+                # Build notification parts
+                status_display = status
+                if status == "completed":
+                    status_display = "completed ✓"
+                elif status == "failed":
+                    status_display = "failed ✗"
+
+                notification_parts = [f"[JOB_EVENT] Job {job_id[:8]}... {status_display}"]
+                notification_parts.append(f"  Agent: {job.agent_id}")
+
+                if job.result_summary:
+                    notification_parts.append(f"  Result:\n{job.result_summary}")
+
+                if error:
+                    notification_parts.append(f"  Error: {error}")
+
+                notification = "\n".join(notification_parts)
                 
                 await self._instance_manager.enqueue_message(
                     instance_id=watcher.instance_id,
