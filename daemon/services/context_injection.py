@@ -31,6 +31,11 @@ _STOP_WORDS = frozenset({
 })
 
 
+def _increase_heading_levels(content: str) -> str:
+    """Increase all markdown heading levels by 1 to avoid clashing with template headings."""
+    return re.sub(r'^(#+)', r'#\1', content, flags=re.MULTILINE)
+
+
 @dataclass
 class MatchedFile:
     """Represents a matched context file with its relevance score."""
@@ -302,11 +307,12 @@ def _format_injection(
 ) -> str:
     """Format matched files into injection string.
 
-    Pre-loads top 2 matches only:
+    Pre-loads top 3 matches only:
     - Match 1 (highest score): ALWAYS included, full content (truncated to cap if alone exceeds it).
     - Match 2 (2nd highest): ONLY if score > 60%, full content truncated to remaining budget.
+    - Match 3 (3rd highest): ONLY if score > 60%, full content truncated to remaining budget.
 
-    Files 3+ are NOT pre-loaded but appear in the Available Context Files index.
+    Files 4+ are NOT pre-loaded but appear in the Available Context Files index.
 
     Args:
         matched_files: List of matched files to format (sorted by score desc).
@@ -322,7 +328,7 @@ def _format_injection(
     injected_slugs: set[str] = set()
     matched_by_slug: dict[str, MatchedFile] = {m.slug: m for m in matched_files}
 
-    for i, matched in enumerate(matched_files[:2]):  # Only top 2
+    for i, matched in enumerate(matched_files[:3]):  # Only top 3
         if i == 0:
             # Match 1: ALWAYS include, full content (read from file)
             file_path = context_dir / matched.filename if context_dir else None
@@ -331,6 +337,7 @@ def _format_injection(
                 continue
             try:
                 content = file_path.read_text(encoding="utf-8", errors="replace")
+                content = _increase_heading_levels(content)
             except Exception as e:
                 logger.debug("[Explorer] _format_injection: error reading match 1: %s", e)
                 continue
@@ -352,8 +359,32 @@ def _format_injection(
                 break
             try:
                 content = file_path.read_text(encoding="utf-8", errors="replace")
+                content = _increase_heading_levels(content)
             except Exception as e:
                 logger.debug("[Explorer] _format_injection: error reading match 2: %s", e)
+                break
+            if not content:
+                break
+            estimated_tokens = len(content) // 4
+            if estimated_tokens > remaining_budget:
+                content = _truncate_to_tokens(content, remaining_budget)
+                estimated_tokens = len(content) // 4
+            if estimated_tokens > remaining_budget:
+                break
+            remaining_budget -= estimated_tokens
+        elif i == 2:
+            # Match 3: ONLY if score > 60%
+            if matched.score <= 0.60:
+                break
+            file_path = context_dir / matched.filename if context_dir else None
+            if file_path is None or not file_path.exists():
+                logger.debug("[Explorer] _format_injection: context_dir not available for match 3, skipping")
+                break
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+                content = _increase_heading_levels(content)
+            except Exception as e:
+                logger.debug("[Explorer] _format_injection: error reading match 3: %s", e)
                 break
             if not content:
                 break

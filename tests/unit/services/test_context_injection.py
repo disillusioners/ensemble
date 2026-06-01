@@ -17,6 +17,7 @@ from daemon.services.context_injection import (
     _truncate_to_tokens,
     _match_context_files,
     _format_injection,
+    _increase_heading_levels,
     get_shared_context,
 )
 
@@ -486,13 +487,99 @@ class TestFormatInjection:
         assert "### match2" not in result  # Second match should not appear
         assert "Content of second match" not in result
 
-    def test_third_match_never_included(self, tmp_path):
-        """Match 3 and beyond are NEVER included in pre-loaded context."""
+    def test_third_match_included_only_if_score_gt_60(self, tmp_path):
+        """Match 3 is ONLY included if score > 60%."""
         context_dir = tmp_path / "context"
         context_dir.mkdir()
 
         # Create three files
-        for i in range(1, 4):
+        file1 = context_dir / "match1_20260531_120000.md"
+        file1.write_text("Content of first match.")
+        file2 = context_dir / "match2_20260531_120001.md"
+        file2.write_text("Content of second match.")
+        file3 = context_dir / "match3_20260531_120002.md"
+        file3.write_text("Content of third match.")
+
+        matched = [
+            MatchedFile(
+                filename="match1_20260531_120000.md",
+                slug="match1",
+                score=0.90,
+                sections={},
+                first_sentence="First.",
+            ),
+            MatchedFile(
+                filename="match2_20260531_120001.md",
+                slug="match2",
+                score=0.70,  # > 60%, should be included
+                sections={},
+                first_sentence="Second.",
+            ),
+            MatchedFile(
+                filename="match3_20260531_120002.md",
+                slug="match3",
+                score=0.65,  # Exactly 65% - should be included (strictly > 60%)
+                sections={},
+                first_sentence="Third.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        assert "### match1 (90% match)" in result
+        assert "### match2 (70% match)" in result
+        assert "### match3 (65% match)" in result
+        assert "Content of first match." in result
+        assert "Content of second match." in result
+        assert "Content of third match." in result
+
+    def test_third_match_not_included_if_score_lte_60(self, tmp_path):
+        """Match 3 is NOT included if score <= 60%."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create three files
+        file1 = context_dir / "match1_20260531_120000.md"
+        file1.write_text("Content of first match.")
+        file2 = context_dir / "match2_20260531_120001.md"
+        file2.write_text("Content of second match.")
+        file3 = context_dir / "match3_20260531_120002.md"
+        file3.write_text("Content of third match - should not appear.")
+
+        matched = [
+            MatchedFile(
+                filename="match1_20260531_120000.md",
+                slug="match1",
+                score=0.90,
+                sections={},
+                first_sentence="First.",
+            ),
+            MatchedFile(
+                filename="match2_20260531_120001.md",
+                slug="match2",
+                score=0.70,  # > 60%, should be included
+                sections={},
+                first_sentence="Second.",
+            ),
+            MatchedFile(
+                filename="match3_20260531_120002.md",
+                slug="match3",
+                score=0.60,  # Exactly 60% - should NOT be included
+                sections={},
+                first_sentence="Third.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        assert "### match1 (90% match)" in result
+        assert "### match2 (70% match)" in result
+        assert "### match3" not in result  # Third match should not appear
+        assert "Content of third match" not in result
+
+    def test_fourth_match_never_included(self, tmp_path):
+        """Match 4 and beyond are NEVER included in pre-loaded context."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create four files
+        for i in range(1, 5):
             file = context_dir / f"match{i}_20260531_12000{i}.md"
             file.write_text(f"Content of match {i}.")
 
@@ -514,15 +601,23 @@ class TestFormatInjection:
             MatchedFile(
                 filename="match3_20260531_120003.md",
                 slug="match3",
-                score=0.50,
+                score=0.70,  # > 60%, should be included
                 sections={},
-                first_sentence="Third - should not appear.",
+                first_sentence="Third.",
+            ),
+            MatchedFile(
+                filename="match4_20260531_120004.md",
+                slug="match4",
+                score=0.50,  # <= 60%, should NOT be included
+                sections={},
+                first_sentence="Fourth - should not appear.",
             ),
         ]
         result = _format_injection(matched, context_dir=context_dir)
         assert "### match1 (90% match)" in result
         assert "### match2 (75% match)" in result
-        assert "### match3" not in result  # Third match should not appear
+        assert "### match3 (70% match)" in result
+        assert "### match4" not in result  # Fourth match should not appear
 
     def test_full_file_content_used_not_section_based(self, tmp_path):
         """Full file content is used, not section-based extraction."""
@@ -695,6 +790,42 @@ High
         # Both files should appear in index
         assert "| gamma-delta_20260531_120001.md |" in result
         assert "| alpha-beta_20260531_120000.md |" in result
+
+    def test_increase_heading_levels(self, tmp_path):
+        """Pre-loaded file headings are increased by one level."""
+        context_dir = tmp_path / "context"
+        context_dir.mkdir()
+
+        # Create file with headings
+        file1 = context_dir / "match1_20260531_120000.md"
+        file1.write_text("""# Title
+Some content
+
+## Subtitle
+More content
+
+### Sub-subtitle
+Even more content
+
+Regular paragraph without heading.
+""")
+
+        matched = [
+            MatchedFile(
+                filename="match1_20260531_120000.md",
+                slug="match1",
+                score=0.90,
+                sections={},
+                first_sentence="Title.",
+            ),
+        ]
+        result = _format_injection(matched, context_dir=context_dir)
+        # Headings should be increased by one level
+        assert "## Title" in result  # # -> ##
+        assert "### Subtitle" in result  # ## -> ###
+        assert "#### Sub-subtitle" in result  # ### -> ####
+        # Regular content should remain unchanged
+        assert "Regular paragraph without heading." in result
 
 
 # ─── TestGetSharedContext (PUBLIC API) ──────────────────────────────────────────
