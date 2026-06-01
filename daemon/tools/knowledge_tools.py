@@ -34,6 +34,12 @@ _SHOULD_UPDATE_KB_PATTERN = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
+# Pattern to match ## Need Save: true|false heading (with optional bold/italic)
+_SHOULD_SAVE_PATTERN = re.compile(
+    r"^##\s+Need\s+Save:\s*\*{0,2}(true|false)\*{0,2}\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
 
 def _parse_should_update_kb(response: str) -> bool:
     """Parse the Explorer response for the should_update_kb flag.
@@ -46,6 +52,14 @@ def _parse_should_update_kb(response: str) -> bool:
     """
     # Search for ## Need Update KB: true|false pattern directly
     match = _SHOULD_UPDATE_KB_PATTERN.search(response)
+    if match:
+        return match.group(1).lower() == "true"
+    return False
+
+
+def _parse_should_save(response: str) -> bool:
+    """Parse ## Need Save: true/false from Explorer response."""
+    match = _SHOULD_SAVE_PATTERN.search(response)
     if match:
         return match.group(1).lower() == "true"
     return False
@@ -195,6 +209,36 @@ async def _enqueue_experience_job(
         logger.warning("Failed to enqueue experiencer job: %s", e)
 
 
+def _extract_concise_section(content: str) -> str | None:
+    """Extract the ## Concise section from content."""
+    match = re.search(r'^##\s*Concise:\s*\n(.*?)(?=\n##\s|\Z)', content, re.MULTILINE | re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _is_duplicate_concise(new_concise: str, context_dir: Path, threshold: float = 0.8) -> bool:
+    """Check if a similar concise section already exists."""
+    try:
+        new_tokens = set(new_concise.lower().split())
+        if len(new_tokens) < 5:  # too short to compare
+            return False
+        for md_file in context_dir.glob("*.md"):
+            existing = md_file.read_text(encoding="utf-8", errors="replace")
+            existing_concise = _extract_concise_section(existing)
+            if not existing_concise:
+                continue
+            existing_tokens = set(existing_concise.lower().split())
+            if not existing_tokens:
+                continue
+            overlap = len(new_tokens & existing_tokens) / min(len(new_tokens), len(existing_tokens))
+            if overlap >= threshold:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _save_explorer_result(
     query: str,
     result: str,
@@ -223,6 +267,12 @@ def _save_explorer_result(
             f"**Mode**: {mode}\n\n"
             f"{result}"
         )
+
+        # Dedup: skip if a file with very similar ## Concise section exists
+        concise = _extract_concise_section(result)
+        if concise and _is_duplicate_concise(concise, dir_path):
+            logger.debug("Skipping save: concise section too similar to existing file")
+            return
 
         file_path.write_text(content, encoding="utf-8")
     except Exception as e:
@@ -332,6 +382,9 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         # Parse response for should_update_kb flag (use original result, before stripping)
         should_update_kb = _parse_should_update_kb(result)
 
+        # Parse response for should_save flag (use original result, before stripping)
+        should_save = _parse_should_save(result)
+
         # Fire-and-forget: create job for kb-importer if knowledge update needed
         # Pass original result so kb-importer has full context including the flag heading
         if should_update_kb:
@@ -357,29 +410,31 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 except Exception as e:
                     logger.warning("Failed to schedule kb-importer job: %s", e)
 
-        # Strip the Need Update KB heading from the response before returning to caller
-        result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
+        # Strip the Need Update KB and Need Save headings from the response before returning
+        result = _SHOULD_UPDATE_KB_PATTERN.sub("", result)
+        result = _SHOULD_SAVE_PATTERN.sub("", result).strip()
 
         # Auto-save explorer result to shared context directory (fire-and-forget)
-        try:
-            root_id = manager._instance_repository.get_tree_root_id(current_instance_id)
-            context_key = root_id or current_instance_id or "default"
-            project_name = None
-            if pid and hasattr(manager, '_project_repository'):
-                try:
-                    proj = manager._project_repository.get(pid)
-                    project_name = proj.name if proj else None
-                except Exception:
-                    pass
-            _save_explorer_result(
-                query=query,
-                result=result,
-                context_key=context_key,
-                project_name=project_name,
-                mode=mode,
-            )
-        except Exception as e:
-            logger.debug("Failed to save explorer result to shared context: %s", e)
+        if should_save:
+            try:
+                root_id = manager._instance_repository.get_tree_root_id(current_instance_id)
+                context_key = root_id or current_instance_id or "default"
+                project_name = None
+                if pid and hasattr(manager, '_project_repository'):
+                    try:
+                        proj = manager._project_repository.get(pid)
+                        project_name = proj.name if proj else None
+                    except Exception:
+                        pass
+                _save_explorer_result(
+                    query=query,
+                    result=result,
+                    context_key=context_key,
+                    project_name=project_name,
+                    mode=mode,
+                )
+            except Exception as e:
+                logger.debug("Failed to save explorer result to shared context: %s", e)
 
         return result
 

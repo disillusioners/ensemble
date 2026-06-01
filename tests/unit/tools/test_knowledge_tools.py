@@ -1225,3 +1225,340 @@ class TestKnowledgeToolsConditionalCreation:
                 tool_names = [t.name for t in tools]
                 assert "explore" in tool_names, "explore tool should be present when RAG is enabled"
                 assert "experience" in tool_names, "experience tool should be present when RAG is enabled"
+
+
+# =============================================================================
+# Explore Auto-Save Tests (Layer A: Agent-level flag)
+# =============================================================================
+
+
+class TestExploreAutoSave:
+    """Tests for explore() auto-save feature triggered by ## Need Save: flag."""
+
+    @pytest.fixture
+    def mock_manager_for_save(self, configured_env, mock_manager):
+        """Mock manager set up for auto-save tests."""
+        # Set up instance metadata with project_id
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        # Set up get_tree_root_id to return a valid context key
+        mock_manager._instance_repository.get_tree_root_id = MagicMock(
+            return_value="tree-root-for-save-test"
+        )
+
+        return mock_manager
+
+    @pytest.mark.asyncio
+    async def test_explore_need_save_true_triggers_save(self, mock_manager_for_save, tmp_path):
+        """## Need Save: true causes _save_explorer_result to be called."""
+        explorer_response = (
+            "## Answer\nFound important information.\n\n"
+            "## Need Save: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                    result = await explore_tool.ainvoke({"query": "What is the auth?"})
+
+                    # _save_explorer_result should have been called
+                    mock_save.assert_called_once()
+                    call_kwargs = mock_save.call_args.kwargs
+                    assert call_kwargs["query"] == "What is the auth?"
+                    assert "Found important information" in call_kwargs["result"]
+                    assert call_kwargs["context_key"] == "tree-root-for-save-test"
+
+    @pytest.mark.asyncio
+    async def test_explore_need_save_false_skips_save(self, mock_manager_for_save, tmp_path):
+        """## Need Save: false means _save_explorer_result is NOT called."""
+        explorer_response = (
+            "## Answer\nNo need to save this.\n\n"
+            "## Need Save: false"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                    result = await explore_tool.ainvoke({"query": "Quick question"})
+
+                    # _save_explorer_result should NOT have been called
+                    mock_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_need_save_stripped_from_response(self, mock_manager_for_save, tmp_path):
+        """## Need Save: heading is stripped from the returned response."""
+        explorer_response = (
+            "## Answer\nFound information.\n\n"
+            "## Need Save: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result"):
+                    result = await explore_tool.ainvoke({"query": "What is X?"})
+
+                # Need Save heading should be stripped from returned result
+                assert "Need Save" not in result
+                assert "## Need Save" not in result
+                assert "Found information" in result
+
+    @pytest.mark.asyncio
+    async def test_explore_need_save_false_stripped_from_response(self, mock_manager_for_save, tmp_path):
+        """## Need Save: false heading is stripped from the returned response."""
+        explorer_response = (
+            "## Answer\nNo need to save.\n\n"
+            "## Need Save: false"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                result = await explore_tool.ainvoke({"query": "Quick question"})
+
+                # Need Save heading should be stripped
+                assert "Need Save" not in result
+                assert "No need to save" in result
+
+    @pytest.mark.asyncio
+    async def test_explore_missing_need_save_defaults_to_no_save(self, mock_manager_for_save, tmp_path):
+        """When ## Need Save: is absent, save is NOT triggered."""
+        explorer_response = (
+            "## Answer\nRegular response without save flag."
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                    result = await explore_tool.ainvoke({"query": "What?"})
+
+                    # _save_explorer_result should NOT have been called
+                    mock_save.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_save_uses_current_instance_id_when_no_tree_root(self, mock_manager_for_save, tmp_path):
+        """When get_tree_root_id returns empty, uses current_instance_id as context key."""
+        mock_manager_for_save._instance_repository.get_tree_root_id = MagicMock(return_value="")
+
+        explorer_response = (
+            "## Answer\nData to save.\n\n"
+            "## Need Save: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result") as mock_save:
+                    await explore_tool.ainvoke({"query": "Test"})
+
+                    # Should use current_instance_id as fallback
+                    mock_save.assert_called_once()
+                    call_kwargs = mock_save.call_args.kwargs
+                    assert call_kwargs["context_key"] == "parent-instance-id"
+
+    @pytest.mark.asyncio
+    async def test_explore_save_failure_is_nonblocking(self, mock_manager_for_save, tmp_path):
+        """If _save_explorer_result raises, explore still returns successfully."""
+        explorer_response = (
+            "## Answer\nImportant information.\n\n"
+            "## Need Save: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with patch("daemon.tools.knowledge_tools._save_explorer_result",
+                           side_effect=IOError("Disk full")):
+                    result = await explore_tool.ainvoke({"query": "What?"})
+
+                # Explore should still return the response
+                assert "Important information" in result
+                assert "Need Save" not in result
+
+
+# =============================================================================
+# Explore Auto-Save Dedup Tests (Layer B: System-level dedup)
+# =============================================================================
+
+
+class TestExploreAutoSaveDedup:
+    """Tests for explore() auto-save dedup at system level in _save_explorer_result."""
+
+    @pytest.fixture
+    def mock_manager_for_dedup(self, configured_env, mock_manager):
+        """Mock manager set up for dedup tests."""
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        mock_manager._instance_repository.get_tree_root_id = MagicMock(
+            return_value="dedup-test-context"
+        )
+
+        return mock_manager
+
+    @pytest.mark.asyncio
+    async def test_save_skips_duplicate_concise(self, mock_manager_for_dedup, tmp_path):
+        """Auto-save skips file creation when ## Concise: is too similar to existing."""
+        # Set up context directory with existing file
+        context_dir = tmp_path / "ensemble" / "context" / "dedup-test-context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create existing file with a concise section (very similar content)
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+The authentication system uses JWT tokens for user authentication with refresh tokens for security.
+
+## Answer
+Full details here.
+""")
+
+        # Explorer response includes ## Concise: section (which gets passed to save)
+        explorer_response = """## Answer
+JWT tokens for authentication.
+
+## Concise:
+The authentication system uses JWT tokens for user authentication with refresh tokens for security.
+
+## Need Save: true"""
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_dedup, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "auth tokens"})
+
+                # Allow async save to complete
+                import asyncio
+                await asyncio.sleep(0.05)
+
+                # Should NOT create a new file (duplicate concise)
+                files = list(context_dir.glob("*.md"))
+                assert len(files) == 1, f"Expected 1 file (duplicate skip), got {len(files)}: {[f.name for f in files]}"
+
+    @pytest.mark.asyncio
+    async def test_save_creates_file_for_different_concise(self, mock_manager_for_dedup, tmp_path):
+        """Auto-save creates file when ## Concise: is different enough."""
+        context_dir = tmp_path / "ensemble" / "context" / "dedup-test-context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create existing file with different concise
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+The authentication system uses JWT tokens for user authentication.
+
+## Answer
+Full details here.
+""")
+
+        explorer_response = (
+            "## Answer\nThe database uses PostgreSQL.\n\n"
+            "## Need Save: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_dedup, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                await explore_tool.ainvoke({"query": "database schema"})
+
+                # Allow async save to complete
+                import asyncio
+                await asyncio.sleep(0.05)
+
+                # Should create a new file (different concise)
+                files = list(context_dir.glob("*.md"))
+                assert len(files) == 2, f"Expected 2 files, got {len(files)}: {[f.name for f in files]}"
+
+    @pytest.mark.asyncio
+    async def test_save_handles_corrupted_files_gracefully(self, mock_manager_for_dedup, tmp_path, caplog):
+        """Auto-save continues even if existing files are corrupted."""
+        import logging
+        context_dir = tmp_path / "ensemble" / "context" / "dedup-test-context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a valid file
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+Some valid concise content about authentication.
+""")
+
+        explorer_response = (
+            "## Answer\nNew information to save.\n\n"
+            "## Need Save: true"
+        )
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=explorer_response):
+            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+                mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+                tools = create_knowledge_tools(mock_manager_for_dedup, "parent-instance-id")
+                explore_tool = next(t for t in tools if t.name == "explore")
+
+                with caplog.at_level(logging.DEBUG):
+                    await explore_tool.ainvoke({"query": "new topic"})
+
+                    # Allow async save to complete
+                    import asyncio
+                    await asyncio.sleep(0.05)
+
+                # Should have saved the file (corrupted files don't block saving)
+                files = list(context_dir.glob("*.md"))
+                assert len(files) == 2

@@ -2,6 +2,9 @@
 
 Tests cover:
 - _save_explorer_result(): file creation, content format, slug generation, timestamps
+- _parse_should_save(): parsing ## Need Save: true/false from responses
+- _extract_concise_section(): extracting ## Concise: section from content
+- _is_duplicate_concise(): dedup checking with Jaccard similarity
 - append_context_key(): placeholder resolution ({{ENSEMBLE_CONTEXT_KEY}}, {{ENSEMBLE_SHARED_CONTEXT_DIR}})
 - Fire-and-forget safety: exceptions don't crash explore()
 - Edge cases: empty queries, special characters, long content
@@ -14,7 +17,13 @@ from unittest.mock import MagicMock, patch, AsyncMock
 import tempfile
 import re
 
-from daemon.tools.knowledge_tools import _save_explorer_result
+from daemon.tools.knowledge_tools import (
+    _save_explorer_result,
+    _parse_should_save,
+    _extract_concise_section,
+    _is_duplicate_concise,
+    _SHOULD_SAVE_PATTERN,
+)
 from daemon.services.instance_lifecycle import append_context_key
 
 
@@ -503,5 +512,420 @@ class TestSaveExplorerResultIntegration:
         _save_explorer_result(query, result, context_key)
 
         context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        files = list(context_dir.glob("*.md"))
+        assert len(files) == 1
+
+
+# =============================================================================
+# Test Class for _parse_should_save()
+# =============================================================================
+
+class TestParseShouldSave:
+    """Tests for _parse_should_save() flag parsing function."""
+
+    def test_parse_should_save_true(self):
+        """Heading with Need Save: true returns True."""
+        response = "Some response\n## Need Save: true\nMore text"
+        assert _parse_should_save(response) is True
+
+    def test_parse_should_save_false(self):
+        """Heading with Need Save: false returns False."""
+        response = "Some response\n## Need Save: false\nMore text"
+        assert _parse_should_save(response) is False
+
+    def test_parse_should_save_missing(self):
+        """No heading in response returns False (default)."""
+        response = "## Answer\nSome text\n## Confidence: HIGH"
+        assert _parse_should_save(response) is False
+
+    def test_parse_should_save_case_insensitive(self):
+        """Flag parsing is case-insensitive."""
+        assert _parse_should_save("## Need Save: TRUE") is True
+        assert _parse_should_save("## Need Save: True") is True
+        assert _parse_should_save("## Need Save: TRUE") is True
+        assert _parse_should_save("## NEED SAVE: TRUE") is True
+
+    def test_parse_should_save_malformed(self):
+        """Malformed flag values return False."""
+        response = "## Need Save: maybe"
+        assert _parse_should_save(response) is False
+
+    def test_parse_should_save_with_extra_whitespace(self):
+        """Heading with extra whitespace/newlines still parses correctly."""
+        response = "## Need Save: true  \nMore text"
+        assert _parse_should_save(response) is True
+
+    def test_parse_should_save_bold_true(self):
+        """Bold formatting **true** parses correctly as True."""
+        response = "## Need Save: **true**\nMore text"
+        assert _parse_should_save(response) is True
+
+    def test_parse_should_save_bold_false(self):
+        """Bold formatting **false** parses correctly as False."""
+        response = "## Need Save: **false**\nMore text"
+        assert _parse_should_save(response) is False
+
+    def test_parse_should_save_italic_true(self):
+        """Italic formatting *true* parses correctly as True."""
+        response = "## Need Save: *true*\nMore text"
+        assert _parse_should_save(response) is True
+
+    def test_parse_should_save_italic_false(self):
+        """Italic formatting *false* parses correctly as False."""
+        response = "## Need Save: *false*\nMore text"
+        assert _parse_should_save(response) is False
+
+    def test_parse_should_save_heading_stripped_from_response(self):
+        """Heading is properly stripped from response text."""
+        response = "Some response\n## Need Save: true\nMore text"
+        stripped = _SHOULD_SAVE_PATTERN.sub("", response).strip()
+        # Heading including newlines is removed
+        assert "Need Save" not in stripped
+        assert "Some response" in stripped
+        assert "More text" in stripped
+
+    def test_parse_should_save_bold_heading_stripped(self):
+        """Bold heading is stripped including bold markers."""
+        response = "Some response\n## Need Save: **true**\nMore text"
+        stripped = _SHOULD_SAVE_PATTERN.sub("", response).strip()
+        assert "Need Save" not in stripped
+        assert "**true**" not in stripped
+        assert "Some response" in stripped
+        assert "More text" in stripped
+
+    def test_parse_should_save_response_without_heading_unchanged(self):
+        """Response without heading is returned unchanged."""
+        response = "Some response without Need Save"
+        stripped = _SHOULD_SAVE_PATTERN.sub("", response).strip()
+        assert stripped == response
+
+
+# =============================================================================
+# Test Class for _extract_concise_section()
+# =============================================================================
+
+class TestExtractConciseSection:
+    """Tests for _extract_concise_section() function."""
+
+    def test_extract_concise_present(self):
+        """Extracts ## Concise: section when present."""
+        content = """## Answer
+Full response here.
+
+## Concise:
+This is a concise summary of the findings.
+
+## Sources
+Source 1
+"""
+        result = _extract_concise_section(content)
+        assert result == "This is a concise summary of the findings."
+
+    def test_extract_concise_absent(self):
+        """Returns None when no ## Concise: section present."""
+        content = """## Answer
+Full response here.
+
+## Confidence: HIGH
+"""
+        result = _extract_concise_section(content)
+        assert result is None
+
+    def test_extract_concise_multiline(self):
+        """Extracts multi-line ## Concise: section."""
+        content = """## Answer
+Full response.
+
+## Concise:
+This is the first sentence.
+This is the second sentence.
+And the third one.
+
+## Sources
+Source list
+"""
+        result = _extract_concise_section(content)
+        expected = "This is the first sentence.\nThis is the second sentence.\nAnd the third one."
+        assert result == expected
+
+    def test_extract_concise_at_end(self):
+        """Extracts ## Concise: section at end of content."""
+        content = """## Answer
+Full response.
+
+## Concise:
+Concise summary here."""
+        result = _extract_concise_section(content)
+        assert result == "Concise summary here."
+
+    def test_extract_concise_empty_section(self):
+        """Returns empty string when ## Concise: has no content."""
+        content = """## Answer
+Full response.
+
+## Concise:
+"""
+        result = _extract_concise_section(content)
+        assert result == ""
+
+    def test_extract_concise_with_bold_markers(self):
+        """Preserves content even if it has bold markers."""
+        content = """## Concise:
+This has **bold** and *italic* text.
+"""
+        result = _extract_concise_section(content)
+        assert "**bold**" in result
+        assert "*italic*" in result
+
+
+# =============================================================================
+# Test Class for _is_duplicate_concise()
+# =============================================================================
+
+class TestIsDuplicateConcise:
+    """Tests for _is_duplicate_concise() dedup function."""
+
+    def test_duplicate_similar_concise(self, mock_temp_dir):
+        """Returns True when concise section is similar above threshold."""
+        context_key = "dedup-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create existing file with a concise section
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+The authentication system uses JWT tokens for user authentication.
+
+## Answer
+Full details here.
+""")
+
+        new_concise = "The authentication system uses JWT tokens for user authentication"
+        result = _is_duplicate_concise(new_concise, context_dir)
+        assert result is True
+
+    def test_not_duplicate_different_concise(self, mock_temp_dir):
+        """Returns False when concise section is different enough."""
+        context_key = "dedup-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create existing file with a concise section
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+The authentication system uses JWT tokens for user authentication.
+
+## Answer
+Full details here.
+""")
+
+        # Very different concise section
+        new_concise = "The database schema uses PostgreSQL with migrations"
+        result = _is_duplicate_concise(new_concise, context_dir)
+        assert result is False
+
+    def test_not_duplicate_empty_context_dir(self, mock_temp_dir):
+        """Returns False when context directory has no files."""
+        context_key = "empty-dir-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        new_concise = "Some concise summary about authentication"
+        result = _is_duplicate_concise(new_concise, context_dir)
+        assert result is False
+
+    def test_not_duplicate_empty_concise(self, mock_temp_dir):
+        """Returns False for empty concise section (too short)."""
+        context_key = "empty-concise-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        new_concise = "short"  # Less than 5 tokens
+        result = _is_duplicate_concise(new_concise, context_dir)
+        assert result is False
+
+    def test_not_duplicate_short_concise(self, mock_temp_dir):
+        """Returns False when concise has less than 5 tokens."""
+        context_key = "short-concise-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        new_concise = "The auth uses tokens"  # 4 tokens
+        result = _is_duplicate_concise(new_concise, context_dir)
+        assert result is False
+
+    def test_handles_corrupted_files_gracefully(self, mock_temp_dir, caplog):
+        """Returns False when context directory has corrupted files."""
+        import logging
+        context_key = "corrupted-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create corrupted file (can't be read)
+        corrupted_file = context_dir / "corrupted.md"
+        corrupted_file.write_text("""# Corrupted
+
+## Concise:
+Some concise content here.
+""")
+
+        new_concise = "This is a different concise section with more tokens"
+        with caplog.at_level(logging.DEBUG, logger="daemon.tools.knowledge_tools"):
+            result = _is_duplicate_concise(new_concise, context_dir)
+
+        # Should return False, not raise
+        assert result is False
+
+    def test_skips_files_without_concise_section(self, mock_temp_dir):
+        """Ignores files without ## Concise: section."""
+        context_key = "no-concise-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create file without concise section
+        existing_file = context_dir / "no_concise_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Answer:
+This file has no concise section.
+""")
+
+        new_concise = "This is a concise section about authentication and tokens for users"
+        result = _is_duplicate_concise(new_concise, context_dir)
+        # Should not be considered duplicate since no existing concise
+        assert result is False
+
+    def test_custom_threshold(self, mock_temp_dir):
+        """Uses custom Jaccard threshold when provided."""
+        context_key = "threshold-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create existing file
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+The authentication system uses JWT tokens for user authentication with refresh tokens.
+
+## Answer
+Full details here.
+""")
+
+        # Only slightly different
+        new_concise = "The authentication system uses JWT tokens for user authentication with refresh tokens"
+        # With 0.95 threshold, should be True (very similar)
+        result_095 = _is_duplicate_concise(new_concise, context_dir, threshold=0.95)
+        assert result_095 is True
+
+        # With 0.5 threshold, should definitely be True
+        result_050 = _is_duplicate_concise(new_concise, context_dir, threshold=0.5)
+        assert result_050 is True
+
+
+# =============================================================================
+# Test Class for _save_explorer_result() dedup behavior
+# =============================================================================
+
+class TestSaveExplorerResultDedup:
+    """Tests for _save_explorer_result() dedup behavior."""
+
+    def test_saves_when_no_existing_files(self, mock_temp_dir):
+        """Saves file when context directory is empty."""
+        query = "test query"
+        result = """## Concise:
+This is a concise summary about authentication.
+
+## Answer
+Full answer here.
+"""
+        context_key = "dedup-save-test"
+
+        _save_explorer_result(query, result, context_key)
+
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        files = list(context_dir.glob("*.md"))
+        assert len(files) == 1
+        assert "test-query" in files[0].name
+
+    def test_skips_save_when_duplicate_concise(self, mock_temp_dir):
+        """Skips save when ## Concise: section is too similar to existing."""
+        context_key = "dedup-skip-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create existing file with similar concise
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+The authentication system uses JWT tokens for user authentication with refresh tokens.
+
+## Answer
+Full details here.
+""")
+
+        query = "auth tokens"
+        result = """## Concise:
+The authentication system uses JWT tokens for user authentication with refresh tokens.
+
+## Answer
+Same answer content.
+"""
+        # Clear the file tracker by calling with different result first
+        # Actually, we need to call the function and check it skips
+        _save_explorer_result(query, result, context_key)
+
+        # Should NOT create a new file (skipped due to duplicate)
+        files = list(context_dir.glob("*.md"))
+        assert len(files) == 1, f"Expected 1 file (skip duplicate), got {len(files)}: {[f.name for f in files]}"
+        assert files[0].name == "existing_20260601_120000.md"
+
+    def test_saves_when_concise_different_enough(self, mock_temp_dir):
+        """Saves file when ## Concise: section is different enough."""
+        context_key = "dedup-save-diff-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create existing file
+        existing_file = context_dir / "existing_20260601_120000.md"
+        existing_file.write_text("""# Existing Result
+
+## Concise:
+The authentication system uses JWT tokens for user authentication.
+
+## Answer
+Full details here.
+""")
+
+        query = "database schema"
+        result = """## Concise:
+The database schema uses PostgreSQL with migration support and foreign key constraints.
+
+## Answer
+Database details here.
+"""
+        _save_explorer_result(query, result, context_key)
+
+        # Should create a new file (different concise)
+        files = list(context_dir.glob("*.md"))
+        assert len(files) == 2, f"Expected 2 files, got {len(files)}: {[f.name for f in files]}"
+
+    def test_saves_when_no_concise_section(self, mock_temp_dir):
+        """Saves file when result has no ## Concise: section."""
+        context_key = "no-concise-save-test"
+        context_dir = mock_temp_dir / "ensemble" / "context" / context_key
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        query = "test"
+        result = "## Answer\nSome answer without concise section."
+
+        _save_explorer_result(query, result, context_key)
+
+        # Should save (no concise = no dedup check)
         files = list(context_dir.glob("*.md"))
         assert len(files) == 1
