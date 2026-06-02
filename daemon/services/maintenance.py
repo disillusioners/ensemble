@@ -253,6 +253,7 @@ class CheckpointCleanupJob:
         config: PersistenceConfig,
         checkpointer: AsyncSqliteSaver,
         instance_repo: SQLModelInstanceRepository,
+        on_instance_deleted: Callable[[str], None] | None = None,
     ):
         """Initialize the checkpoint cleanup job.
 
@@ -262,10 +263,16 @@ class CheckpointCleanupJob:
                 - Use checkpointer.adelete_thread() for whole-thread deletions (Ops A-C).
                 - Use checkpointer.conn + checkpointer.lock for queries (all ops).
             instance_repo: Instance repository for querying instance data.
+            on_instance_deleted: Optional callback invoked after BOTH checkpoint
+                cleanup AND instance record deletion succeed for an instance.
+                Used to release in-memory state (graph, tasks, request registry)
+                in InstanceManager without creating a circular dependency.
+                Signature: takes instance_id, returns None.
         """
         self._config = config
         self._checkpointer = checkpointer
         self._instance_repo = instance_repo
+        self._on_instance_deleted = on_instance_deleted
 
     async def execute(self) -> None:
         """Run all 4 checkpoint cleanup operations.
@@ -334,13 +341,14 @@ class CheckpointCleanupJob:
             logger.error(f"Orphaned threads cleanup failed: {e}")
 
     async def _cleanup_expired_terminal(self) -> None:
-        """(B) Delete checkpoint data for terminal instances older than TTL.
+        """(B) Delete checkpoint data, instance records, and in-memory state
+        for terminal instances older than TTL.
 
         Finds instances in terminal states (TERMINATED, COMPLETED, ERROR, FAILED)
-        where updated_at is older than checkpoint_ttl_hours, and deletes their
-        checkpoint data.
+        where updated_at is older than checkpoint_ttl_hours, and performs full
+        cleanup via _cleanup_instance (checkpoint data, DB record, in-memory state).
 
-        Deletion method: checkpointer.adelete_thread(instance_id)
+        Deletion method: _cleanup_instance() → adelete_thread() + instance_repo.delete() + callback.
         """
         try:
             ttl_hours = self._config.checkpoint_ttl_hours
@@ -356,24 +364,33 @@ class CheckpointCleanupJob:
 
             logger.info(f"Found {len(expired_instances)} expired terminal instances")
 
-            # Delete checkpoint data for each expired instance
+            # Full cleanup for each expired instance (checkpoint + record + in-memory)
+            # Per-instance try/except ensures one failure doesn't abort the batch
             deleted = 0
             for instance_id in expired_instances:
-                await self._checkpointer.adelete_thread(instance_id)
-                deleted += 1
+                try:
+                    await self._cleanup_instance(instance_id)
+                    deleted += 1
+                except Exception as e:
+                    logger.error(
+                        f"Failed to clean up instance {instance_id[:8]}...: {e}"
+                    )
 
-            logger.info(f"Deleted checkpoint data for {deleted} expired terminal instances")
+            logger.info(f"Cleaned up {deleted} expired terminal instances (checkpoints + records)")
 
         except Exception as e:
             logger.error(f"Expired terminal cleanup failed: {e}")
 
     async def _enforce_history_cap(self) -> None:
-        """(C) Keep only max_instance_history terminal instances' checkpoint data.
+        """(C) Keep only max_instance_history terminal instances.
 
         Counts terminal instances with checkpoint data. If count exceeds
         max_instance_history (default 300), prunes oldest instances by updated_at.
 
-        Deletion method: checkpointer.adelete_thread(instance_id)
+        Each pruned instance is fully cleaned up via _cleanup_instance
+        (checkpoint data, DB record, in-memory state).
+
+        Deletion method: _cleanup_instance() → adelete_thread() + instance_repo.delete() + callback.
         """
         try:
             max_history = self._config.max_instance_history
@@ -396,13 +413,19 @@ class CheckpointCleanupJob:
             )
 
             # Prune the oldest instances (first 'excess' items in the list)
+            # Per-instance try/except ensures one failure doesn't abort the batch
             to_delete = terminal_instances[:excess]
             deleted = 0
             for instance_id in to_delete:
-                await self._checkpointer.adelete_thread(instance_id)
-                deleted += 1
+                try:
+                    await self._cleanup_instance(instance_id)
+                    deleted += 1
+                except Exception as e:
+                    logger.error(
+                        f"Failed to clean up instance {instance_id[:8]}...: {e}"
+                    )
 
-            logger.info(f"Pruned {deleted} terminal instances from history cap")
+            logger.info(f"Pruned {deleted} terminal instances from history cap (checkpoints + records)")
 
         except Exception as e:
             logger.error(f"History cap enforcement failed: {e}")
@@ -467,6 +490,48 @@ class CheckpointCleanupJob:
             logger.error(f"Per-thread checkpoint pruning failed: {e}")
 
     # ── Helper Methods ─────────────────────────────────────────────────────────
+
+    async def _cleanup_instance(self, instance_id: str) -> None:
+        """Delete checkpoint data, instance record, and in-memory state for an instance.
+
+        Performs the full cleanup sequence in order:
+        1. Delete checkpoint data from checkpoints.db (via adelete_thread).
+        2. Delete instance record from instances.db (cascades to hierarchy,
+           tasks, events, message_queue tables).
+        3. Invoke the on_instance_deleted callback to release in-memory state
+           (graph cache, graph tasks, request registry) — only if the
+           instance record was actually deleted.
+
+        If the instance record is not found in the DB (deleted by another
+        process between query and delete), a warning is logged and the
+        callback is skipped. The checkpoint data is still removed in this case.
+
+        Args:
+            instance_id: The instance ID to clean up.
+        """
+        # 1. Delete checkpoint data from checkpoints.db
+        await self._checkpointer.adelete_thread(instance_id)
+
+        # 2. Delete instance record from instances.db (with cascade)
+        result = self._instance_repo.delete(instance_id)
+        if not result.get("deleted", False):
+            logger.warning(
+                f"Instance record not found during cleanup: {instance_id[:8]}... "
+                f"(checkpoint data was already deleted, skipping in-memory callback)"
+            )
+            return
+
+        # 3. Clean up in-memory state via callback (if provided).
+        # The callback is best-effort in-memory cleanup, so we isolate it
+        # from the surrounding flow: a failure here must not undo the
+        # already-completed DB cleanup.
+        if self._on_instance_deleted is not None:
+            try:
+                self._on_instance_deleted(instance_id)
+            except Exception as e:
+                logger.warning(
+                    f"In-memory cleanup callback failed for {instance_id[:8]}...: {e}"
+                )
 
     def _get_all_instance_ids(self) -> set[str]:
         """Get all instance IDs from the instance repository.

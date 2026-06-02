@@ -14,6 +14,9 @@ from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
+from daemon.repositories.task.models import Task
+from daemon.repositories.event.models import Event
+from daemon.repositories.message_queue.models import MessageQueue
 
 # Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
@@ -428,6 +431,17 @@ class SQLModelInstanceRepository:
             instance = db_session.get(Instance, instance_id)
             if instance is None:
                 return {"deleted": False, "instance_id": instance_id, "error": "Not found"}
+
+            # Delete queue tables that reference this instance
+            db_session.exec(
+                sql_delete(Task).where(Task.instance_id == instance_id)
+            )
+            db_session.exec(
+                sql_delete(Event).where(Event.instance_id == instance_id)
+            )
+            db_session.exec(
+                sql_delete(MessageQueue).where(MessageQueue.instance_id == instance_id)
+            )
 
             # Delete from hierarchy where instance is parent
             db_session.exec(

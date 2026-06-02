@@ -431,10 +431,11 @@ class TestCheckpointCleanupJobExpired:
 
     @pytest.mark.asyncio
     async def test_cleanup_expired_terminal(self):
-        """Mock instances past TTL, verify deletion."""
+        """Mock instances past TTL, verify full cleanup (checkpoints + records + callback)."""
         config = PersistenceConfig(checkpoint_ttl_hours=24)
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
 
         # Create expired instances (older than 24 hours)
         old_time = (utcnow() - timedelta(hours=48)).isoformat()
@@ -457,21 +458,33 @@ class TestCheckpointCleanupJobExpired:
             return ([], 0)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
+        # Mock delete to return successful deletion
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
 
-        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
 
         await job._cleanup_expired_terminal()
 
         # Should have called adelete_thread for each expired terminal instance
         # There are 4 terminal statuses
         assert checkpointer.adelete_thread.call_count == len(TERMINAL_STATUSES)
+        # Should also have called instance_repo.delete for each expired instance
+        assert instance_repo.delete.call_count == len(TERMINAL_STATUSES)
+        # And the on_instance_deleted callback for each
+        assert on_instance_deleted.call_count == len(TERMINAL_STATUSES)
 
     @pytest.mark.asyncio
     async def test_cleanup_no_expired(self):
-        """When no instances are expired, no deletion."""
+        """When no instances are expired, no cleanup (and _cleanup_instance not called)."""
         config = PersistenceConfig(checkpoint_ttl_hours=24)
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
 
         # All instances are recent
         recent_time = utcnow().isoformat()
@@ -491,12 +504,17 @@ class TestCheckpointCleanupJobExpired:
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
 
-        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
 
-        await job._cleanup_expired_terminal()
+        # Patch _cleanup_instance to verify it is NOT called when there are no expired instances
+        with patch.object(job, "_cleanup_instance", new=AsyncMock()) as mock_cleanup_instance:
+            await job._cleanup_expired_terminal()
+            mock_cleanup_instance.assert_not_called()
 
         # No deletion when no expired instances
         checkpointer.adelete_thread.assert_not_called()
+        instance_repo.delete.assert_not_called()
+        on_instance_deleted.assert_not_called()
 
 
 class TestCheckpointCleanupJobHistoryCap:
@@ -504,10 +522,11 @@ class TestCheckpointCleanupJobHistoryCap:
 
     @pytest.mark.asyncio
     async def test_enforce_history_cap(self):
-        """Create more terminal instances than cap, verify oldest are pruned."""
+        """Create more terminal instances than cap, verify oldest are pruned fully."""
         config = PersistenceConfig(max_instance_history=5)
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
 
         # Create 10 terminal instances (exceeds cap of 5)
         old_time_1 = (utcnow() - timedelta(days=10)).isoformat()
@@ -548,20 +567,30 @@ class TestCheckpointCleanupJobHistoryCap:
             return ([], 0)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
 
-        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
 
         await job._enforce_history_cap()
 
         # Should delete 5 oldest instances (10 - 5 = 5 excess)
         assert checkpointer.adelete_thread.call_count == 5
+        # Each prune should also delete the instance record and trigger callback
+        assert instance_repo.delete.call_count == 5
+        assert on_instance_deleted.call_count == 5
 
     @pytest.mark.asyncio
     async def test_enforce_history_cap_within_limit(self):
-        """When count is within cap, no deletion."""
+        """When count is within cap, no deletion (and _cleanup_instance not called)."""
         config = PersistenceConfig(max_instance_history=10)
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
 
         # Only 5 instances total (within cap of 10)
         recent_time = utcnow().isoformat()
@@ -580,12 +609,232 @@ class TestCheckpointCleanupJobHistoryCap:
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
 
-        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
 
-        await job._enforce_history_cap()
+        # Patch _cleanup_instance to verify it is NOT called when within limit
+        with patch.object(job, "_cleanup_instance", new=AsyncMock()) as mock_cleanup_instance:
+            await job._enforce_history_cap()
+            mock_cleanup_instance.assert_not_called()
 
         # No deletion when within limit (5 <= 10)
         checkpointer.adelete_thread.assert_not_called()
+        instance_repo.delete.assert_not_called()
+        on_instance_deleted.assert_not_called()
+
+
+class TestCheckpointCleanupJobBackwardCompatibility:
+    """Tests for backward compatibility: job works without on_instance_deleted callback."""
+
+    @pytest.mark.asyncio
+    async def test_works_without_callback(self):
+        """No on_instance_deleted callback: checkpoint + instance DB cleanup still runs, no callback invoked."""
+        config = PersistenceConfig(checkpoint_ttl_hours=24)
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        # No callback provided - default is None
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+
+        # Create expired instances (one per terminal status)
+        old_time = (utcnow() - timedelta(hours=48)).isoformat()
+
+        def list_side_effect(status, limit=100, offset=0):
+            if status in TERMINAL_STATUSES:
+                return (
+                    [MagicMock(instance_id=f"expired-{status}", updated_at=old_time)],
+                    1,
+                )
+            return ([], 0)
+
+        instance_repo.list = MagicMock(side_effect=list_side_effect)
+
+        # Construct job WITHOUT the optional on_instance_deleted argument
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+
+        # Verify the default value is None
+        assert job._on_instance_deleted is None
+
+        # Operation B should still work end-to-end
+        await job._cleanup_expired_terminal()
+
+        # Both checkpoint and instance record cleanup happened
+        assert checkpointer.adelete_thread.call_count == len(TERMINAL_STATUSES)
+        assert instance_repo.delete.call_count == len(TERMINAL_STATUSES)
+        # No callback to call - no error raised
+
+    @pytest.mark.asyncio
+    async def test_explicit_none_callback_equivalent(self):
+        """Passing on_instance_deleted=None explicitly behaves like omitting it."""
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        instance_repo.list = MagicMock(return_value=([], 0))
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
+        )
+
+        # Mock checkpointer.conn and lock for Operations A and D
+        mock_lock = asyncio.Lock()
+        mock_conn = AsyncMock()
+        mock_cursor = AsyncMock()
+        mock_cursor.fetchall = AsyncMock(return_value=[])
+        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+        checkpointer.conn = mock_conn
+        checkpointer.lock = mock_lock
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted=None)
+
+        # Should not raise even with all operations running
+        await job.execute()
+
+
+class TestCleanupInstanceHelper:
+    """Focused tests for the new _cleanup_instance helper method."""
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_full_sequence(self):
+        """All three steps happen in order: adelete_thread → instance_repo.delete → callback."""
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "inst-1", "agent_dir": "/agents/inst-1"}
+        )
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
+
+        await job._cleanup_instance("inst-1")
+
+        # Step 1: checkpoint data deleted
+        checkpointer.adelete_thread.assert_awaited_once_with("inst-1")
+        # Step 2: instance record deleted
+        instance_repo.delete.assert_called_once_with("inst-1")
+        # Step 3: callback invoked with the instance_id
+        on_instance_deleted.assert_called_once_with("inst-1")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_skips_callback_when_not_deleted(self):
+        """When instance_repo.delete returns {deleted: False}, callback must NOT be called."""
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        # Simulate the instance already being deleted by another process
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": False, "instance_id": "inst-2", "agent_dir": "/agents/inst-2"}
+        )
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
+
+        await job._cleanup_instance("inst-2")
+
+        # Checkpoint data was still removed
+        checkpointer.adelete_thread.assert_awaited_once_with("inst-2")
+        # Delete was attempted
+        instance_repo.delete.assert_called_once_with("inst-2")
+        # But the callback must NOT be called - the instance didn't exist
+        on_instance_deleted.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_without_callback(self):
+        """_cleanup_instance works when no callback is provided (no AttributeError)."""
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "inst-3", "agent_dir": "/test"}
+        )
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo)
+
+        # Should not raise
+        await job._cleanup_instance("inst-3")
+
+        checkpointer.adelete_thread.assert_awaited_once_with("inst-3")
+        instance_repo.delete.assert_called_once_with("inst-3")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_execution_order(self):
+        """Verify execution order: adelete_thread → instance_repo.delete → callback.
+
+        Uses the attach_mock pattern to record all three calls on a single
+        parent mock so the call_args_list preserves invocation ordering
+        across the three methods.
+        """
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "inst-order", "agent_dir": "/test"}
+        )
+        on_instance_deleted = MagicMock()
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
+
+        # Parent mock + attach_mock: routes all three call records into
+        # one ordered call_args_list.
+        parent = MagicMock()
+        parent.attach_mock(checkpointer.adelete_thread, "adelete_thread")
+        parent.attach_mock(instance_repo.delete, "instance_repo_delete")
+        parent.attach_mock(on_instance_deleted, "on_instance_deleted")
+
+        await job._cleanup_instance("inst-order")
+
+        # Extract the method names in invocation order.
+        order = [name for name, _, _ in parent.mock_calls]
+        assert order == [
+            "adelete_thread",
+            "instance_repo_delete",
+            "on_instance_deleted",
+        ], f"Expected ordered sequence, got: {order}"
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_batch_continues_on_failure(self):
+        """When instance_repo.delete raises for ONE instance, the rest still get cleaned.
+
+        Mirrors the per-instance loop used by _cleanup_expired_terminal and
+        _enforce_history_cap. Verifies the per-instance error isolation
+        introduced for Issue 1: a failure on one ID must not abort the batch.
+        """
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+
+        # instance_repo.delete succeeds for inst-A/inst-C, raises for inst-B.
+        def delete_side_effect(instance_id):
+            if instance_id == "inst-B":
+                raise RuntimeError("DB transient error")
+            return {"deleted": True, "instance_id": instance_id, "agent_dir": "/test"}
+
+        instance_repo.delete = MagicMock(side_effect=delete_side_effect)
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
+
+        # Drive the same loop pattern used by operations B and C.
+        instance_ids = ["inst-A", "inst-B", "inst-C"]
+        for instance_id in instance_ids:
+            try:
+                await job._cleanup_instance(instance_id)
+            except Exception as e:
+                # The operations catch here; replicate that contract in the test.
+                logger_msg = f"Failed to clean up instance {instance_id[:8]}...: {e}"
+                assert "inst-B" in logger_msg
+
+        # All three instances had their checkpoint thread deleted, in order.
+        await_args_list = checkpointer.adelete_thread.await_args_list
+        called_ids = [call.args[0] for call in await_args_list]
+        assert called_ids == ["inst-A", "inst-B", "inst-C"]
+
+        # instance_repo.delete was attempted for all three.
+        assert instance_repo.delete.call_count == 3
+
+        # Callback was invoked for the two successful deletes and NOT for
+        # inst-B (where delete raised before the callback path was reached).
+        callback_ids = [call.args[0] for call in on_instance_deleted.call_args_list]
+        assert callback_ids == ["inst-A", "inst-C"]
 
 
 class TestCheckpointCleanupJobPerThreadPruning:
