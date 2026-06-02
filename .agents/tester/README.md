@@ -60,7 +60,17 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-06-02 explorer-rag-remove-heading)
+## Test Results (Latest: 2026-06-02 maintenance-cleanup-fix)
+
+### Maintenance Cleanup Bug Fix (2026-06-02)
+- **Branch**: `feature/fix-maintenance-cleanup` (commits `34279f0`, `a32ca71`)
+- **Maintenance Unit Tests**: 46/46 PASS
+- **Instance Cascade Integration**: 5/5 PASS
+- **Core Regression**: 662/662 PASS
+- **API Regression**: 209/217 PASS (8 skipped, 0 regressions)
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Quick Fixes**: 0 (none needed)
+- **Status**: ✅ READY
 
 ### Explorer RAG Heading Removal — Phase 2 (2026-06-02)
 - **Branch**: `feature/explorer-rag-remove-heading`
