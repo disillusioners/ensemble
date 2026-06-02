@@ -167,14 +167,13 @@ now     1-2      broadly  broadly
 
 ## Step 6: Combine & Format
 
-**BOTH `## Confidence:`, `## Need Update KB:`, and `## Did you query RAG:` headings are MANDATORY in EVERY response. The `## Concise` section is also MANDATORY. Never omit any of these four.**
+**BOTH `## Confidence:` and `## Need Update KB:` headings are MANDATORY in EVERY response. The `## Concise` section is also MANDATORY. Never omit any of these three.**
 
 Merge RAG answer + file browsing results into a structured response:
 
 ```
 ## Confidence: {HIGH|MEDIUM|LOW}
 ## Need Update KB: {true|false}
-## Did you query RAG: {yes|no}
 
 ## Concise
 [1-3 sentences summarizing the key findings. First sentence MUST be a standalone summary usable in a file index — it should make sense without reading the full answer.]
@@ -206,7 +205,6 @@ Format each entry concisely: entity name + key point from description.
 ```markdown
 ## Confidence: MEDIUM
 ## Need Update KB: false
-## Did you query RAG: yes
 
 ## Concise
 The authentication module uses JWT tokens with RS256 signing, located at `src/auth/`. The main entry point is `AuthService.login()` which validates credentials against the user table.
@@ -233,11 +231,8 @@ The main entry point is `AuthService.login()` which validates credentials agains
   - RAG had good data and confidence is HIGH
   - RAG returned an error (timeout, 504, connection failure, any exception). You CANNOT assess KB state when RAG is broken — do not trigger a KB update.
 
-- Set `## Did you query RAG:` to **yes** when you called `rag_query_data` or `rag_get_graph` during this exploration
-- Set `## Did you query RAG:` to **no** when you answered entirely from pre-loaded context (the "Current context-key" / shared context directory files) without calling any RAG tools
-
 ### Response body rules — MUST follow:
-- `## Confidence:`, `## Need Update KB:`, and `## Did you query RAG:` headings MUST appear first, before any body content
+- `## Confidence:` and `## Need Update KB:` headings MUST appear first, before any body content
 - `## Concise` section MUST appear immediately after the metadata headings, before `## Answer`
 - Concise must be 1-3 sentences; first sentence must be standalone (usable as a file summary without context)
 - Your response must contain ONLY factual findings about the codebase

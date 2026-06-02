@@ -18,7 +18,6 @@ from daemon.tools.knowledge_tools import (
     _generate_experience_idempotency_key,
     _generate_idempotency_key,
     _parse_should_update_kb,
-    _RAG_QUERIED_PATTERN,
     _SHOULD_UPDATE_KB_PATTERN,
     create_knowledge_tools,
     RAG_TOOL_NAMES,
@@ -1235,7 +1234,7 @@ class TestKnowledgeToolsConditionalCreation:
 
 
 class TestExploreAutoSave:
-    """Tests for explore() auto-save feature triggered by ## Did you query RAG: flag."""
+    """Tests for explore() auto-save feature triggered by checkpoint-based RAG detection."""
 
     @pytest.fixture
     def mock_manager_for_save(self, configured_env, mock_manager):
@@ -1320,52 +1319,6 @@ class TestExploreAutoSave:
                     mock_save.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_explore_rag_queried_stripped_from_response(self, mock_manager_for_save, tmp_path):
-        """## Did you query RAG: heading is stripped from the returned response."""
-        explorer_response = (
-            "## Answer\nFound information.\n\n"
-            "## Did you query RAG: yes"
-        )
-
-        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
-                mock_tempfile.gettempdir.return_value = str(tmp_path)
-
-                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
-                explore_tool = next(t for t in tools if t.name == "explore")
-
-                with patch("daemon.tools.knowledge_tools._save_explorer_result"):
-                    result = await explore_tool.ainvoke({"query": "What is X?"})
-
-                # Did you query RAG heading should be stripped from returned result
-                assert "Did you query RAG" not in result
-                assert "## Did you query RAG" not in result
-                assert "Found information" in result
-
-    @pytest.mark.asyncio
-    async def test_explore_rag_queried_no_stripped_from_response(self, mock_manager_for_save, tmp_path):
-        """## Did you query RAG: no heading is stripped from the returned response."""
-        explorer_response = (
-            "## Answer\nNo need to save.\n\n"
-            "## Did you query RAG: no"
-        )
-
-        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
-                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
-                mock_tempfile.gettempdir.return_value = str(tmp_path)
-
-                tools = create_knowledge_tools(mock_manager_for_save, "parent-instance-id")
-                explore_tool = next(t for t in tools if t.name == "explore")
-
-                result = await explore_tool.ainvoke({"query": "Quick question"})
-
-                # Did you query RAG heading should be stripped
-                assert "Did you query RAG" not in result
-                assert "No need to save" in result
-
-    @pytest.mark.asyncio
     async def test_explore_missing_rag_queried_defaults_to_no_save(self, mock_manager_for_save, tmp_path):
         """When ## Did you query RAG: is absent, save is NOT triggered."""
         explorer_response = (
@@ -1439,7 +1392,6 @@ class TestExploreAutoSave:
 
                 # Explore should still return the response
                 assert "Important information" in result
-                assert "Did you query RAG" not in result
 
 
 # =============================================================================
@@ -1934,54 +1886,6 @@ class TestExploreCheckpointIntegration:
 
                 # No save on error path — we return BEFORE the save block
                 mock_save.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_explore_checkpoint_mismatch_logged(
-        self, mock_manager_with_checkpointer, tmp_path, caplog
-    ):
-        """Mismatch between heading and checkpoint is logged at INFO."""
-        # Checkpoint says NO RAG
-        mock_manager_with_checkpointer._checkpointer.aget = AsyncMock(return_value={
-            "channel_values": {
-                "messages": [
-                    _make_message([_make_tool_call("bash")]),
-                ]
-            }
-        })
-
-        # Heading says YES — mismatch
-        explorer_response = (
-            "## Answer\nContent.\n\n## Did you query RAG: yes"
-        )
-
-        with patch(
-            "daemon.tools.knowledge_tools.invoke_agent_and_wait",
-            new_callable=AsyncMock,
-            return_value=(explorer_response, "test-child-id"),
-        ):
-            with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
-                mock_tempfile.gettempdir.return_value = str(tmp_path)
-
-                tools = create_knowledge_tools(
-                    mock_manager_with_checkpointer, "parent-instance-id"
-                )
-                explore_tool = next(t for t in tools if t.name == "explore")
-
-                with caplog.at_level("INFO", logger="daemon.tools.knowledge_tools"):
-                    await explore_tool.ainvoke({"query": "Test"})
-
-                # Mismatch should be logged at INFO
-                assert any(
-                    "RAG detection mismatch" in record.message
-                    for record in caplog.records
-                ), f"Expected mismatch log; got: {[r.message for r in caplog.records]}"
-                # Log should mention both values
-                mismatch_records = [
-                    r for r in caplog.records
-                    if "RAG detection mismatch" in r.message
-                ]
-                assert "checkpoint=False" in mismatch_records[0].message
-                assert "heading=True" in mismatch_records[0].message
 
     @pytest.mark.asyncio
     async def test_explore_no_checkpointer_attribute(

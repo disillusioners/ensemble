@@ -34,12 +34,6 @@ _SHOULD_UPDATE_KB_PATTERN = re.compile(
     re.MULTILINE | re.IGNORECASE,
 )
 
-# Pattern to match ## Did you query RAG: yes|no heading (with optional bold/italic)
-_RAG_QUERIED_PATTERN = re.compile(
-    r"^##\s+Did\s+you\s+query\s+RAG:\s*\*{0,2}(yes|no)\*{0,2}\s*$",
-    re.MULTILINE | re.IGNORECASE,
-)
-
 
 def _parse_should_update_kb(response: str) -> bool:
     """Parse the Explorer response for the should_update_kb flag.
@@ -54,14 +48,6 @@ def _parse_should_update_kb(response: str) -> bool:
     match = _SHOULD_UPDATE_KB_PATTERN.search(response)
     if match:
         return match.group(1).lower() == "true"
-    return False
-
-
-def _parse_rag_queried(response: str) -> bool:
-    """Parse ## Did you query RAG: yes/no from Explorer response."""
-    match = _RAG_QUERIED_PATTERN.search(response)
-    if match:
-        return match.group(1).lower() == "yes"
     return False
 
 
@@ -436,25 +422,11 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
             result = "Explorer agent timed out or failed. Try a simpler query."
 
         # Deterministic RAG detection via checkpoint (runs for BOTH success and error paths)
-        rag_queried_checkpoint = False
+        rag_queried = False
         if child_instance_id and hasattr(manager, "_checkpointer") and manager._checkpointer:
-            rag_queried_checkpoint = await _check_rag_queried_via_checkpoint(
+            rag_queried = await _check_rag_queried_via_checkpoint(
                 manager._checkpointer, child_instance_id
             )
-
-        # [Phase 1 only] Keep heading-based detection for log comparison
-        rag_queried_heading = _parse_rag_queried(result) if isinstance(result, str) else False
-
-        if rag_queried_checkpoint != rag_queried_heading:
-            logger.info(
-                "RAG detection mismatch: checkpoint=%s, heading=%s, instance=%s",
-                rag_queried_checkpoint,
-                rag_queried_heading,
-                child_instance_id[:8] if child_instance_id else "N/A",
-            )
-
-        # Use checkpoint result as source of truth
-        rag_queried = rag_queried_checkpoint
 
         # Return early if error (AFTER checkpoint inspection)
         if is_error:
@@ -488,9 +460,8 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                 except Exception as e:
                     logger.warning("Failed to schedule kb-importer job: %s", e)
 
-        # Strip the Need Update KB and RAG Queried headings from the response before returning
-        result = _SHOULD_UPDATE_KB_PATTERN.sub("", result)
-        result = _RAG_QUERIED_PATTERN.sub("", result).strip()
+        # Strip the Need Update KB heading from the response before returning
+        result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
 
         # Auto-save explorer result to shared context directory (fire-and-forget)
         if rag_queried:
