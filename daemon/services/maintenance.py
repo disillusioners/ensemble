@@ -397,7 +397,7 @@ class CheckpointCleanupJob:
             max_history = max_history if max_history > 0 else MAX_INSTANCE_HISTORY
 
             # Get terminal instances ordered by updated_at (oldest first)
-            terminal_instances = self._get_terminal_instances_with_checkpoints()
+            terminal_instances = self._get_terminal_instances_ordered_by_age()
             total_count = len(terminal_instances)
 
             if total_count <= max_history:
@@ -492,34 +492,59 @@ class CheckpointCleanupJob:
     # ── Helper Methods ─────────────────────────────────────────────────────────
 
     async def _cleanup_instance(self, instance_id: str) -> None:
-        """Delete checkpoint data, instance record, and in-memory state for an instance.
+        """Delete instance record, checkpoint data, and in-memory state for an instance.
 
         Performs the full cleanup sequence in order:
-        1. Delete checkpoint data from checkpoints.db (via adelete_thread).
-        2. Delete instance record from instances.db (cascades to hierarchy,
+        0. Re-verify the instance is still in a terminal status (TOCTOU guard).
+           Between the time the maintenance job listed terminal instances and
+           now, the instance could have been resumed by a new job. Re-fetching
+           and re-checking prevents deleting a record that is no longer
+           eligible for cleanup.
+        1. Delete instance record from instances.db (cascades to hierarchy,
            tasks, events, message_queue tables).
+        2. Delete checkpoint data from checkpoints.db (via adelete_thread).
         3. Invoke the on_instance_deleted callback to release in-memory state
            (graph cache, graph tasks, request registry) — only if the
            instance record was actually deleted.
 
+        Rationale for this order:
+        - If instance delete fails → checkpoint data is preserved, and the
+          next maintenance cycle will retry cleanly.
+        - If instance delete succeeds but checkpoint deletion fails → the
+          orphan checkpoint thread is naturally swept by Operation A
+          (_cleanup_orphaned_threads) on the next cycle.
+
         If the instance record is not found in the DB (deleted by another
-        process between query and delete), a warning is logged and the
-        callback is skipped. The checkpoint data is still removed in this case.
+        process between query and delete), a warning is logged and both the
+        checkpoint deletion and the in-memory callback are skipped. The
+        orphan checkpoint data, if any, is left to Operation A to sweep.
 
         Args:
             instance_id: The instance ID to clean up.
         """
-        # 1. Delete checkpoint data from checkpoints.db
-        await self._checkpointer.adelete_thread(instance_id)
+        # 0. TOCTOU guard — re-verify the instance is still terminal.
+        # Between listing terminal instances and acting on them, the instance
+        # could have been resumed by a new job. Skip in that case.
+        # If the instance is already gone (get returns None), fall through
+        # so the delete + checkpoint sweep still runs as a self-heal.
+        instance = self._instance_repo.get(instance_id)
+        if instance and instance.status not in TERMINAL_STATUSES:
+            logger.debug(
+                f"Instance {instance_id[:8]}... no longer terminal, skipping"
+            )
+            return
 
-        # 2. Delete instance record from instances.db (with cascade)
+        # 1. Delete instance record from instances.db (with cascade)
         result = self._instance_repo.delete(instance_id)
         if not result.get("deleted", False):
             logger.warning(
                 f"Instance record not found during cleanup: {instance_id[:8]}... "
-                f"(checkpoint data was already deleted, skipping in-memory callback)"
+                f"(skipping checkpoint and in-memory cleanup)"
             )
             return
+
+        # 2. Delete checkpoint data from checkpoints.db
+        await self._checkpointer.adelete_thread(instance_id)
 
         # 3. Clean up in-memory state via callback (if provided).
         # The callback is best-effort in-memory cleanup, so we isolate it
@@ -590,8 +615,11 @@ class CheckpointCleanupJob:
 
         return expired
 
-    def _get_terminal_instances_with_checkpoints(self) -> list[str]:
-        """Get terminal instances that have checkpoint data, ordered by updated_at.
+    def _get_terminal_instances_ordered_by_age(self) -> list[str]:
+        """Get all terminal instances ordered by age (oldest first).
+
+        Iterates every status in TERMINAL_STATUSES, so the result includes all
+        terminal instances regardless of whether they have checkpoint data.
 
         Returns:
             List of instance_id strings for terminal instances, oldest first.

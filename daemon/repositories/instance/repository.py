@@ -17,6 +17,7 @@ from .models import Instance, InstanceHierarchy, InstanceStatus
 from daemon.repositories.task.models import Task
 from daemon.repositories.event.models import Event
 from daemon.repositories.message_queue.models import MessageQueue
+from daemon.repositories.job_queue.watcher_models import JobWatcher
 
 # Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
@@ -425,6 +426,39 @@ class SQLModelInstanceRepository:
     # DELETE
     # --------------------------------------------------------
 
+    @staticmethod
+    def _cascade_instance_deps(db_session: SQLModelSession, instance_id: str) -> None:
+        """Delete all dependent records for an instance (except the instance itself).
+
+        Order: JobWatcher → Task → Event → MessageQueue → InstanceHierarchy (parent) → InstanceHierarchy (child).
+        JobWatcher must come first since it has a real FK to instances.instance_id.
+        Does NOT commit — the caller handles the commit.
+        """
+        # JobWatcher (FK to instances.instance_id)
+        db_session.exec(
+            sql_delete(JobWatcher).where(JobWatcher.instance_id == instance_id)
+        )
+        # Task
+        db_session.exec(
+            sql_delete(Task).where(Task.instance_id == instance_id)
+        )
+        # Event
+        db_session.exec(
+            sql_delete(Event).where(Event.instance_id == instance_id)
+        )
+        # MessageQueue
+        db_session.exec(
+            sql_delete(MessageQueue).where(MessageQueue.instance_id == instance_id)
+        )
+        # InstanceHierarchy where instance is parent
+        db_session.exec(
+            sql_delete(InstanceHierarchy).where(InstanceHierarchy.parent_id == instance_id)
+        )
+        # InstanceHierarchy where instance is child
+        db_session.exec(
+            sql_delete(InstanceHierarchy).where(InstanceHierarchy.child_id == instance_id)
+        )
+
     def delete(self, instance_id: str) -> dict[str, Any]:
         """Delete an instance and its hierarchy references."""
         with SQLModelSession(self.engine) as db_session:
@@ -432,28 +466,7 @@ class SQLModelInstanceRepository:
             if instance is None:
                 return {"deleted": False, "instance_id": instance_id, "error": "Not found"}
 
-            # Delete queue tables that reference this instance
-            db_session.exec(
-                sql_delete(Task).where(Task.instance_id == instance_id)
-            )
-            db_session.exec(
-                sql_delete(Event).where(Event.instance_id == instance_id)
-            )
-            db_session.exec(
-                sql_delete(MessageQueue).where(MessageQueue.instance_id == instance_id)
-            )
-
-            # Delete from hierarchy where instance is parent
-            db_session.exec(
-                sql_delete(InstanceHierarchy).where(InstanceHierarchy.parent_id == instance_id)
-            )
-
-            # Delete from hierarchy where instance is child
-            db_session.exec(
-                sql_delete(InstanceHierarchy).where(InstanceHierarchy.child_id == instance_id)
-            )
-
-            # Delete instance
+            self._cascade_instance_deps(db_session, instance_id)
             db_session.delete(instance)
             db_session.commit()
 
@@ -485,28 +498,23 @@ class SQLModelInstanceRepository:
 
     def delete_by_project(self, project_id: str) -> int:
         """Delete all instances for a project.
-        
+
         Args:
             project_id: Project identifier.
-            
+
         Returns:
             Number of instances deleted.
         """
         with SQLModelSession(self.engine) as db_session:
-            # First get all instance IDs for this project to clean up hierarchy
+            # Get all instance IDs for this project first to run per-instance cascade
             stmt = select(Instance.instance_id).where(Instance.project_id == project_id)
             instance_ids = list(db_session.exec(stmt).all())
-            
-            # BUG 5 FIX: Use IN clause instead of N+1 individual deletes
-            if instance_ids:
-                # Delete hierarchy links where parent or child is in this project
-                db_session.exec(
-                    sql_delete(InstanceHierarchy).where(
-                        (col(InstanceHierarchy.parent_id).in_(instance_ids)) |
-                        (col(InstanceHierarchy.child_id).in_(instance_ids))
-                    )
-                )
-            
+
+            # Cascade deps for each instance (handles JobWatcher, Task, Event,
+            # MessageQueue, and InstanceHierarchy parent/child rows).
+            for instance_id in instance_ids:
+                self._cascade_instance_deps(db_session, instance_id)
+
             # Delete all instances for this project
             stmt = sql_delete(Instance).where(Instance.project_id == project_id)
             result = db_session.exec(stmt)

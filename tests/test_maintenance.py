@@ -458,6 +458,10 @@ class TestCheckpointCleanupJobExpired:
             return ([], 0)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
+        # TOCTOU guard: re-fetch shows the instance is still terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
         # Mock delete to return successful deletion
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
@@ -567,6 +571,10 @@ class TestCheckpointCleanupJobHistoryCap:
             return ([], 0)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
+        # TOCTOU guard: re-fetch shows the instance is still terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
         )
@@ -648,6 +656,10 @@ class TestCheckpointCleanupJobBackwardCompatibility:
             return ([], 0)
 
         instance_repo.list = MagicMock(side_effect=list_side_effect)
+        # TOCTOU guard: re-fetch shows the instance is still terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
 
         # Construct job WITHOUT the optional on_instance_deleted argument
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
@@ -694,11 +706,15 @@ class TestCleanupInstanceHelper:
 
     @pytest.mark.asyncio
     async def test_cleanup_instance_full_sequence(self):
-        """All three steps happen in order: adelete_thread → instance_repo.delete → callback."""
+        """All steps happen in order: get (TOCTOU) → instance_repo.delete → adelete_thread → callback."""
         config = PersistenceConfig()
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
         on_instance_deleted = MagicMock()
+        # TOCTOU guard: re-fetch shows instance is still terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "inst-1", "agent_dir": "/agents/inst-1"}
         )
@@ -707,20 +723,26 @@ class TestCleanupInstanceHelper:
 
         await job._cleanup_instance("inst-1")
 
-        # Step 1: checkpoint data deleted
-        checkpointer.adelete_thread.assert_awaited_once_with("inst-1")
-        # Step 2: instance record deleted
+        # Step 0: instance re-fetched for TOCTOU guard
+        instance_repo.get.assert_called_once_with("inst-1")
+        # Step 1: instance record deleted
         instance_repo.delete.assert_called_once_with("inst-1")
+        # Step 2: checkpoint data deleted
+        checkpointer.adelete_thread.assert_awaited_once_with("inst-1")
         # Step 3: callback invoked with the instance_id
         on_instance_deleted.assert_called_once_with("inst-1")
 
     @pytest.mark.asyncio
     async def test_cleanup_instance_skips_callback_when_not_deleted(self):
-        """When instance_repo.delete returns {deleted: False}, callback must NOT be called."""
+        """When instance_repo.delete returns {deleted: False}, neither checkpoint nor callback runs."""
         config = PersistenceConfig()
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
         on_instance_deleted = MagicMock()
+        # TOCTOU guard: instance still appears terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
         # Simulate the instance already being deleted by another process
         instance_repo.delete = MagicMock(
             return_value={"deleted": False, "instance_id": "inst-2", "agent_dir": "/agents/inst-2"}
@@ -730,11 +752,15 @@ class TestCleanupInstanceHelper:
 
         await job._cleanup_instance("inst-2")
 
-        # Checkpoint data was still removed
-        checkpointer.adelete_thread.assert_awaited_once_with("inst-2")
+        # TOCTOU re-fetch was performed
+        instance_repo.get.assert_called_once_with("inst-2")
         # Delete was attempted
         instance_repo.delete.assert_called_once_with("inst-2")
-        # But the callback must NOT be called - the instance didn't exist
+        # But the checkpoint thread must NOT be deleted here — Operation A
+        # (_cleanup_orphaned_threads) is responsible for sweeping any orphan
+        # checkpoint data left behind when the record is already gone.
+        checkpointer.adelete_thread.assert_not_called()
+        # And the callback must NOT be called — the instance didn't exist.
         on_instance_deleted.assert_not_called()
 
     @pytest.mark.asyncio
@@ -743,6 +769,10 @@ class TestCleanupInstanceHelper:
         config = PersistenceConfig()
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
+        # TOCTOU guard: instance still appears terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "inst-3", "agent_dir": "/test"}
         )
@@ -752,20 +782,25 @@ class TestCleanupInstanceHelper:
         # Should not raise
         await job._cleanup_instance("inst-3")
 
-        checkpointer.adelete_thread.assert_awaited_once_with("inst-3")
+        instance_repo.get.assert_called_once_with("inst-3")
         instance_repo.delete.assert_called_once_with("inst-3")
+        checkpointer.adelete_thread.assert_awaited_once_with("inst-3")
 
     @pytest.mark.asyncio
     async def test_cleanup_instance_execution_order(self):
-        """Verify execution order: adelete_thread → instance_repo.delete → callback.
+        """Verify execution order: get → instance_repo.delete → adelete_thread → callback.
 
-        Uses the attach_mock pattern to record all three calls on a single
+        Uses the attach_mock pattern to record all four calls on a single
         parent mock so the call_args_list preserves invocation ordering
-        across the three methods.
+        across the methods.
         """
         config = PersistenceConfig()
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
+        # TOCTOU guard: instance still appears terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "inst-order", "agent_dir": "/test"}
         )
@@ -773,11 +808,12 @@ class TestCleanupInstanceHelper:
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
 
-        # Parent mock + attach_mock: routes all three call records into
+        # Parent mock + attach_mock: routes all four call records into
         # one ordered call_args_list.
         parent = MagicMock()
-        parent.attach_mock(checkpointer.adelete_thread, "adelete_thread")
+        parent.attach_mock(instance_repo.get, "instance_repo_get")
         parent.attach_mock(instance_repo.delete, "instance_repo_delete")
+        parent.attach_mock(checkpointer.adelete_thread, "adelete_thread")
         parent.attach_mock(on_instance_deleted, "on_instance_deleted")
 
         await job._cleanup_instance("inst-order")
@@ -785,8 +821,9 @@ class TestCleanupInstanceHelper:
         # Extract the method names in invocation order.
         order = [name for name, _, _ in parent.mock_calls]
         assert order == [
-            "adelete_thread",
+            "instance_repo_get",
             "instance_repo_delete",
+            "adelete_thread",
             "on_instance_deleted",
         ], f"Expected ordered sequence, got: {order}"
 
@@ -802,6 +839,11 @@ class TestCleanupInstanceHelper:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
         on_instance_deleted = MagicMock()
+
+        # TOCTOU guard: all three instances still appear terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
 
         # instance_repo.delete succeeds for inst-A/inst-C, raises for inst-B.
         def delete_side_effect(instance_id):
@@ -823,18 +865,84 @@ class TestCleanupInstanceHelper:
                 logger_msg = f"Failed to clean up instance {instance_id[:8]}...: {e}"
                 assert "inst-B" in logger_msg
 
-        # All three instances had their checkpoint thread deleted, in order.
-        await_args_list = checkpointer.adelete_thread.await_args_list
-        called_ids = [call.args[0] for call in await_args_list]
-        assert called_ids == ["inst-A", "inst-B", "inst-C"]
+        # TOCTOU re-fetch attempted for all three.
+        assert instance_repo.get.call_count == 3
 
         # instance_repo.delete was attempted for all three.
         assert instance_repo.delete.call_count == 3
+
+        # Checkpoint thread was deleted only for the two whose instance
+        # record was actually deleted (inst-A and inst-C). inst-B's delete
+        # raised, so its checkpoint thread is left for Operation A to sweep.
+        await_args_list = checkpointer.adelete_thread.await_args_list
+        called_ids = [call.args[0] for call in await_args_list]
+        assert called_ids == ["inst-A", "inst-C"]
 
         # Callback was invoked for the two successful deletes and NOT for
         # inst-B (where delete raised before the callback path was reached).
         callback_ids = [call.args[0] for call in on_instance_deleted.call_args_list]
         assert callback_ids == ["inst-A", "inst-C"]
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_toctou_skips_when_no_longer_terminal(self):
+        """TOCTOU guard: if the instance was resumed (no longer terminal), skip cleanup.
+
+        Between listing terminal instances and acting on them, another job
+        could resume the instance. In that case, we must NOT delete the
+        instance record, its checkpoint data, or invoke the callback.
+        """
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        # TOCTOU re-fetch: instance has been resumed — status is "running"
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="running")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "inst-resumed", "agent_dir": "/test"}
+        )
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
+
+        await job._cleanup_instance("inst-resumed")
+
+        # TOCTOU re-fetch was performed
+        instance_repo.get.assert_called_once_with("inst-resumed")
+        # Nothing else should have been touched
+        instance_repo.delete.assert_not_called()
+        checkpointer.adelete_thread.assert_not_called()
+        on_instance_deleted.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_instance_toctou_continues_when_instance_already_gone(self):
+        """TOCTOU guard: if get returns None (already deleted), still self-heal the rest.
+
+        If the instance record is already gone (deleted by another process
+        between listing and cleanup), the delete call is a no-op (returns
+        {deleted: False}), and the checkpoint thread is left to Operation A
+        to sweep. This is a self-healing path — not a failure.
+        """
+        config = PersistenceConfig()
+        checkpointer = AsyncMock()
+        instance_repo = MagicMock()
+        on_instance_deleted = MagicMock()
+        # TOCTOU re-fetch: instance is already gone
+        instance_repo.get = MagicMock(return_value=None)
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": False, "instance_id": "inst-gone", "agent_dir": "/test"}
+        )
+
+        job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted)
+
+        # Should not raise
+        await job._cleanup_instance("inst-gone")
+
+        instance_repo.get.assert_called_once_with("inst-gone")
+        instance_repo.delete.assert_called_once_with("inst-gone")
+        # No checkpoint or callback work — orphan is left for Operation A.
+        checkpointer.adelete_thread.assert_not_called()
+        on_instance_deleted.assert_not_called()
 
 
 class TestCheckpointCleanupJobPerThreadPruning:
@@ -978,6 +1086,13 @@ class TestCheckpointCleanupJobErrorIsolation:
         expired_instance.instance_id = "expired-instance-123"
         expired_instance.updated_at = "2020-01-01T00:00:00"
         instance_repo.list = MagicMock(return_value=([expired_instance], 1))
+        # TOCTOU guard: re-fetch shows the instance is still terminal
+        instance_repo.get = MagicMock(
+            return_value=MagicMock(status="terminated")
+        )
+        instance_repo.delete = MagicMock(
+            return_value={"deleted": True, "instance_id": "expired-instance-123", "agent_dir": "/test"}
+        )
 
         checkpointer.conn = mock_conn
         checkpointer.lock = asyncio.Lock()
