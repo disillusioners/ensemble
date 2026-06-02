@@ -1267,11 +1267,8 @@ class TestExploreAutoSave:
 
     @pytest.mark.asyncio
     async def test_explore_rag_queried_yes_triggers_save(self, mock_manager_for_save, tmp_path):
-        """## Did you query RAG: yes causes _save_explorer_result to be called."""
-        explorer_response = (
-            "## Answer\nFound important information.\n\n"
-            "## Did you query RAG: yes"
-        )
+        """Checkpoint shows RAG was queried → _save_explorer_result is called."""
+        explorer_response = "## Answer\nFound important information."
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
@@ -1293,11 +1290,8 @@ class TestExploreAutoSave:
 
     @pytest.mark.asyncio
     async def test_explore_rag_queried_no_skips_save(self, mock_manager_for_save, tmp_path):
-        """## Did you query RAG: no means _save_explorer_result is NOT called."""
-        explorer_response = (
-            "## Answer\nNo need to save this.\n\n"
-            "## Did you query RAG: no"
-        )
+        """Checkpoint shows no RAG queried → _save_explorer_result is NOT called."""
+        explorer_response = "## Answer\nNo need to save this."
 
         # Checkpoint agrees: no RAG tool called
         mock_manager_for_save._checkpointer.aget = AsyncMock(return_value={
@@ -1320,7 +1314,7 @@ class TestExploreAutoSave:
 
     @pytest.mark.asyncio
     async def test_explore_missing_rag_queried_defaults_to_no_save(self, mock_manager_for_save, tmp_path):
-        """When ## Did you query RAG: is absent, save is NOT triggered."""
+        """When checkpoint shows no RAG queried, save is NOT triggered."""
         explorer_response = (
             "## Answer\nRegular response without save flag."
         )
@@ -1349,10 +1343,7 @@ class TestExploreAutoSave:
         """When get_tree_root_id returns empty, uses current_instance_id as context key."""
         mock_manager_for_save._instance_repository.get_tree_root_id = MagicMock(return_value="")
 
-        explorer_response = (
-            "## Answer\nData to save.\n\n"
-            "## Did you query RAG: yes"
-        )
+        explorer_response = "## Answer\nData to save."
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
@@ -1373,10 +1364,7 @@ class TestExploreAutoSave:
     @pytest.mark.asyncio
     async def test_explore_save_failure_is_nonblocking(self, mock_manager_for_save, tmp_path):
         """If _save_explorer_result raises, explore still returns successfully."""
-        explorer_response = (
-            "## Answer\nImportant information.\n\n"
-            "## Did you query RAG: yes"
-        )
+        explorer_response = "## Answer\nImportant information."
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
@@ -1452,8 +1440,7 @@ JWT tokens for authentication.
 
 ## Concise:
 The authentication system uses JWT tokens for user authentication with refresh tokens for security.
-
-## Did you query RAG: yes"""
+"""
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
@@ -1490,10 +1477,7 @@ The authentication system uses JWT tokens for user authentication.
 Full details here.
 """)
 
-        explorer_response = (
-            "## Answer\nThe database uses PostgreSQL.\n\n"
-            "## Did you query RAG: yes"
-        )
+        explorer_response = "## Answer\nThe database uses PostgreSQL."
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
@@ -1528,10 +1512,7 @@ Full details here.
 Some valid concise content about authentication.
 """)
 
-        explorer_response = (
-            "## Answer\nNew information to save.\n\n"
-            "## Did you query RAG: yes"
-        )
+        explorer_response = "## Answer\nNew information to save."
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
@@ -1813,7 +1794,9 @@ class TestExploreCheckpointIntegration:
     async def test_explore_checkpoint_rag_not_found_skips(
         self, mock_manager_with_checkpointer, tmp_path
     ):
-        """Checkpoint says no RAG → _save_explorer_result is NOT called."""
+        """Checkpoint says no RAG → _save_explorer_result is NOT called.
+        (Response text is irrelevant — rag_queried is sourced from the checkpoint.)
+        """
         # Checkpoint shows no RAG tool calls
         mock_manager_with_checkpointer._checkpointer.aget = AsyncMock(return_value={
             "channel_values": {
@@ -1823,10 +1806,7 @@ class TestExploreCheckpointIntegration:
             }
         })
 
-        # Heading says yes (deliberate mismatch) — checkpoint wins
-        explorer_response = (
-            "## Answer\nContent.\n\n## Did you query RAG: yes"
-        )
+        explorer_response = "## Answer\nContent."
 
         with patch(
             "daemon.tools.knowledge_tools.invoke_agent_and_wait",
@@ -1901,9 +1881,7 @@ class TestExploreCheckpointIntegration:
         if hasattr(mock_manager, "_checkpointer"):
             del mock_manager._checkpointer
 
-        explorer_response = (
-            "## Answer\nFound info.\n\n## Did you query RAG: yes"
-        )
+        explorer_response = "## Answer\nFound info."
 
         with patch(
             "daemon.tools.knowledge_tools.invoke_agent_and_wait",
