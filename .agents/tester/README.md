@@ -60,7 +60,18 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-06-01 explorer-rag-checkpoint-detection)
+## Test Results (Latest: 2026-06-02 explorer-rag-remove-heading)
+
+### Explorer RAG Heading Removal — Phase 2 (2026-06-02)
+- **Branch**: `feature/explorer-rag-remove-heading`
+- **Knowledge Tools**: 82/82 PASS (3 heading tests removed, checkpoint-only detection)
+- **Auto-Save + Registry**: 78/78 PASS (TestParseRagQueried removed, no regressions)
+- **Core Regression**: 662/662 PASS
+- **API Regression**: 209/209 PASS (8 skipped)
+- **Orphan Reference Check**: ✅ CLEAN (12 orphans found & fixed in commit `1464545`)
+- **ensure.md**: PASS (dev.sh stable 30s)
+- **Quick Fixes**: 1 (orphan test mock cleanup: commit `1464545`)
+- **Status**: ✅ READY
 
 ### Explorer RAG Checkpoint Detection (2026-06-01)
 - **Branch**: `feature/explorer-rag-checkpoint-detection`
