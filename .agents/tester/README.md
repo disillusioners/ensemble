@@ -60,7 +60,23 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-06-02 maintenance-cleanup-fix)
+## Test Results (Latest: 2026-06-03 phase1-database-migration)
+
+### Phase 1: SQLite → PostgreSQL Database Migration (2026-06-03)
+- **Branch**: `feature/database-migration` (commit `10e42c0` + test commit `200093e`)
+- **Existing Tests**: 2,185/2,185 PASS (0 failures, 27 pre-existing skips)
+- **New Feature Tests**: 50/50 PASS (5 new test files, 954 lines)
+  - `test_ensemble_config.py`: 16/16 — Config load/save/auto-detect/atomic-writes
+  - `test_engine_property.py`: 6/6 — Read-only property, MagicMock pattern
+  - `test_sqlite_guards.py`: 10/10 — factory.py + runner.py dialect guards
+  - `test_dialect_upsert.py`: 7/7 — Dialect-aware upsert helper
+  - `test_startup_integration.py`: 11/11 — Lifespan order, health endpoint
+- **Core Regression**: 662/662 PASS
+- **API Regression**: 209/217 PASS (8 skipped, 0 regressions)
+- **Job Queue**: 1179/1198 PASS (19 skipped, 0 regressions)
+- **ensure.md**: PASS (dev.sh stable 30s, `Loaded ensemble config: database=sqlite` confirmed)
+- **Quick Fixes**: 0 source code fixes needed
+- **Status**: ✅ READY
 
 ### Maintenance Cleanup Bug Fix (2026-06-02)
 - **Branch**: `feature/fix-maintenance-cleanup` (commits `34279f0`, `a32ca71`)

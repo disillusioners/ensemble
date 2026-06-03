@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 86 packs
-- Unit: 71 | Integration: 1 | Mock: 6 | E2E: 7
+- Total: 91 packs
+- Unit: 76 | Integration: 1 | Mock: 6 | E2E: 7
 
 ## Unit Test Packs
 
@@ -113,6 +113,14 @@
 | slack_blocks_unit_test | tests/test_slack_blocks.py | Slack Blocks Kit: markdown_to_blocks conversion, formatting, edge cases | 2 min | 2026-05-31 | ✅ PASS (23/23, feature/slack-source) |
 | slack_rate_limiter_unit_test | tests/test_slack_rate_limiter.py | Slack rate limiter: Tier 1-4, max_wait auto-increase, bucket system, concurrency | 2 min | 2026-05-31 | ✅ PASS (23/23, feature/slack-source) |
 | slack_thread_manager_unit_test | tests/test_slack_thread_manager.py | Slack thread manager: TTL/LRU, race conditions (TOCTOU), eviction, instance lifecycle | 2 min | 2026-05-31 | ✅ PASS (20/20, feature/slack-source) |
+
+### Phase 1 Database Migration Tests
+
+| ensemble_config_unit_test | tests/unit/test_ensemble_config.py | EnsembleConfig: load/save/auto-create, Postgres ENV auto-detection, atomic writes, schema validation, property accessors | 2 min | 2026-06-03 | ✅ PASS (16/16, feature/database-migration Phase 1) |
+| engine_property_unit_test | tests/unit/test_engine_property.py | InstanceManager.engine property: read-only, returns _engine, no setter, no deleter, MagicMock pattern | 2 min | 2026-06-03 | ✅ PASS (6/6, feature/database-migration Phase 1) |
+| sqlite_guards_unit_test | tests/unit/test_sqlite_guards.py | SQLite guards: factory.py sqlite_master skip, MigrationRunner skip on non-SQLite, SQLite runs normally | 2 min | 2026-06-03 | ✅ PASS (10/10, feature/database-migration Phase 1) |
+| dialect_upsert_unit_test | tests/unit/test_dialect_upsert.py | Dialect-aware upsert: SQLite/PostgreSQL insert helper, fallback to SQLite, end-to-end upsert | 2 min | 2026-06-03 | ✅ PASS (7/7, feature/database-migration Phase 1) |
+| startup_integration_unit_test | tests/unit/test_startup_integration.py | Startup integration: lifespan loading order, ensemble.json creation, health endpoint database fields | 2 min | 2026-06-03 | ✅ PASS (11/11, feature/database-migration Phase 1) |
 
 ---
 
