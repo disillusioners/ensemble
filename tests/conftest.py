@@ -249,12 +249,12 @@ for key, mock_mod in _mock_modules.items():
 def pytest_collection_modifyitems(items):
     """Only apply mocks for unit tests, not integration tests."""
     for item in items:
-        if "integration" not in item.fspath.strpath:
+        if "integration" not in item.fspath.strpath and "e2e" not in item.fspath.strpath:
             # Ensure mocks are applied for unit tests (always inject to override any real modules)
             for key in _mock_modules:
                 sys.modules[key] = _mock_modules[key]
         else:
-            # Restore real modules for integration tests
+            # Restore real modules for integration / e2e tests
             for key in _mock_modules:
                 if key in _original_modules:
                     sys.modules[key] = _original_modules[key]
