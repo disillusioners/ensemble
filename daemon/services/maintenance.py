@@ -5,16 +5,22 @@ This module provides:
 - CheckpointCleanupJob: The first registered job that cleans up orphaned checkpoint data
 
 Deletion Method Policy:
-- For whole-thread deletion: Use checkpointer.adelete_thread(thread_id).
-  This deletes ALL checkpoints + writes for the thread, protected by AsyncSqliteSaver's lock.
-- For partial checkpoint pruning (operation D): Use checkpointer.conn + checkpointer.lock
-  for direct SQL queries, then adelete_thread() is NOT suitable because we need to keep
-  some checkpoints (the latest N) and only delete the oldest ones.
+- All checkpoint database access goes through the CheckpointerAdapter interface
+  (see daemon.checkpoint_adapter). The adapter abstracts away the underlying
+  database technology (SQLite via AsyncSqliteSaver or PostgreSQL via
+  AsyncPostgresSaver).
+- For whole-thread deletion: use checkpointer.adelete_thread(thread_id).
+- For partial checkpoint pruning (operation D): use the adapter's
+  get_checkpoint_ids / delete_checkpoints_excluding / delete_writes_excluding.
+- For listing threads or finding excess groups, use list_thread_ids and
+  find_excess_checkpoint_groups respectively.
 
-Why checkpointer.conn + checkpointer.lock instead of aiosqlite.connect()?
-AsyncSqliteSaver already holds an open connection to the checkpoint DB. Opening a second
-connection bypasses its internal lock mechanism, risking corruption if operations interleave.
-Using checkpointer.conn (wrapped in checkpointer.lock) ensures thread-safe access.
+Why use the adapter instead of raw checkpointer.conn + checkpointer.lock?
+- AsyncSqliteSaver exposes .conn and .lock, but AsyncPostgresSaver does not.
+- Direct access binds the code to a single backend.
+- The adapter provides a uniform interface that works with both backends
+  while preserving the SQLite thread-safety contract (the SQLite adapter
+  still wraps its calls in saver.lock and uses saver.conn internally).
 
 Error Handling:
 - Each cleanup operation runs independently with its own try/except.
@@ -28,8 +34,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Coroutine
 
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
-
+from daemon.checkpoint_adapter import CheckpointerAdapter
 from daemon.config import PersistenceConfig
 from daemon.constants import (
     CHECKPOINT_MAX_PER_THREAD,
@@ -244,14 +249,16 @@ class CheckpointCleanupJob:
     - The job's execute() method catches all operation failures internally.
 
     Thread Safety:
-    - All database queries use checkpointer.conn wrapped in checkpointer.lock.
-    - This ensures thread-safe access to the same connection that AsyncSqliteSaver uses.
+    - All database access is delegated to the CheckpointerAdapter. The SQLite
+      implementation of the adapter wraps its operations in
+      AsyncSqliteSaver's lock and uses its existing connection, preserving
+      the same thread-safety contract as direct access.
     """
 
     def __init__(
         self,
         config: PersistenceConfig,
-        checkpointer: AsyncSqliteSaver,
+        checkpointer: CheckpointerAdapter,
         instance_repo: SQLModelInstanceRepository,
         on_instance_deleted: Callable[[str], None] | None = None,
     ):
@@ -259,9 +266,9 @@ class CheckpointCleanupJob:
 
         Args:
             config: PersistenceConfig with checkpoint_ttl_hours, max_instance_history.
-            checkpointer: AsyncSqliteSaver instance.
-                - Use checkpointer.adelete_thread() for whole-thread deletions (Ops A-C).
-                - Use checkpointer.conn + checkpointer.lock for queries (all ops).
+            checkpointer: A CheckpointerAdapter wrapping the underlying saver.
+                Use checkpointer.adelete_thread() for whole-thread deletions
+                (Ops A-C) and the partial-pruning methods for Op D.
             instance_repo: Instance repository for querying instance data.
             on_instance_deleted: Optional callback invoked after BOTH checkpoint
                 cleanup AND instance record deletion succeed for an instance.
@@ -303,18 +310,14 @@ class CheckpointCleanupJob:
         corresponding instance records in the instances DB.
 
         Deletion method: checkpointer.adelete_thread(thread_id)
-        Uses checkpointer.conn + lock for thread-safe query access.
+        Thread list is obtained via checkpointer.list_thread_ids().
         """
         try:
-            # Get all thread IDs from checkpoint database
-            # Use checkpointer's existing connection wrapped in its lock
-            # to ensure thread-safe access (avoiding a second connection)
-            async with self._checkpointer.lock:
-                cursor = await self._checkpointer.conn.execute(
-                    "SELECT DISTINCT thread_id FROM checkpoints"
-                )
-                rows = await cursor.fetchall()
-                checkpoint_threads = [row[0] for row in rows]
+            # Get all thread IDs from checkpoint database via the adapter.
+            # The SQLite adapter implementation wraps this call in
+            # AsyncSqliteSaver's lock and uses its existing connection,
+            # preserving thread-safe access to the same DB.
+            checkpoint_threads = await self._checkpointer.list_thread_ids()
 
             if not checkpoint_threads:
                 return
@@ -436,7 +439,11 @@ class CheckpointCleanupJob:
         Queries the checkpoint database to find threads with more than
         CHECKPOINT_MAX_PER_THREAD checkpoints, then deletes the oldest ones.
 
-        Uses checkpointer.conn + checkpointer.lock for thread-safe queries.
+        Uses checkpointer.find_excess_checkpoint_groups() to identify threads
+        that exceed the cap, and the partial-pruning helpers
+        (get_checkpoint_ids / delete_checkpoints_excluding /
+        delete_writes_excluding) to remove the oldest checkpoints while
+        keeping the most recent N.
 
         Schema:
         - checkpoints: (thread_id, checkpoint_ns, checkpoint_id, ...) PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
@@ -451,20 +458,11 @@ class CheckpointCleanupJob:
         try:
             max_per_thread = CHECKPOINT_MAX_PER_THREAD
 
-            # Find threads with excessive checkpoints
-            # Use checkpointer's connection wrapped in its lock for thread safety
-            async with self._checkpointer.lock:
-                # Step 1: Find (thread_id, checkpoint_ns) pairs with excess
-                cursor = await self._checkpointer.conn.execute(
-                    """
-                    SELECT thread_id, checkpoint_ns, COUNT(*) as cnt
-                    FROM checkpoints
-                    GROUP BY thread_id, checkpoint_ns
-                    HAVING cnt > ?
-                    """,
-                    (max_per_thread,),
-                )
-                excess_pairs = await cursor.fetchall()
+            # Find threads with excessive checkpoints via the adapter.
+            # The SQLite adapter wraps this in AsyncSqliteSaver's lock.
+            excess_pairs = await self._checkpointer.find_excess_checkpoint_groups(
+                max_per_thread
+            )
 
             if not excess_pairs:
                 logger.debug("No threads with excessive checkpoints found")
@@ -655,11 +653,14 @@ class CheckpointCleanupJob:
     ) -> int:
         """Prune checkpoints for a specific (thread_id, checkpoint_ns), keeping only the latest N.
 
-        Uses direct SQL to delete the oldest checkpoints, preserving the most recent
-        max_per_thread checkpoints. checkpoint_id is a UUID string where lexicographic
-        ordering = chronological ordering, so ORDER BY checkpoint_id DESC gives newest first.
+        Uses the CheckpointerAdapter to:
+        1. Find checkpoint_ids to KEEP (most recent N by lexicographic DESC).
+        2. Delete checkpoints NOT in keep list.
+        3. Delete corresponding writes NOT in keep list.
 
-        Uses checkpointer.conn + checkpointer.lock for thread-safe access.
+        checkpoint_id is a UUID string where lexicographic ordering equals
+        chronological ordering, so the adapter's "newest first" ordering gives
+        the most recent checkpoints.
 
         Args:
             thread_id: The thread ID to prune.
@@ -669,46 +670,23 @@ class CheckpointCleanupJob:
         Returns:
             Number of checkpoints deleted.
         """
-        async with self._checkpointer.lock:
-            # Step 1: Get checkpoint_ids to KEEP (most recent N by lexicographic DESC)
-            cursor = await self._checkpointer.conn.execute(
-                """
-                SELECT checkpoint_id FROM checkpoints
-                WHERE thread_id = ? AND checkpoint_ns = ?
-                ORDER BY checkpoint_id DESC
-                LIMIT ?
-                """,
-                (thread_id, checkpoint_ns, max_per_thread),
-            )
-            rows = await cursor.fetchall()
-            ids_to_keep = {row[0] for row in rows}
+        # Step 1: Get checkpoint_ids to KEEP (most recent N)
+        ids_to_keep_list = await self._checkpointer.get_checkpoint_ids(
+            thread_id, checkpoint_ns, max_per_thread
+        )
+        ids_to_keep = set(ids_to_keep_list)
 
-            if not ids_to_keep:
-                return 0
+        if not ids_to_keep:
+            return 0
 
-            # Step 2: Delete checkpoints NOT in keep list
-            placeholders = ",".join("?" * len(ids_to_keep))
-            cursor = await self._checkpointer.conn.execute(
-                f"""
-                DELETE FROM checkpoints
-                WHERE thread_id = ? AND checkpoint_ns = ?
-                AND checkpoint_id NOT IN ({placeholders})
-                """,
-                (thread_id, checkpoint_ns, *ids_to_keep),
-            )
-            await self._checkpointer.conn.commit()
-            checkpoint_rows = cursor.rowcount
+        # Step 2: Delete checkpoints NOT in keep list
+        checkpoint_rows = await self._checkpointer.delete_checkpoints_excluding(
+            thread_id, checkpoint_ns, ids_to_keep
+        )
 
-            # Step 3: Delete corresponding writes NOT in keep list
-            cursor = await self._checkpointer.conn.execute(
-                f"""
-                DELETE FROM writes
-                WHERE thread_id = ? AND checkpoint_ns = ?
-                AND checkpoint_id NOT IN ({placeholders})
-                """,
-                (thread_id, checkpoint_ns, *ids_to_keep),
-            )
-            await self._checkpointer.conn.commit()
-            write_rows = cursor.rowcount
+        # Step 3: Delete corresponding writes NOT in keep list
+        write_rows = await self._checkpointer.delete_writes_excluding(
+            thread_id, checkpoint_ns, ids_to_keep
+        )
 
-            return checkpoint_rows
+        return checkpoint_rows

@@ -370,17 +370,10 @@ class TestCheckpointCleanupJobOrphans:
             )
         )
 
-        # Mock checkpointer.conn and lock for Operation A
-        mock_lock = asyncio.Lock()
-        mock_conn = AsyncMock()
-
-        # Cursor returns checkpoint threads: thread-1, thread-2, thread-3
-        mock_cursor = AsyncMock()
-        mock_cursor.fetchall = AsyncMock(return_value=[("thread-1",), ("thread-2",), ("thread-3",)])
-        mock_conn.execute = AsyncMock(return_value=mock_cursor)
-
-        checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
+        # Mock adapter.list_thread_ids for Operation A
+        checkpointer.list_thread_ids = AsyncMock(
+            return_value=["thread-1", "thread-2", "thread-3"]
+        )
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -407,16 +400,10 @@ class TestCheckpointCleanupJobOrphans:
             )
         )
 
-        # Mock checkpointer.conn and lock
-        mock_lock = asyncio.Lock()
-        mock_conn = AsyncMock()
-
-        mock_cursor = AsyncMock()
-        mock_cursor.fetchall = AsyncMock(return_value=[("thread-1",), ("thread-2",)])
-        mock_conn.execute = AsyncMock(return_value=mock_cursor)
-
-        checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
+        # Mock adapter.list_thread_ids — all threads have matching instances
+        checkpointer.list_thread_ids = AsyncMock(
+            return_value=["thread-1", "thread-2"]
+        )
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -686,14 +673,9 @@ class TestCheckpointCleanupJobBackwardCompatibility:
             return_value={"deleted": True, "instance_id": "any", "agent_dir": "/test"}
         )
 
-        # Mock checkpointer.conn and lock for Operations A and D
-        mock_lock = asyncio.Lock()
-        mock_conn = AsyncMock()
-        mock_cursor = AsyncMock()
-        mock_cursor.fetchall = AsyncMock(return_value=[])
-        mock_conn.execute = AsyncMock(return_value=mock_cursor)
-        checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
+        # Mock adapter methods for Operations A and D — both return empty results
+        checkpointer.list_thread_ids = AsyncMock(return_value=[])
+        checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo, on_instance_deleted=None)
 
@@ -955,48 +937,19 @@ class TestCheckpointCleanupJobPerThreadPruning:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
-        # Mock checkpointer.conn and lock
-        mock_lock = asyncio.Lock()
-        mock_conn = AsyncMock()
-        checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
-
-        # Track execute calls to return appropriate cursors
-        execute_results = []
-
-        # First query result: threads with excess checkpoints
-        # Returns (thread_id, checkpoint_ns, count)
-        excess_cursor = AsyncMock()
-        excess_cursor.fetchall = AsyncMock(
-            return_value=[("thread-excess", "", 100)]  # thread_id, checkpoint_ns, cnt
+        # Mock the adapter methods invoked during Operation D
+        # Step 1: find_excess_checkpoint_groups returns one thread/namespace pair
+        checkpointer.find_excess_checkpoint_groups = AsyncMock(
+            return_value=[("thread-excess", "", 100)]
         )
-        execute_results.append(excess_cursor)
-
-        # Second query result: checkpoint IDs to keep for thread-excess
-        keep_cursor = AsyncMock()
-        keep_cursor.fetchall = AsyncMock(
-            return_value=[(f"keep-{i:032d}",) for i in range(50)]
+        # Step 2: get_checkpoint_ids returns 50 IDs to keep
+        checkpointer.get_checkpoint_ids = AsyncMock(
+            return_value=[f"keep-{i:032d}" for i in range(50)]
         )
-        execute_results.append(keep_cursor)
-
-        # Third query result: delete from checkpoints (returns rowcount)
-        delete_checkpoint_cursor = AsyncMock()
-        delete_checkpoint_cursor.rowcount = 50
-        execute_results.append(delete_checkpoint_cursor)
-
-        # Fourth query result: delete from writes (returns rowcount)
-        delete_writes_cursor = AsyncMock()
-        delete_writes_cursor.rowcount = 100
-        execute_results.append(delete_writes_cursor)
-
-        call_idx = [0]
-
-        async def mock_execute(sql, params=None):
-            cursor = execute_results[call_idx[0]]
-            call_idx[0] += 1
-            return cursor
-
-        mock_conn.execute = mock_execute
+        # Step 3: delete_checkpoints_excluding returns the rowcount
+        checkpointer.delete_checkpoints_excluding = AsyncMock(return_value=50)
+        # Step 4: delete_writes_excluding returns the rowcount
+        checkpointer.delete_writes_excluding = AsyncMock(return_value=100)
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -1005,8 +958,15 @@ class TestCheckpointCleanupJobPerThreadPruning:
 
         # Method returns None (no explicit return in production code)
         assert result is None
-        # Verify execute was called multiple times (find excess + 3 queries for pruning)
-        assert call_idx[0] >= 4  # At least 4 SQL operations
+        # Verify each adapter method was called once
+        checkpointer.find_excess_checkpoint_groups.assert_awaited_once_with(
+            CHECKPOINT_MAX_PER_THREAD
+        )
+        checkpointer.get_checkpoint_ids.assert_awaited_once_with(
+            "thread-excess", "", CHECKPOINT_MAX_PER_THREAD
+        )
+        checkpointer.delete_checkpoints_excluding.assert_awaited_once()
+        checkpointer.delete_writes_excluding.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_prune_no_excess_threads(self):
@@ -1015,16 +975,8 @@ class TestCheckpointCleanupJobPerThreadPruning:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
-        # Mock checkpointer.conn and lock
-        mock_lock = asyncio.Lock()
-        mock_conn = AsyncMock()
-        checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
-
-        # First query returns empty (no excess threads)
-        mock_cursor = AsyncMock()
-        mock_cursor.fetchall = AsyncMock(return_value=[])
-        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+        # find_excess_checkpoint_groups returns empty — no threads to prune
+        checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -1032,6 +984,10 @@ class TestCheckpointCleanupJobPerThreadPruning:
 
         # No deletions when no excess threads - method returns None
         assert result is None
+        # Pruning methods should not have been called
+        checkpointer.get_checkpoint_ids.assert_not_called()
+        checkpointer.delete_checkpoints_excluding.assert_not_called()
+        checkpointer.delete_writes_excluding.assert_not_called()
 
 
 class TestCheckpointCleanupJobErrorIsolation:
@@ -1048,14 +1004,9 @@ class TestCheckpointCleanupJobErrorIsolation:
         )
         instance_repo = MagicMock()
 
-        # Mock checkpointer.conn and lock for queries
-        mock_lock = asyncio.Lock()
-        mock_conn = AsyncMock()
-        mock_cursor = AsyncMock()
-        mock_cursor.fetchall = AsyncMock(return_value=[])
-        mock_conn.execute = AsyncMock(return_value=mock_cursor)
-        checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
+        # Mock adapter methods for Operations A and D — return empty so they no-op
+        checkpointer.list_thread_ids = AsyncMock(return_value=[])
+        checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -1076,9 +1027,10 @@ class TestCheckpointCleanupJobErrorIsolation:
         checkpointer.adelete_thread = AsyncMock(side_effect=lambda tid: deleted_threads.append(tid))
 
         # Operation A fails when querying checkpoint DB for orphaned threads
-        # (Operation B doesn't use conn.execute, so it won't be affected)
-        mock_conn = AsyncMock()
-        mock_conn.execute = AsyncMock(side_effect=RuntimeError("Checkpoint DB error"))
+        # (Operation B doesn't use the checkpoint DB for queries, so it won't be affected)
+        checkpointer.list_thread_ids = AsyncMock(
+            side_effect=RuntimeError("Checkpoint DB error")
+        )
 
         # Operation A fails before calling instance_repo.list, so we only need
         # instance_repo.list to return data for Operation B (expired terminal instances)
@@ -1093,9 +1045,6 @@ class TestCheckpointCleanupJobErrorIsolation:
         instance_repo.delete = MagicMock(
             return_value={"deleted": True, "instance_id": "expired-instance-123", "agent_dir": "/test"}
         )
-
-        checkpointer.conn = mock_conn
-        checkpointer.lock = asyncio.Lock()
 
         job = CheckpointCleanupJob(config, checkpointer, instance_repo)
 
@@ -1117,16 +1066,9 @@ class TestCheckpointCleanupJobExecute:
         checkpointer = AsyncMock()
         instance_repo = MagicMock()
 
-        # Mock checkpointer.conn and lock for all operations
-        mock_lock = asyncio.Lock()
-        mock_conn = AsyncMock()
-        checkpointer.conn = mock_conn
-        checkpointer.lock = mock_lock
-
-        # Return empty results for all queries (no orphans, no excess)
-        mock_cursor = AsyncMock()
-        mock_cursor.fetchall = AsyncMock(return_value=[])
-        mock_conn.execute = AsyncMock(return_value=mock_cursor)
+        # Mock adapter methods for all operations — return empty results
+        checkpointer.list_thread_ids = AsyncMock(return_value=[])
+        checkpointer.find_excess_checkpoint_groups = AsyncMock(return_value=[])
 
         # instance_repo returns empty list for all status queries
         instance_repo.list = MagicMock(return_value=([], 0))
@@ -1137,8 +1079,11 @@ class TestCheckpointCleanupJobExecute:
 
         # Verify adelete_thread was not called (no data to clean up)
         checkpointer.adelete_thread.assert_not_called()
-        # Verify SQL queries were executed (at least for Operations A and D)
-        assert mock_conn.execute.call_count >= 2
+        # Verify the adapter's query methods were called (Ops A and D)
+        checkpointer.list_thread_ids.assert_awaited_once()
+        checkpointer.find_excess_checkpoint_groups.assert_awaited_once_with(
+            CHECKPOINT_MAX_PER_THREAD
+        )
 
 
 # ==================== Integration-style Tests ====================

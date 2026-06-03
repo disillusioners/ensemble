@@ -26,7 +26,6 @@ from .main_loop_bridge import MainLoopBridge
 if TYPE_CHECKING:
     from ..config import Config
     from ..graph import CompiledStateGraph
-    from ..persistence import CheckpointSaver
     from ..repositories.instance.repository import SQLModelInstanceRepository
     from ..repositories.message_queue.repository import MessageQueueRepository
     from ..repositories.project.repository import SQLModelProjectRepository
@@ -245,9 +244,17 @@ class InstanceMessagingService:
         return self._manager._compactor
 
     @property
-    def _checkpointer(self) -> "CheckpointSaver | None":
-        """Access checkpointer through manager for test mockability."""
-        return self._manager._checkpointer
+    def _checkpointer(self) -> "Any | None":
+        """Access the underlying LangGraph checkpointer (saver) through manager.
+
+        Phase 2 migration: the manager now stores a ``CheckpointerAdapter``;
+        services that need the raw saver (``aget`` / ``alist``) reach it via
+        ``raw_saver``. ``maintenance.py`` uses the adapter interface directly.
+
+        Returns ``None`` if the checkpointer has not been initialized yet.
+        """
+        adapter = self._manager._checkpointer
+        return adapter.raw_saver if adapter is not None else None
 
     def _get_system_prompt_tokens(self, instance_id: str) -> int:
         """Get the cached system prompt token count for an instance's agent."""

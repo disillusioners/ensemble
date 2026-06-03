@@ -444,8 +444,7 @@ class InstanceManager:
         self.config = config
         self._ensemble_config = ensemble_config
         self.db_path = Path(config.persistence.db_path)
-        self._checkpointer = None  # Lazy init - call await manager.initialize() to set
-        self._checkpointer_db_path = Path(config.persistence.checkpointer_db_path)
+        self._checkpointer: Any = None  # CheckpointerAdapter — set by initialize()
         self._loop: asyncio.AbstractEventLoop | None = None  # Set during initialize()
         self.prompt_cache = PromptCache()
 
@@ -851,12 +850,15 @@ class InstanceManager:
 
     @property
     def checkpointer(self):
-        """Get the async checkpointer instance.
+        """Get the checkpointer adapter instance.
 
         The checkpointer is created lazily on first access and but it must be initialized explicitly via initialize().
 
         Returns:
-            AsyncSqliteSaver checkpointer.
+            ``CheckpointerAdapter`` wrapping either an ``AsyncSqliteSaver``
+            (SQLite backend) or an ``AsyncPostgresSaver`` (PostgreSQL backend).
+            Use ``.raw_saver`` to access the underlying LangGraph saver for
+            ``aget`` / ``aput`` / ``alist`` operations.
         """
         return self._checkpointer
 
@@ -870,17 +872,35 @@ class InstanceManager:
         return self._engine
 
     async def initialize(self) -> None:
-        """Initialize the async checkpointer.
-        
+        """Initialize the checkpointer adapter.
+
         Must be called after SessionManager construction, typically in the FastAPI
-        lifespan startup. This ensures the async checkpointer is created within
+        lifespan startup. This ensures the checkpointer is created within
         an async context.
-        
-        Note: The checkpointer uses a separate database file from the main
-        application database to avoid SQLite lock contention.
+
+        The backend is selected from ``self._ensemble_config``:
+
+        - ``is_postgres`` → builds a ``PostgresCheckpointerAdapter`` (lazy-imports
+          psycopg/asyncpg). See ``create_postgres_checkpointer``.
+        - ``is_sqlite`` (default) → builds a ``SqliteCheckpointerAdapter`` wrapping
+          an ``AsyncSqliteSaver`` at ``config.persistence.checkpointer_db_path``.
+
+        Note: The checkpointer uses a separate database connection from the
+        main application database to avoid SQLite lock contention. For
+        PostgreSQL, the ``instances.db`` and ``checkpoints.db`` live in the
+        same PostgreSQL server but are managed by independent connections.
         """
         self._loop = asyncio.get_running_loop()
-        self._checkpointer = await get_checkpointer(self._checkpointer_db_path)
+        # ``get_checkpointer`` dispatches on ensemble_config.is_postgres and
+        # returns the appropriate ``CheckpointerAdapter``. ``self._ensemble_config``
+        # is guaranteed to be set by the lifespan (api.py) before ``initialize()``
+        # is called, but fall back to a default SQLite config for safety so
+        # tests calling ``manager.initialize()`` directly still work.
+        if self._ensemble_config is not None:
+            self._checkpointer = await get_checkpointer(self._ensemble_config)
+        else:
+            from daemon.ensemble_config import EnsembleConfig
+            self._checkpointer = await get_checkpointer(EnsembleConfig())
         # NEW: Set event loop for CompletionRegistry (thread-safe notification)
         self._completion_registry.set_event_loop(self._loop)
         # NEW: Schedule periodic stale cleanup (every 10 minutes)
@@ -913,7 +933,16 @@ class InstanceManager:
         )
         await self._maintenance_service.start()
 
-        logger.info(f"SessionManager initialized with async checkpointer at {self._checkpointer_db_path}")
+        if self._ensemble_config is not None and self._ensemble_config.is_postgres:
+            pg = self._ensemble_config.postgres
+            logger.info(
+                f"SessionManager initialized with PostgreSQL checkpointer "
+                f"({pg.host}:{pg.port}/{pg.db})"
+            )
+        else:
+            logger.info(
+                "SessionManager initialized with async checkpointer"
+            )
 
     async def _cleanup_stale_completions(self) -> None:
         """Background task to periodically clean stale CompletionRegistry entries."""
@@ -1773,16 +1802,16 @@ class InstanceManager:
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.
-        
+
         Args:
             instance_id: The instance ID to check.
-            
+
         Returns:
             True if checkpoint exists, False otherwise.
         """
         try:
             config = {"configurable": {"thread_id": instance_id}}
-            state = await self.checkpointer.aget(config)
+            state = await self.checkpointer.raw_saver.aget(config)
             result = state is not None
             channel_values = state.get("channel_values", {}) if state else {}
             msg_count = len(channel_values.get("messages", []))
@@ -1794,16 +1823,16 @@ class InstanceManager:
 
     async def _get_message_count(self, instance_id: str) -> int:
         """Get the number of messages in the instance's checkpoint/state.
-        
+
         Args:
             instance_id: The instance ID to check.
-            
+
         Returns:
             Number of messages in the current state.
         """
         try:
             config = {"configurable": {"thread_id": instance_id}}
-            state = await self.checkpointer.aget(config)
+            state = await self.checkpointer.raw_saver.aget(config)
             if state:
                 channel_values = state.get("channel_values", {})
                 messages = channel_values.get("messages", [])
@@ -2330,6 +2359,35 @@ class InstanceManager:
         if hasattr(self, '_engine') and self._engine:
             self._engine.dispose()
             logger.info("Database engine disposed")
+
+    async def close_checkpointer(self) -> None:
+        """Close the checkpointer adapter and release its underlying connections.
+
+        Safe to call when ``self._checkpointer`` is ``None`` (e.g. the
+        manager was constructed but ``initialize()`` was never awaited, or
+        initialization failed). Delegates the close to the adapter's
+        ``close()`` method, which is implemented for both SQLite and
+        PostgreSQL backends.
+
+        Idempotent: subsequent calls are no-ops because the adapter
+        implementations are themselves defensive against missing conn
+        attributes after first close.
+
+        The checkpointer is closed *after* the maintenance service has
+        stopped, so the in-flight checkpoint cleanup job is not
+        interrupted while it is reading or deleting from the checkpoint
+        database.
+        """
+        if not getattr(self, '_checkpointer', None):
+            return
+        try:
+            await self._checkpointer.close()
+            logger.info("Checkpointer adapter closed")
+        except Exception as e:
+            # Don't let close errors derail the rest of shutdown — the
+            # underlying connections will be released by the interpreter
+            # exit regardless.
+            logger.warning(f"Error closing checkpointer adapter: {e}")
     
     async def shutdown(self, grace_period: float = 10.0) -> None:
         """Gracefully shutdown all manager components in order.
@@ -2341,8 +2399,11 @@ class InstanceManager:
         4. Wait for in-flight processing to finish (grace period)
         5. Shutdown worker pool
         6. Shutdown event bus
-        7. Shutdown MCP service (close all connections)
-        8. Clean up resources (dispose database engine)
+        7. Shutdown maintenance service (stops the checkpoint cleanup job)
+        8. Close the checkpointer adapter (SQLite/PostgreSQL connections)
+        9. Drain MCP warm-up pool
+        10. Shutdown MCP service (close all connections)
+        11. Clean up resources (dispose database engine)
         
         Each step is wrapped in its own try/except so failures don't skip subsequent steps.
         
@@ -2377,6 +2438,7 @@ class InstanceManager:
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
             ("shutdown_maintenance_service", self._maintenance_service.stop() if self._maintenance_service else asyncio.sleep(0)),
+            ("close_checkpointer", self.close_checkpointer()),
             ("drain_mcp_pool", self._drain_warmup_pool()),
             ("shutdown_mcp_service", self._mcp_service.close_all_connections()),
         ]

@@ -20,7 +20,6 @@ from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
     from ..config import Config
-    from ..persistence import CheckpointSaver
     from ..repositories.instance.repository import SQLModelInstanceRepository
     from .event_publisher import EventPublisherService
     from .error_reporting import ErrorReportingService
@@ -64,9 +63,18 @@ class ChildReportsService:
         return self._manager._instance_repository
 
     @property
-    def _checkpointer(self) -> "CheckpointSaver | None":
-        """Access checkpointer through manager for test mockability."""
-        return self._manager._checkpointer
+    def _checkpointer(self) -> "Any | None":
+        """Access the underlying LangGraph checkpointer (saver) through manager.
+
+        Phase 2 migration: the manager now stores a ``CheckpointerAdapter``;
+        services that need the raw saver (passed to ``get_instance_messages``)
+        reach it via ``raw_saver``. ``maintenance.py`` uses the adapter
+        interface directly.
+
+        Returns ``None`` if the checkpointer has not been initialized yet.
+        """
+        adapter = self._manager._checkpointer
+        return adapter.raw_saver if adapter is not None else None
 
     def _trigger_title_generation(self, instance_id: str, completed_message_id: str) -> None:
         """Trigger title generation for an instance after message completion.

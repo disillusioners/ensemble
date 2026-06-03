@@ -24,7 +24,6 @@ from .project_normalizer import normalize_project_id
 if TYPE_CHECKING:
     from ..config import Config
     from ..metadata import AgentMetadata
-    from ..persistence import CheckpointSaver
     from ..repositories.instance.repository import SQLModelInstanceRepository
     from ..repositories.project.repository import SQLModelProjectRepository
     from .job_queue_service import JobQueueService
@@ -114,9 +113,17 @@ class InstanceLifecycleService:
         return self._manager._compactor
 
     @property
-    def _checkpointer(self) -> "CheckpointSaver | None":
-        """Access checkpointer through manager for test mockability."""
-        return self._manager._checkpointer
+    def _checkpointer(self) -> "Any | None":
+        """Access the underlying LangGraph checkpointer (saver) through manager.
+
+        Phase 2 migration: the manager now stores a ``CheckpointerAdapter``;
+        services that need the raw saver (passed to ``build_instance_graph``
+        as ``checkpointer=...``) reach it via ``raw_saver``.
+
+        Returns ``None`` if the checkpointer has not been initialized yet.
+        """
+        adapter = self._manager._checkpointer
+        return adapter.raw_saver if adapter is not None else None
 
     def _get_mcp_tool_names(
         self,

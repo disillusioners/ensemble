@@ -119,6 +119,7 @@ def _import_daemon_modules():
         identify_boundary_groups,
     )
     from daemon.config import CompactionConfig as CompactionConfigModel
+    from daemon.ensemble_config import EnsembleConfig
     from daemon.graph import SessionState, build_session_graph
     from daemon.loader import estimate_messages_tokens
     from daemon.persistence import get_checkpointer
@@ -128,6 +129,7 @@ def _import_daemon_modules():
         "ContextCompactor": ContextCompactor,
         "identify_boundary_groups": identify_boundary_groups,
         "CompactionConfigModel": CompactionConfigModel,
+        "EnsembleConfig": EnsembleConfig,
         "SessionState": SessionState,
         "build_session_graph": build_session_graph,
         "estimate_messages_tokens": estimate_messages_tokens,
@@ -601,6 +603,7 @@ async def test_crash_recovery_after_compaction():
     CompactionContext = daemon["CompactionContext"]
     estimate_messages_tokens = daemon["estimate_messages_tokens"]
     get_checkpointer = daemon["get_checkpointer"]
+    EnsembleConfig = daemon["EnsembleConfig"]
 
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
         db_path = tmp.name
@@ -609,8 +612,21 @@ async def test_crash_recovery_after_compaction():
         session_id = "test-crash-recovery"
         config = {"configurable": {"thread_id": session_id}}
 
-        # ---- Phase 1: Build state and compact ----
-        checkpointer1 = await get_checkpointer(db_path)
+        # Phase 1: Build state and compact.
+        # Phase 2 of the SQLite→PostgreSQL migration moved get_checkpointer to a
+        # config-aware dispatcher that returns a CheckpointerAdapter. Tests that
+        # wire the saver directly into build_session_graph use ``raw_saver``.
+        ensemble_config = EnsembleConfig(
+            database="sqlite",
+            sqlite={
+                "checkpoints_db": db_path,
+                # instances_db isn't used by this test, but EnsembleConfig
+                # requires both fields to be set; point to a sibling temp path.
+                "instances_db": db_path,
+            },
+        )
+        adapter1 = await get_checkpointer(ensemble_config)
+        checkpointer1 = adapter1.raw_saver
         await checkpointer1.setup()
 
         # Build message history
@@ -709,7 +725,10 @@ async def test_crash_recovery_after_compaction():
         await checkpointer1.conn.close()
 
         # ---- Phase 2: Recover from same DB file ----
-        checkpointer2 = await get_checkpointer(db_path)
+        # Re-open via the same EnsembleConfig; the adapter returns a fresh
+        # AsyncSqliteSaver bound to the same on-disk DB file.
+        adapter2 = await get_checkpointer(ensemble_config)
+        checkpointer2 = adapter2.raw_saver
         await checkpointer2.setup()
 
         with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
