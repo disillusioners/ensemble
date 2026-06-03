@@ -165,27 +165,36 @@ class MigrationWorker:
     async def start(self) -> None:
         """Start the migration.
 
-        Preconditions are validated **before** the lock is acquired so
-        that an obviously invalid request (wrong DB, missing env) gets
-        a synchronous error rather than transitioning to FAILED state.
+        The lock is acquired **before** any state checks so that two
+        concurrent ``start()`` callers cannot both pass precondition
+        validation before either acquires the lock (TOCTOU race). All
+        checks happen *inside* the critical section, guaranteeing
+        exclusive observation of ``_progress.status`` and of the
+        ``is_migration_available()`` result.
 
         Raises:
             RuntimeError: If a migration is already running (caller
                 should return HTTP 409).
             ValueError: If preconditions are not met (not SQLite,
-                PG env not set, etc.) — caller should return 400/422.
+                PG env not set, already completed, etc.) — caller
+                should return 400/422.
         """
-        if self._lock.locked():
-            raise RuntimeError("Migration is already running")
-
-        # Validate preconditions before taking the lock so callers get
-        # a synchronous error for an obviously invalid request.
-        availability = self.is_migration_available()
-        if not availability["can_migrate"]:
-            reasons = "; ".join(availability["reasons"])
-            raise ValueError(f"Migration prerequisites not met: {reasons}")
-
         async with self._lock:
+            # State check FIRST (inside the lock) so we cannot race
+            # with another caller that has already entered the
+            # critical section and is mid-migration.
+            if self._progress.status != MigrationState.IDLE:
+                raise RuntimeError("Migration is already running")
+
+            # Precondition check also inside the lock — is_migration_available
+            # reads ``_progress.status`` and config, both of which must
+            # be observed exclusively with the subsequent state mutation
+            # in ``_run_migration``.
+            availability = self.is_migration_available()
+            if not availability["can_migrate"]:
+                reasons = "; ".join(availability["reasons"])
+                raise ValueError(f"Migration prerequisites not met: {reasons}")
+
             try:
                 await self._run_migration()
             finally:

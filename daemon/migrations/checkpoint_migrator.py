@@ -308,6 +308,31 @@ class CheckpointMigrator:
         # an empty dict would silently drop non-primitive values.
         new_versions = checkpoint_tuple.checkpoint.get("channel_versions", {})
 
+        # Defensive check: an empty ``channel_versions`` combined with
+        # non-primitive channel data is a data-loss signal — PG's
+        # ``aput()`` will write the row but skip blob storage for
+        # any new/changed non-primitive channel value. We still
+        # attempt the migration (the row itself is valuable) but
+        # surface a warning so the operator can investigate the
+        # source checkpoint before this becomes silent corruption.
+        if not new_versions:
+            channel_values = checkpoint_tuple.checkpoint.get(
+                "channel_values", {}
+            )
+            has_non_primitive = any(
+                not isinstance(v, (str, int, float, bool, type(None)))
+                for v in channel_values.values()
+            )
+            if has_non_primitive or checkpoint_tuple.pending_writes:
+                checkpoint_id = configurable.get("checkpoint_id", "unknown")
+                self._log(
+                    "warning",
+                    f"Checkpoint {checkpoint_id} in thread {thread_id} has "
+                    f"empty channel_versions but contains non-primitive "
+                    f"channel data; non-primitive values may be silently "
+                    f"dropped during migration",
+                )
+
         # Write the checkpoint. aput() uses INSERT ... ON CONFLICT DO UPDATE,
         # so this is idempotent -- safe to re-run migration.
         saved_config = await pg_checkpointer.aput(

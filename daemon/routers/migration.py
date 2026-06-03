@@ -247,6 +247,12 @@ async def migration_events(
                     "event": event_type,
                     "data": json.dumps(event_data),
                 }
+                # Break on terminal events so the loop exits and the
+                # ``finally`` block unsubscribes the queue. Without
+                # this, completed/error/cancelled migrations would
+                # leak the subscriber queue and its pending coroutine.
+                if event_type in ("complete", "error", "cancelled"):
+                    break
         finally:
             worker.unsubscribe(queue)
 
