@@ -213,10 +213,12 @@ export class MigrationService {
 
     eventSource.onerror = () => {
       this.ngZone.run(() => {
-        console.error('[Migration SSE] Connection error');
+        if (this.eventSource) {
+          console.error('[Migration SSE] Connection error');
+          this.eventSource?.close();
+          this.eventSource = null;
+        }
         this.isConnected.set(false);
-        this.eventSource?.close();
-        this.eventSource = null;
       });
     };
   }
@@ -290,7 +292,7 @@ export class MigrationService {
       current_phase: null,
       current_table: null,
       tables_completed: (data['tables_migrated'] as number) ?? current?.tables_completed ?? 0,
-      tables_total: (data['tables_migrated'] as number) ?? current?.tables_total ?? 0,
+      tables_total: current?.tables_total ?? (data['tables_migrated'] as number) ?? 0,
       checkpoints_migrated:
         (data['checkpoints_migrated'] as number) ?? current?.checkpoints_migrated ?? 0,
       error: null,
@@ -335,6 +337,9 @@ export class MigrationService {
 
   private handleTerminalEvent(): void {
     // Server closes the SSE stream after complete/error/cancelled. Clean up.
+    // Set eventSource to null BEFORE isConnected.set(false) so that the native
+    // onerror callback (which fires when we close the connection) can detect
+    // this is a clean shutdown and avoid logging a misleading error.
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;

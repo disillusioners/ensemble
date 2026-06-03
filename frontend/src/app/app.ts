@@ -43,9 +43,9 @@ export class App implements OnInit {
   readonly isStreaming = this.sseService.isStreaming;
   readonly migrationAvailable = signal(false);
 
-  readonly settingsMenuItems: SettingsMenuItem[] = [
+  readonly settingsMenuItems = signal<SettingsMenuItem[]>([
     { label: 'MCP Servers', icon: 'settings_input_hdmi', route: '/mcp-servers' }
-  ];
+  ]);
 
   ngOnInit(): void {
     this.loadHealth();
@@ -68,11 +68,10 @@ export class App implements OnInit {
       next: (data) => {
         if (data.migration_available) {
           this.migrationAvailable.set(true);
-          this.settingsMenuItems.push({
-            label: 'Database Migration',
-            icon: 'storage',
-            route: '/migration'
-          });
+          this.settingsMenuItems.update(items => [
+            ...items,
+            { label: 'Database Migration', icon: 'storage', route: '/migration' }
+          ]);
         }
       },
       error: () => {
