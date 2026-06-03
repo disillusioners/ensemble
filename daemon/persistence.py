@@ -20,6 +20,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 import aiosqlite
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -86,7 +87,9 @@ def _build_pg_connection_string(config: EnsembleConfig) -> str:
     user = os.environ.get("POSTGRES_USER", pg.user)
     password = os.environ.get("POSTGRES_PASSWORD", pg.password)
 
-    return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+    # URL-encode credentials so that special characters in user/password
+    # (e.g. ``@``, ``:``, ``/``, ``?``, ``#``) cannot break the DSN.
+    return f"postgresql://{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{db}"
 
 
 async def create_postgres_checkpointer(config: EnsembleConfig) -> CheckpointerAdapter:

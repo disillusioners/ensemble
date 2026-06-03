@@ -322,14 +322,18 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
     async def delete_writes_excluding(
         self, thread_id: str, checkpoint_ns: str, keep_ids: set[str]
     ) -> int:
-        """Delete writes NOT in keep_ids. Returns deleted count."""
+        """Delete writes NOT in keep_ids. Returns deleted count.
+
+        NOTE: The PG LangGraph saver stores writes in the ``checkpoint_writes``
+        table (NOT ``writes`` — that name is the SQLite table name).
+        """
         if not keep_ids:
             return 0
 
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
-                DELETE FROM writes
+                DELETE FROM checkpoint_writes
                 WHERE thread_id = $1 AND checkpoint_ns = $2
                 AND NOT (checkpoint_id = ANY($3::text[]))
                 """,
@@ -346,19 +350,24 @@ class PostgresCheckpointerAdapter(CheckpointerAdapter):
     async def adelete_thread(self, thread_id: str) -> None:
         """Delete all checkpoint data for a thread.
 
-        Deletes from both checkpoints and writes tables, since
-        AsyncPostgresSaver may not have an adelete_thread method.
+        Deletes from all three PG tables used by ``AsyncPostgresSaver``:
+        - ``checkpoints``  — checkpoint JSONB
+        - ``checkpoint_writes`` — pending writes (NOT ``writes`` — that's SQLite)
+        - ``checkpoint_blobs`` — non-primitive channel values (no SQLite equivalent)
 
-        Both DELETE statements run inside a single transaction so a failure
-        on the second statement cannot leave the thread in a partially
-        deleted state. Writes are deleted BEFORE checkpoints because
-        ``writes`` references ``checkpoints`` — deleting checkpoints first
-        would risk FK violations on the writes table.
+        All DELETE statements run inside a single transaction so a failure
+        on any statement cannot leave the thread in a partially deleted
+        state. Order: ``checkpoint_writes`` and ``checkpoint_blobs`` first
+        (no FK to ``checkpoints``), then ``checkpoints`` last.
         """
         async with self._pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
-                    "DELETE FROM writes WHERE thread_id = $1",
+                    "DELETE FROM checkpoint_writes WHERE thread_id = $1",
+                    thread_id,
+                )
+                await conn.execute(
+                    "DELETE FROM checkpoint_blobs WHERE thread_id = $1",
                     thread_id,
                 )
                 await conn.execute(
