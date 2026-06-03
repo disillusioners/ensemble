@@ -1,14 +1,20 @@
 # Test Packs
 
 ## Summary
-- Total: 91 packs
-- Unit: 76 | Integration: 1 | Mock: 6 | E2E: 7
+- Total: 96 packs
+- Unit: 81 | Integration: 1 | Mock: 6 | E2E: 7 | Manual: 1
 
 ## Unit Test Packs
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-02 | ✅ PASS (662/662, feature/explorer-rag-remove-heading Phase 2, 0 regressions) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-04 | ⚠️ 30 FAIL (Phase 3 write-pause guard fixture issue, NOT source bug — 662/662 pass in isolation) |
+| write_pause_guard_unit_test | tests/unit/test_write_pause_guard.py | WritePauseGuard: state machine, drain event, pause/resume, RuntimeError, sync/async interop, WriteGuardSession | 2 min | 2026-06-04 | ✅ PASS (27/27, Phase 3, 0 failures) |
+| data_migrator_unit_test | tests/unit/test_data_migrator.py | TableMigrator: FK-safe ordering, ON CONFLICT idempotent, batch processing, cancel, validate, _table_exists | 2 min | 2026-06-04 | ✅ PASS (30/30, Phase 3, 0 failures) |
+| checkpoint_migrator_unit_test | tests/unit/test_checkpoint_migrator.py | CheckpointMigrator: alist→aput, channel_versions warning, progress, cancel, single failure handling | 2 min | 2026-06-04 | ✅ PASS (23/23, Phase 3, 0 failures) |
+| migration_worker_unit_test | tests/unit/test_migration_worker.py | MigrationWorker: 5-state machine, asyncio.Lock, config update, writes paused/resumed, SSE, cancel | 2 min | 2026-06-04 | ✅ PASS (40/40, Phase 3, 0 failures in isolation) |
+| migration_api_unit_test | tests/unit/test_migration_api.py | Migration API: 5 endpoints (availability/start/status/cancel/events), status codes, SSE streaming | 2 min | 2026-06-04 | ✅ PASS (29/29, Phase 3, 0 failures) |
+| migration_e2e_test | tests/e2e/test_migration_e2e.py | Real SQLite→PostgreSQL E2E migration against ensemble_test: full migration, availability, idempotency | 5 min | 2026-06-04 | ✅ PASS (3/3, Phase 3, real PG migration verified) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-24 | ✅ PASS (137 passed, system_default_project no regression) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
 | api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-06-02 | ✅ PASS (209/217, 8 skipped, feature/fix-maintenance-cleanup, 0 regressions) |
@@ -121,6 +127,14 @@
 | sqlite_guards_unit_test | tests/unit/test_sqlite_guards.py | SQLite guards: factory.py sqlite_master skip, MigrationRunner skip on non-SQLite, SQLite runs normally | 2 min | 2026-06-03 | ✅ PASS (10/10, feature/database-migration Phase 1) |
 | dialect_upsert_unit_test | tests/unit/test_dialect_upsert.py | Dialect-aware upsert: SQLite/PostgreSQL insert helper, fallback to SQLite, end-to-end upsert | 2 min | 2026-06-03 | ✅ PASS (7/7, feature/database-migration Phase 1) |
 | startup_integration_unit_test | tests/unit/test_startup_integration.py | Startup integration: lifespan loading order, ensemble.json creation, health endpoint database fields | 2 min | 2026-06-03 | ✅ PASS (11/11, feature/database-migration Phase 1) |
+
+### Phase 2 Database Migration Tests
+
+| maintenance_adapter_test | tests/test_maintenance.py | Maintenance refactor: all 4 operations use CheckpointerAdapter, orphan cleanup, checkpoint pruning, error isolation | 2 min | 2026-06-03 | ✅ PASS (46/46, feature/database-migration Phase 2, 0 regressions) |
+| persistence_adapter_test | tests/test_persistence.py | Persistence adapter: get_checkpointer dispatch, SQLite adapter, PG adapter, instance messages | 2 min | 2026-06-03 | ✅ PASS (15/15, feature/database-migration Phase 2, 3 bugs fixed in 8e4d5f6) |
+| pg_roundtrip_manual_test | tests/manual_test_pg_roundtrip.py | PG checkpoint round-trip: write, read, adelete_thread (3 tables), URL encoding, live ensemble_test | 2 min | 2026-06-03 | ✅ PASS (6/6 checks, live PG, 3 bugs found & fixed) |
+| pg_startup_manual_test | tests/manual_test_pg_startup.py | PG startup integration: env config dispatch, PostgresCheckpointerAdapter, asyncpg pool queries | 2 min | 2026-06-03 | ✅ PASS (real asyncpg queries against ensemble_test) |
+| sqlite_startup_manual_test | tests/manual_test_sqlite_startup.py | SQLite startup integration: default path, SqliteCheckpointerAdapter, write/read/delete | 2 min | 2026-06-03 | ✅ PASS (default SQLite path verified) |
 
 ---
 

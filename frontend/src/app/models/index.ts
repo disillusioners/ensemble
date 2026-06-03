@@ -307,3 +307,47 @@ export interface BuiltinServerConfigure {
   template_name: string;
   values: Record<string, unknown>;
 }
+
+// Migration types (SQLite → PostgreSQL)
+
+export type MigrationStatus = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
+export type MigrationDatabase = 'sqlite' | 'postgres';
+
+export interface MigrationAvailability {
+  migration_available: boolean;
+  current_database: MigrationDatabase;
+  postgres_configured: boolean;
+  can_start: boolean;
+}
+
+export interface MigrationProgress {
+  status: MigrationStatus;
+  current_phase: string | null;
+  current_table: string | null;
+  tables_completed: number;
+  tables_total: number;
+  checkpoints_migrated: number;
+  error: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  requires_restart: boolean;
+}
+
+export interface MigrationStartResponse {
+  migration_id: string;
+  status: MigrationStatus;
+  message: string;
+}
+
+export interface MigrationCancelResponse {
+  status: MigrationStatus;
+  message: string;
+}
+
+export type MigrationLogLevel = 'info' | 'warning' | 'error' | 'debug';
+
+export interface MigrationLogEntry {
+  level: MigrationLogLevel;
+  message: string;
+  timestamp: string;
+}

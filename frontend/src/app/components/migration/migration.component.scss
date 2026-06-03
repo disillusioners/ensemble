@@ -1,0 +1,566 @@
+// Color variables (dark theme)
+$bg-primary: #0f172a;
+$bg-card: #1e293b;
+$bg-card-hover: #334155;
+$border-color: #334155;
+$text-primary: #f1f5f9;
+$text-secondary: #94a3b8;
+$text-muted: #64748b;
+
+// Accent colors
+$accent-cyan: #10a7f7;
+$accent-emerald: #10b981;
+$accent-rose: #f43f5e;
+$accent-amber: #f59e0b;
+$accent-blue: #3b82f6;
+$accent-violet: #8b5cf6;
+
+:host {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  background: $bg-primary;
+}
+
+.migration-container {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  padding: 2rem 1.5rem;
+  overflow-y: auto;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.migration-card {
+  width: 100%;
+  max-width: 820px;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+// ── Card header ─────────────────────────────────────────────────────────
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.header-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.card-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: $text-primary;
+  margin: 0 0 0.25rem;
+}
+
+.card-subtitle {
+  font-size: 0.875rem;
+  color: $text-secondary;
+  margin: 0;
+}
+
+.connection-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+
+  &.connected {
+    background: rgba($accent-emerald, 0.15);
+    color: $accent-emerald;
+  }
+
+  &.connecting {
+    background: rgba($accent-amber, 0.15);
+    color: $accent-amber;
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+// ── State cards (info / error / success) ───────────────────────────────
+.state-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.25rem;
+  border-radius: 0.75rem;
+  border: 1px solid $border-color;
+  background: $bg-card;
+}
+
+.state-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+
+  mat-icon {
+    font-size: 28px;
+    width: 28px;
+    height: 28px;
+  }
+}
+
+.state-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.state-title {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 0 0 0.375rem;
+  color: $text-primary;
+}
+
+.state-message {
+  font-size: 0.875rem;
+  color: $text-secondary;
+  margin: 0 0 0.75rem;
+  line-height: 1.5;
+
+  code {
+    background: rgba(0, 0, 0, 0.3);
+    padding: 0.0625rem 0.375rem;
+    border-radius: 0.25rem;
+    font-size: 0.8125rem;
+    color: $accent-cyan;
+  }
+}
+
+.info-state {
+  .state-icon { color: $accent-blue; }
+}
+
+.error-state {
+  border-color: rgba($accent-rose, 0.4);
+  background: rgba($accent-rose, 0.08);
+
+  .state-icon { color: $accent-rose; }
+}
+
+.success-state {
+  border-color: rgba($accent-emerald, 0.4);
+  background: rgba($accent-emerald, 0.08);
+
+  .state-icon { color: $accent-emerald; }
+}
+
+// ── Meta grid (shown in info state) ────────────────────────────────────
+.meta-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0;
+}
+
+.meta-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8125rem;
+
+  dt {
+    color: $text-muted;
+    font-weight: 500;
+    min-width: 160px;
+  }
+
+  dd {
+    margin: 0;
+    color: $text-primary;
+  }
+}
+
+// ── Database badges ────────────────────────────────────────────────────
+.db-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.375rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+
+  &.sqlite {
+    background: rgba($accent-blue, 0.15);
+    color: $accent-blue;
+  }
+
+  &.postgres {
+    background: rgba($accent-cyan, 0.15);
+    color: $accent-cyan;
+  }
+
+  &.ok {
+    background: rgba($accent-emerald, 0.15);
+    color: $accent-emerald;
+  }
+
+  &.no {
+    background: rgba($accent-rose, 0.15);
+    color: $accent-rose;
+  }
+}
+
+.db-arrow {
+  display: inline-flex;
+  align-items: center;
+  color: $text-muted;
+  margin-left: 0.25rem;
+
+  mat-icon {
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+  }
+}
+
+// ── Status strip ───────────────────────────────────────────────────────
+.status-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  padding: 1rem 1.25rem;
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 0.75rem;
+}
+
+.status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  min-width: 120px;
+}
+
+.status-label {
+  font-size: 0.6875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: $text-muted;
+}
+
+.status-value {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+}
+
+// ── Status badge ───────────────────────────────────────────────────────
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.625rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  text-transform: capitalize;
+
+  mat-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+
+  &.idle {
+    background: rgba($text-muted, 0.15);
+    color: $text-muted;
+  }
+
+  &.running {
+    background: rgba($accent-cyan, 0.15);
+    color: $accent-cyan;
+  }
+
+  &.completed {
+    background: rgba($accent-emerald, 0.15);
+    color: $accent-emerald;
+  }
+
+  &.failed {
+    background: rgba($accent-rose, 0.15);
+    color: $accent-rose;
+  }
+
+  &.cancelled {
+    background: rgba($accent-amber, 0.15);
+    color: $accent-amber;
+  }
+}
+
+// ── Action bar ─────────────────────────────────────────────────────────
+.action-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.start-btn {
+  background: $accent-cyan !important;
+  color: white !important;
+
+  mat-icon {
+    margin-right: 0.25rem;
+  }
+
+  &:hover:not(:disabled) {
+    background: rgba($accent-cyan, 0.85) !important;
+  }
+
+  &:disabled {
+    background: rgba($accent-cyan, 0.3) !important;
+    color: rgba(white, 0.5) !important;
+  }
+}
+
+.cancel-btn {
+  border-color: $border-color !important;
+  color: $text-secondary !important;
+
+  mat-icon {
+    margin-right: 0.25rem;
+  }
+
+  &:hover {
+    border-color: $accent-rose !important;
+    color: $accent-rose !important;
+  }
+}
+
+// ── Progress section ───────────────────────────────────────────────────
+.progress-section {
+  padding: 1rem 1.25rem;
+  background: $bg-card;
+  border: 1px solid $border-color;
+  border-radius: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.progress-phase {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: $text-primary;
+}
+
+.progress-count {
+  font-size: 0.8125rem;
+  color: $text-secondary;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+}
+
+.migration-progress {
+  border-radius: 4px;
+  overflow: hidden;
+
+  ::ng-deep .mdc-linear-progress__bar-inner {
+    border-color: $accent-cyan !important;
+  }
+
+  ::ng-deep .mdc-linear-progress__buffer-bar {
+    background-color: rgba($accent-cyan, 0.15) !important;
+  }
+}
+
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.75rem;
+  color: $text-muted;
+
+  .checkpoint-count {
+    font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  }
+}
+
+// ── Log section ────────────────────────────────────────────────────────
+.log-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.log-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: $text-muted;
+  margin: 0;
+}
+
+.log-viewer {
+  max-height: 360px;
+  overflow-y: auto;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid $border-color;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.log-entry {
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.0625rem 0;
+  word-break: break-word;
+
+  .log-time {
+    color: $text-muted;
+    flex-shrink: 0;
+  }
+
+  .log-level {
+    flex-shrink: 0;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.6875rem;
+    min-width: 56px;
+  }
+
+  .log-message {
+    flex: 1;
+    color: $text-primary;
+  }
+
+  &.log-info .log-level {
+    color: $accent-cyan;
+  }
+
+  &.log-warning .log-level {
+    color: $accent-amber;
+  }
+
+  &.log-warning .log-message {
+    color: $accent-amber;
+  }
+
+  &.log-error .log-level {
+    color: $accent-rose;
+  }
+
+  &.log-error .log-message {
+    color: $accent-rose;
+  }
+
+  &.log-debug .log-level {
+    color: $text-muted;
+  }
+}
+
+.log-tail {
+  height: 1px;
+}
+
+// ── Scrollbar ──────────────────────────────────────────────────────────
+.log-viewer::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.log-viewer::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.log-viewer::-webkit-scrollbar-thumb {
+  background: $border-color;
+  border-radius: 4px;
+
+  &:hover {
+    background: $text-muted;
+  }
+}
+
+.migration-container::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.migration-container::-webkit-scrollbar-track {
+  background: $bg-primary;
+}
+
+.migration-container::-webkit-scrollbar-thumb {
+  background: $border-color;
+  border-radius: 4px;
+
+  &:hover {
+    background: $text-muted;
+  }
+}
+
+// ── Snackbar overrides ─────────────────────────────────────────────────
+::ng-deep {
+  .info-snackbar {
+    --mdc-snackbar-container-color: #1e293b;
+    --mdc-snackbar-supporting-text-color: #f1f5f9;
+  }
+
+  .error-snackbar {
+    --mdc-snackbar-container-color: #f43f5e;
+    --mdc-snackbar-supporting-text-color: white;
+  }
+}
+
+// ── Responsive ─────────────────────────────────────────────────────────
+@media (max-width: 640px) {
+  .migration-container {
+    padding: 1rem 0.75rem;
+  }
+
+  .status-strip {
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .status-item {
+    min-width: 0;
+  }
+
+  .card-title {
+    font-size: 1.25rem;
+  }
+}
