@@ -56,10 +56,8 @@ from sqlalchemy import func, select
 from sqlmodel import Session, SQLModel
 
 from daemon.ensemble_config import EnsembleConfig
-from daemon.migrations.data_migrator import (
-    MigrationCancelledError,
-    TableMigrator,
-)
+from daemon.migrations import MigrationCancelledError
+from daemon.migrations.data_migrator import TableMigrator
 from daemon.migrations.models import SchemaMigration
 from daemon.repositories.factory import create_postgres_engine
 
@@ -453,10 +451,7 @@ class MigrationWorker:
         Returns the number of checkpoints migrated. Returns 0 if the
         source checkpointer has no checkpoints.
         """
-        from daemon.migrations.checkpoint_migrator import (
-            CheckpointMigrator,
-            MigrationCancelledError as CheckpointCancelledError,
-        )
+        from daemon.migrations.checkpoint_migrator import CheckpointMigrator
         from daemon.persistence import get_checkpointer
 
         config = self._manager.ensemble_config
@@ -483,10 +478,8 @@ class MigrationWorker:
                 sqlite_checkpointer.raw_saver,
                 pg_checkpointer.raw_saver,
             )
-        except CheckpointCancelledError:
-            # Normalize to the worker's own cancelled type so the
-            # orchestrator's except clause catches it.
-            raise MigrationCancelledError("Checkpoint migration cancelled") from None
+        except MigrationCancelledError:
+            raise
         finally:
             # Release connections regardless of success/failure.
             await self._close_checkpointer_safely(sqlite_checkpointer)

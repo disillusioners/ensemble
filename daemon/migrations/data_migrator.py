@@ -42,8 +42,10 @@ import logging
 import threading
 from typing import Any, Callable, Iterable, Iterator
 
-from sqlalchemy import Engine, func, insert, select
+from sqlalchemy import Engine, func, select
 from sqlmodel import Session, SQLModel
+
+from daemon.migrations import MigrationCancelledError
 
 # ---------------------------------------------------------------------------
 # Import every model module so its tables register with SQLModel.metadata.
@@ -83,15 +85,6 @@ DEFAULT_BATCH_SIZE: int = 500
 # Callback signature for progress reporting. Implementations may attach
 # this to an SSE event stream, a structured logger, or just ``print``.
 LogCallback = Callable[..., None]
-
-
-class MigrationCancelledError(Exception):
-    """Raised when the migration is cancelled via the cancel event.
-
-    The migrator checks ``cancel_event`` between batches; if it fires
-    we abort the in-flight table and propagate this error so the caller
-    can roll back any partial transaction.
-    """
 
 
 class TableMigrator:
@@ -590,7 +583,6 @@ def chunked(iterable: Iterable, size: int) -> Iterator[list]:
 
 __all__ = [
     "TableMigrator",
-    "MigrationCancelledError",
     "TABLES_TO_SKIP",
     "DEFAULT_BATCH_SIZE",
     "chunked",

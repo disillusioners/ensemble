@@ -14,27 +14,26 @@ Example:
 # Import runner components directly to avoid circular imports
 from .runner import MigrationError, MigrationFile, MigrationRunner
 
+
+class MigrationCancelledError(MigrationError):
+    """Raised when a migration is cancelled via the cancel event."""
+
+
 # Lazy import for SchemaMigration to avoid circular import with daemon.repositories
 def __getattr__(name: str):
     if name == "SchemaMigration":
         from .models import SchemaMigration
         return SchemaMigration
-    if name in ("CheckpointMigrator", "MigrationCancelledError"):
-        from .checkpoint_migrator import (
-            CheckpointMigrator,
-            MigrationCancelledError,
-        )
-        return {
-            "CheckpointMigrator": CheckpointMigrator,
-            "MigrationCancelledError": MigrationCancelledError,
-        }[name]
+    if name == "CheckpointMigrator":
+        from .checkpoint_migrator import CheckpointMigrator
+        return CheckpointMigrator
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "MigrationRunner",
     "MigrationFile",
     "MigrationError",
+    "MigrationCancelledError",
     "SchemaMigration",
     "CheckpointMigrator",
-    "MigrationCancelledError",
 ]

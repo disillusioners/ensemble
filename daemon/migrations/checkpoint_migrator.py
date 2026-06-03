@@ -22,13 +22,9 @@ import logging
 import threading
 from typing import Any, Callable
 
-from .runner import MigrationError
+from daemon.migrations import MigrationCancelledError
 
 logger = logging.getLogger(__name__)
-
-
-class MigrationCancelledError(MigrationError):
-    """Raised when a checkpoint migration is cancelled by the user."""
 
 
 class CheckpointMigrator:
