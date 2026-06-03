@@ -201,6 +201,7 @@ def _fetch_project_history(repo: SQLModelProjectRepository, project) -> tuple:
 async def create_project(
     body: ProjectCreateRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectResponse:
     """Create a new project with auto-provisioned system queues.
@@ -219,6 +220,9 @@ async def create_project(
         201 with created project
         409 if project name already exists
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     try:
         project = await asyncio.to_thread(
             repo.create,
@@ -361,6 +365,7 @@ async def list_projects_trailing(
 async def set_queue_status(
     project_id: str,
     body: dict,
+    request: Request,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectResponse:
     """Pause or resume job queue for a project.
@@ -373,6 +378,9 @@ async def set_queue_status(
         400 if 'paused' field is missing
         404 if project doesn't exist
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Check project exists
     project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
@@ -416,6 +424,7 @@ async def set_queue_status(
 )
 async def pause_queue(
     project_id: str,
+    request: Request,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectResponse:
     """Pause job queue for a project.
@@ -424,6 +433,9 @@ async def pause_queue(
         200 with updated project
         404 if project doesn't exist
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
         raise HTTPException(
@@ -457,6 +469,7 @@ async def pause_queue(
 )
 async def resume_queue(
     project_id: str,
+    request: Request,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectResponse:
     """Resume job queue for a project.
@@ -465,6 +478,9 @@ async def resume_queue(
         200 with updated project
         404 if project doesn't exist
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
         raise HTTPException(
@@ -568,7 +584,8 @@ async def list_project_history(
 )
 async def add_project_history(
     project_id: str,
-    request: ProjectHistoryAddRequest,
+    request: Request,
+    payload: ProjectHistoryAddRequest,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> ProjectHistoryEntryResponse:
     """Add a new history entry to a project.
@@ -584,6 +601,9 @@ async def add_project_history(
         400 if entry_type is invalid
         404 if project doesn't exist
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Validate project exists
     project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
@@ -597,11 +617,11 @@ async def add_project_history(
     
     # Validate entry_type
     valid_types = {e.value for e in HistoryEntryType}
-    if request.entry_type not in valid_types:
+    if payload.entry_type not in valid_types:
         raise HTTPException(
             status_code=400,
             detail={
-                "error": f"Invalid entry_type '{request.entry_type}'",
+                "error": f"Invalid entry_type '{payload.entry_type}'",
                 "valid_types": list(valid_types),
             }
         )
@@ -609,12 +629,12 @@ async def add_project_history(
     entry = await asyncio.to_thread(
         repo.add_history_entry,
         project_id=project_id,
-        entry_type=request.entry_type,
-        summary=request.summary,
-        details=request.details,
+        entry_type=payload.entry_type,
+        summary=payload.summary,
+        details=payload.details,
         source_agent=None,
         source_instance_id=None,
-        entry_metadata=request.entry_metadata,
+        entry_metadata=payload.entry_metadata,
     )
     
     return ProjectHistoryEntryResponse(**entry)
@@ -685,6 +705,7 @@ async def search_project_history(
 async def delete_project_history(
     project_id: str,
     entry_id: str,
+    request: Request,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
 ) -> dict:
     """Delete a project history entry.
@@ -693,6 +714,9 @@ async def delete_project_history(
         200 with success message
         404 if project or entry not found
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Validate project exists
     project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
@@ -766,10 +790,12 @@ async def delete_project(
         404 if project not found
         409 if active instances or running jobs exist (and force=False)
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     try:
         # BUG 4 FIX: Collect instance IDs BEFORE DB deletion
         # Clean up in-memory state first, then do DB deletion
-        manager = _get_manager(request)
         instance_ids = []
         if manager and hasattr(manager, '_instance_repository') and manager._instance_repository:
             try:

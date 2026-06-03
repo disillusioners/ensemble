@@ -16,6 +16,7 @@ from ..cancellation import CancellationReason
 from ..compaction import ContextCompactor
 from ..registry import get_registry
 from ..repositories.instance.models import Instance, InstanceStatus
+from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
@@ -343,7 +344,7 @@ class InstanceLifecycleService:
         # Update parent's children list and waiting_for counter
         if parent_id:
             from sqlmodel import Session
-            with Session(self._manager.engine) as session:
+            with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
                 parent = session.get(Instance, parent_id)
                 if parent:
                     # Add child to parent's denormalized children list

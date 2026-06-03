@@ -1,8 +1,9 @@
 """Job Queue CRUD API endpoints."""
 
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
@@ -35,6 +36,11 @@ TERMINAL_STATUSES = {
     JobStatus.CANCELLED.value,
     JobStatus.DEAD_LETTER.value,
 }
+
+
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 
 def _job_to_response(
@@ -86,7 +92,8 @@ def _job_to_response(
     },
 )
 async def create_job(
-    request: JobCreateRequest,
+    request: Request,
+    body: JobCreateRequest,
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """Submit a new job for processing.
@@ -102,8 +109,11 @@ async def create_job(
         200 with job details (existing non-terminal job returned)
         422 if validation errors
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Validate: queue_id requires project_id
-    if request.queue_id and not request.project_id:
+    if body.queue_id and not body.project_id:
         raise HTTPException(
             status_code=422,
             detail={"error": "Validation Error", "message": "project_id is required when queue_id is specified"}
@@ -111,7 +121,7 @@ async def create_job(
 
     # Validate and resolve agent input
     try:
-        resolved_agent_id, agent_path = validate_agent_id(request.agent_id)
+        resolved_agent_id, agent_path = validate_agent_id(body.agent_id)
     except HTTPException:
         raise
     except Exception as e:
@@ -121,19 +131,19 @@ async def create_job(
         )
     
     # Normalize project_id for defense-in-depth consistency
-    normalized_project_id = normalize_project_id(request.project_id)
+    normalized_project_id = normalize_project_id(body.project_id)
 
     # Enqueue the job (service.enqueue handles idempotency check internally)
     try:
         job = await service.enqueue(
             agent_id=resolved_agent_id,
-            message=request.message,
-            source=request.source,
+            message=body.message,
+            source=body.source,
             project_id=normalized_project_id,
-            priority=request.priority,
-            metadata=request.metadata,
-            queue_id=request.queue_id,
-            idempotency_key=request.idempotency_key,
+            priority=body.priority,
+            metadata=body.metadata,
+            queue_id=body.queue_id,
+            idempotency_key=body.idempotency_key,
         )
     except ValidationError as e:
         raise HTTPException(
@@ -155,7 +165,7 @@ async def create_job(
     # This is detected by checking if the returned job has the same idempotency_key
     # and was already non-pending when returned
     is_idempotent_return = False
-    if request.idempotency_key and job.idempotency_key == request.idempotency_key:
+    if body.idempotency_key and job.idempotency_key == body.idempotency_key:
         if job.status != JobStatus.PENDING.value:
             is_idempotent_return = True
     

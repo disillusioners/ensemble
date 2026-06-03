@@ -44,7 +44,9 @@ async def create_instance(
 ) -> InstanceInfo:
     """Spawn a new instance."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Generate instance_id upfront so MCP preload can use it
     instance_id = instance_create.instance_id or str(uuid.uuid4())
     
@@ -189,7 +191,9 @@ async def terminate_instance(
 ) -> dict:
     """Terminate an instance."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Check instance exists
     try:
         await manager.get_instance(instance_id)
@@ -215,6 +219,8 @@ async def pause_instance(
 ) -> dict:
     """Pause an instance and cascade to children."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
     # Check instance exists
     try:
@@ -246,6 +252,8 @@ async def resume_instance(
     """Resume a paused instance and cascade to children.
     Re-executes existing PROCESSING jobs from checkpoint with optional message."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
     # Check instance exists
     try:
@@ -295,6 +303,9 @@ async def stop_instance_deprecated(
     request: Request,
 ) -> dict:
     """Deprecated: Use POST /pause instead."""
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     return await pause_instance(instance_id, request)
 
 

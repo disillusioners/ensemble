@@ -75,6 +75,10 @@ class HealthResponse(BaseModel):
         default=None,
         description="Whether POSTGRES_HOST and POSTGRES_DB env vars are set. None until lifespan wires up ensemble_config.",
     )
+    migration_available: bool | None = Field(
+        default=None,
+        description="Whether a SQLite→PostgreSQL migration can currently start. None until the migration worker is wired up in lifespan.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -84,6 +88,7 @@ class HealthResponse(BaseModel):
                 "version": "1.0.0",
                 "current_database": "sqlite",
                 "postgres_env_available": False,
+                "migration_available": False,
             }
         }
     )

@@ -16,6 +16,7 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..registry import get_registry
+from ..write_pause_guard import WriteGuardSession
 from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
@@ -596,7 +597,7 @@ Provide a concise summary:"""
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
             last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
         
-        with Session(self._manager.engine) as session:
+        with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # Get instance metadata
             instance = session.get(Instance, instance_id)
             if instance is None:

@@ -84,7 +84,9 @@ async def list_schedules(request: Request):
 async def update_schedule(schedule_id: str, schedule_update: ScheduleUpdate, request: Request):
     """Update a schedule configuration."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Check source exists and is a scheduler
     existing = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not existing:
@@ -178,9 +180,11 @@ async def trigger_schedule(schedule_id: str, request: Request):
     Triggers the schedule immediately, regardless of its configured schedule.
     """
     from daemon.sources.base import SourceConfig
-    
+
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Check source exists and is a scheduler
     source = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not source:
@@ -191,7 +195,7 @@ async def trigger_schedule(schedule_id: str, request: Request):
                 message=f"Schedule not found: {schedule_id}"
             ).model_dump()
         )
-    
+
     if source.source_type != "scheduler":
         raise HTTPException(
             status_code=400,
@@ -200,7 +204,7 @@ async def trigger_schedule(schedule_id: str, request: Request):
                 message=f"Source {schedule_id} is not a scheduler (type: {source.source_type})"
             ).model_dump()
         )
-    
+
     # Check if registry has the source
     if not manager.source_registry:
         raise HTTPException(
@@ -248,7 +252,9 @@ async def trigger_schedule(schedule_id: str, request: Request):
 async def start_schedule(schedule_id: str, request: Request):
     """Start a scheduler source."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Check source exists
     source = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not source:
@@ -296,7 +302,9 @@ async def start_schedule(schedule_id: str, request: Request):
 async def stop_schedule(schedule_id: str, request: Request):
     """Stop a scheduler source."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Check source exists
     source = await asyncio.to_thread(manager._source_repository.get_source_config, schedule_id)
     if not source:

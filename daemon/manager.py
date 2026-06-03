@@ -72,6 +72,7 @@ from .cancellation import (
 from .request_registry import ActiveRequestRegistry
 from .compaction import ContextCompactor, CompactionContext
 from .constants import WORKER_POOL_SIZE
+from .write_pause_guard import WritePauseGuard
 
 # Worker pool imports (lazy import to avoid circular dependency)
 from typing import TYPE_CHECKING
@@ -447,6 +448,12 @@ class InstanceManager:
         self._checkpointer: Any = None  # CheckpointerAdapter — set by initialize()
         self._loop: asyncio.AbstractEventLoop | None = None  # Set during initialize()
         self.prompt_cache = PromptCache()
+
+        # Write-pause gate for Phase 3 SQLite→PostgreSQL hot-swap.
+        # Services/tools open sessions via WriteGuardSession which consults
+        # this guard; pause_writes() blocks new sessions and drains the
+        # in-flight ones so the migration can swap engines safely.
+        self._write_guard = WritePauseGuard()
 
         # Initialize context compactor
         if self.config.compaction.enabled:
@@ -870,6 +877,82 @@ class InstanceManager:
             The shared SQLAlchemy Engine instance used by all repositories.
         """
         return self._engine
+
+    @property
+    def ensemble_config(self) -> "EnsembleConfig | None":
+        """Public read-only access to the ``EnsembleConfig`` selecting the DB backend.
+
+        Returns:
+            The :class:`EnsembleConfig` instance passed to ``__init__``, or
+            ``None`` if the manager was constructed without one (legacy
+            SQLite-only call sites). Used by services that need to
+            introspect the current backend (e.g. :class:`MigrationWorker`
+            checking ``is_sqlite`` before kicking off a hot-swap) and by
+            HTTP endpoints that report the active backend in ``/health``.
+        """
+        return self._ensemble_config
+
+    @property
+    def data_dir(self) -> "Path":
+        """Directory containing the SQLite database files and ``ensemble.json``.
+
+        The migration worker uses this when rewriting ``ensemble.json`` so
+        the file lands next to the database files (where the lifespan
+        code in ``api.py`` originally loaded it from). Computed from
+        ``self.db_path.parent`` because the SQLite path config is the
+        only data-directory anchor the manager has after construction.
+        """
+        return self.db_path.parent
+
+    @property
+    def write_guard(self) -> WritePauseGuard:
+        """Public read-only access to the write-pause guard.
+
+        Services / tools that open a ``Session`` directly (the 6 sites
+        being migrated in Phase 3) wrap it in
+        ``WriteGuardSession(Session(engine), manager.write_guard)`` so
+        the migration entry point can drain in-flight writes before
+        swapping the underlying engine.
+
+        Returns:
+            The shared ``WritePauseGuard`` instance owned by this
+            manager.
+        """
+        return self._write_guard
+
+    @property
+    def is_write_paused(self) -> bool:
+        """Return ``True`` if ``pause_writes()`` is currently in effect.
+
+        The migration entry point (and tests) can poll this to
+        coordinate other shutdown / recovery actions.
+        """
+        return self._write_guard.is_write_paused
+
+    def pause_writes(self) -> None:
+        """Block new writes and wait for in-flight writes to drain.
+
+        Phase 3 of the SQLite→PostgreSQL migration calls this before
+        swapping the underlying engine so no in-flight write lands on
+        a half-migrated database. ``resume_writes()`` must be called
+        once the new engine is in place.
+
+        Blocks the calling thread until the in-flight write counter
+        reaches zero. Safe to call from any thread; uses
+        ``threading`` primitives only (no ``asyncio`` locks) because
+        the codebase runs sync ``Session`` work inside
+        ``asyncio.to_thread`` workers.
+        """
+        self._write_guard.pause_writes()
+
+    def resume_writes(self) -> None:
+        """Re-allow new writes after a migration.
+
+        Counterpart to :meth:`pause_writes`. Wakes any thread that
+        was blocked trying to open a new session and returns the
+        guard to its default "writes allowed" state.
+        """
+        self._write_guard.resume_writes()
 
     async def initialize(self) -> None:
         """Initialize the checkpointer adapter.

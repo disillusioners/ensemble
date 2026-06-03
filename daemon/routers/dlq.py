@@ -1,8 +1,9 @@
 """Dead Letter Queue API endpoints."""
 
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from daemon.services.dead_letter_service import DeadLetterService, DLQItemNotFoundError
@@ -40,6 +41,11 @@ def set_dead_letter_service(service: DeadLetterService) -> None:
     """Set the DeadLetterService instance (called during app startup)."""
     global _dead_letter_service
     _dead_letter_service = service
+
+
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 
 # ==================== Schemas ====================
@@ -292,6 +298,7 @@ async def list_dlq(
 )
 async def replay_all_dlq(
     project_id: str,
+    request: Request,
     queue_id: str | None = None,
     reason: str | None = None,
     limit: int = Query(default=DEFAULT_JOB_LIST_LIMIT * 2, ge=1, le=MAX_SCHEDULE_EXECUTION_LIMIT),
@@ -316,6 +323,9 @@ async def replay_all_dlq(
     Returns:
         200 with summary including total considered, limit, replayed/failed/skipped counts
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Get total count of DLQ items matching criteria
     total = service.count_dlq(project_id=project_id, queue_id=queue_id)
     
@@ -429,6 +439,7 @@ async def get_dlq_item(
 async def replay_dlq_item(
     project_id: str,
     dlq_id: str,
+    request: Request,
     service: DeadLetterService = Depends(get_dead_letter_service),
 ) -> DLQReplayResponse:
     """Replay a job from the dead letter queue.
@@ -449,6 +460,9 @@ async def replay_dlq_item(
         200 with replayed job details
         404 if DLQ item not found
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Verify DLQ item exists and belongs to project
     dlq_item = service.get_dlq(dlq_id)
     if dlq_item is None:
@@ -512,6 +526,7 @@ async def replay_dlq_item(
 async def delete_dlq_item(
     project_id: str,
     dlq_id: str,
+    request: Request,
     service: DeadLetterService = Depends(get_dead_letter_service),
 ) -> None:
     """Delete a single DLQ item.
@@ -527,6 +542,9 @@ async def delete_dlq_item(
         204 if deleted successfully
         404 if DLQ item not found
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Verify DLQ item exists and belongs to project
     dlq_item = service.get_dlq(dlq_id)
     if dlq_item is None:
@@ -573,6 +591,7 @@ async def delete_dlq_item(
 )
 async def cleanup_dlq(
     project_id: str,
+    request: Request,
     max_age_days: int = 30,
     reason: str | None = None,
     service: DeadLetterService = Depends(get_dead_letter_service),
@@ -591,6 +610,9 @@ async def cleanup_dlq(
     Returns:
         200 with count of deleted items
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Validate max_age_days
     if max_age_days < 0:
         raise HTTPException(

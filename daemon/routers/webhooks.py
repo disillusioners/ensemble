@@ -36,7 +36,9 @@ async def receive_webhook(source_id: str, request: Request) -> dict:
         HTTPException: If source not found, invalid, or processing fails.
     """
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Check source exists (use asyncio.to_thread like other routers)
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:

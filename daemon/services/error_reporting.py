@@ -12,6 +12,7 @@ from sqlmodel import Session
 
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus
+from ..write_pause_guard import WriteGuardSession
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -156,7 +157,7 @@ class ErrorReportingService:
             severity = "critical" if error_type in CRITICAL_ERROR_TYPES else "warning"
             
             # Step 3: Atomic DB transaction
-            with Session(self._manager.engine) as session:
+            with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
                 # a) Get child instance
                 instance = session.get(Instance, instance_id)
                 if not instance:

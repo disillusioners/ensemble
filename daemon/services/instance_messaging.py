@@ -20,6 +20,7 @@ from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..utils import parse_think_tags, serialize_message
+from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
 
@@ -598,7 +599,7 @@ class InstanceMessagingService:
         if images:
             logger.info(f"Processing message with {len(images)} image(s)")
         
-        with Session(self._manager.engine) as session:
+        with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
             db_message = MessageQueue(
                 message_id=message_id,
@@ -1191,7 +1192,7 @@ class InstanceMessagingService:
         if images:
             logger.info(f"Processing message with {len(images)} image(s)")
 
-        with Session(self._manager.engine) as session:
+        with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
             db_message = MessageQueue(
                 message_id=message_id,

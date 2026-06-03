@@ -193,6 +193,8 @@ async def test_mcp_server_connection(test_request: McpServerTestConnectionReques
 async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request):
     """Create a new MCP server."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
     # Validate MCP server config
     try:
@@ -251,6 +253,8 @@ async def list_builtin_templates():
 async def configure_builtin_server(request: Request, config_request: BuiltinServerConfigure):
     """Configure a built-in MCP server from a template."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     registry = get_registry()
 
     # Look up the template definition
@@ -349,6 +353,8 @@ async def update_mcp_server(
 ):
     """Update an MCP server configuration."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
     # Check if server exists
     existing = await asyncio.to_thread(
@@ -428,6 +434,8 @@ async def update_mcp_server(
 async def delete_mcp_server(server_id: str, request: Request):
     """Delete an MCP server."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
     # Check if server exists
     existing = await asyncio.to_thread(
@@ -466,6 +474,8 @@ async def delete_mcp_server(server_id: str, request: Request):
 async def reset_builtin_server(server_id: str, request: Request):
     """Reset a built-in MCP server to its default configuration."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
 
     # Check if server exists
     existing = await asyncio.to_thread(

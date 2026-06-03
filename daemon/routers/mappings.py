@@ -67,7 +67,9 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, 
     """Create an instance mapping for an external user."""
     import uuid
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Validate agent_id
     resolved_agent_id, agent_path = validate_agent_id(mapping_create.agent_id)
     
@@ -159,7 +161,9 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, 
 async def delete_mapping(source_id: str, mapping_id: str, request: Request):
     """Delete an instance mapping."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     result = await asyncio.to_thread(manager._source_repository.delete_instance_mapping, mapping_id)
     if not result.get("deleted"):
         raise HTTPException(

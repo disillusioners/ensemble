@@ -2,8 +2,9 @@
 
 import asyncio
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from daemon.repositories import SQLModelProjectRepository
@@ -22,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 # Create router with /projects/{project_id}/queues prefix
 router = APIRouter(prefix="/projects/{project_id}/queues", tags=["queues"])
+
+
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
 
 # Dependency to get JobQueueMgmtService
 # This will be set up in daemon/api.py during app initialization
@@ -166,6 +172,7 @@ async def list_queues(
 )
 async def ensure_system_queues(
     project_id: str,
+    request: Request,
     repo: SQLModelProjectRepository = Depends(get_project_repository),
     service: JobQueueMgmtService = Depends(get_mgmt_service),
 ) -> EnsureSystemQueuesResponse:
@@ -181,6 +188,9 @@ async def ensure_system_queues(
         200 with lists of existing and created queue names
         404 if project doesn't exist
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     # Validate project exists
     project = await asyncio.to_thread(repo.get, project_id)
     if project is None:
@@ -216,7 +226,8 @@ async def ensure_system_queues(
 )
 async def create_queue(
     project_id: str,
-    request: JobQueueCreateRequest,
+    request: Request,
+    body: JobQueueCreateRequest,
     service: JobQueueMgmtService = Depends(get_mgmt_service),
 ) -> JobQueueResponse:
     """Create a new custom queue for a project.
@@ -230,13 +241,16 @@ async def create_queue(
         400 if validation fails or reserved name
         409 if queue with name already exists
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     try:
         queue = await service.create_queue(
             project_id=project_id,
-            queue_name=request.queue_name,
-            queue_type=request.queue_type,
-            concurrency_limit=request.concurrency_limit,
-            description=request.description,
+            queue_name=body.queue_name,
+            queue_type=body.queue_type,
+            concurrency_limit=body.concurrency_limit,
+            description=body.description,
         )
         return _queue_to_response(queue)
     except ValueError as e:
@@ -300,7 +314,8 @@ async def get_queue(
 async def update_queue(
     project_id: str,
     queue_id: str,
-    request: JobQueueUpdateRequest,
+    request: Request,
+    body: JobQueueUpdateRequest,
     service: JobQueueMgmtService = Depends(get_mgmt_service),
 ) -> JobQueueResponse:
     """Update a queue's fields.
@@ -315,19 +330,22 @@ async def update_queue(
         400 if validation fails
         404 if queue not found or not owned by project
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     try:
         # Build updates dict from non-None fields
         updates = {}
-        if request.queue_name is not None:
-            updates["queue_name"] = request.queue_name
-        if request.queue_type is not None:
-            updates["queue_type"] = request.queue_type
-        if request.concurrency_limit is not None:
-            updates["concurrency_limit"] = request.concurrency_limit
-        if request.is_paused is not None:
-            updates["is_paused"] = request.is_paused
-        if request.description is not None:
-            updates["description"] = request.description
+        if body.queue_name is not None:
+            updates["queue_name"] = body.queue_name
+        if body.queue_type is not None:
+            updates["queue_type"] = body.queue_type
+        if body.concurrency_limit is not None:
+            updates["concurrency_limit"] = body.concurrency_limit
+        if body.is_paused is not None:
+            updates["is_paused"] = body.is_paused
+        if body.description is not None:
+            updates["description"] = body.description
         
         if not updates:
             raise HTTPException(
@@ -366,6 +384,7 @@ async def update_queue(
 async def delete_queue(
     project_id: str,
     queue_id: str,
+    request: Request,
     service: JobQueueMgmtService = Depends(get_mgmt_service),
 ) -> dict:
     """Delete a queue.
@@ -383,6 +402,9 @@ async def delete_queue(
         404 if queue not found or not owned by project
         409 if queue has processing jobs
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     try:
         result = await service.delete_queue(project_id, queue_id)
         return result
@@ -421,6 +443,7 @@ async def delete_queue(
 async def start_queue(
     project_id: str,
     queue_id: str,
+    request: Request,
     service: JobQueueMgmtService = Depends(get_mgmt_service),
 ) -> JobQueueResponse:
     """Resume a paused queue.
@@ -435,6 +458,9 @@ async def start_queue(
         200 with updated queue details
         404 if queue not found or not owned by project
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     try:
         queue = await service.start_queue(project_id, queue_id)
         
@@ -467,6 +493,7 @@ async def start_queue(
 async def stop_queue(
     project_id: str,
     queue_id: str,
+    request: Request,
     service: JobQueueMgmtService = Depends(get_mgmt_service),
 ) -> JobQueueResponse:
     """Pause a queue.
@@ -481,6 +508,9 @@ async def stop_queue(
         200 with updated queue details
         404 if queue not found or not owned by project
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     try:
         queue = await service.stop_queue(project_id, queue_id)
         

@@ -1,8 +1,9 @@
 """Job Queue Management API endpoints."""
 
 import logging
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
@@ -23,6 +24,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
+def _get_manager(request: Request) -> Any:
+    """Get the InstanceManager from app state."""
+    return request.app.state.manager
+
+
 # ==================== Management Endpoints ====================
 
 
@@ -36,6 +42,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 )
 async def delete_job(
     job_id: str,
+    request: Request,
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """Delete (cancel or soft-delete) a job.
@@ -49,6 +56,9 @@ async def delete_job(
         400 if job is already deleted
         404 if job not found
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
     
     if job is None:
@@ -112,6 +122,7 @@ async def delete_job(
 )
 async def cancel_job_endpoint(
     job_id: str,
+    request: Request,
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """Cancel a pending or processing job.
@@ -123,6 +134,9 @@ async def cancel_job_endpoint(
         400 if job is already in a terminal state or deleted
         404 if job not found
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
     
     if job is None:
@@ -185,6 +199,7 @@ async def cancel_job_endpoint(
 )
 async def restore_job_endpoint(
     job_id: str,
+    request: Request,
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """Restore a soft-deleted job.
@@ -194,6 +209,9 @@ async def restore_job_endpoint(
         400 if job is not deleted or is in terminal state
         404 if job not found
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
     
     if job is None:
@@ -253,6 +271,7 @@ async def restore_job_endpoint(
 )
 async def retry_job(
     job_id: str,
+    request: Request,
     service: JobQueueService = Depends(get_job_queue_service),
     dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ):
@@ -267,6 +286,9 @@ async def retry_job(
         404 if job not found
         422 if DEAD_LETTER entry not found for DEAD_LETTER job
     """
+    manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
     
     if job is None:

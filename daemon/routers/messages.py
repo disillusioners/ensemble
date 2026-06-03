@@ -34,7 +34,9 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
     If the instance is PAUSED, automatically resumes it with the user's message.
     """
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Check instance exists and get its status FIRST (before any enqueue)
     try:
         instance_info = manager.get_instance_info(instance_id)

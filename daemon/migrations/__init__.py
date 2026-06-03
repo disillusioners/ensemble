@@ -19,6 +19,15 @@ def __getattr__(name: str):
     if name == "SchemaMigration":
         from .models import SchemaMigration
         return SchemaMigration
+    if name in ("CheckpointMigrator", "MigrationCancelledError"):
+        from .checkpoint_migrator import (
+            CheckpointMigrator,
+            MigrationCancelledError,
+        )
+        return {
+            "CheckpointMigrator": CheckpointMigrator,
+            "MigrationCancelledError": MigrationCancelledError,
+        }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
@@ -26,4 +35,6 @@ __all__ = [
     "MigrationFile",
     "MigrationError",
     "SchemaMigration",
+    "CheckpointMigrator",
+    "MigrationCancelledError",
 ]

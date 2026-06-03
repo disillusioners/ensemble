@@ -13,6 +13,7 @@ from .queues import router as queues_router
 from .dlq import router as dlq_router
 from .mcp_servers import router as mcp_servers_router
 from .notifications import router as notifications_router
+from .migration import router as migration_router
 
 __all__ = [
     "agents_router",
@@ -28,4 +29,5 @@ __all__ = [
     "dlq_router",
     "mcp_servers_router",
     "notifications_router",
+    "migration_router",
 ]

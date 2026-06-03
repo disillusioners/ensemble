@@ -63,6 +63,7 @@ from daemon.routers import (
     dlq_router,
     mcp_servers_router,
     notifications_router,
+    migration_router,
 )
 
 from daemon.mcp import (
@@ -145,6 +146,13 @@ async def lifespan(app: FastAPI):
     # Set up worker pool for message processing
     manager.setup_worker_pool()
     start_time = time.time()
+
+    # Initialize MigrationWorker (SQLite → PostgreSQL migration orchestrator).
+    # Must be created AFTER manager.initialize() so the worker can read the
+    # live engine dialect, ensemble_config, and write guard from the manager.
+    # The router resolves the worker from app.state.migration_worker.
+    from daemon.services.migration_worker import MigrationWorker
+    app.state.migration_worker = MigrationWorker(manager)
     
     # Initialize JobQueueService with shared engine from manager
     # Set create_tables=True to ensure job_queue_items table is created
@@ -505,12 +513,30 @@ def create_app() -> FastAPI:
     async def health_check(request: Request):
         """Health check endpoint.
 
-        Reports active database backend and whether PostgreSQL env vars are
-        configured. The ensemble_config is read from app.state once the
-        lifespan wires it up (Task 6); until then the new fields are None.
+        Reports active database backend, whether PostgreSQL env vars are
+        configured, and whether a SQLite→PostgreSQL migration can currently
+        start. The ``ensemble_config`` and ``migration_worker`` are read
+        from ``app.state`` once the lifespan wires them up; until then the
+        new fields are ``None``.
         """
         start_time = getattr(request.app.state, 'start_time', None)
         ensemble_config = getattr(request.app.state, 'ensemble_config', None)
+        migration_worker = getattr(request.app.state, 'migration_worker', None)
+
+        # Derive migration availability from the worker if it's been wired
+        # up. ``is_migration_available()`` is a pure read of
+        # ``manager.engine.url`` + ``ensemble_config`` + env vars, so it's
+        # safe to call on every health-check request.
+        migration_available: bool | None = None
+        if migration_worker is not None:
+            try:
+                migration_available = bool(
+                    migration_worker.is_migration_available().get("can_migrate")
+                )
+            except Exception:
+                logger.debug("Health check: migration availability probe failed", exc_info=True)
+                migration_available = None
+
         return HealthResponse(
             status="healthy",
             uptime_seconds=time.time() - start_time if start_time else 0,
@@ -520,6 +546,7 @@ def create_app() -> FastAPI:
                 ensemble_config.postgres_env_available
                 if ensemble_config is not None else None
             ),
+            migration_available=migration_available,
         )
 
     # Project info endpoint
@@ -546,7 +573,8 @@ def create_app() -> FastAPI:
     api_router.include_router(dlq_router)           # /api/dlq
     api_router.include_router(mcp_servers_router)    # /api/mcp-servers
     api_router.include_router(notifications_router)   # /api/notifications
-    
+    api_router.include_router(migration_router)       # /api/migration
+
     app.include_router(api_router)
 
     # --- MCP KB server mounts (MUST be before catch-all SPA route) ---

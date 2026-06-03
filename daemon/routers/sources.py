@@ -97,6 +97,8 @@ async def list_sources(request: Request):
 async def create_source(source_create: SourceCreate, request: Request):
     """Create a new message source."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     credential_manager = _get_credential_manager(request)
     
     # Check if source already exists
@@ -237,6 +239,8 @@ async def get_source(source_id: str, request: Request):
 async def update_source(source_id: str, source_update: SourceUpdate, request: Request):
     """Update a message source configuration."""
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     credential_manager = _get_credential_manager(request)
     
     existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
@@ -302,7 +306,9 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
 async def delete_source(source_id: str, request: Request):
     """Delete a message source."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     # Get source to check type first
     existing = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not existing:
@@ -313,7 +319,7 @@ async def delete_source(source_id: str, request: Request):
                 message=f"Source not found: {source_id}"
             ).model_dump()
         )
-    
+
     # Stop and unregister adapter if running
     try:
         adapter = manager.source_registry.get(source_id)
@@ -323,7 +329,7 @@ async def delete_source(source_id: str, request: Request):
             logger.info(f"Stopped and unregistered adapter: {source_id}")
     except Exception as e:
         logger.warning(f"Failed to stop adapter during delete {source_id}: {e}")
-    
+
     # Delete from database
     await asyncio.to_thread(manager._source_repository.delete_source_config, source_id)
     
@@ -334,10 +340,12 @@ async def delete_source(source_id: str, request: Request):
 async def start_source(source_id: str, request: Request):
     """Start a message source adapter."""
     from daemon.sources.base import SourceConfig
-    
+
     manager = _get_manager(request)
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     credential_manager = _get_credential_manager(request)
-    
+
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
@@ -430,7 +438,9 @@ async def start_source(source_id: str, request: Request):
 async def stop_source(source_id: str, request: Request):
     """Stop a message source adapter."""
     manager = _get_manager(request)
-    
+    if manager.is_write_paused:
+        raise HTTPException(status_code=503, detail="Writes are paused for database migration")
+
     source = await asyncio.to_thread(manager._source_repository.get_source_config, source_id)
     if not source:
         raise HTTPException(
@@ -440,7 +450,7 @@ async def stop_source(source_id: str, request: Request):
                 message=f"Source not found: {source_id}"
             ).model_dump()
         )
-    
+
     # Reject lifecycle operations for scheduler sources
     await _reject_scheduler_lifecycle(source_id, manager)
     
