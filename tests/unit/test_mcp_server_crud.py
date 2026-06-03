@@ -105,6 +105,8 @@ def app(router_engine_and_repo):
 
     # Create mock manager with repository
     mock_manager = MagicMock()
+    # Phase 3: routers check manager.is_write_paused; MagicMock auto-attr is truthy → 503.
+    mock_manager.is_write_paused = False
 
     # Wrap repository methods to work with asyncio.to_thread
     def sync_create(*args, **kwargs):

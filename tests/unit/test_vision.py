@@ -701,17 +701,19 @@ class TestImagesWithoutVisionConfig:
         mock_manager = MagicMock()
         mock_manager.config = mock_config
         mock_manager.get_instance = AsyncMock()  # Instance exists
-        
+        # Phase 3: routers check manager.is_write_paused; MagicMock auto-attr is truthy → 503.
+        mock_manager.is_write_paused = False
+
         # Create mock request with app.state.manager
         mock_request = MagicMock()
         mock_request.app.state.manager = mock_manager
-        
+
         # Patch _get_manager to return our mock
         with patch("daemon.routers.messages._get_manager", return_value=mock_manager):
             # Import the API function
             from daemon.routers.messages import send_message
             from daemon.models import MessageCreate
-            
+
             # Create message with images
             images = [make_valid_image(0)]
             message = MessageCreate(content="What do you see?", images=images)
@@ -747,7 +749,9 @@ class TestImagesWithoutVisionConfig:
         mock_manager.config = mock_config
         mock_manager.get_instance = AsyncMock()  # Instance exists
         mock_manager.enqueue_message_via_jq = AsyncMock(return_value=mock_result)
-        
+        # Phase 3: routers check manager.is_write_paused; MagicMock auto-attr is truthy → 503.
+        mock_manager.is_write_paused = False
+
         # Create mock request with app.state.manager
         mock_request = MagicMock()
         mock_request.app.state.manager = mock_manager

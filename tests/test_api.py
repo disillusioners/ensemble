@@ -22,6 +22,8 @@ async def mock_manager():
     manager = Mock()
     manager.spawn_instance = Mock(return_value="test-instance-id")
     manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
+    # Phase 3: routers check manager.is_write_paused; Mock auto-attr is truthy → 503.
+    manager.is_write_paused = False
     manager.get_instance = AsyncMock()
     manager.send_message = Mock(return_value="Test response")
     manager.terminate_instance = AsyncMock(return_value=True)

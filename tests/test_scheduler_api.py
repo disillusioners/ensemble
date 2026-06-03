@@ -23,7 +23,7 @@ from daemon.models.source import SourceStatus
 async def mock_manager():
     """Create a mock InstanceManager with scheduler support."""
     manager = Mock()
-    
+
     # Basic instance manager mocks
     manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
     manager.get_instance = AsyncMock()
@@ -33,6 +33,8 @@ async def mock_manager():
     manager.get_instance_info = Mock()
     manager.enqueue_message = AsyncMock()
     manager.get_messages = AsyncMock(return_value=[])
+    # Phase 3: routers check manager.is_write_paused; Mock auto-attr is truthy → 503.
+    manager.is_write_paused = False
     
     # Set up temp SQLite database
     temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")

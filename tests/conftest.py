@@ -392,6 +392,52 @@ def sample_message_create_data():
     }
 
 
+# ==================== Phase 3: app.state.manager safety net ====================
+
+
+@pytest.fixture(autouse=True)
+def _ensure_app_state_manager():
+    """Provide a default ``app.state.manager`` for tests that don't set one.
+
+    Phase 3 of the database migration added write-pause guards at the top
+    of every router endpoint (``if manager.is_write_paused: raise 503``)
+    and routes ``request.app.state.manager`` lookups through a helper.
+    Test fixtures that build a bare ``FastAPI()`` and forget to set
+    ``app.state.manager`` now raise ``AttributeError`` from Starlette's
+    ``State.__getattr__``; fixtures that set it to ``None`` raise
+    ``AttributeError: 'NoneType' object has no attribute 'is_write_paused'``
+    when the router reads the property.
+
+    This fixture patches ``starlette.datastructures.State.__getattr__`` so
+    a missing-or-``None`` ``manager`` attribute is replaced with a
+    ``MagicMock`` whose ``is_write_paused`` is ``False``. Tests that
+    explicitly set ``app.state.manager`` to a real (or mock) object are
+    unaffected because the patch only fires when the key is missing or
+    set to ``None``.
+    """
+    from starlette.datastructures import State
+    from unittest.mock import MagicMock
+
+    original_getattr = State.__getattr__
+
+    def patched_getattr(self, key):
+        if key == "manager":
+            existing = self._state.get("manager", "__missing__")
+            if existing == "__missing__" or existing is None:
+                default = MagicMock()
+                default.is_write_paused = False
+                self._state["manager"] = default
+                return default
+            return existing
+        return original_getattr(self, key)
+
+    State.__getattr__ = patched_getattr
+    try:
+        yield
+    finally:
+        State.__getattr__ = original_getattr
+
+
 @pytest.fixture(autouse=True)
 def clean_env():
     """Clean up environment variables before and after each test."""
