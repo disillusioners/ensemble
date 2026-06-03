@@ -156,7 +156,7 @@ class ErrorReportingService:
             severity = "critical" if error_type in CRITICAL_ERROR_TYPES else "warning"
             
             # Step 3: Atomic DB transaction
-            with Session(self._manager._engine) as session:
+            with Session(self._manager.engine) as session:
                 # a) Get child instance
                 instance = session.get(Instance, instance_id)
                 if not instance:

@@ -81,6 +81,7 @@ from daemon.routers.messages import send_message as send_message  # noqa: F401
 
 from daemon import __version__
 from daemon.models import ErrorCodes, ErrorResponse, HealthResponse
+from daemon.ensemble_config import EnsembleConfig
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
@@ -121,6 +122,14 @@ async def lifespan(app: FastAPI):
     from daemon.repositories.instance.repository import SQLModelInstanceRepository
     from daemon.repositories import create_job_repository
     
+    # Load ensemble.json FIRST (database backend selection).
+    # This is the chicken-and-egg resolution: ensemble_config picks the DB engine
+    # *before* config.yaml is consulted. The default data_dir matches the
+    # default location of the SQLite databases (`./data/`).
+    data_dir = Path(os.environ.get("ENSEMBLE_DATA_DIR", "./data"))
+    ensemble_config = EnsembleConfig.load_or_create(data_dir)
+    app.state.ensemble_config = ensemble_config
+
     # Load config first
     config = load_config()
 
@@ -130,7 +139,7 @@ async def lifespan(app: FastAPI):
     await auto_test_rag()
 
     # Initialize InstanceManager
-    manager = InstanceManager(config)
+    manager = InstanceManager(config, ensemble_config)
     await manager.initialize()
     
     # Set up worker pool for message processing
@@ -139,20 +148,20 @@ async def lifespan(app: FastAPI):
     
     # Initialize JobQueueService with shared engine from manager
     # Set create_tables=True to ensure job_queue_items table is created
-    job_repository = create_job_repository(engine=manager._engine, create_tables=True)
+    job_repository = create_job_repository(engine=manager.engine, create_tables=True)
     
     # Create LockRepository for job lock persistence
-    lock_repo = LockRepository(engine=manager._engine)
+    lock_repo = LockRepository(engine=manager.engine)
     job_lock_manager = JobLockManager(lock_repo=lock_repo)
     
     # Create queue repository for job queue management
-    queue_repo = JobQueueRepository(engine=manager._engine)
+    queue_repo = JobQueueRepository(engine=manager.engine)
 
     # Create watcher repository for job lifecycle subscriptions
     from daemon.repositories.job_queue.watcher_models import JobWatcher
     from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
-    JobWatcher.metadata.create_all(manager._engine)
-    watcher_repo = JobWatcherRepository(engine=manager._engine)
+    JobWatcher.metadata.create_all(manager.engine)
+    watcher_repo = JobWatcherRepository(engine=manager.engine)
     manager._watcher_repo = watcher_repo  # Store on manager for tools access
 
     # Create job queue management service for auto-provisioning
@@ -222,7 +231,7 @@ async def lifespan(app: FastAPI):
     job_queue_service.set_project_repo(manager._project_repository)
     
     # Run startup recovery for orphaned PROCESSING jobs
-    instance_repo = SQLModelInstanceRepository(engine=manager._engine)
+    instance_repo = SQLModelInstanceRepository(engine=manager.engine)
     job_recovery = JobRecoveryService(
         job_repository=job_repository,
         lock_repository=lock_repo,
@@ -238,7 +247,7 @@ async def lifespan(app: FastAPI):
         logger.info(f"Reconciled {reconciled} terminal job watches")
     
     # Initialize DeadLetterService and set on retry engine
-    dlq_repository = DeadLetterRepository(engine=manager._engine)
+    dlq_repository = DeadLetterRepository(engine=manager.engine)
     dead_letter_service = DeadLetterService(
         job_repository=job_repository,
         dlq_repository=dlq_repository,
@@ -494,12 +503,23 @@ def create_app() -> FastAPI:
     # Health check endpoint
     @api_router.get("/health", response_model=HealthResponse)
     async def health_check(request: Request):
-        """Health check endpoint."""
+        """Health check endpoint.
+
+        Reports active database backend and whether PostgreSQL env vars are
+        configured. The ensemble_config is read from app.state once the
+        lifespan wires it up (Task 6); until then the new fields are None.
+        """
         start_time = getattr(request.app.state, 'start_time', None)
+        ensemble_config = getattr(request.app.state, 'ensemble_config', None)
         return HealthResponse(
             status="healthy",
             uptime_seconds=time.time() - start_time if start_time else 0,
-            version=__version__
+            version=__version__,
+            current_database=ensemble_config.database if ensemble_config is not None else None,
+            postgres_env_available=(
+                ensemble_config.postgres_env_available
+                if ensemble_config is not None else None
+            ),
         )
 
     # Project info endpoint

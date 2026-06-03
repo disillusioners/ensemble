@@ -16,6 +16,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
 
 from .config import Config
+from .ensemble_config import EnsembleConfig
 from .graph import build_instance_graph
 from .loader import PromptCache, load_and_cache_prompt
 from .utils import parse_think_tags, serialize_message, find_near_instance, DEFAULT_FUZZY_MATCH_DISTANCE  # noqa: F401
@@ -430,13 +431,18 @@ class AsyncMessageResult:
 class InstanceManager:
     """Manages all agent instances, their graphs, and lifecycle."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, ensemble_config: EnsembleConfig | None = None):
         """Initialize the instance manager.
 
         Args:
             config: Configuration object with LLM, limits, and persistence settings.
+            ensemble_config: Optional EnsembleConfig controlling database backend
+                selection. When None or is_sqlite, the existing SQLite engine
+                creation path is used (backward compatible). When is_postgres,
+                ``create_postgres_engine`` is used instead.
         """
         self.config = config
+        self._ensemble_config = ensemble_config
         self.db_path = Path(config.persistence.db_path)
         self._checkpointer = None  # Lazy init - call await manager.initialize() to set
         self._checkpointer_db_path = Path(config.persistence.checkpointer_db_path)
@@ -486,8 +492,17 @@ class InstanceManager:
         # Create ONE shared database engine for all repositories
         # This prevents database lock contention when multiple components
         # (watchdog thread, async processors, etc.) access the same SQLite file
-        db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
-        self._engine = create_engine_from_config(db_config)
+        #
+        # Database backend is selected by ensemble_config:
+        #   - ensemble_config.is_postgres  → sync PostgreSQL engine via psycopg
+        #                                     (Phase 2 will introduce async sessions)
+        #   - ensemble_config.is_sqlite (or None) → existing sync SQLite path
+        if self._ensemble_config is not None and self._ensemble_config.is_postgres:
+            from .repositories.factory import create_postgres_engine
+            self._engine = create_postgres_engine(self._ensemble_config)
+        else:
+            db_config = DatabaseConfig.sqlite(db_path=str(self.db_path))
+            self._engine = create_engine_from_config(db_config)
         
         # Create tables once for all repositories
         from sqlmodel import SQLModel
@@ -837,14 +852,23 @@ class InstanceManager:
     @property
     def checkpointer(self):
         """Get the async checkpointer instance.
-        
+
         The checkpointer is created lazily on first access and but it must be initialized explicitly via initialize().
-        
+
         Returns:
             AsyncSqliteSaver checkpointer.
         """
         return self._checkpointer
-    
+
+    @property
+    def engine(self):
+        """Public read-only access to the database engine.
+
+        Returns:
+            The shared SQLAlchemy Engine instance used by all repositories.
+        """
+        return self._engine
+
     async def initialize(self) -> None:
         """Initialize the async checkpointer.
         

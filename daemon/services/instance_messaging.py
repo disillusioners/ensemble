@@ -591,7 +591,7 @@ class InstanceMessagingService:
         if images:
             logger.info(f"Processing message with {len(images)} image(s)")
         
-        with Session(self._manager._engine) as session:
+        with Session(self._manager.engine) as session:
             # 1. Insert the message
             db_message = MessageQueue(
                 message_id=message_id,
@@ -1184,7 +1184,7 @@ class InstanceMessagingService:
         if images:
             logger.info(f"Processing message with {len(images)} image(s)")
 
-        with Session(self._manager._engine) as session:
+        with Session(self._manager.engine) as session:
             # 1. Insert the message
             db_message = MessageQueue(
                 message_id=message_id,

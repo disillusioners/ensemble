@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Engine, event
-from sqlmodel import Session, SQLModel, create_engine
+from sqlalchemy import Engine, create_engine, event
+from sqlmodel import Session, SQLModel
 
 from .project.repository import SQLModelProjectRepository
 from .instance.repository import SQLModelInstanceRepository
@@ -16,6 +17,11 @@ from .source.repository import SQLModelSourceRepository
 from .job_queue.repository import JobRepository
 from .job_queue.queue_repository import JobQueueRepository
 from .mcp_server.repository import SQLModelMcpServerRepository
+
+if TYPE_CHECKING:
+    from daemon.ensemble_config import EnsembleConfig
+
+logger = logging.getLogger(__name__)
 
 
 def create_mcp_server_repository(
@@ -130,20 +136,70 @@ def create_engine_from_config(config: DatabaseConfig) -> Engine:
             max_overflow=config.max_overflow,
             pool_pre_ping=True,
         )
-    
+
+    return engine
+
+
+def create_postgres_engine(config: "EnsembleConfig") -> Engine:
+    """Create a SQLAlchemy **sync** engine for PostgreSQL.
+
+    Uses the psycopg (sync) driver so the returned engine works with the
+    existing sync ``Session(engine)`` consumer pattern used everywhere in
+    the repository layer. Phase 2 of the migration plan introduces async
+    sessions; for Phase 1 the sync engine is intentional.
+
+    Connection URL is constructed inline (rather than calling
+    ``config.get_postgres_url()``) because the latter returns the
+    ``postgresql+asyncpg://`` URL used by the future async path.
+
+    Args:
+        config: EnsembleConfig containing PostgreSQL connection details.
+                ``POSTGRES_*`` environment variables override file values
+                for credential rotation without rewriting ``ensemble.json``.
+
+    Returns:
+        SQLAlchemy Engine instance ready for ``with engine.connect()`` /
+        ``Session(engine)``.
+    """
+    import os
+
+    pg = config.postgres
+    host = os.environ.get("POSTGRES_HOST", pg.host)
+    port = os.environ.get("POSTGRES_PORT", str(pg.port))
+    db = os.environ.get("POSTGRES_DB", pg.db)
+    user = os.environ.get("POSTGRES_USER", pg.user)
+    password = os.environ.get("POSTGRES_PASSWORD", pg.password)
+
+    url = f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+
+    logger.info(
+        f"Creating PostgreSQL engine: {host}:{port}/{db}"
+    )
+
+    engine = create_engine(
+        url,
+        echo=False,
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+    )
     return engine
 
 
 def _add_agent_id_column(conn, table_name: str, logger) -> None:
     """Add agent_id column to a table if it doesn't exist and populate from agent_dir.
-    
+
     Args:
         conn: Database connection.
         table_name: Name of the table to migrate.
         logger: Logger instance for recording migration progress.
     """
     from sqlalchemy import text
-    
+
+    # Skip for non-SQLite databases (PostgreSQL uses SQLModel metadata)
+    if "sqlite" not in str(conn.engine.url):
+        return
+
     # Check if column exists
     result = conn.execute(text(f"SELECT sql FROM sqlite_master WHERE type='table' AND name='{table_name}'"))
     row = result.fetchone()
@@ -185,19 +241,24 @@ def _add_agent_id_column(conn, table_name: str, logger) -> None:
 
 def run_migrations(engine: Engine) -> None:
     """Run database migrations to add missing columns to existing tables.
-    
+
     This function checks for and adds any columns that exist in the model
     but are missing from the actual database schema. This handles cases where
     new columns are added to models after the database was initially created.
-    
+
     Args:
         engine: SQLAlchemy Engine instance.
     """
     from sqlalchemy import text
     import logging
-    
+
     logger = logging.getLogger(__name__)
-    
+
+    # Skip for non-SQLite databases (PostgreSQL uses SQLModel metadata)
+    if "sqlite" not in str(engine.url):
+        logger.info("Skipping SQLite migrations for non-SQLite database")
+        return
+
     # Get the connection to check existing columns
     with engine.connect() as conn:
         # Migration: Add job_queue_paused to projects

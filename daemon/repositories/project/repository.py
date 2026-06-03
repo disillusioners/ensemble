@@ -92,6 +92,26 @@ class SQLModelProjectRepository:
             )
         session.commit()
 
+    def _get_dialect_insert(self, session: Session):
+        """Get dialect-appropriate insert function for upsert operations.
+
+        Generic ``sqlalchemy.insert()`` does not support
+        ``on_conflict_do_update()`` — that method is dialect-specific. This
+        helper returns the dialect-specific insert callable so the caller can
+        chain ``on_conflict_do_update`` for both SQLite and PostgreSQL.
+
+        Args:
+            session: SQLAlchemy Session whose bound engine determines dialect.
+
+        Returns:
+            Dialect-specific insert callable. Both ``sqlite`` and
+            ``postgresql`` dialect inserts support ``on_conflict_do_update``.
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            return pg_insert
+        return sqlite_insert
+
     # --------------------------------------------------------
     # CREATE
     # --------------------------------------------------------
@@ -556,7 +576,10 @@ class SQLModelProjectRepository:
             raise ValueError("meta_key cannot be empty")
 
         now = datetime.now(timezone.utc).isoformat()
-        stmt = sqlite_insert(ProjectMetadataRecord).values(
+        # Use dialect-aware insert: generic sqlalchemy.insert() lacks
+        # on_conflict_do_update() which is a dialect-specific method.
+        insert_fn = self._get_dialect_insert(session)
+        stmt = insert_fn(ProjectMetadataRecord).values(
             project_id=project_id, meta_key=key, meta_value=value,
             created_at=now, updated_at=now
         )

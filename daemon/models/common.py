@@ -67,13 +67,23 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="Service status (always 'healthy')")
     uptime_seconds: float = Field(..., description="Service uptime in seconds")
     version: str = Field(..., description="Service version")
+    current_database: str | None = Field(
+        default=None,
+        description="Active database backend ('sqlite' or 'postgres'). None until lifespan wires up ensemble_config.",
+    )
+    postgres_env_available: bool | None = Field(
+        default=None,
+        description="Whether POSTGRES_HOST and POSTGRES_DB env vars are set. None until lifespan wires up ensemble_config.",
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "status": "healthy",
                 "uptime_seconds": 3600.0,
-                "version": "1.0.0"
+                "version": "1.0.0",
+                "current_database": "sqlite",
+                "postgres_env_available": False,
             }
         }
     )

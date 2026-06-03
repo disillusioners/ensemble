@@ -441,6 +441,12 @@ class MigrationRunner:
         Returns:
             List of applied migration versions.
         """
+        # Skip migrations entirely for non-SQLite databases.
+        # PostgreSQL schemas are created by SQLModel.metadata.create_all() instead.
+        if "sqlite" not in str(self.engine.url):
+            logger.info("Skipping migrations for non-SQLite database (using SQLModel metadata)")
+            return []
+        
         self.ensure_migrations_table()
         pending = self.get_pending_migrations()
         

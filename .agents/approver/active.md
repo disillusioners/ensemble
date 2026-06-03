@@ -1,5 +1,5 @@
-Current Plan: Explorer Context Auto-Injection
-Tracking File: explorer-context-auto-injection-tracking.md
-Iteration: 001
+Current Plan: SQLite → PostgreSQL Migration
+Tracking File: sqlite-to-postgres-migration-tracking.md
+Iteration: 002
 Status: APPROVED
-Last Updated: 2026-05-31 17:26
+Last Updated: 2026-06-03 11:15

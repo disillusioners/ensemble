@@ -481,7 +481,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # This handles the case where a parent reuses an existing child (vs first spawn)
         from sqlmodel import Session
         from ..repositories.instance.models import Instance
-        with Session(manager._engine) as session:
+        with Session(manager.engine) as session:
             target_instance = session.get(Instance, instance_id)
             if target_instance and target_instance.parent_id == current_instance_id:
                 parent_instance = session.get(Instance, current_instance_id)

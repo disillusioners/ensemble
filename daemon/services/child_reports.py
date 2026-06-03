@@ -588,7 +588,7 @@ Provide a concise summary:"""
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
             last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
         
-        with Session(self._manager._engine) as session:
+        with Session(self._manager.engine) as session:
             # Get instance metadata
             instance = session.get(Instance, instance_id)
             if instance is None:

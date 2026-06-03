@@ -336,7 +336,7 @@ class InstanceLifecycleService:
         # Update parent's children list and waiting_for counter
         if parent_id:
             from sqlmodel import Session
-            with Session(self._manager._engine) as session:
+            with Session(self._manager.engine) as session:
                 parent = session.get(Instance, parent_id)
                 if parent:
                     # Add child to parent's denormalized children list

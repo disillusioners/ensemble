@@ -138,7 +138,7 @@ class TestInstanceManagerInit:
             manager._instance_repository = mock_instance_repository
             
             assert manager.config == mock_config
-            assert manager._engine is not None
+            assert manager.engine is not None
             assert manager.instances == {}
 
 
