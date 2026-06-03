@@ -38,6 +38,7 @@ And from the migration entry point::
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 from types import TracebackType
@@ -218,13 +219,37 @@ class WriteGuardSession:
     def __init__(self, session: Session, guard: WritePauseGuard) -> None:
         """Wrap a ``Session`` and register it with a ``WritePauseGuard``.
 
+        Accepts either a raw ``Session`` *or* a context manager that
+        yields one. The latter arises at test sites and at any caller
+        that has already done ``with Session(engine) as s:`` and now
+        wants to gate ``s``. We unwrap the CM by calling ``__enter__``
+        here and store the underlying session, so the proxy exposes
+        ``add`` / ``commit`` / ``close`` / ``exec`` ... directly
+        instead of forwarding to a ``_GeneratorContextManager``.
+
+        We *only* unwrap ``contextlib._GeneratorContextManager``
+        instances (the type produced by ``@contextmanager``). A raw
+        SQLModel ``Session`` is itself a context manager — calling
+        its ``__enter__`` would change semantics and ownership — so
+        it must be passed through unchanged. ``MagicMock`` instances
+        used in tests happen to expose ``__enter__``/``__exit__`` but
+        are not context managers, so they also pass through.
+
         Args:
-            session: The underlying SQLModel ``Session`` whose work
-                we want to gate. Ownership transfers to this proxy —
-                ``__exit__`` will close it.
+            session: The underlying ``Session`` (or a context manager
+                yielding one) whose work we want to gate. Ownership
+                transfers to this proxy — ``__exit__`` will close it.
             guard: The ``WritePauseGuard`` that will be notified of
                 the session's entry and exit.
         """
+        # Only unwrap the specific CM type produced by
+        # ``@contextmanager`` (and tests that fake it). Real
+        # ``Session`` objects and ``MagicMock`` instances are not
+        # ``_GeneratorContextManager`` subclasses, so they pass
+        # through unchanged and ``close()`` still hits the right
+        # object on ``__exit__``.
+        if isinstance(session, contextlib._GeneratorContextManager):
+            session = session.__enter__()
         # Use object.__setattr__ to bypass our own __setattr__ (if
         # we ever add one) and avoid triggering __getattr__ for
         # ``_session`` during init.

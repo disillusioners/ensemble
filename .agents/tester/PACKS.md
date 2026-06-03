@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 96 packs
-- Unit: 81 | Integration: 1 | Mock: 6 | E2E: 7 | Manual: 1
+- Total: 102 packs
+- Unit: 87 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -77,6 +77,11 @@
 | resume_child_notification_test | tests/unit/test_resume_child_notification.py | Child completion notification in resume: WorkerPool path, JobQueue path, no-parent graceful, error handling (both branches) | 2 min | 2026-05-28 | ✅ PASS (9/9, resume-child-notification, 0 regressions) |
 | completion_report_idempotency_test | tests/unit/test_completion_report_idempotency.py | Completion report idempotency fix: force_notify stale delete, idempotency preserved, edge cases (waiting_for=0, multiple children, error handling), manager wrapper | 2 min | 2026-05-28 | ✅ PASS (11/11, P0 cleanup regression, 0 regressions) |
 | p0_stale_cleanup_test | tests/unit/test_p0_stale_cleanup.py | P0 stale cleanup: resume stale report deletion (5), force_notify simplification (3), integration (2) | 2 min | 2026-05-28 | ✅ PASS (10/10, new tests, commit e1e6889) |
+| write_pause_guard_unit_test | tests/unit/test_write_pause_guard.py | WritePauseGuard: state machine, pause/resume with real threads, drain blocking, RuntimeError, WriteGuardSession, sync/async interop | 2 min | 2026-06-04 | ✅ PASS (27/27, feature/database-migration Phase 3, 0 failures) |
+| data_migrator_unit_test | tests/unit/test_data_migrator.py | TableMigrator: FK-safe ordering (sorted_tables), ON CONFLICT DO NOTHING idempotency, batch progress, cancel between batches, validation | 2 min | 2026-06-04 | ✅ PASS (30/30, feature/database-migration Phase 3, 0 failures) |
+| checkpoint_migrator_unit_test | tests/unit/test_checkpoint_migrator.py | CheckpointMigrator: API-based alist→aput, channel_versions warning, pending writes grouping, cancel, failure tolerance | 2 min | 2026-06-04 | ✅ PASS (23/23, feature/database-migration Phase 3, 0 failures) |
+| migration_worker_unit_test | tests/unit/test_migration_worker.py | MigrationWorker: 5-state machine, asyncio.Lock, ensemble.json update, write pause/resume, SSE fan-out, validation | 2 min | 2026-06-04 | ✅ PASS (40/40, feature/database-migration Phase 3, 0 failures) |
+| migration_api_unit_test | tests/unit/test_migration_api.py | Migration API router: 5 endpoints (availability/start/status/cancel/events), status codes, SSE, worker-not-initialized | 2 min | 2026-06-04 | ✅ PASS (29/29, feature/database-migration Phase 3, 0 failures) |
 
 ## Integration Test Packs
 
@@ -106,6 +111,7 @@
 | instances_project_tabs_e2e_test | frontend/e2e/instances-project-tabs.spec.ts | Instances page project tabs: visibility, switching, state persistence, filtering, empty state | 5 min | 2026-05-27 | ✅ PASS (5/5 scenarios, commit 917060a) |
 | mcp_tools_e2e_test | tests/e2e/test_mcp_tools.py | MCP tools visible to LLM: API returns MCP tool names, LLM response mentions MCP tools, daemon health check | 5 min | 2026-05-22 | ✅ PASS (8/8 checks, feature/fix-mcp-cold-load) |
 | mcp_tools_restore_e2e_test | tests/e2e/test_mcp_tools_restore.py | MCP tools on restored instances: create instance → verify MCP → restart daemon → re-verify MCP on same instance | 5 min | 2026-05-22 | ✅ PASS (16/16 checks, feature/fix-mcp-cold-load) |
+| migration_e2e_test | tests/e2e/test_migration_e2e.py | SQLite→PostgreSQL migration: full worker run, availability check, idempotent second run (real PostgreSQL) | 5 min | 2026-06-04 | ✅ PASS (3/3, feature/database-migration Phase 3, 0 failures) |
 
 | notification_broadcaster_unit_test | tests/unit/test_notification_broadcaster.py | NotificationBroadcaster: connection management, broadcasting, queue-full, dead connection cleanup, singleton, **instance_created events** | 2 min | 2026-05-30 | ✅ PASS (23/23, instance_created SSE feature, 0 regressions) |
 | notification_sse_endpoint_test | tests/unit/test_notification_sse_endpoint.py | SSE endpoint integration: queue management, multi-client broadcast, root completion flow, event structure, JSON format, heartbeat | 2 min | 2026-05-20 | ✅ PASS (11/11, notification system) |

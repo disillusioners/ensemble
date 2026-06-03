@@ -1089,6 +1089,8 @@ async def test_source_inheritance_parent_to_child(
         parent_instance_meta if i == parent_uuid else child_instance_meta
     )
     mock_instance_repo.set_metadata = MagicMock()
+    mock_instance_repo.count_children.return_value = 0
+    mock_instance_repo.get_tree_root_id.return_value = parent_uuid
 
     with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
          patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
@@ -1507,7 +1509,10 @@ async def test_full_chain_external_msg_to_telegram_after_child_completion(
 
     # Track metadata state for original_source
     metadata_state = {"original_source": None, "children": []}
-    
+
+    parent_uuid = "11111111-1111-1111-1111-111111111111"
+    child_uuid = "22222222-2222-2222-2222-222222222222"
+
     def get_side_effect(instance_id):
         meta = MagicMock()
         if instance_id.startswith("22222222"):
@@ -1525,14 +1530,13 @@ async def test_full_chain_external_msg_to_telegram_after_child_completion(
     def set_metadata_side_effect(instance_id, key, value):
         if key == "original_source" and metadata_state["original_source"] is None:
             metadata_state["original_source"] = value
-    
+
     mock_instance_repo = MagicMock()
     mock_instance_repo.create.return_value = MagicMock(instance_id="test-instance")
     mock_instance_repo.get.side_effect = get_side_effect
     mock_instance_repo.set_metadata.side_effect = set_metadata_side_effect
-
-    parent_uuid = "11111111-1111-1111-1111-111111111111"
-    child_uuid = "22222222-2222-2222-2222-222222222222"
+    mock_instance_repo.count_children.return_value = 0
+    mock_instance_repo.get_tree_root_id.return_value = parent_uuid
 
     with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
          patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
@@ -1652,6 +1656,8 @@ async def test_source_inheritance_grandchild_from_grandparent(
     mock_instance_repo.create.return_value = MagicMock()
     mock_instance_repo.get.side_effect = get_side_effect
     mock_instance_repo.set_metadata.side_effect = set_metadata_side_effect
+    mock_instance_repo.count_children.return_value = 0
+    mock_instance_repo.get_tree_root_id.return_value = grandparent_uuid
 
     with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
          patch('daemon.manager.build_instance_graph', return_value=mock_graph), \

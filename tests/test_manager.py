@@ -3,6 +3,7 @@
 import pytest
 import asyncio
 import time
+from contextlib import contextmanager
 from unittest.mock import Mock, MagicMock, AsyncMock, patch
 from datetime import datetime
 
@@ -1300,8 +1301,6 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Task') as mock_task, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            mock_session = MagicMock()
-
             # Create a fresh mock instance for each call
             def get_instance_side_effect(instance_id, instance_cls):
                 mock_instance = MagicMock()
@@ -1313,10 +1312,14 @@ class TestTitleGenerationTrigger:
                 # The code will transition this to RUNNING
                 return mock_instance
 
+            mock_session = MagicMock()
             mock_session.get.side_effect = get_instance_side_effect
-            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
-            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
-            mock_session_cls.return_value.add = Mock()
+
+            @contextmanager
+            def mock_session_ctx():
+                yield mock_session
+
+            mock_session_cls.return_value = mock_session_ctx()
 
             # Configure MainLoopBridge to capture the call
             mock_bridge.run_async_no_wait = Mock()
@@ -1350,8 +1353,6 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Task') as mock_task, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            mock_session = MagicMock()
-
             def get_instance_side_effect(instance_id, instance_cls):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value
@@ -1361,10 +1362,14 @@ class TestTitleGenerationTrigger:
                 mock_instance.paused_at = None
                 return mock_instance
 
+            mock_session = MagicMock()
             mock_session.get.side_effect = get_instance_side_effect
-            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
-            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
-            mock_session_cls.return_value.add = Mock()
+
+            @contextmanager
+            def mock_session_ctx():
+                yield mock_session
+
+            mock_session_cls.return_value = mock_session_ctx()
 
             mock_bridge.run_async_no_wait = Mock()
 
@@ -1395,8 +1400,6 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.Task') as mock_task, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            mock_session = MagicMock()
-
             def get_instance_side_effect(instance_id, instance_cls):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
@@ -1406,10 +1409,14 @@ class TestTitleGenerationTrigger:
                 mock_instance.paused_at = None
                 return mock_instance
 
+            mock_session = MagicMock()
             mock_session.get.side_effect = get_instance_side_effect
-            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
-            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
-            mock_session_cls.return_value.add = Mock()
+
+            @contextmanager
+            def mock_session_ctx():
+                yield mock_session
+
+            mock_session_cls.return_value = mock_session_ctx()
 
             mock_bridge.run_async_no_wait = Mock()
 
@@ -1448,8 +1455,6 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            mock_session = MagicMock()
-
             def get_instance_side_effect(instance_id, instance_cls):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.IDLE.value
@@ -1459,10 +1464,14 @@ class TestTitleGenerationTrigger:
                 mock_instance.paused_at = None
                 return mock_instance
 
+            mock_session = MagicMock()
             mock_session.get.side_effect = get_instance_side_effect
-            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
-            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
-            mock_session_cls.return_value.add = Mock()
+
+            @contextmanager
+            def mock_session_ctx():
+                yield mock_session
+
+            mock_session_cls.return_value = mock_session_ctx()
 
             mock_bridge.run_async_no_wait = Mock()
 
@@ -1500,8 +1509,6 @@ class TestTitleGenerationTrigger:
              patch('daemon.services.instance_messaging.MessageQueue') as mock_message_queue, \
              patch('daemon.services.instance_messaging.Event') as mock_event:
 
-            mock_session = MagicMock()
-
             def get_instance_side_effect(instance_id, instance_cls):
                 mock_instance = MagicMock()
                 mock_instance.status = InstanceStatus.RUNNING.value  # Already RUNNING
@@ -1511,10 +1518,14 @@ class TestTitleGenerationTrigger:
                 mock_instance.paused_at = None
                 return mock_instance
 
+            mock_session = MagicMock()
             mock_session.get.side_effect = get_instance_side_effect
-            mock_session_cls.return_value.__enter__ = Mock(return_value=mock_session)
-            mock_session_cls.return_value.__exit__ = Mock(return_value=False)
-            mock_session_cls.return_value.add = Mock()
+
+            @contextmanager
+            def mock_session_ctx():
+                yield mock_session
+
+            mock_session_cls.return_value = mock_session_ctx()
 
             mock_bridge.run_async_no_wait = Mock()
 

@@ -200,8 +200,6 @@ mock_langchain_mcp_tools = create_mock_module("langchain_mcp_adapters.tools", {
 })
 
 
-# Save and replace modules (only for non-integration tests)
-_original_modules = {}
 _mock_modules = {
     "langgraph": mock_langgraph,
     "langgraph.graph": mock_langgraph_graph,
@@ -239,27 +237,33 @@ _mock_modules = {
     "slack_sdk": mock_slack_sdk,
 }
 
+
 # Inject mocks into sys.modules BEFORE any test imports happen.
 # Always inject (no guard) so mocks replace any real modules that may have
 # been imported during pytest collection or from prior test runs.
+#
+# IMPORTANT: Do NOT delete these mocks from sys.modules at collection time.
+# pytest discovers and imports test files throughout the collection phase, and
+# removing ``mcp`` (or any other mock) here would break subsequent test files
+# that import ``daemon.manager`` -> ``daemon.mcp.warmup_pool`` -> ``mcp``.
+# Tests that need the real ``mcp`` SDK (e.g. tests/e2e) are responsible for
+# swapping the mock for the real module per-test (see tests/e2e/conftest.py).
 for key, mock_mod in _mock_modules.items():
     sys.modules[key] = mock_mod
 
 
-def pytest_collection_modifyitems(items):
-    """Only apply mocks for unit tests, not integration tests."""
-    for item in items:
-        if "integration" not in item.fspath.strpath and "e2e" not in item.fspath.strpath:
-            # Ensure mocks are applied for unit tests (always inject to override any real modules)
-            for key in _mock_modules:
-                sys.modules[key] = _mock_modules[key]
-        else:
-            # Restore real modules for integration / e2e tests
-            for key in _mock_modules:
-                if key in _original_modules:
-                    sys.modules[key] = _original_modules[key]
-                elif key in sys.modules and sys.modules[key] is _mock_modules.get(key):
-                    del sys.modules[key]
+def pytest_pycollect_makemodule(module_path, parent):
+    """Re-inject mocked modules before each test file is imported.
+
+    Some test files (and the daemon modules they import) can indirectly cause
+    ``sys.modules`` entries to be removed during collection. Re-installing the
+    mocks right before each test file is loaded guarantees that every test
+    file sees the mocks, regardless of what earlier collection steps did.
+    """
+    for key, mock_mod in _mock_modules.items():
+        sys.modules[key] = mock_mod
+    # Default behaviour: let pytest build the Module the usual way.
+    return pytest.Module.from_parent(parent, path=module_path)
 
 
 @pytest.fixture

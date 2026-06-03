@@ -74,15 +74,14 @@ tests/
   - Full migration end-to-end with data verification
   - Availability check before migration
   - Idempotent second run
-- **Regression**: 232 new fixture failures (NOT source code bugs)
-  - Root cause: Phase 3 write-pause guard needs updated test fixtures (`mock_manager.is_write_paused = False`)
-  - All failures are in pre-existing test fixtures, not in migration code
-  - All new Phase 3 tests pass in isolation AND in the new test files
-  - ~50 pre-existing failures carried over from Phase 2
+- **Regression**: 0 Phase 3 regressions (after fixture fix commit `8b7f815`)
+  - Before fix: 232 test fixture failures due to write-pause guard
+  - After fix: All resolved, ~40 pre-existing failures only
+  - Fixture fix: 6 test files updated, autouse conftest patch for `app.state.manager`
 - **conftest.py**: E2E paths excluded from mock re-injection (allows real langgraph imports)
 - **ensure.md**: PASS (dev.sh stable 30s, `Loaded ensemble config: database=sqlite`)
-- **Quick Fixes**: 2 in test code (model imports ordering, checkpoint table initialization)
-- **Bugs Found**: None in source code — all bugs were test fixture issues
+- **Fixture Fixes**: 6 test files fixed (commit `8b7f815`): test_api.py, test_scheduler_api.py, test_builtin_mcp_servers.py, test_mcp_server_crud.py, test_vision.py, conftest.py
+- **Bugs Found**: None in source code — all issues were test fixture compatibility
 - **Status**: ✅ READY (migration code is sound, fixture updates needed for full regression green)
 
 ### Phase 2: PostgreSQL Drivers & CheckpointerAdapter (2026-06-03)

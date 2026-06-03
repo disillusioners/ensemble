@@ -441,11 +441,15 @@ class InstanceMessagingService:
         try:
             # Compact context before processing (non-blocking)
             await self._maybe_compact_context(instance_id, graph, config)
-            
+
             result = await graph.ainvoke({"messages": [message]}, config)
         except asyncio.CancelledError:
             logger.info(f"Graph execution cancelled for instance {instance_id}")
-            raise
+            # Return a graceful empty result so callers (and the title-generation
+            # finally block above) can observe a consistent contract. The
+            # title-generation trigger in the finally block still fires, ensuring
+            # the first-message title is generated even on cancellation.
+            return MessageResult(content="")
         finally:
             # Trigger title generation even on cancellation (fire-and-forget)
             self._maybe_trigger_title_generation(instance_id, message, is_first_message)
@@ -765,7 +769,13 @@ class InstanceMessagingService:
         # Determine the effective source for progressive dispatch
         dispatch_source: str | None = None
         if message_source:
-            is_internal_report = message_source.startswith("internal_")
+            # C1 fix: Only treat internal_report:* and internal_error_report:* as completion reports.
+            # internal_agent:* is agent-to-agent communication, NOT a completion report,
+            # so it must NOT trigger original_source lookup/replacement.
+            is_internal_report = (
+                message_source.startswith("internal_report:") or
+                message_source.startswith("internal_error_report:")
+            )
             if is_internal_report:
                 # This is an internal message (completion report, error report, etc.)
                 # Retrieve the original external source from instance metadata

@@ -437,6 +437,7 @@ async def test_handle_message_uses_agent_dir_from_metadata(conn, mock_manager):
             external_user_id="user123",
             agent_id="/custom/agents",
             force_new=False,
+            extra_mapping_metadata=None,
         )
 
 
@@ -478,6 +479,7 @@ async def test_handle_message_uses_default_agent_dir(conn, mock_manager):
             external_user_id="user123",
             agent_id="/default/agents",
             force_new=False,
+            extra_mapping_metadata=None,
         )
 
 

@@ -7,6 +7,7 @@ Tests cover:
 """
 
 import pytest
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from daemon.services.instance_lifecycle import append_context_key, InstanceLifecycleService
@@ -164,8 +165,7 @@ class TestContextKeyInjection:
              patch("daemon.services.instance_lifecycle.append_context_key") as mock_append_context_key, \
              patch("daemon.manager.load_and_cache_prompt") as mock_load_prompt, \
              patch("daemon.manager.build_instance_graph") as mock_build_graph, \
-             patch("daemon.manager.create_instance_tools") as mock_create_tools, \
-             patch("sqlmodel.Session") as mock_session:
+             patch("daemon.manager.create_instance_tools") as mock_create_tools:
 
             # Configure mocks
             mock_registry = MagicMock()
@@ -180,24 +180,28 @@ class TestContextKeyInjection:
             mock_build_graph.return_value = MagicMock()
             mock_append_context_key.return_value = "You are a test agent."  # Return modified prompt
 
-            # Mock Session context manager to prevent actual DB operations
-            mock_session_instance = MagicMock()
-            # Set up the parent mock that session.get() returns
+            # Mock Session context manager — the source wraps it in WriteGuardSession
+            # which unwraps contextlib._GeneratorContextManager via __enter__.
             mock_parent = MagicMock()
             mock_parent.children = "[]"  # Valid JSON array
-            mock_session_instance.get.return_value = mock_parent
-            mock_session.return_value.__enter__ = MagicMock(return_value=mock_session_instance)
-            mock_session.return_value.__exit__ = MagicMock(return_value=False)
+            mock_session = MagicMock()
+            mock_session.get.return_value = mock_parent
 
-            # Execute - call spawn_instance with a parent_id
-            test_parent_id = "parent-123"
-            service.spawn_instance(agent_id="test", parent_id=test_parent_id)
+            @contextmanager
+            def mock_session_ctx():
+                yield mock_session
 
-            # Verify append_context_key was called with the parent_id
-            mock_append_context_key.assert_called_once()
-            call_kwargs = mock_append_context_key.call_args.kwargs
-            assert call_kwargs.get("parent_id") == test_parent_id, \
-                f"Expected parent_id='{test_parent_id}', got {call_kwargs.get('parent_id')}"
+            with patch("sqlmodel.Session", return_value=mock_session_ctx()):
+
+                # Execute - call spawn_instance with a parent_id
+                test_parent_id = "parent-123"
+                service.spawn_instance(agent_id="test", parent_id=test_parent_id)
+
+                # Verify append_context_key was called with the parent_id
+                mock_append_context_key.assert_called_once()
+                call_kwargs = mock_append_context_key.call_args.kwargs
+                assert call_kwargs.get("parent_id") == test_parent_id, \
+                    f"Expected parent_id='{test_parent_id}', got {call_kwargs.get('parent_id')}"
 
     def test_restore_instance_injects_context_key(self):
         """Verify _restore_instance() calls append_context_key with meta.parent_id."""
