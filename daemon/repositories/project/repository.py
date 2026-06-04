@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, insert, func, or_
+from sqlalchemy import delete as sql_delete, insert, func, or_, cast
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm.attributes import flag_modified
@@ -247,10 +247,21 @@ class SQLModelProjectRepository:
     def get_by_instance(self, instance_id: str) -> list[Project]:
         """Get all projects linked to an instance."""
         with Session(self.engine) as session:
-            stmt = select(Project).where(
-                (Project.creator_instance_id == instance_id)
-                | col(Project.relationships).contains(f'"instances"')
-            )
+            # JSON containment is dialect-aware: PostgreSQL JSONB uses ``@>``,
+            # SQLite keeps the LIKE-based ``contains`` (with Python-side correction).
+            if session.bind is not None and session.bind.dialect.name == "postgresql":
+                from sqlalchemy import cast
+                from sqlalchemy.dialects.postgresql import JSONB
+
+                stmt = select(Project).where(
+                    (Project.creator_instance_id == instance_id)
+                    | cast(Project.relationships, JSONB).contains({"instances": [instance_id]})
+                )
+            else:
+                stmt = select(Project).where(
+                    (Project.creator_instance_id == instance_id)
+                    | col(Project.relationships).contains(f'"instances"')
+                )
             projects = list(session.exec(stmt))
             result = []
             for p in projects:
@@ -263,10 +274,46 @@ class SQLModelProjectRepository:
     def get_by_directory(self, directory: str) -> list[Project]:
         """Get all projects that reference a directory."""
         with Session(self.engine) as session:
-            stmt = select(Project).where(
-                (Project.main_directory == directory)
-                | col(Project.related_directories).contains(f'"{directory}"')
-            )
+            # JSON containment is dialect-aware: PostgreSQL JSONB uses ``@>``,
+            # SQLite keeps the LIKE-based ``contains`` (with Python-side correction).
+            if session.bind is not None and session.bind.dialect.name == "postgresql":
+                from sqlalchemy import cast
+                from sqlalchemy.dialects.postgresql import JSONB
+
+                stmt = select(Project).where(
+                    (Project.main_directory == directory)
+                    | cast(Project.related_directories, JSONB).contains([directory])
+                )
+            else:
+                stmt = select(Project).where(
+                    (Project.main_directory == directory)
+                    | col(Project.related_directories).contains(f'"{directory}"')
+                )
+            projects = list(session.exec(stmt))
+            result = []
+            for p in projects:
+                if p.main_directory == directory or directory in p.related_directories:
+                    result.append(p)
+            return self._enrich_projects(session, result)
+
+    def get_by_directory(self, directory: str) -> list[Project]:
+        """Get all projects that reference a directory."""
+        with Session(self.engine) as session:
+            # JSON containment is dialect-aware: PostgreSQL JSONB uses ``@>``,
+            # SQLite keeps the LIKE-based ``contains`` (with Python-side correction).
+            if session.bind is not None and session.bind.dialect.name == "postgresql":
+                from sqlalchemy import cast
+                from sqlalchemy.dialects.postgresql import JSONB
+
+                stmt = select(Project).where(
+                    (Project.main_directory == directory)
+                    | cast(Project.related_directories, JSONB).contains([directory])
+                )
+            else:
+                stmt = select(Project).where(
+                    (Project.main_directory == directory)
+                    | col(Project.related_directories).contains(f'"{directory}"')
+                )
             projects = list(session.exec(stmt))
             result = []
             for p in projects:
@@ -957,7 +1004,7 @@ class SQLModelProjectRepository:
         """
         with Session(self.engine) as session:
             stmt = select(ProjectHistoryEntry).where(
-                ProjectHistoryEntry.project_id == project_id
+                ProjectHistoryEntry.project_id == project_id,
             )
             if entry_type:
                 stmt = stmt.where(ProjectHistoryEntry.entry_type == entry_type)
@@ -999,12 +1046,14 @@ class SQLModelProjectRepository:
         search_term = f"%{escaped}%"
 
         with Session(self.engine) as session:
-            # Build search condition for summary and details with NULL-safe handling
+            # Build search condition for summary and details with NULL-safe handling.
+            # `escape="\\"` is required so that the backslash-escaped `%`/`_` wildcards
+            # in `search_term` are treated as literals by both SQLite and PostgreSQL.
             stmt = select(ProjectHistoryEntry).where(
                 ProjectHistoryEntry.project_id == project_id,
                 or_(
-                    ProjectHistoryEntry.summary.ilike(search_term),
-                    func.coalesce(ProjectHistoryEntry.details, "").ilike(search_term),
+                    ProjectHistoryEntry.summary.ilike(search_term, escape="\\"),
+                    func.coalesce(ProjectHistoryEntry.details, "").ilike(search_term, escape="\\"),
                 ),
             )
 

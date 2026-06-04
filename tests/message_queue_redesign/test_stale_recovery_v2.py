@@ -80,13 +80,14 @@ def create_cancelled_task(
                     status = :status_cancelled,
                     retry_count = :retry_count,
                     retry_scheduled = :retry_scheduled,
-                    cancel_requested = 1
+                    cancel_requested = :cancel_requested
                 WHERE id = :id
             """),
             {
                 "status_cancelled": TaskStatus.CANCELLED.value,
                 "retry_count": retry_count,
-                "retry_scheduled": 1 if retry_scheduled else 0,
+                "retry_scheduled": bool(retry_scheduled),
+                "cancel_requested": True,
                 "id": task.id,
             }
         )
@@ -124,13 +125,15 @@ def create_task_with_retry_child(
                 UPDATE task SET
                     status = :status_cancelled,
                     retry_count = :retry_count,
-                    retry_scheduled = 1,
-                    cancel_requested = 1
+                    retry_scheduled = :retry_scheduled,
+                    cancel_requested = :cancel_requested
                 WHERE id = :parent_id
             """),
             {
                 "status_cancelled": TaskStatus.CANCELLED.value,
                 "retry_count": parent_retry_count,
+                "retry_scheduled": True,
+                "cancel_requested": True,
                 "parent_id": parent.id,
             }
         )

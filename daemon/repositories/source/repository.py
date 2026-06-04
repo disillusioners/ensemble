@@ -100,7 +100,9 @@ class SQLModelSourceRepository:
         The counter is stored in the source's config field (_run_counter) so it persists
         even if sessions crash. Initializes to 0 if not present.
 
-        Uses atomic SQL with json_set() and RETURNING to avoid race conditions.
+        Uses atomic SQL with a dialect-aware JSON update and RETURNING to avoid
+        race conditions on both SQLite (``json_set``/``json_extract``) and
+        PostgreSQL (``jsonb_set``/``->>``).
 
         Args:
             source_id: The source ID to increment the counter for.
@@ -109,19 +111,38 @@ class SQLModelSourceRepository:
             The new counter value, or None if the source was not found.
         """
         with Session(self.engine) as session:
-            # Atomic update using json_set for _run_counter with COALESCE and RETURNING clause
-            update_sql = text("""
-                UPDATE source_configs
-                SET config = json_set(
-                    COALESCE(config, '{}'),
-                    '$._run_counter',
-                    COALESCE(CAST(json_extract(config, '$._run_counter') AS INTEGER), 0) + 1
-                ),
-                updated_at = :updated_at
-                WHERE source_id = :source_id
-                RETURNING CAST(json_extract(config, '$._run_counter') AS INTEGER) as counter
-            """)
-            result = session.execute(update_sql, {"source_id": source_id, "updated_at": datetime.now(timezone.utc).isoformat()}).fetchone()
+            # Dialect-aware atomic update of the JSON ``_run_counter`` field.
+            # SQLite uses json_set/json_extract; PostgreSQL uses jsonb_set/->>.
+            if session.bind is not None and session.bind.dialect.name == "postgresql":
+                update_sql = text("""
+                    UPDATE source_configs
+                    SET config = jsonb_set(
+                        COALESCE(config, '{}'::jsonb),
+                        '{_run_counter}',
+                        to_jsonb(
+                            COALESCE((config->>'_run_counter')::int, 0) + 1
+                        )
+                    ),
+                    updated_at = :updated_at
+                    WHERE source_id = :source_id
+                    RETURNING (config->>'_run_counter')::int AS counter
+                """)
+            else:
+                update_sql = text("""
+                    UPDATE source_configs
+                    SET config = json_set(
+                        COALESCE(config, '{}'),
+                        '$._run_counter',
+                        COALESCE(CAST(json_extract(config, '$._run_counter') AS INTEGER), 0) + 1
+                    ),
+                    updated_at = :updated_at
+                    WHERE source_id = :source_id
+                    RETURNING CAST(json_extract(config, '$._run_counter') AS INTEGER) as counter
+                """)
+            result = session.execute(
+                update_sql,
+                {"source_id": source_id, "updated_at": datetime.now(timezone.utc).isoformat()},
+            ).fetchone()
 
             session.commit()
 
