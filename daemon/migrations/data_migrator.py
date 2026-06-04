@@ -387,6 +387,68 @@ class TableMigrator:
 
         return mismatches
 
+    def sync_sequences(self) -> int:
+        """Advance every PG integer-PK sequence to MAX(id) of its table.
+
+        PostgreSQL sequences are NOT advanced when rows are inserted with
+        explicit PK values (which is what :meth:`migrate_table` does via
+        ``pg_insert(...).values(**data)``). Without this step, new inserts
+        after migration collide with migrated rows and raise UniqueViolation.
+
+        We use ``pg_get_serial_sequence(table, column)`` to discover the
+        sequence name for each serial PK column, then ``setval`` to
+        ``COALESCE(MAX(id), 1)`` so the sequence continues from the right
+        point on next insert.
+
+        Idempotent: ``setval`` to the current value is a no-op.
+
+        Returns:
+            Number of sequences synchronized.
+        """
+        from sqlalchemy import text
+
+        synced = 0
+        with self._pg_engine.begin() as conn:
+            for table in SQLModel.metadata.sorted_tables:
+                table_name = table.name
+                if table_name in TABLES_TO_SKIP:
+                    continue
+                if not self._table_exists(self._pg_engine, table_name):
+                    continue
+                for col in table.columns:
+                    if not col.primary_key:
+                        continue
+                    if not col.autoincrement:
+                        continue
+                    seq_result = conn.execute(
+                        text(
+                            "SELECT pg_get_serial_sequence(:table_name, :col_name) AS seq"
+                        ),
+                        {"table_name": table_name, "col_name": col.name},
+                    )
+                    seq_row = seq_result.fetchone()
+                    if not seq_row or not seq_row[0]:
+                        continue
+                    seq_name = seq_row[0]
+                    max_result = conn.execute(
+                        text(
+                            f"SELECT COALESCE(MAX({col.name}), 1) FROM {table_name}"
+                        )
+                    )
+                    max_id = max_result.fetchone()[0]
+                    conn.execute(
+                        text("SELECT setval(:seq, :max_id)"),
+                        {"seq": seq_name, "max_id": max_id},
+                    )
+                    self._log(
+                        "debug",
+                        f"Synced sequence {seq_name} for {table_name}.{col.name} to {max_id}",
+                    )
+                    synced += 1
+
+        self._log("info", f"Synchronized {synced} PostgreSQL sequences after migration")
+        return synced
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

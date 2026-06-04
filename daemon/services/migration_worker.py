@@ -374,6 +374,14 @@ class MigrationWorker:
                 f"Table migration complete: {total_rows} rows across {len(counts)} tables",
             )
 
+            # Step 5b: Sync PG sequences so new inserts don't collide with migrated rows.
+            # migrate_table inserts rows with explicit PKs; PG sequences are not advanced
+            # by such inserts, so without this step every post-migration insert raises
+            # UniqueViolation on the integer-PK tables (event, instance, message, etc.).
+            self._set_phase("syncing_sequences")
+            self._log_callback("info", "Synchronizing PostgreSQL sequences to MAX(id)")
+            await asyncio.to_thread(table_migrator.sync_sequences)
+
             # Step 6: Migrate checkpoints (async API-based).
             self._set_phase("migrating_checkpoints")
             self._emit_event("progress", {"message": "Migrating checkpoints (async API-based)"})

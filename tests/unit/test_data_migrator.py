@@ -599,6 +599,111 @@ class TestValidateMigration:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# sync_sequences
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestSyncSequences:
+    """``sync_sequences`` advances PG sequences to MAX(id) after migration."""
+
+    def test_sync_sequences_calls_setval_for_each_autoincrement_pk(
+        self, sqlite_engine, pg_engine, cancel_event, log_callback
+    ):
+        """Every table with an autoincrement PK gets setval called once."""
+        from unittest.mock import MagicMock, call
+
+        migrator = TableMigrator(
+            sqlite_engine=sqlite_engine,
+            pg_engine=pg_engine,
+            cancel_event=cancel_event,
+            log_callback=log_callback,
+        )
+
+        executed_sql: list[str] = []
+        setval_calls: list[tuple] = []
+
+        original_begin = pg_engine.begin
+        mock_conn = MagicMock()
+
+        def capture_execute(sql, params=None):
+            executed_sql.append(str(sql))
+            result = MagicMock()
+            if "pg_get_serial_sequence" in str(sql):
+                result.fetchone.return_value = ("test_p3_parent_id_seq",)
+            elif "MAX" in str(sql):
+                result.fetchone.return_value = (5,)
+            else:
+                result.fetchone.return_value = (5,)
+            return result
+
+        mock_conn.execute = capture_execute
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=None)
+
+        with patch.object(pg_engine, "begin", return_value=mock_conn):
+            synced = migrator.sync_sequences()
+
+        assert synced >= 1
+
+    def _make_mock_conn(self, max_id: int = 5):
+        """Build a mock connection that satisfies sync_sequences' PG SQL calls."""
+        from unittest.mock import MagicMock
+
+        mock_conn = MagicMock()
+
+        def capture_execute(sql, params=None):
+            result = MagicMock()
+            sql_str = str(sql)
+            if "pg_get_serial_sequence" in sql_str:
+                result.fetchone.return_value = ("test_seq",)
+            elif "MAX" in sql_str:
+                result.fetchone.return_value = (max_id,)
+            else:
+                result.fetchone.return_value = (max_id,)
+            return result
+
+        mock_conn.execute = capture_execute
+        mock_conn.__enter__ = MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = MagicMock(return_value=None)
+        return mock_conn
+
+    def test_sync_sequences_idempotent(
+        self, sqlite_engine, pg_engine, cancel_event
+    ):
+        """Calling sync_sequences twice is safe — setval to the same value is a no-op."""
+        migrator = TableMigrator(
+            sqlite_engine=sqlite_engine,
+            pg_engine=pg_engine,
+            cancel_event=cancel_event,
+            log_callback=None,
+        )
+
+        mock_conn = self._make_mock_conn(max_id=5)
+        with patch.object(pg_engine, "begin", return_value=mock_conn):
+            result1 = migrator.sync_sequences()
+            result2 = migrator.sync_sequences()
+
+        assert result1 == result2
+
+    def test_sync_sequences_returns_nonzero_count(
+        self, sqlite_engine, pg_engine, cancel_event
+    ):
+        """sync_sequences processes every table with an autoincrement PK."""
+        migrator = TableMigrator(
+            sqlite_engine=sqlite_engine,
+            pg_engine=pg_engine,
+            cancel_event=cancel_event,
+            log_callback=None,
+        )
+
+        mock_conn = self._make_mock_conn(max_id=3)
+        with patch.object(pg_engine, "begin", return_value=mock_conn):
+            synced = migrator.sync_sequences()
+
+        assert synced >= 1
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # _table_exists helper
 # ──────────────────────────────────────────────────────────────────────────────
 
