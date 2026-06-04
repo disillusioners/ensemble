@@ -87,7 +87,12 @@ class PersistenceConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PERSISTENCE_")
 
     db_path: str = Field(default="./data/instances.db")
-    checkpointer_db_path: str = Field(default="./data/checkpoints.db")
+    # NOTE: The historical ``checkpointer_db_path`` field has been removed.
+    # The runtime checkpointer path is owned by ``EnsembleConfig.sqlite.checkpoints_db``
+    # and read in ``daemon.persistence.get_checkpointer``. The lifespan in
+    # ``daemon/api.py`` resolves the data directory from ``ENSEMBLE_DATA_DIR``
+    # (with a ``DATA_DIR`` fallback) before loading ``ensemble.json``, so
+    # there is no longer a second config knob to keep in sync.
     checkpoint_interval: int = Field(default=1)
     checkpoint_ttl_hours: int = Field(default=CHECKPOINT_TTL_HOURS)
     checkpoint_cleanup_interval: int = Field(default=CHECKPOINT_CLEANUP_INTERVAL_HOURS)
@@ -292,20 +297,17 @@ def load_config(config_path: str | None = None) -> Config:
     config_dict["queue"] = queue_config
 
     # Handle persistence config - env vars take priority over YAML
-    # This allows dev.sh to override paths via PERSISTENCE_DB_PATH, etc.
+    # This allows dev.sh to override paths via PERSISTENCE_DB_PATH.
     persistence_config: Dict[str, Any] = {}
     if "persistence" in processed_config:
         persistence_config = processed_config["persistence"].copy()
-    # Don't override db_path if PERSISTENCE_DB_PATH env var is set
-    if "PERSISTENCE_DB_PATH" not in os.environ:
-        persistence_config.setdefault("db_path", "./data/instances.db")
-    else:
+    if "PERSISTENCE_DB_PATH" in os.environ:
         persistence_config["db_path"] = os.environ["PERSISTENCE_DB_PATH"]
-    # Don't override checkpointer_db_path if PERSISTENCE_CHECKPOINTER_DB_PATH env var is set
-    if "PERSISTENCE_CHECKPOINTER_DB_PATH" not in os.environ:
-        persistence_config.setdefault("checkpointer_db_path", "./data/checkpoints.db")
     else:
-        persistence_config["checkpointer_db_path"] = os.environ["PERSISTENCE_CHECKPOINTER_DB_PATH"]
+        persistence_config.setdefault("db_path", "./data/instances.db")
+    # ``checkpointer_db_path`` was removed (see PersistenceConfig above).
+    # Silently drop it from the YAML dict so old configs keep loading.
+    persistence_config.pop("checkpointer_db_path", None)
     config_dict["persistence"] = persistence_config
 
     if "compaction" in processed_config:

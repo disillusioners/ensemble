@@ -329,7 +329,6 @@ class TestManagerSpawnInstanceErrors:
         # Create minimal config - use plain MagicMock without spec
         config = MagicMock()
         config.persistence.db_path = ":memory:"
-        config.persistence.checkpointer_db_path = ":memory:"
         config.llm.base_url = "https://api.example.com"
         config.llm.api_key = "test-key"
         config.llm.model = "test-model"
@@ -383,7 +382,6 @@ class TestManagerSpawnInstanceErrors:
 
         config = MagicMock()
         config.persistence.db_path = ":memory:"
-        config.persistence.checkpointer_db_path = ":memory:"
         config.llm.base_url = "https://api.example.com"
         config.llm.api_key = "test-key"
         config.llm.model = "test-model"
@@ -416,7 +414,6 @@ class TestManagerSpawnInstanceErrors:
 
         config = MagicMock()
         config.persistence.db_path = ":memory:"
-        config.persistence.checkpointer_db_path = ":memory:"
         config.llm.base_url = "https://api.example.com"
         config.llm.api_key = "test-key"
         config.llm.model = "test-model"
@@ -461,7 +458,6 @@ class TestManagerSpawnInstanceErrors:
 
         config = MagicMock()
         config.persistence.db_path = ":memory:"
-        config.persistence.checkpointer_db_path = ":memory:"
         config.llm.base_url = "https://api.example.com"
         config.llm.api_key = "test-key"
         config.llm.model = "test-model"
@@ -527,7 +523,6 @@ class TestErrorMessageConsistency:
 
         config = MagicMock()
         config.persistence.db_path = ":memory:"
-        config.persistence.checkpointer_db_path = ":memory:"
         config.llm.base_url = "https://api.example.com"
         config.llm.api_key = "test-key"
         config.llm.model = "test-model"

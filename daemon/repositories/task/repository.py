@@ -418,8 +418,12 @@ class TaskRepository:
             else:
                 parent = dict(parent_row._mapping)
 
-                # Check retry_scheduled guard to prevent double-retry
-                if parent.get("retry_scheduled", 0):
+                # Check retry_scheduled guard to prevent double-retry.
+                # Use `False` (not `0`) as the dict.get() default so the
+                # truthiness check is unambiguous across dialects — the value
+                # itself is read as a Python bool from both SQLite and
+                # PostgreSQL.
+                if parent.get("retry_scheduled", False):
                     pass  # Retry already scheduled by another process
                 elif parent.get("retry_count", 0) >= max_retries:
                     pass  # Max retries exceeded
@@ -436,26 +440,33 @@ class TaskRepository:
                     next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
                     now = datetime.now(timezone.utc)
 
-                    # Mark parent as CANCELLED and set retry_scheduled guard
+                    # Mark parent as CANCELLED and set retry_scheduled guard.
+                    # Use bound parameters (`:cancel_requested`, `:retry_scheduled`)
+                    # with Python booleans so the comparison works on both
+                    # SQLite (INTEGER 0/1) and PostgreSQL (BOOLEAN false/true).
                     conn.execute(
                         text("""
                             UPDATE task SET
                                 status = :status_cancelled,
-                                cancel_requested = 1,
+                                cancel_requested = :cancel_requested,
                                 cancel_requested_at = :cancelled_at,
                                 completed_at = :completed_at,
-                                retry_scheduled = 1
+                                retry_scheduled = :retry_scheduled
                             WHERE id = :id
                         """),
                         {
                             "status_cancelled": TaskStatus.CANCELLED.value,
+                            "cancel_requested": True,
                             "cancelled_at": now,
                             "completed_at": now,
+                            "retry_scheduled": True,
                             "id": task_id,
                         }
                     )
 
-                    # Create new retry task (column is task_type, not type)
+                    # Create new retry task (column is task_type, not type).
+                    # Pass Python booleans so the bound parameters are typed
+                    # correctly for both SQLite and PostgreSQL.
                     result = conn.execute(
                         text("""
                             INSERT INTO task (task_type, instance_id, message_id, status,
@@ -474,8 +485,8 @@ class TaskRepository:
                             "retry_count": new_retry_count,
                             "next_retry_at_str": next_retry_at_str,
                             "created_at": now,
-                            "cancel_requested": 0,
-                            "retry_scheduled": 0,
+                            "cancel_requested": False,
+                            "retry_scheduled": False,
                         }
                     ).fetchone()
 
@@ -507,20 +518,26 @@ class TaskRepository:
         now = datetime.now(timezone.utc)
 
         with self.engine.begin() as conn:
+            # Use bound parameters with Python booleans so the boolean
+            # comparisons work on both SQLite (INTEGER 0/1) and PostgreSQL
+            # (BOOLEAN false/true).
             result = conn.execute(
                 text("""
                     UPDATE task
-                    SET cancel_requested = 1,
+                    SET cancel_requested = :cancel_requested_true,
                         cancel_requested_at = :cancelled_at
                     WHERE id = :id
                     AND status = :status_running
-                    AND cancel_requested = 0
-                    AND retry_scheduled = 0
+                    AND cancel_requested = :cancel_requested_false
+                    AND retry_scheduled = :retry_scheduled_false
                 """),
                 {
+                    "cancel_requested_true": True,
                     "cancelled_at": now,
                     "id": task_id,
                     "status_running": TaskStatus.RUNNING.value,
+                    "cancel_requested_false": False,
+                    "retry_scheduled_false": False,
                 }
             )
             return result.rowcount > 0
@@ -531,15 +548,19 @@ class TaskRepository:
         threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
 
         with self.engine.begin() as conn:
+            # Use bound parameter with Python False so the boolean
+            # comparison works on both SQLite (INTEGER 0) and PostgreSQL
+            # (BOOLEAN false).
             stmt = text("""
                 SELECT * FROM task
                 WHERE status = :status_running
                 AND started_at < :threshold
-                AND cancel_requested = 0
+                AND cancel_requested = :cancel_requested
             """)
             rows = conn.execute(stmt, {
                 "status_running": TaskStatus.RUNNING.value,
                 "threshold": threshold,
+                "cancel_requested": False,
             }).fetchall()
             return [self._row_to_task(row) for row in rows]
 
@@ -569,7 +590,7 @@ class TaskRepository:
                 text("""
                     UPDATE task SET
                         status = :status_cancelled,
-                        cancel_requested = 1,
+                        cancel_requested = :cancel_requested,
                         cancel_requested_at = :cancelled_at,
                         completed_at = :completed_at,
                         error = :error
@@ -577,6 +598,7 @@ class TaskRepository:
                 """),
                 {
                     "status_cancelled": TaskStatus.CANCELLED.value,
+                    "cancel_requested": True,
                     "cancelled_at": now,
                     "completed_at": now,
                     "error": f"Task cancelled: {reason}",
@@ -621,8 +643,11 @@ class TaskRepository:
             else:
                 parent = dict(parent_row._mapping)
 
-                # Check guards
-                if parent.get("retry_scheduled", 0):
+                # Check guards. Use `False` (not `0`) as the dict.get()
+                # default so the truthiness check is unambiguous across
+                # dialects — the value itself is read as a Python bool from
+                # both SQLite and PostgreSQL.
+                if parent.get("retry_scheduled", False):
                     pass  # Already has retry scheduled
                 elif parent.get("retry_count", 0) >= max_retries:
                     pass  # Max retries exceeded
@@ -638,27 +663,34 @@ class TaskRepository:
                     next_retry_at = now + timedelta(seconds=delay_seconds)
                     next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
 
-                    # Force-cancel parent and set retry_scheduled guard
+                    # Force-cancel parent and set retry_scheduled guard.
+                    # Use bound parameters with Python booleans so the
+                    # boolean column writes work on both SQLite
+                    # (INTEGER 0/1) and PostgreSQL (BOOLEAN false/true).
                     conn.execute(
                         text("""
                             UPDATE task SET
                                 status = :status_cancelled,
-                                cancel_requested = 1,
+                                cancel_requested = :cancel_requested,
                                 cancel_requested_at = :now,
                                 completed_at = :now,
                                 error = :error,
-                                retry_scheduled = 1
+                                retry_scheduled = :retry_scheduled
                             WHERE id = :id
                         """),
                         {
                             "status_cancelled": TaskStatus.CANCELLED.value,
+                            "cancel_requested": True,
                             "now": now,
                             "error": f"Force cancelled: {reason}",
+                            "retry_scheduled": True,
                             "id": task_id,
                         }
                     )
 
-                    # Create retry child
+                    # Create retry child. Pass Python booleans so the
+                    # bound parameters are typed correctly for both
+                    # SQLite and PostgreSQL.
                     result = conn.execute(
                         text("""
                             INSERT INTO task (task_type, instance_id, message_id, status,
@@ -677,8 +709,8 @@ class TaskRepository:
                             "retry_count": new_retry_count,
                             "next_retry_at_str": next_retry_at_str,
                             "created_at": now,
-                            "cancel_requested": 0,
-                            "retry_scheduled": 0,
+                            "cancel_requested": False,
+                            "retry_scheduled": False,
                         }
                     ).fetchone()
 
@@ -702,10 +734,15 @@ class TaskRepository:
         Used by startup recovery to detect crash-before-retry scenarios.
         """
         with self.engine.begin() as conn:
+            # Use bound parameter with Python False so the boolean
+            # comparison works on both SQLite (INTEGER 0) and PostgreSQL
+            # (BOOLEAN false). The previous hard-coded `= 0` raised
+            # `psycopg.errors.UndefinedFunction: operator does not exist:
+            # boolean = integer` on PostgreSQL.
             stmt = text("""
                 SELECT t1.* FROM task t1
                 WHERE t1.status = :status_cancelled
-                AND t1.retry_scheduled = 0
+                AND t1.retry_scheduled = :retry_scheduled
                 AND t1.message_id IS NOT NULL
                 AND NOT EXISTS (
                     SELECT 1 FROM task t2
@@ -716,6 +753,7 @@ class TaskRepository:
             """)
             rows = conn.execute(stmt, {
                 "status_cancelled": TaskStatus.CANCELLED.value,
+                "retry_scheduled": False,
             }).fetchall()
             return [self._row_to_task(row) for row in rows]
 

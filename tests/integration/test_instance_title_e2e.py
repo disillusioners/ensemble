@@ -74,9 +74,7 @@ def test_db_path(tmp_path):
     import uuid
     # Use unique path per test to avoid database corruption between tests
     db_path = tmp_path / f"test_title_{uuid.uuid4().hex[:8]}.db"
-    # Also set checkpointer db path to avoid conflicts
-    checkpointer_path = tmp_path / f"test_checkpoints_{uuid.uuid4().hex[:8]}.db"
-    yield db_path, checkpointer_path
+    yield db_path
     # Cleanup is automatic with tmp_path
 
 
@@ -99,13 +97,13 @@ async def test_instance_title_generation_e2e(
     # Use the manager's instance repository instead of standalone functions
     # The manager._instance_repository is a SQLModelInstanceRepository
     
-    # Unpack unique db paths
-    db_path, checkpointer_path = test_db_path
-    
+    # Set unique db path for test isolation
+    db_path = test_db_path
+
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(db_path)
-    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
-    
+    # Checkpointer path is set via ensemble_config, not persistence config.
+
     # Create manager
     logger.info("[TEST] Creating InstanceManager...")
     manager = InstanceManager(integration_config)
@@ -281,13 +279,13 @@ async def test_instance_title_not_regenerated(
     from daemon.manager import InstanceManager
     # Use manager._instance_repository instead of standalone persistence functions
     
-    # Unpack unique db paths
-    db_path, checkpointer_path = test_db_path
-    
+    # Set unique db path for test isolation
+    db_path = test_db_path
+
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(db_path)
-    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
-    
+    # Checkpointer path is set via ensemble_config, not persistence config.
+
     # Create manager
     logger.info("[TEST] Creating InstanceManager...")
     manager = InstanceManager(integration_config)

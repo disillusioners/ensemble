@@ -22,7 +22,6 @@ class TestPublishInstanceLifecycleEvent:
         # Create mock manager
         mock_config = MagicMock()
         mock_config.persistence.db_path = ":memory:"
-        mock_config.persistence.checkpointer_db_path = ":memory:"
         mock_config.llm.base_url = "http://localhost"
         mock_config.llm.api_key = "test"
         mock_config.llm.model = "test"
@@ -259,7 +258,6 @@ class TestLifecycleEventCallSites:
         # Create minimal mock setup
         mock_config = MagicMock()
         mock_config.persistence.db_path = ":memory:"
-        mock_config.persistence.checkpointer_db_path = ":memory:"
         mock_config.llm.base_url = "http://localhost"
         mock_config.llm.api_key = "test"
         mock_config.llm.model = "test"

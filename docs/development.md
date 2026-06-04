@@ -70,7 +70,8 @@ The `dev.sh` script starts the FastAPI backend with hot-reload:
 6. **Creates dev data directory** — Uses `./data_dev/` (separate from production `./data/`)
 7. **Configures dev databases:**
    - `PERSISTENCE_DB_PATH=./data_dev/instances.db`
-   - `PERSISTENCE_CHECKPOINTER_DB_PATH=./data_dev/checkpoints.db`
+   - `ENSEMBLE_DATA_DIR=./data_dev` (lifespan resolves the checkpointer
+     DB path from `ensemble.json`, which lives here)
 8. **Sets dev port** — Always uses port **8079** (avoids conflict with production on 8088)
 9. **Starts uvicorn** — With `--reload` flag for auto-reload on code changes
 
@@ -444,7 +445,7 @@ make stop    # Kill process on port 8088
 | `PORT` | `8079` (dev) / `8088` (prod) | Server port |
 | `DATA_DIR` | `./data_dev` (dev) | Database directory |
 | `PERSISTENCE_DB_PATH` | `$DATA_DIR/instances.db` | Instance database path |
-| `PERSISTENCE_CHECKPOINTER_DB_PATH` | `$DATA_DIR/checkpoints.db` | Checkpoint database path |
+| `ENSEMBLE_DATA_DIR` | `$DATA_DIR` (dev) | Directory holding `ensemble.json` (which records the checkpointer DB path) |
 | `LOG_LEVEL` | `info` | Logging level for third-party libs (debug, info, warning, error) |
 | `LOG_LEVEL_DAEMON` | `info` | Logging level for daemon modules (debug, info, warning, error) |
 | `USE_WORKER_POOL` | `true` | Enable/disable worker pool |

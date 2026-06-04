@@ -1099,7 +1099,6 @@ class TestMaintenanceServiceIntegration:
 
         # Create a real-ish config
         config = PersistenceConfig(
-            checkpointer_db_path="/tmp/test_checkpoints.db",
             checkpoint_ttl_hours=24,
             max_instance_history=10,
         )

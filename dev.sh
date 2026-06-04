@@ -49,9 +49,12 @@ export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4}"
 export DATA_DIR="${DATA_DIR:-./data_dev}"
 mkdir -p "$DATA_DIR"
 
+# Mirror to ENSEMBLE_DATA_DIR so the lifespan (api.py) loads ensemble.json
+# from the dev dir. The checkpointer DB path lives in ensemble.json.
+export ENSEMBLE_DATA_DIR="${ENSEMBLE_DATA_DIR:-$DATA_DIR}"
+
 # Override persistence paths for dev mode
 export PERSISTENCE_DB_PATH="$DATA_DIR/instances.db"
-export PERSISTENCE_CHECKPOINTER_DB_PATH="$DATA_DIR/checkpoints.db"
 
 # Dev mode always uses port 8079 to avoid conflicting with production
 export PORT=8079

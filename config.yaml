@@ -29,7 +29,8 @@ limits:
 # Persistence Settings
 persistence:
   db_path: ./data/instances.db
-  checkpointer_db_path: ./data/checkpoints.db
+  # checkpointer_db_path was removed; the checkpointer DB path lives in
+  # ensemble.json (EnsembleConfig.sqlite.checkpoints_db).
   checkpoint_interval: 1
   checkpoint_ttl_hours: 168
   checkpoint_cleanup_interval: 24

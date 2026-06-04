@@ -127,7 +127,13 @@ async def lifespan(app: FastAPI):
     # This is the chicken-and-egg resolution: ensemble_config picks the DB engine
     # *before* config.yaml is consulted. The default data_dir matches the
     # default location of the SQLite databases (`./data/`).
-    data_dir = Path(os.environ.get("ENSEMBLE_DATA_DIR", "./data"))
+    # Precedence: ENSEMBLE_DATA_DIR > DATA_DIR > ./data. Falling back to DATA_DIR
+    # keeps dev.sh (which historically only set DATA_DIR) working without changes.
+    data_dir = Path(
+        os.environ.get("ENSEMBLE_DATA_DIR")
+        or os.environ.get("DATA_DIR")
+        or "./data"
+    )
     ensemble_config = EnsembleConfig.load_or_create(data_dir)
     app.state.ensemble_config = ensemble_config
 

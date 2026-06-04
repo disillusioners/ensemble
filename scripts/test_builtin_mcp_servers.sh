@@ -112,7 +112,8 @@ log_info "Test data directory created"
 export PORT=$TEST_PORT
 export DATA_DIR="$DATA_DIR"
 export PERSISTENCE_DB_PATH="$DATA_DIR/instances.db"
-export PERSISTENCE_CHECKPOINTER_DB_PATH="$DATA_DIR/checkpoints.db"
+# Checkpointer DB path lives in ensemble.json — route it through ENSEMBLE_DATA_DIR.
+export ENSEMBLE_DATA_DIR="$DATA_DIR"
 export OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
 export OPENAI_MODEL="${OPENAI_MODEL:-gpt-4}"
 export LOG_LEVEL="${LOG_LEVEL:-info}"

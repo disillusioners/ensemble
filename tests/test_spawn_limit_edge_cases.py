@@ -38,7 +38,6 @@ def mock_config():
     config.queue.llm_retry_timeout_attempts = 3
     config.queue.discard_on_startup = None
     config.persistence.db_path = ":memory:"
-    config.persistence.checkpointer_db_path = ":memory:"
     config.persistence.checkpoint_interval = 1
     config.persistence.checkpoint_ttl_hours = 168
     config.persistence.checkpoint_cleanup_interval = 24

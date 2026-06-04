@@ -963,10 +963,12 @@ class InstanceManager:
 
         The backend is selected from ``self._ensemble_config``:
 
-        - ``is_postgres`` → builds a ``PostgresCheckpointerAdapter`` (lazy-imports
-          psycopg/asyncpg). See ``create_postgres_checkpointer``.
+        - ``is_postgres`` → builds a ``PostgresCheckpointerAdapter`` via
+          ``create_postgres_checkpointer`` (no file path; the PostgreSQL
+          checkpointer connects to the configured DSN).
         - ``is_sqlite`` (default) → builds a ``SqliteCheckpointerAdapter`` wrapping
-          an ``AsyncSqliteSaver`` at ``config.persistence.checkpointer_db_path``.
+          an ``AsyncSqliteSaver`` at the path recorded in
+          ``ensemble_config.sqlite.checkpoints_db``.
 
         Note: The checkpointer uses a separate database connection from the
         main application database to avoid SQLite lock contention. For

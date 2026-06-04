@@ -265,7 +265,6 @@ def mock_config():
 
     config.persistence = MagicMock(spec=PersistenceConfig)
     config.persistence.db_path = ":memory:"
-    config.persistence.checkpointer_db_path = ":memory:"
 
     config.queue = MagicMock(spec=QueueConfig)
     config.queue.discard_on_startup = None

@@ -309,7 +309,9 @@ class TestPersistenceConfig:
         config = PersistenceConfig()
         
         assert config.db_path == "./data/instances.db"
-        assert config.checkpointer_db_path == "./data/checkpoints.db"
+        # ``checkpointer_db_path`` was removed: the checkpointer DB path is
+        # owned by ``EnsembleConfig.sqlite.checkpoints_db`` (see
+        # ``daemon/persistence.py``). Persisted in ``./data/ensemble.json``.
         assert config.checkpoint_interval == 1
         assert config.checkpoint_ttl_hours == 168
         assert config.checkpoint_cleanup_interval == 24

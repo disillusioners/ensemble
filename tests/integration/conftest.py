@@ -93,8 +93,8 @@ def integration_config(tmp_path):
     # Override database paths to use temp directories to avoid conflicts
     # when tests run in different working directories
     config.persistence.db_path = str(tmp_path / "instances.db")
-    config.persistence.checkpointer_db_path = str(tmp_path / "checkpoints.db")
-    
+    # Checkpointer path is set via ensemble_config, not persistence config.
+
     return config
 
 

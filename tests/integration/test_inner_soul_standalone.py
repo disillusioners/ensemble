@@ -194,7 +194,7 @@ def integration_config(tmp_path):
     config = _get_config()
     # Override database paths to use temp directories to avoid conflicts
     config.persistence.db_path = str(tmp_path / "instances.db")
-    config.persistence.checkpointer_db_path = str(tmp_path / "checkpoints.db")
+    # Checkpointer path is set via ensemble_config, not persistence config.
     return config
 
 

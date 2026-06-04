@@ -185,9 +185,7 @@ def test_db_path(tmp_path):
     import uuid
     # Use unique path per test to avoid database corruption between tests
     db_path = tmp_path / f"test_queue_{uuid.uuid4().hex[:8]}.db"
-    # Also set checkpointer db path to avoid conflicts
-    checkpointer_path = tmp_path / f"test_checkpoints_{uuid.uuid4().hex[:8]}.db"
-    yield db_path, checkpointer_path
+    yield db_path
     # Cleanup is automatic with tmp_path
 
 
@@ -211,13 +209,13 @@ async def test_single_message_no_duplicate_llm_calls(
     
     tracker = mock_llm_tracker
     
-    # Unpack unique db paths
-    db_path, checkpointer_path = test_db_path
-    
+    # Set unique db path for test isolation
+    db_path = test_db_path
+
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(db_path)
-    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
-    
+    # Checkpointer path is set via ensemble_config, not persistence config.
+
     # Create manager
     logger.info("=" * 60)
     logger.info("[TEST] Creating InstanceManager...")
@@ -362,13 +360,13 @@ async def test_sse_events_count(
     
     tracker = mock_llm_tracker
     
-    # Unpack unique db paths
-    db_path, checkpointer_path = test_db_path
-    
+    # Set unique db path for test isolation
+    db_path = test_db_path
+
     # Modify the persistence config for test isolation
     integration_config.persistence.db_path = str(db_path)
-    integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
-    
+    # Checkpointer path is set via ensemble_config, not persistence config.
+
     manager = InstanceManager(integration_config)
     await manager.initialize()
     
@@ -486,11 +484,11 @@ async def test_debug_llm_invocation_count(
     logging.getLogger('daemon.graph').addHandler(handler)
     
     try:
-        # Unpack unique db paths
-        db_path, checkpointer_path = test_db_path
-        
+        # Set unique db path for test isolation
+        db_path = test_db_path
+
         integration_config.persistence.db_path = str(db_path)
-        integration_config.persistence.checkpointer_db_path = str(checkpointer_path)
+        # Checkpointer path is set via ensemble_config, not persistence config.
         manager = InstanceManager(integration_config)
         await manager.initialize()
         
