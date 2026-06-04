@@ -342,7 +342,6 @@ class SQLModelProjectRepository:
                     | (col(Project.description).contains(query))
                     | (col(ProjectShortnameLink.shortname).contains(query))
                 )
-                .distinct()
                 .order_by(col(Project.updated_at).desc())
                 .limit(limit)
             )
