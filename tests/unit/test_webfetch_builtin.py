@@ -18,6 +18,23 @@ from daemon.mcp.builtin_servers import get_registry
 # =============================================================================
 
 
+@pytest.fixture(autouse=True)
+def clean_registry():
+    """Reset MCP server registry to its import-time state before each test.
+
+    The BuiltinServerRegistry is a module-level singleton. Without this
+    fixture, mutations from other test files (e.g., unregister calls) would
+    leak into these tests.
+    """
+    from daemon.mcp.builtin_servers import _registry
+    from daemon.mcp.builtin_servers.context7 import Context7ServerDefinition
+
+    _registry._definitions.clear()
+    _registry.register(WebFetchServerDefinition())
+    _registry.register(Context7ServerDefinition())
+    yield
+
+
 @pytest.fixture
 def webfetch_definition():
     """Create a WebFetchServerDefinition instance."""

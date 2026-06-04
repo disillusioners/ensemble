@@ -49,6 +49,22 @@ class TestRAGRedirectConstants:
 # =============================================================================
 
 
+@pytest.fixture(autouse=True)
+def default_rag_disabled():
+    """Default `is_rag_enabled` to False for this file's tests.
+
+    `_should_redirect_to_rag` calls `is_rag_enabled()` which reads the
+    module-level `_rag_enabled` flag in `daemon.rag.config`. That flag can be
+    mutated by other test files (e.g., test_config.py calls `disable_rag()`).
+    Tests in this file that expect redirect behavior use the `rag_enabled`
+    fixture to override this. Using `patch` (not the real `disable_rag()`)
+    keeps the mutation scoped to each test, preventing state leakage to
+    RAG-dependent tools in other test files.
+    """
+    with patch("daemon.tools.inner_soul.is_rag_enabled", return_value=False):
+        yield
+
+
 @pytest.fixture
 def temp_agent(tmp_path):
     """Create a minimal test agent in temp directory."""
