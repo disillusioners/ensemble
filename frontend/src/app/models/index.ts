@@ -312,6 +312,9 @@ export interface BuiltinServerConfigure {
 
 export type MigrationStatus = 'idle' | 'running' | 'completed' | 'failed' | 'cancelled';
 export type MigrationDatabase = 'sqlite' | 'postgres';
+// 'unknown' is the fallback when the daemon is unreachable so the UI
+// doesn't lie about which DB is active (vs. a misleading hard-coded default).
+export type MigrationDatabaseState = MigrationDatabase | 'unknown';
 
 export interface MigrationAvailability {
   /**
@@ -321,7 +324,7 @@ export interface MigrationAvailability {
    * operator must restart the daemon before re-running.
    */
   migration_available: boolean;
-  current_database: MigrationDatabase;
+  current_database: MigrationDatabaseState;
   postgres_configured: boolean;
   can_start: boolean;
   /**

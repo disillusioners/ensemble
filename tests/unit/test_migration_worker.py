@@ -317,6 +317,44 @@ class TestIsMigrationAvailable:
         assert result["is_sqlite"] is False
         assert any("not SQLite" in r for r in result["reasons"])
 
+    def test_config_sqlite_with_postgres_engine_blocks_migration(self, data_dir):
+        """Regression: config says sqlite but engine URL is PostgreSQL.
+
+        Scenario: operator flipped ``ensemble.json`` to ``sqlite`` (or the
+        config reloads from disk on a daemon that was running PG), but the
+        loaded engine is still the old PostgreSQL one. Running the
+        migration would copy from the wrong source, so the engine
+        dialect acts as a safety guard on ``can_migrate``.
+
+        Crucially, ``is_sqlite`` must still report ``True`` (config is
+        the source of truth for what the operator chose). Folding the
+        engine check into ``is_sqlite`` here would make the UI show the
+        OLD backend and hide the migration actions — that was the bug
+        this test guards against.
+        """
+        from sqlalchemy.engine.url import URL
+
+        # Config says sqlite (the operator's chosen backend), but the
+        # live engine is still the old PostgreSQL connection.
+        mgr = _MockManager(data_dir=data_dir, is_sqlite=True)
+        mgr.engine = MagicMock()
+        mgr.engine.url = URL.create("postgresql", "u", "p", "h", 5432, "d")
+
+        worker = _make_worker(mgr, pg_env=True)
+        result = worker.is_migration_available()
+
+        # Config-only reporting: operator chose sqlite, so the UI must
+        # show sqlite as the current backend and surface the migration
+        # flow. The engine guard lives on ``can_migrate`` only.
+        assert result["is_sqlite"] is True
+        # Safety guard: running a SQLite→PG migration against a live
+        # PostgreSQL engine would copy from the wrong source, so the
+        # engine dialect vetoes the run.
+        assert result["can_migrate"] is False
+        # The operator-visible reason must mention the engine dialect so
+        # the UI can explain why the start button is disabled.
+        assert any("Engine" in r and "SQLite" in r for r in result["reasons"])
+
     def test_database_url_postgres_alternative(self, manager):
         """``DATABASE_URL_POSTGRES`` env var counts as PG availability."""
         os.environ.pop("POSTGRES_HOST", None)

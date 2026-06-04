@@ -257,8 +257,18 @@ class MigrationWorker:
         if not pg_env_available:
             pg_env_available = bool(os.environ.get("DATABASE_URL_POSTGRES"))
 
-        # Engine dialect as a secondary signal (catches misconfigured
-        # engines where ensemble_config lies).
+        # Engine dialect as a secondary signal. The engine is the LAGGING
+        # implementation detail — the config is the source of truth for
+        # what the operator chose. After ``POST /api/database/switch`` the
+        # config flips immediately but the engine isn't swapped until a
+        # restart. Using the engine URL alone would make the UI report the
+        # OLD backend even after a successful switch.
+        #
+        # The engine check is only used here for the ``can_migrate`` safety
+        # guard (you can't run a SQLite→PG migration if the running engine
+        # is already pointing at PG — you'd be copying from the wrong
+        # source). It must NOT be folded into the ``is_sqlite`` report,
+        # which drives the ``current_database`` field the UI displays.
         engine_url = ""
         if hasattr(self._manager, "engine") and self._manager.engine is not None:
             engine_url = str(self._manager.engine.url)
@@ -276,7 +286,10 @@ class MigrationWorker:
 
         return {
             "can_migrate": can_migrate,
-            "is_sqlite": is_sqlite and engine_is_sqlite,
+            # Report the config, not the engine. The engine lags config
+            # until restart; reporting it would make the UI show the wrong
+            # current backend right after a switch.
+            "is_sqlite": is_sqlite,
             "pg_env_available": pg_env_available,
             "reasons": reasons,
         }

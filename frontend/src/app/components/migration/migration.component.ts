@@ -47,10 +47,11 @@ export class SwitchConfirmDialog {
 /**
  * Database page (SQLite ↔ PostgreSQL).
  *
- * Renders one of three states based on the live ``availability`` signal:
+ * Renders one of four states based on the live ``availability`` signal:
  *   A. SQLite + PG env set      → existing migration flow
  *   B. PostgreSQL active        → show current status + "Switch to SQLite"
  *   C. SQLite + PG env not set  → "PostgreSQL not configured" (no action)
+ *   D. Unknown (daemon down)    → "Daemon unreachable" (no claim about backend)
  *
  * Pure presentation: subscribes to MigrationService signals and forwards
  * user actions back to the service. The service owns the SSE stream and

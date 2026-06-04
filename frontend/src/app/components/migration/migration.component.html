@@ -74,6 +74,23 @@
             }
           </div>
         }
+      } @else if (av.current_database === 'unknown') {
+        <!-- State D: Daemon unreachable — we don't know which DB is active.
+             Fall through to "PostgreSQL not configured" would be wrong
+             (and previously was); surface a distinct message so the
+             operator knows it's a connectivity issue, not a config gap. -->
+        <div class="state-card info-state">
+          <div class="state-icon">
+            <mat-icon>cloud_off</mat-icon>
+          </div>
+          <div class="state-content">
+            <h2 class="state-title">Daemon unreachable</h2>
+            <p class="state-message">
+              Cannot reach the daemon to determine the active database.
+              Once the daemon is back, this page will update automatically.
+            </p>
+          </div>
+        </div>
       } @else if (av.postgres_configured || av.postgres_env_set) {
         <!-- State A: Running SQLite + PG ENV set → existing migration UI -->
         <!-- Status strip -->

@@ -62,10 +62,13 @@ export class MigrationService {
       tap(av => this.availability.set(av)),
       catchError(err => {
         console.error('Failed to check migration availability:', err);
-        // Default to "not available" on error so UI can render a sane state
+        // Daemon unreachable: don't claim a specific backend. Render an
+        // "unknown" state so the UI doesn't lie about which DB is active
+        // (the old hard-coded "postgres" default was misleading and made
+        // a down daemon look like a PG daemon).
         this.availability.set({
           migration_available: false,
-          current_database: 'postgres',
+          current_database: 'unknown',
           postgres_configured: false,
           can_start: false,
           postgres_env_set: false,
