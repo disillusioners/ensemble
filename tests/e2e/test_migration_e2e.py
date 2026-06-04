@@ -507,6 +507,307 @@ async def test_migration_idempotent_second_run(migration_e2e_setup):
         )
 
 
+# ── Edge case tests ────────────────────────────────────────────────────────
+
+
+@pytest_asyncio.fixture
+async def empty_sqlite_source(tmp_path: Path):
+    """SQLite source with schema but zero rows in every table.
+
+    Mirrors :func:`sqlite_source` exactly but skips the data-insertion
+    step. Used to verify the migrator's "empty source" path: the
+    schema still needs to be created on the PG side even when there
+    is nothing to copy.
+    """
+    from daemon.ensemble_config import EnsembleConfig
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+
+    sqlite_path = data_dir / "instances.db"
+    sqlite_url = f"sqlite:///{sqlite_path}"
+    sqlite_engine = create_engine(
+        sqlite_url,
+        connect_args={"check_same_thread": False},
+        pool_pre_ping=True,
+    )
+    # Create the schema but insert no rows.
+    SQLModel.metadata.create_all(sqlite_engine)
+
+    ensemble_config = EnsembleConfig(
+        database="sqlite",
+        sqlite={
+            "instances_db": str(sqlite_path),
+            "checkpoints_db": str(data_dir / "checkpoints.db"),
+        },
+    )
+    ensemble_config.save(data_dir)
+
+    # Materialize the langgraph checkpoint tables so the checkpoint
+    # migrator can read them. Same rationale as in ``sqlite_source``.
+    from daemon.persistence import get_checkpointer
+    sqlite_ckpt = await get_checkpointer(ensemble_config)
+    try:
+        raw = sqlite_ckpt.raw_saver
+        if hasattr(raw, "setup"):
+            setup = raw.setup
+            if asyncio.iscoroutinefunction(setup):
+                await setup()
+            else:
+                setup()
+    finally:
+        await sqlite_ckpt.close()
+
+    yield sqlite_engine, data_dir, ensemble_config
+
+    sqlite_engine.dispose()
+    shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+@pytest_asyncio.fixture
+async def empty_migration_setup(empty_sqlite_source):
+    """Wrap :func:`empty_sqlite_source` with PG teardown."""
+    sqlite_engine, data_dir, ensemble_config = empty_sqlite_source
+    _drop_all_public_tables()
+    try:
+        yield sqlite_engine, data_dir, ensemble_config
+    finally:
+        _drop_all_public_tables()
+
+
+@pytest.mark.asyncio
+async def test_migration_empty_database(empty_migration_setup):
+    """Migration should succeed when SQLite has no data rows.
+
+    Exercises the migrator's "all tables empty" path. The schema
+    should still be created in PG (via ``SQLModel.metadata.create_all``),
+    ``ensemble.json`` should be flipped to ``"postgres"``, and the
+    worker should reach the ``COMPLETED`` state without errors.
+    """
+    from daemon.services.migration_worker import MigrationWorker
+    from daemon.write_pause_guard import WritePauseGuard
+
+    sqlite_engine, data_dir, ensemble_config = empty_migration_setup
+    guard = WritePauseGuard()
+    manager = _ManagerShim(sqlite_engine, ensemble_config, data_dir, guard)
+    worker = MigrationWorker(manager)
+
+    # No rows in SQLite — sanity check before we kick off the migration.
+    sqlite_counts_before = _sqlite_table_row_counts(sqlite_engine)
+    # The checkpoint tables created by ``AsyncSqliteSaver.setup()`` are
+    # legitimately empty in this fixture, so all user tables have 0 rows.
+    user_table_rows = [
+        n
+        for t, n in sqlite_counts_before.items()
+        if t not in ("checkpoints", "checkpoint_blobs", "checkpoint_writes")
+    ]
+    assert all(n == 0 for n in user_table_rows), (
+        f"expected all user tables empty, got {sqlite_counts_before}"
+    )
+
+    await _run_worker_to_completion(worker)
+
+    final = worker.get_status()
+    assert final["status"] == "completed", (
+        f"expected completed, got {final['status']}: {final.get('error')}"
+    )
+    assert final.get("error") is None
+
+    # The schema must have been created on the PG side, even with zero
+    # source rows. We assert at least one user table is present.
+    pg_counts = _pg_table_row_counts()
+    assert len(pg_counts) > 0, "no tables created in PG for empty source"
+    for n in pg_counts.values():
+        assert n == 0, f"expected zero rows in PG, got {pg_counts}"
+
+    # ensemble.json must still be rewritten.
+    ensemble_json = data_dir / "ensemble.json"
+    assert ensemble_json.exists()
+    new_config = json.loads(ensemble_json.read_text())
+    assert new_config["database"] == "postgres"
+
+
+@pytest.mark.asyncio
+async def test_migration_large_batch(migration_e2e_setup):
+    """Migrate 10K+ rows to exercise TableMigrator batching.
+
+    ``DEFAULT_BATCH_SIZE`` is 500, so this hits 20+ batches per table
+    and stresses the ``offset/limit`` pagination path. Verifies the
+    row count in PG matches SQLite exactly.
+    """
+    from daemon.services.migration_worker import MigrationWorker
+    from daemon.write_pause_guard import WritePauseGuard
+
+    sqlite_engine, data_dir, ensemble_config = migration_e2e_setup
+
+    # Insert 10,000 extra SourceConfig rows. Commit in chunks of 1000
+    # to keep the SQLite transaction short. The fixture already
+    # inserted 3 source rows; the unique ``source_id`` and ``name``
+    # constraints require us to use fresh values.
+    n_extra = 10_000
+    with Session(sqlite_engine) as s:
+        for i in range(n_extra):
+            s.add(SourceConfig(
+                source_id=f"large-{i:06d}",
+                source_type="scheduler",
+                name=f"large-name-{i:06d}",
+                config={"index": i, "interval": 60 + (i % 60)},
+                credentials=None,
+                enabled=(i % 2 == 0),
+            ))
+            if (i + 1) % 1000 == 0:
+                s.commit()
+        s.commit()
+
+    sqlite_counts = _sqlite_table_row_counts(sqlite_engine)
+    assert sqlite_counts.get("source", 0) == 3 + n_extra, (
+        f"fixture + 10k inserts missing: source count = {sqlite_counts.get('source')}"
+    )
+
+    guard = WritePauseGuard()
+    manager = _ManagerShim(sqlite_engine, ensemble_config, data_dir, guard)
+    worker = MigrationWorker(manager)
+
+    await _run_worker_to_completion(worker)
+
+    final = worker.get_status()
+    assert final["status"] == "completed", (
+        f"expected completed, got {final['status']}: {final.get('error')}"
+    )
+
+    pg_counts = _pg_table_row_counts()
+    assert pg_counts.get("source", 0) == 3 + n_extra, (
+        f"large-batch migration lost rows: "
+        f"sqlite={3 + n_extra}, pg={pg_counts.get('source')}"
+    )
+
+    # Spot-check: a specific row from deep in the batch must round-trip
+    # with its JSON config intact.
+    with psycopg.connect(_pg_url()) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                'SELECT name, config FROM source WHERE name = %s',
+                (f"large-name-{n_extra - 1:06d}",),
+            )
+            row = cur.fetchone()
+    assert row is not None, "last batch row missing in PG"
+    assert row[0] == f"large-name-{n_extra - 1:06d}"
+    # ``config`` is stored as JSONB; psycopg returns a Python dict.
+    assert row[1]["index"] == n_extra - 1
+
+
+@pytest.mark.asyncio
+async def test_migration_cancelled_midway(migration_e2e_setup):
+    """Cancelling a running migration transitions to ``CANCELLED``.
+
+    The migration cooperatively checks a ``threading.Event`` between
+    batches, so it is impossible to guarantee the cancel fires
+    *before* the migration finishes for a tiny dataset. We seed 3,000
+    extra rows to give cancel a wide enough window, and accept either
+    ``CANCELLED`` or ``COMPLETED`` — both prove the API is wired up;
+    a real cancel-vs-finish race is timing-dependent and not the
+    point of this test.
+    """
+    from daemon.services.migration_worker import MigrationWorker
+    from daemon.write_pause_guard import WritePauseGuard
+
+    sqlite_engine, data_dir, ensemble_config = migration_e2e_setup
+
+    # Insert 3,000 extra rows so the migration takes a few hundred ms.
+    with Session(sqlite_engine) as s:
+        for i in range(3_000):
+            s.add(SourceConfig(
+                source_id=f"cancel-{i:06d}",
+                source_type="scheduler",
+                name=f"cancel-name-{i:06d}",
+                config={"i": i},
+                credentials=None,
+                enabled=True,
+            ))
+            if (i + 1) % 1000 == 0:
+                s.commit()
+        s.commit()
+
+    guard = WritePauseGuard()
+    manager = _ManagerShim(sqlite_engine, ensemble_config, data_dir, guard)
+    worker = MigrationWorker(manager)
+
+    # Fire the worker and request cancel after a short delay.
+    task = asyncio.create_task(worker.start())
+    await asyncio.sleep(0.05)
+    try:
+        await worker.cancel()
+    except RuntimeError:
+        # Migration already finished before our cancel arrived — fine,
+        # we still verify the task completed cleanly.
+        pass
+
+    try:
+        await asyncio.wait_for(task, timeout=30.0)
+    except asyncio.TimeoutError:
+        task.cancel()
+        pytest.fail("MigrationWorker did not finish after cancel request")
+
+    final = worker.get_status()
+    assert final["status"] in ("cancelled", "completed"), (
+        f"unexpected terminal state: {final['status']}: {final.get('error')}"
+    )
+    # CANCELLED is not an error. COMPLETED is also valid (cancel may
+    # arrive after the small dataset finishes). FAILED would be a bug.
+    if final["status"] == "cancelled":
+        assert final.get("error") is None, (
+            f"cancelled migration should have no error, got {final.get('error')}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_migration_unavailable_when_pg_env_missing(
+    migration_e2e_setup, monkeypatch
+):
+    """Without ``POSTGRES_HOST``/``POSTGRES_DB`` the migration refuses to start.
+
+    The worker must report a clean ``can_migrate: False`` with a
+    human-readable reason, and ``start()`` must raise a ``ValueError``
+    (not a stack trace or crash). This is the contract the frontend
+    relies on to disable the "Start migration" button.
+    """
+    import daemon.services.migration_worker as mw_module
+    from daemon.services.migration_worker import MigrationWorker
+    from daemon.write_pause_guard import WritePauseGuard
+
+    # Clear both env vars the availability check looks at. ``delenv``
+    # is safer than ``setenv("")`` because the worker checks truthiness
+    # explicitly, but we want to simulate "never set" for this test.
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    monkeypatch.delenv("POSTGRES_DB", raising=False)
+
+    sqlite_engine, data_dir, ensemble_config = migration_e2e_setup
+    guard = WritePauseGuard()
+    manager = _ManagerShim(sqlite_engine, ensemble_config, data_dir, guard)
+    worker = MigrationWorker(manager)
+
+    # ``is_migration_available`` must report a clean refusal.
+    avail = worker.is_migration_available()
+    assert avail["can_migrate"] is False
+    assert avail["pg_env_available"] is False
+    # The reason should mention Postgres / env vars.
+    assert any(
+        "postgres" in r.lower() or "env" in r.lower()
+        for r in avail["reasons"]
+    ), f"reasons should mention env vars, got {avail['reasons']}"
+
+    # ``start()`` must refuse with a clear ValueError, not crash.
+    with pytest.raises(ValueError) as excinfo:
+        await worker.start()
+    msg = str(excinfo.value).lower()
+    assert "postgres" in msg or "env" in msg, (
+        f"start() error should mention env vars, got: {excinfo.value!r}"
+    )
+
+    # The worker must NOT have advanced past IDLE.
+    assert worker.get_status()["status"] == "idle"
+
+
 # ── Test helpers (private) ──────────────────────────────────────────────────
 
 

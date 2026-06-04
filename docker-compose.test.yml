@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ensemble_test
+      POSTGRES_USER: ensemble
+      POSTGRES_PASSWORD: test_password
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SH", "pg_isready -U ensemble"]
+      interval: 5s
+      retries: 5

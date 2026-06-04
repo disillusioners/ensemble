@@ -215,11 +215,10 @@ async def migration_events(
     """SSE stream of migration events.
 
     Each event from the worker is forwarded verbatim, with ``data``
-    JSON-encoded for the wire. The stream also emits a ``keepalive``
+    JSON-encoded for the SSE wire. The stream also emits a ``keepalive``
     comment every 15s so proxies don't drop the connection during long
     silent phases (e.g. while a large table is being copied).
     """
-    _ = request  # keep reference to silence unused-arg warnings in some linters
 
     async def event_generator() -> Any:
         queue = worker.subscribe()

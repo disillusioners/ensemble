@@ -27,6 +27,9 @@ from daemon.migrations import MigrationCancelledError
 logger = logging.getLogger(__name__)
 
 
+__all__ = ["CheckpointMigrator"]
+
+
 class CheckpointMigrator:
     """Migrates checkpoints from SQLite to PostgreSQL via API-based export/import.
 

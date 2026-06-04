@@ -1,7 +1,5 @@
 """Database migration models."""
 
-from datetime import datetime
-
 from sqlmodel import Field, SQLModel
 
 
