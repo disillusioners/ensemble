@@ -238,7 +238,10 @@ class ProcessMessageProcessor(BaseProcessor):
             # Note: internal_agent:* is agent-to-agent communication, NOT a completion report
             logger.debug(f"[DISPATCH] task completed: instance={task.instance_id}, message_source={message_source}, result={'truthy' if result else 'falsy'}")
             dispatch_source = message_source
-            is_internal_report = message_source.startswith("internal_")
+            is_internal_report = (
+                message_source.startswith("internal_report:")
+                or message_source.startswith("internal_error_report:")
+            )
             logger.debug(f"[DISPATCH] is_internal_report={is_internal_report}, dispatch_source={dispatch_source}")
             if is_internal_report:
                 # Retrieve original external source from instance metadata
