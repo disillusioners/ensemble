@@ -29,6 +29,9 @@ dependencies = [
     "modelcontextprotocol>=1.0.1",
     "slack-bolt>=1.18.0",
     "slack-sdk>=3.21.0",
+    "psycopg[binary]>=3.1.0",
+    "asyncpg>=0.29.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -36,11 +39,6 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "httpx>=0.28.0",
-]
-postgres = [
-    "psycopg[binary]>=3.1.0",
-    "asyncpg>=0.29.0",
-    "langgraph-checkpoint-postgres>=2.0.0",
 ]
 
 [project.scripts]
