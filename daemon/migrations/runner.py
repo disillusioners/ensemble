@@ -54,7 +54,7 @@ class MigrationFile:
     @property
     def checksum(self) -> str:
         """Calculate SHA-256 checksum of the file content."""
-        content = self.path.read_text()
+        content = self.path.read_text(encoding="utf-8")
         return hashlib.sha256(content.encode()).hexdigest()
     
     @classmethod
@@ -70,7 +70,7 @@ class MigrationFile:
         Raises:
             ValueError: If the file has an invalid format.
         """
-        content = path.read_text()
+        content = path.read_text(encoding="utf-8")
         
         # Extract version from filename (YYYYMMDD_HHMMSS)
         version_match = re.match(r"^(\d{8}_\d{6})", path.stem)

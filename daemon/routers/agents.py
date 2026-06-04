@@ -50,7 +50,7 @@ async def list_agents():
             meta_path = agent_path / "meta.json"
             if meta_path.exists():
                 try:
-                    with open(meta_path, "r") as f:
+                    with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
                     
                     result.append(AgentInfo(
@@ -127,7 +127,7 @@ async def create_agent(agent_create: AgentCreate):
             "version": "1.0.0"
         }
         
-        with open(new_agent_dir / "meta.json", "w") as f:
+        with open(new_agent_dir / "meta.json", "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2)
         
         # Create empty directories

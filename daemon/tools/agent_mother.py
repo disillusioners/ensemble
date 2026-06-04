@@ -73,7 +73,7 @@ def create_mother_tools(manager: "InstanceManager", current_instance_id: str):
             meta_path = agent_path / "meta.json"
             if meta_path.exists():
                 try:
-                    with open(meta_path, "r") as f:
+                    with open(meta_path, "r", encoding="utf-8") as f:
                         meta = json.load(f)
                     agent_info["name"] = meta.get("name", agent_path.name)
                     agent_info["description"] = meta.get("description", "")
@@ -87,7 +87,7 @@ def create_mother_tools(manager: "InstanceManager", current_instance_id: str):
             soul_path = agent_path / "soul.md"
             if soul_path.exists():
                 try:
-                    content = soul_path.read_text()
+                    content = soul_path.read_text(encoding="utf-8")
                     # Look for purpose line
                     for line in content.split("\n"):
                         if "purpose" in line.lower() and ":" in line:
@@ -178,7 +178,7 @@ Returns:
                 "created_at": datetime.now().isoformat(),
             }
             
-            with open(new_agent_dir / "meta.json", "w") as f:
+            with open(new_agent_dir / "meta.json", "w", encoding="utf-8") as f:
                 json.dump(meta, f, indent=2)
             
             # Create empty directories
@@ -196,7 +196,7 @@ Returns:
 
 I learn and grow through experience.
 """
-            with open(new_agent_dir / "soul.md", "w") as f:
+            with open(new_agent_dir / "soul.md", "w", encoding="utf-8") as f:
                 f.write(soul_content)
             
             # Customize workflow.md if provided
@@ -215,7 +215,7 @@ I learn and grow through experience.
 - If blocked → report blocker and suggest alternatives
 - If task complete → summarize and record learnings
 """
-                with open(new_agent_dir / "workflow.md", "w") as f:
+                with open(new_agent_dir / "workflow.md", "w", encoding="utf-8") as f:
                     f.write(workflow_content)
             
             # Customize rule.md if rules provided
@@ -230,7 +230,7 @@ I learn and grow through experience.
                     rule_content += "## Must Not\n"
                     for rule in rules_must_not:
                         rule_content += f"- {rule}\n"
-                with open(new_agent_dir / "rule.md", "w") as f:
+                with open(new_agent_dir / "rule.md", "w", encoding="utf-8") as f:
                     f.write(rule_content)
             
             # Customize tools.md if extra tools specified
@@ -247,7 +247,7 @@ This agent has access to these additional tools:
 
 *Common tools (bash, time, read_file, list_directory, glob_files, inner_soul) are automatically loaded.*
 """
-                with open(new_agent_dir / "tools.md", "w") as f:
+                with open(new_agent_dir / "tools.md", "w", encoding="utf-8") as f:
                     f.write(tools_content)
             
             return {
@@ -321,7 +321,7 @@ Returns:
             }
         
         try:
-            content = file_path.read_text()
+            content = file_path.read_text(encoding="utf-8")
             return {
                 "success": True,
                 "agent": agent_name,
@@ -374,7 +374,7 @@ Returns:
         
         try:
             # Write new content
-            file_path.write_text(content)
+            file_path.write_text(content, encoding="utf-8")
             
             # Invalidate prompt cache so changes take effect immediately
             manager.prompt_cache.invalidate(agent_name)

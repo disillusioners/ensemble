@@ -273,7 +273,7 @@ def _lock_memory_file(filepath: Path, timeout: float = 5.0):
     """
     lock_file = filepath.with_suffix('.lock')
     lock_file.touch(exist_ok=True)
-    f = open(lock_file, 'r+')
+    f = open(lock_file, 'r+', encoding='utf-8')
     deadline = time.monotonic() + timeout
     acquired = False
     try:
@@ -853,7 +853,7 @@ def _update_memories(agent_id: str, agent_path: Path, request: str, classificati
 
 {request}
 """
-    filepath.write_text(file_content)
+    filepath.write_text(file_content, encoding="utf-8")
     
     # Invalidate prompt cache so new memory appears in next prompt
     if manager:
@@ -883,7 +883,7 @@ def _update_memory_md(agent_id: str, agent_path: Path, request: str, rules: dict
     try:
         with _lock_memory_file(memory_file):
             # Read current content inside lock
-            current = memory_file.read_text() if memory_file.exists() else "# Memory\n\n"
+            current = memory_file.read_text(encoding="utf-8") if memory_file.exists() else "# Memory\n\n"
             word_count = len(current.split())
             max_words = rules.get("max_memory_words", 2000)
             
@@ -961,7 +961,7 @@ def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, man
         with _lock_memory_file(soul_file):
             # Read current soul inside lock
             if soul_file.exists():
-                current = soul_file.read_text()
+                current = soul_file.read_text(encoding="utf-8")
             else:
                 current = "# Who I Am\n\n"
             
@@ -1036,7 +1036,7 @@ def _update_soul(agent_id: str, agent_path: Path, request: str, rules: dict, man
 {current[:500]}{'...' if len(current) > 500 else ''}
 ```
 """
-    history_file.write_text(history_content)
+    history_file.write_text(history_content, encoding="utf-8")
     
     return {
         "success": True,
@@ -1054,7 +1054,7 @@ def _update_user(agent_id: str, agent_path: Path, request: str, manager: "Instan
     
     try:
         with _lock_memory_file(user_file):
-            current = user_file.read_text() if user_file.exists() else "# User\n\n"
+            current = user_file.read_text(encoding="utf-8") if user_file.exists() else "# User\n\n"
             
             # Remove placeholder
             if "(To be filled" in current:
@@ -1088,7 +1088,7 @@ def _update_workflow(agent_id: str, agent_path: Path, request: str, rules: dict,
     
     try:
         with _lock_memory_file(workflow_file):
-            current = workflow_file.read_text() if workflow_file.exists() else "# Workflow\n\n"
+            current = workflow_file.read_text(encoding="utf-8") if workflow_file.exists() else "# Workflow\n\n"
             
             if "**Learned:**" not in current:
                 current += "\n\n---\n\n**Learned:**\n"
@@ -1156,7 +1156,7 @@ def _load_growth_rules(agent_path: Path) -> dict:
     if not growth_file.exists():
         return rules
     
-    content = growth_file.read_text()
+    content = growth_file.read_text(encoding="utf-8")
     
     if match := re.search(r"memory\.md.*?(\d+)\s*words", content, re.IGNORECASE):
         rules["max_memory_words"] = int(match.group(1))

@@ -70,7 +70,7 @@ class EnsembleConfig(BaseModel):
 
         if config_path.exists():
             try:
-                data = json.loads(config_path.read_text())
+                data = json.loads(config_path.read_text(encoding="utf-8"))
                 config = cls(**data)
                 logger.info(f"Loaded ensemble config: database={config.database}")
                 return config
@@ -102,7 +102,7 @@ class EnsembleConfig(BaseModel):
 
         temp_path = config_path.with_suffix(".json.tmp")
         try:
-            temp_path.write_text(self.model_dump_json(indent=2) + "\n")
+            temp_path.write_text(self.model_dump_json(indent=2) + "\n", encoding="utf-8")
             os.replace(str(temp_path), str(config_path))
             logger.info(f"Saved ensemble config to {config_path}")
         except Exception as e:

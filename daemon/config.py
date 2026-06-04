@@ -259,7 +259,7 @@ def load_config(config_path: str | None = None) -> Config:
 
     # Read and parse YAML
     try:
-        with open(config_file, "r") as f:
+        with open(config_file, "r", encoding="utf-8") as f:
             raw_config = yaml.safe_load(f)
     except yaml.YAMLError as e:
         raise ValueError(f"Failed to parse config file: {e}")

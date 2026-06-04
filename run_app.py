@@ -17,7 +17,7 @@ if getattr(sys, 'frozen', False):
     # Load .env file from app directory if it exists
     env_file = os.path.join(app_dir, '.env')
     if os.path.isfile(env_file):
-        with open(env_file, 'r') as f:
+        with open(env_file, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 # Skip comments and empty lines
