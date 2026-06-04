@@ -314,10 +314,34 @@ export type MigrationStatus = 'idle' | 'running' | 'completed' | 'failed' | 'can
 export type MigrationDatabase = 'sqlite' | 'postgres';
 
 export interface MigrationAvailability {
+  /**
+   * True when a SQLite→PostgreSQL migration can be started right now
+   * (i.e. running on SQLite AND PostgreSQL env is configured). Stays
+   * false once the migration has already completed in-process — the
+   * operator must restart the daemon before re-running.
+   */
   migration_available: boolean;
   current_database: MigrationDatabase;
   postgres_configured: boolean;
   can_start: boolean;
+  /**
+   * True when PostgreSQL env vars (POSTGRES_HOST + POSTGRES_DB, or a
+   * full DSN via DATABASE_URL_POSTGRES) were ever set on the running
+   * daemon. Sticky: persists across migrations so the Database menu
+   * stays visible even after the active database flips to PostgreSQL.
+   */
+  postgres_env_set: boolean;
+  /**
+   * True when the operator may flip the active database via
+   * ``POST /api/database/switch`` (e.g. PG is the active database and
+   * the SQLite source is still present, or vice-versa).
+   */
+  can_switch: boolean;
+}
+
+export interface MigrationDatabaseSwitchResponse {
+  message: string;
+  requires_restart: boolean;
 }
 
 export interface MigrationProgress {

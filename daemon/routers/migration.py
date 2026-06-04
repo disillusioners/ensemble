@@ -77,17 +77,30 @@ def _availability_to_response(availability: dict[str, Any]) -> dict[str, Any]:
 
     The worker returns ``can_migrate``/``is_sqlite``/``pg_env_available``/
     ``reasons``; the public contract uses ``migration_available``,
-    ``current_database``, ``postgres_configured``, ``can_start``.
+    ``current_database``, ``postgres_configured``, ``can_start``,
+    ``can_switch``.
+
+    ``can_switch`` indicates whether the operator can switch the active
+    database backend from the gear-menu "Database" item. SQLite is always
+    available as a target, so when the current backend is PostgreSQL
+    ``can_switch`` is always True. When the current backend is SQLite,
+    switching to PostgreSQL requires the PG ENV vars to be set.
     """
     is_sqlite = bool(availability.get("is_sqlite"))
     pg_configured = bool(availability.get("pg_env_available"))
     can_start = bool(availability.get("can_migrate"))
+
+    # If we're already on PG, we can always switch back to SQLite.
+    # If we're on SQLite, we can switch to PG only if env is configured.
+    can_switch = (not is_sqlite) or pg_configured
 
     return {
         "migration_available": can_start,
         "current_database": "sqlite" if is_sqlite else "postgres",
         "postgres_configured": pg_configured,
         "can_start": can_start,
+        "can_switch": can_switch,
+        "postgres_env_set": pg_configured,
     }
 
 

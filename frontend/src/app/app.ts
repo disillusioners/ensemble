@@ -41,7 +41,13 @@ export class App implements OnInit {
 
   readonly health = signal<HealthResponse | null>(null);
   readonly isStreaming = this.sseService.isStreaming;
-  readonly migrationAvailable = signal(false);
+  /**
+   * Sticky flag: true once the running daemon reports that PostgreSQL
+   * env vars were ever configured. Drives the Database gear-menu item —
+   * the menu stays visible even after the active database has been
+   * flipped to PostgreSQL, so the operator can still switch back.
+   */
+  readonly databaseMenuVisible = signal(false);
 
   readonly settingsMenuItems = signal<SettingsMenuItem[]>([
     { label: 'MCP Servers', icon: 'settings_input_hdmi', route: '/mcp-servers' }
@@ -66,11 +72,14 @@ export class App implements OnInit {
   private checkMigrationAvailability(): void {
     this.http.get<MigrationAvailability>('/api/migration/availability').subscribe({
       next: (data) => {
-        if (data.migration_available) {
-          this.migrationAvailable.set(true);
+        // Show the Database menu whenever PostgreSQL env was ever set
+        // (sticky — the menu stays visible after the active database
+        // flips to PostgreSQL, so the operator can switch back).
+        if (data.postgres_env_set && !this.databaseMenuVisible()) {
+          this.databaseMenuVisible.set(true);
           this.settingsMenuItems.update(items => [
             ...items,
-            { label: 'Database Migration', icon: 'storage', route: '/migration' }
+            { label: 'Database', icon: 'storage', route: '/migration' }
           ]);
         }
       },

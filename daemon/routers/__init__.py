@@ -1,6 +1,7 @@
 """Daemon routers module."""
 
 from .agents import router as agents_router
+from .database import router as database_router
 from .instances import router as instances_router
 from .jobs import router as jobs_router
 from .messages import router as messages_router
@@ -17,6 +18,7 @@ from .migration import router as migration_router
 
 __all__ = [
     "agents_router",
+    "database_router",
     "instances_router",
     "jobs_router",
     "messages_router",

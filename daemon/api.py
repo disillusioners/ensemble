@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 # Import routers
 from daemon.routers import (
     agents_router,
+    database_router,
     instances_router,
     messages_router,
     mappings_router,
@@ -136,6 +137,10 @@ async def lifespan(app: FastAPI):
     )
     ensemble_config = EnsembleConfig.load_or_create(data_dir)
     app.state.ensemble_config = ensemble_config
+    # Stash the data_dir so routers (e.g. database switch) can persist
+    # ensemble.json updates to the same location the lifespan loaded it
+    # from, without re-deriving the precedence chain themselves.
+    app.state.data_dir = data_dir
 
     # Load config first
     config = load_config()
@@ -580,6 +585,7 @@ def create_app() -> FastAPI:
     api_router.include_router(mcp_servers_router)    # /api/mcp-servers
     api_router.include_router(notifications_router)   # /api/notifications
     api_router.include_router(migration_router)       # /api/migration
+    api_router.include_router(database_router)        # /api/database
 
     app.include_router(api_router)
 

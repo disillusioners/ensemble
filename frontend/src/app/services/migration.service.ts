@@ -8,6 +8,7 @@ import type {
   MigrationCancelResponse,
   MigrationLogEntry,
   MigrationStatus,
+  MigrationDatabaseSwitchResponse,
 } from '../models';
 
 /**
@@ -19,6 +20,7 @@ import type {
  *   GET  /api/migration/status       → poll current progress
  *   POST /api/migration/cancel       → cooperative cancel
  *   GET  /api/migration/events       → SSE stream of live events
+ *   POST /api/database/switch        → flip active database (sqlite ↔ postgres)
  *
  * SSE events update internal signals; the component template reads
  * signals directly. Connection state is exposed for UI affordances.
@@ -29,6 +31,7 @@ export class MigrationService {
   private readonly ngZone = inject(NgZone);
 
   private readonly API_BASE = '/api/migration';
+  private readonly SWITCH_URL = '/api/database/switch';
   private eventSource: EventSource | null = null;
   private statusPollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -65,6 +68,8 @@ export class MigrationService {
           current_database: 'postgres',
           postgres_configured: false,
           can_start: false,
+          postgres_env_set: false,
+          can_switch: false,
         });
         return of(null);
       })
@@ -125,6 +130,17 @@ export class MigrationService {
         // the SSE stream. Don't update status here.
       })
     );
+  }
+
+  /**
+   * POST /api/database/switch
+   *
+   * Flip the active database. The endpoint accepts the target database
+   * as a request body and returns a ``requires_restart`` flag indicating
+   * whether the daemon must be restarted before the change takes effect.
+   */
+  switchDatabase(database: 'sqlite' | 'postgres'): Observable<MigrationDatabaseSwitchResponse> {
+    return this.http.post<MigrationDatabaseSwitchResponse>(this.SWITCH_URL, { database });
   }
 
   /**

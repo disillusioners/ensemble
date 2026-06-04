@@ -3,8 +3,8 @@
     <!-- Header -->
     <header class="card-header">
       <div class="header-content">
-        <h1 class="card-title">Database Migration</h1>
-        <p class="card-subtitle">Migrate data from SQLite to PostgreSQL</p>
+        <h1 class="card-title">Database</h1>
+        <p class="card-subtitle">Manage the active database backend</p>
       </div>
       @if (isConnected()) {
         <span class="connection-badge connected">
@@ -19,188 +19,257 @@
       }
     </header>
 
-    <!-- Not available state -->
-    @if (availability() && !availability()!.migration_available) {
-      <div class="state-card info-state">
-        <div class="state-icon">
-          <mat-icon>info</mat-icon>
-        </div>
-        <div class="state-content">
-          <h2 class="state-title">Migration not available</h2>
-          <p class="state-message">
-            @if (availability()!.current_database === 'postgres') {
-              The current database is already PostgreSQL. No migration is required.
-            } @else if (!availability()!.postgres_configured) {
-              PostgreSQL environment variables are not configured.
-              Set <code>POSTGRES_HOST</code> and <code>POSTGRES_DB</code> in
-              the daemon environment to enable migration.
-            } @else {
-              Migration is not currently available for this database.
-            }
-          </p>
-          <dl class="meta-grid">
-            <div class="meta-row">
-              <dt>Current database</dt>
-              <dd>
-                <span class="db-badge" [class.sqlite]="availability()!.current_database === 'sqlite'" [class.postgres]="availability()!.current_database === 'postgres'">
-                  {{ availability()!.current_database }}
-                </span>
-              </dd>
-            </div>
-            <div class="meta-row">
-              <dt>PostgreSQL configured</dt>
-              <dd>
-                <span class="db-badge" [class.ok]="availability()!.postgres_configured" [class.no]="!availability()!.postgres_configured">
-                  {{ availability()!.postgres_configured ? 'yes' : 'no' }}
-                </span>
-              </dd>
-            </div>
-          </dl>
-        </div>
-      </div>
-    }
-
-    <!-- Available state -->
-    @if (availability() && availability()!.migration_available) {
-      <!-- Status strip -->
-      <div class="status-strip">
-        <div class="status-item">
-          <span class="status-label">Current</span>
-          <div class="status-value">
-            <span class="db-badge sqlite">SQLite</span>
-            <span class="db-arrow"><mat-icon>arrow_forward</mat-icon></span>
-          </div>
-        </div>
-        <div class="status-item">
-          <span class="status-label">Target</span>
-          <div class="status-value">
-            <span class="db-badge postgres">PostgreSQL</span>
-          </div>
-        </div>
-        <div class="status-item">
-          <span class="status-label">State</span>
-          <div class="status-value">
-            @if (status(); as s) {
-              <span class="status-badge" [class.idle]="s.status === 'idle'" [class.running]="s.status === 'running'" [class.completed]="s.status === 'completed'" [class.failed]="s.status === 'failed'" [class.cancelled]="s.status === 'cancelled'">
-                @if (s.status === 'running') {
-                  <mat-icon class="spin">autorenew</mat-icon>
-                }
-                {{ s.status }}
-              </span>
-            } @else {
-              <span class="status-badge idle">idle</span>
-            }
-          </div>
-        </div>
-      </div>
-
-      <!-- Action buttons -->
-      <div class="action-bar">
-        <button
-          mat-raised-button
-          color="primary"
-          class="start-btn"
-          (click)="startMigration()"
-          [disabled]="!availability()!.can_start || isMigrating() || isComplete()">
-          <mat-icon>play_arrow</mat-icon>
-          Start Migration
-        </button>
-
-        @if (isMigrating()) {
-          <button
-            mat-stroked-button
-            class="cancel-btn"
-            (click)="cancelMigration()">
-            <mat-icon>close</mat-icon>
-            Cancel
-          </button>
-        }
-      </div>
-
-      <!-- Progress section -->
-      @if (status() && (isMigrating() || isComplete() || isFailed() || isCancelled())) {
-        <section class="progress-section">
-          <div class="progress-header">
-            <span class="progress-phase">
-              @if (isMigrating()) {
-                Phase: {{ phaseLabel(status()!.current_phase) }}
-              } @else if (isComplete()) {
-                Migration complete
-              } @else if (isFailed()) {
-                Migration failed
-              } @else if (isCancelled()) {
-                Migration cancelled
-              }
-            </span>
-            @if (status()!.tables_total > 0) {
-              <span class="progress-count">
-                Table {{ status()!.tables_completed }} of {{ status()!.tables_total }}
-              </span>
-            }
-          </div>
-          <mat-progress-bar
-            mode="determinate"
-            [value]="currentProgress()"
-            class="migration-progress">
-          </mat-progress-bar>
-          <div class="progress-meta">
-            <span>{{ currentProgress() }}%</span>
-            @if (status()!.checkpoints_migrated > 0) {
-              <span class="checkpoint-count">
-                {{ status()!.checkpoints_migrated }} checkpoints migrated
-              </span>
-            }
-          </div>
-        </section>
-      }
-
-      <!-- Error display -->
-      @if (isFailed() && status()!.error) {
-        <div class="state-card error-state">
-          <div class="state-icon">
-            <mat-icon>error_outline</mat-icon>
-          </div>
-          <div class="state-content">
-            <h2 class="state-title">Migration failed</h2>
-            <p class="state-message">{{ status()!.error }}</p>
-          </div>
-        </div>
-      }
-
-      <!-- Restart prompt on completion -->
-      @if (isComplete()) {
-        <div class="state-card success-state">
+    @if (availability(); as av) {
+      @if (av.current_database === 'postgres') {
+        <!-- State B: Running PostgreSQL -->
+        <div class="state-card info-state">
           <div class="state-icon">
             <mat-icon>check_circle</mat-icon>
           </div>
           <div class="state-content">
-            <h2 class="state-title">Migration complete</h2>
+            <h2 class="state-title">Currently using PostgreSQL</h2>
             <p class="state-message">
-              The data has been migrated to PostgreSQL. Restart the daemon
-              to switch the running process over to the new database.
+              The daemon is connected to the PostgreSQL database. You can switch
+              back to SQLite at any time — the change requires a daemon restart.
             </p>
+            <dl class="meta-grid">
+              <div class="meta-row">
+                <dt>Active database</dt>
+                <dd>
+                  <span class="db-badge postgres">postgres</span>
+                </dd>
+              </div>
+            </dl>
           </div>
         </div>
-      }
 
-      <!-- Log viewer -->
-      @if (logs().length > 0) {
-        <section class="log-section">
-          <h3 class="log-title">Migration log</h3>
-          <div
-            class="log-viewer"
-            #logContainer>
-            @for (entry of logs(); track $index) {
-              <div class="log-entry" [class]="'log-entry ' + logLevelClass(entry.level)">
-                <span class="log-time">[{{ logTime(entry.timestamp) }}]</span>
-                <span class="log-level">{{ entry.level }}</span>
-                <span class="log-message">{{ entry.message }}</span>
-              </div>
-            }
-            <!-- Spacer to force scroll-to-bottom on update -->
-            <div class="log-tail"></div>
+        @if (switchedTo(); as target) {
+          <div class="state-card success-state">
+            <div class="state-icon">
+              <mat-icon>check_circle</mat-icon>
+            </div>
+            <div class="state-content">
+              <h2 class="state-title">Database switched</h2>
+              <p class="state-message">
+                Database switched. Restart required for changes to take effect.
+              </p>
+            </div>
           </div>
-        </section>
+        } @else {
+          <div class="action-bar">
+            @if (av.can_switch) {
+              <button
+                mat-raised-button
+                color="primary"
+                class="switch-btn"
+                (click)="switchToSqlite()"
+                [disabled]="switching()">
+                <mat-icon>swap_horiz</mat-icon>
+                {{ switching() ? 'Switching…' : 'Switch to SQLite' }}
+              </button>
+            } @else {
+              <p class="hint">
+                Switching back to SQLite is not available in the current state.
+              </p>
+            }
+          </div>
+        }
+      } @else if (av.postgres_configured || av.postgres_env_set) {
+        <!-- State A: Running SQLite + PG ENV set → existing migration UI -->
+        <!-- Status strip -->
+        <div class="status-strip">
+          <div class="status-item">
+            <span class="status-label">Current</span>
+            <div class="status-value">
+              <span class="db-badge sqlite">SQLite</span>
+              <span class="db-arrow"><mat-icon>arrow_forward</mat-icon></span>
+            </div>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Target</span>
+            <div class="status-value">
+              <span class="db-badge postgres">PostgreSQL</span>
+            </div>
+          </div>
+          <div class="status-item">
+            <span class="status-label">State</span>
+            <div class="status-value">
+              @if (status(); as s) {
+                <span class="status-badge" [class.idle]="s.status === 'idle'" [class.running]="s.status === 'running'" [class.completed]="s.status === 'completed'" [class.failed]="s.status === 'failed'" [class.cancelled]="s.status === 'cancelled'">
+                  @if (s.status === 'running') {
+                    <mat-icon class="spin">autorenew</mat-icon>
+                  }
+                  {{ s.status }}
+                </span>
+              } @else {
+                <span class="status-badge idle">idle</span>
+              }
+            </div>
+          </div>
+        </div>
+
+        <!-- Action buttons -->
+        <div class="action-bar">
+          <button
+            mat-raised-button
+            color="primary"
+            class="start-btn"
+            (click)="startMigration()"
+            [disabled]="!av.can_start || isMigrating() || isComplete()">
+            <mat-icon>play_arrow</mat-icon>
+            Start Migration
+          </button>
+
+          @if (isMigrating()) {
+            <button
+              mat-stroked-button
+              class="cancel-btn"
+              (click)="cancelMigration()">
+              <mat-icon>close</mat-icon>
+              Cancel
+            </button>
+          }
+
+          @if (isComplete() && av.can_switch) {
+            <button
+              mat-raised-button
+              color="primary"
+              class="switch-btn"
+              (click)="switchToPostgres()"
+              [disabled]="switching()">
+              <mat-icon>swap_horiz</mat-icon>
+              {{ switching() ? 'Switching…' : 'Switch to PostgreSQL' }}
+            </button>
+          }
+        </div>
+
+        <!-- Progress section -->
+        @if (status() && (isMigrating() || isComplete() || isFailed() || isCancelled())) {
+          <section class="progress-section">
+            <div class="progress-header">
+              <span class="progress-phase">
+                @if (isMigrating()) {
+                  Phase: {{ phaseLabel(status()!.current_phase) }}
+                } @else if (isComplete()) {
+                  Migration complete
+                } @else if (isFailed()) {
+                  Migration failed
+                } @else if (isCancelled()) {
+                  Migration cancelled
+                }
+              </span>
+              @if (status()!.tables_total > 0) {
+                <span class="progress-count">
+                  Table {{ status()!.tables_completed }} of {{ status()!.tables_total }}
+                </span>
+              }
+            </div>
+            <mat-progress-bar
+              mode="determinate"
+              [value]="currentProgress()"
+              class="migration-progress">
+            </mat-progress-bar>
+            <div class="progress-meta">
+              <span>{{ currentProgress() }}%</span>
+              @if (status()!.checkpoints_migrated > 0) {
+                <span class="checkpoint-count">
+                  {{ status()!.checkpoints_migrated }} checkpoints migrated
+                </span>
+              }
+            </div>
+          </section>
+        }
+
+        <!-- Error display -->
+        @if (isFailed() && status()!.error) {
+          <div class="state-card error-state">
+            <div class="state-icon">
+              <mat-icon>error_outline</mat-icon>
+            </div>
+            <div class="state-content">
+              <h2 class="state-title">Migration failed</h2>
+              <p class="state-message">{{ status()!.error }}</p>
+            </div>
+          </div>
+        }
+
+        <!-- Restart prompt on completion -->
+        @if (isComplete()) {
+          <div class="state-card success-state">
+            <div class="state-icon">
+              <mat-icon>check_circle</mat-icon>
+            </div>
+            <div class="state-content">
+              <h2 class="state-title">Migration complete</h2>
+              <p class="state-message">
+                The data has been migrated to PostgreSQL. Restart the daemon
+                to switch the running process over to the new database.
+              </p>
+            </div>
+          </div>
+        }
+
+        @if (switchedTo(); as target) {
+          <div class="state-card success-state">
+            <div class="state-icon">
+              <mat-icon>check_circle</mat-icon>
+            </div>
+            <div class="state-content">
+              <h2 class="state-title">Database switched</h2>
+              <p class="state-message">
+                Database switched. Restart required for changes to take effect.
+              </p>
+            </div>
+          </div>
+        }
+
+        <!-- Log viewer -->
+        @if (logs().length > 0) {
+          <section class="log-section">
+            <h3 class="log-title">Migration log</h3>
+            <div
+              class="log-viewer"
+              #logContainer>
+              @for (entry of logs(); track $index) {
+                <div class="log-entry" [class]="'log-entry ' + logLevelClass(entry.level)">
+                  <span class="log-time">[{{ logTime(entry.timestamp) }}]</span>
+                  <span class="log-level">{{ entry.level }}</span>
+                  <span class="log-message">{{ entry.message }}</span>
+                </div>
+              }
+              <!-- Spacer to force scroll-to-bottom on update -->
+              <div class="log-tail"></div>
+            </div>
+          </section>
+        }
+      } @else {
+        <!-- State C: Running SQLite + PG ENV NOT set -->
+        <div class="state-card info-state">
+          <div class="state-icon">
+            <mat-icon>info</mat-icon>
+          </div>
+          <div class="state-content">
+            <h2 class="state-title">PostgreSQL not configured</h2>
+            <p class="state-message">
+              Set <code>POSTGRES_HOST</code> and <code>POSTGRES_DB</code> in the
+              daemon environment to enable migration to PostgreSQL.
+            </p>
+            <dl class="meta-grid">
+              <div class="meta-row">
+                <dt>Current database</dt>
+                <dd>
+                  <span class="db-badge sqlite">sqlite</span>
+                </dd>
+              </div>
+              <div class="meta-row">
+                <dt>PostgreSQL configured</dt>
+                <dd>
+                  <span class="db-badge no">no</span>
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </div>
       }
     }
   </div>

@@ -152,6 +152,7 @@ class TestAvailabilityEndpoint:
         assert body["migration_available"] is True
         assert body["current_database"] == "sqlite"
         assert body["postgres_configured"] is True
+        assert body["postgres_env_set"] is True
 
     def test_availability_can_migrate_false(
         self, client, mock_worker
@@ -171,6 +172,7 @@ class TestAvailabilityEndpoint:
         assert body["migration_available"] is False
         assert body["current_database"] == "sqlite"
         assert body["postgres_configured"] is False
+        assert body["postgres_env_set"] is False
 
     def test_availability_current_database_postgres(self, client, mock_worker):
         """``current_database`` is ``postgres`` when the engine is on PG."""
@@ -183,6 +185,7 @@ class TestAvailabilityEndpoint:
         response = client.get("/api/migration/availability")
         body = response.json()
         assert body["current_database"] == "postgres"
+        assert body["postgres_env_set"] is True
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -466,10 +469,16 @@ class TestRouterHelpers:
             "current_database": "sqlite",
             "postgres_configured": True,
             "can_start": True,
+            "can_switch": True,  # on sqlite + pg env set => can switch to pg
+            "postgres_env_set": True,
         }
 
     def test_availability_to_response_postgres(self):
-        """``current_database`` is ``postgres`` when ``is_sqlite`` is False."""
+        """``current_database`` is ``postgres`` when ``is_sqlite`` is False.
+
+        ``can_switch`` is True because SQLite is always available as a
+        target when the daemon is on PostgreSQL.
+        """
         result = migration_router._availability_to_response({
             "can_migrate": False,
             "is_sqlite": False,
@@ -479,6 +488,20 @@ class TestRouterHelpers:
         assert result["current_database"] == "postgres"
         assert result["migration_available"] is False
         assert result["can_start"] is False
+        assert result["can_switch"] is True
+        assert result["postgres_env_set"] is True
+
+    def test_availability_to_response_can_switch_false_on_sqlite_no_pg(self):
+        """On SQLite without PG env, ``can_switch`` is False (no target)."""
+        result = migration_router._availability_to_response({
+            "can_migrate": False,
+            "is_sqlite": True,
+            "pg_env_available": False,
+            "reasons": ["pg env not set"],
+        })
+        assert result["current_database"] == "sqlite"
+        assert result["can_switch"] is False
+        assert result["postgres_env_set"] is False
 
     def test_strip_internal_fields_removes_underscore_prefixed(self):
         """Fields starting with ``_`` are stripped."""

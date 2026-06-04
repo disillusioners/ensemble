@@ -357,6 +357,32 @@ $accent-violet: #8b5cf6;
   }
 }
 
+// ── Switch button (used in State B + post-migration State A) ─────────
+.switch-btn {
+  background: $accent-violet !important;
+  color: white !important;
+
+  mat-icon {
+    margin-right: 0.25rem;
+  }
+
+  &:hover:not(:disabled) {
+    background: rgba($accent-violet, 0.85) !important;
+  }
+
+  &:disabled {
+    background: rgba($accent-violet, 0.3) !important;
+    color: rgba(white, 0.5) !important;
+  }
+}
+
+// Hint shown when switch is not available (e.g. PG env not set)
+.hint {
+  font-size: 0.8125rem;
+  color: $text-muted;
+  margin: 0;
+}
+
 // ── Progress section ───────────────────────────────────────────────────
 .progress-section {
   padding: 1rem 1.25rem;
