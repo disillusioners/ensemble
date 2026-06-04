@@ -110,6 +110,23 @@ class TestLoadOrCreate:
 
         assert config.database == "sqlite"
 
+    def test_postgres_env_with_existing_sqlite_dbs_defaults_to_sqlite(self, tmp_path: Path, monkeypatch):
+        """PG env vars set BUT SQLite DBs exist (migration prep) → defaults to sqlite."""
+        for key in ("POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_PORT",
+                    "POSTGRES_USER", "POSTGRES_PASSWORD"):
+            monkeypatch.delenv(key, raising=False)
+
+        monkeypatch.setenv("POSTGRES_HOST", "env-host")
+        monkeypatch.setenv("POSTGRES_DB", "env_db")
+
+        # Simulate existing SQLite DBs (old version before migration)
+        (tmp_path / "instances.db").write_text("")
+        (tmp_path / "checkpoints.db").write_text("")
+
+        config = EnsembleConfig.load_or_create(tmp_path)
+
+        assert config.database == "sqlite"
+
     def test_invalid_json_falls_back_to_defaults(self, tmp_path: Path, monkeypatch):
         """Malformed JSON in ensemble.json → returns default config (graceful)."""
         for key in ("POSTGRES_HOST", "POSTGRES_DB", "POSTGRES_PORT",

@@ -58,7 +58,9 @@ class EnsembleConfig(BaseModel):
         Auto-detection rule:
             - If ensemble.json exists → load it
             - If POSTGRES_HOST AND POSTGRES_DB are both set AND ensemble.json doesn't
-              exist → default to "postgres"
+              exist AND no SQLite DBs (instances.db/checkpoints.db) → default to "postgres"
+            - If POSTGRES_HOST AND POSTGRES_DB are both set AND ensemble.json doesn't
+              exist BUT SQLite DBs exist → default to "sqlite" (migration preparation)
             - Otherwise → default to "sqlite"
 
         The resulting configuration is always persisted to disk via `save()` so the
@@ -78,8 +80,13 @@ class EnsembleConfig(BaseModel):
 
         # Auto-detect from environment variables
         if os.environ.get("POSTGRES_HOST") and os.environ.get("POSTGRES_DB"):
-            logger.info("PostgreSQL ENV vars detected, defaulting to postgres")
-            config = cls(database="postgres")
+            has_sqlite_dbs = (data_dir / "instances.db").exists() or (data_dir / "checkpoints.db").exists()
+            if has_sqlite_dbs:
+                logger.info("PostgreSQL ENV vars detected but SQLite DBs exist, defaulting to sqlite for migration preparation")
+                config = cls()
+            else:
+                logger.info("PostgreSQL ENV vars detected, defaulting to postgres")
+                config = cls(database="postgres")
         else:
             logger.info("No PostgreSQL ENV vars detected, defaulting to sqlite")
             config = cls()
