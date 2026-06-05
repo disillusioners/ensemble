@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -416,6 +417,8 @@ class InstanceLifecycleService:
         Returns:
             True if termination was successful, False if instance was not found.
         """
+        t0 = time.monotonic()
+
         # Get instance metadata BEFORE modifying state (needed for children cascade)
         meta = None
         if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
@@ -426,20 +429,58 @@ class InstanceLifecycleService:
             logger.info(f"Instance {instance_id[:8]}... already terminated, skipping")
             return True
 
-        # Cascade to children FIRST - terminate all child instances recursively
-        if meta and meta.children:
-            for child_id in list(meta.children):
-                logger.info(f"Cascading terminate to child instance: {child_id[:8]}...")
-                await self.terminate_instance(child_id)
+        # Cascade to children FIRST - terminate all child instances in parallel.
+        # (Parallel because each child may itself unwind an in-flight LLM call;
+        # serial cascade would compound to 5s*N worst case.)
+        child_ids: list[str] = list(meta.children) if meta and meta.children else []
+        if child_ids:
+            results = await asyncio.gather(
+                *(self.terminate_instance(cid) for cid in child_ids),
+                return_exceptions=True,
+            )
+            # Cascade logs emitted AFTER gather completes (reviewer S2), so the
+            # timestamp reflects the actual unwind time, not the dispatch time.
+            for cid, result in zip(child_ids, results):
+                if isinstance(result, Exception):
+                    # Reviewer S1: warn on child termination failures
+                    logger.warning(
+                        f"Failed to cascade-terminate child instance {cid[:8]}... "
+                        f"({type(result).__name__}: {result})"
+                    )
+                else:
+                    logger.info(
+                        f"Cascading terminate to child instance: {cid[:8]}... "
+                        f"(trigger=DELETE, parent={instance_id[:8]}...)"
+                    )
         
         # 1. Cancel active requests for this instance
         self._manager._request_registry.cancel_by_instance(instance_id)
 
-        # 1.5. Cancel any running graph task for this instance
+        # 1.5. Cancel any running graph task for this instance, bounded-await unwind.
+        # Bounded wait: graph task unwinds when its in-flight LLM call returns or
+        # hits the LLM client's socket timeout. We cap so a stuck LLM call doesn't
+        # make DELETE hang; the LLM client's timeout is the real backstop.
+        # asyncio.shield protects against outer-cancel (e.g., client disconnect)
+        # leaking the unwinding graph task — the very problem this fix is closing.
         graph_task = self._manager._graph_tasks.pop(instance_id, None)
+        graph_unwind_ms = 0
         if graph_task and not graph_task.done():
             graph_task.cancel()
-            logger.info(f"Cancelled graph task for instance {instance_id[:8]}...")
+            graph_unwind_start = time.monotonic()
+            try:
+                await asyncio.wait_for(asyncio.shield(graph_task), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Graph task {instance_id[:8]}... did not unwind within 5s; "
+                    f"relying on LLM socket timeout to free resources"
+                )
+            except asyncio.CancelledError:
+                logger.debug(f"Graph task {instance_id[:8]}... cancelled during await")
+            graph_unwind_ms = int((time.monotonic() - graph_unwind_start) * 1000)
+            logger.info(
+                f"Cancelled graph task for instance {instance_id[:8]}... "
+                f"(unwind_ms={graph_unwind_ms})"
+            )
 
         # 2. Clean up live hub connections for this instance
         await self._manager._live_hub.cleanup_instance(instance_id)
@@ -502,6 +543,9 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to mark job as failed on terminate: {e}")
 
+        # Track jobs cancelled in steps 7.5 and 7.6 for the summary log
+        jobs_cancelled = 0
+
         # 7.5. Cancel ALL MESSAGE jobs for this instance
         if self._job_queue_service is not None:
             try:
@@ -510,6 +554,7 @@ class InstanceLifecycleService:
                 )
                 for msg_job in message_jobs:
                     await self._job_queue_service.cancel_message_job(msg_job.job_id)
+                jobs_cancelled += len(message_jobs)
             except Exception as e:
                 logger.warning(f"Failed to cancel MESSAGE jobs on terminate: {e}")
 
@@ -541,12 +586,32 @@ class InstanceLifecycleService:
                         else:
                             # PENDING, FAILED — safe to use cancel_job()
                             await self._job_queue_service.cancel_job(remaining_job.job_id)
+                        jobs_cancelled += 1
                     except Exception as e:
                         logger.warning(
                             f"terminate_instance: failed to cancel job {remaining_job.job_id[:8]}...: {e}"
                         )
             except Exception as e:
                 logger.warning(f"Failed to cleanup remaining jobs for instance {instance_id[:8]}...: {e}")
+
+        # 9. Wake the JobProcessor so it can sweep TERMINATED-instance artifacts
+        # immediately rather than waiting up to 30s for the next poll boundary.
+        # Safe to call even if the DB writes haven't fully settled — early wakeup
+        # is benign (JobProcessor's orphan-check will just see RUNNING and skip,
+        # then catch TERMINATED on its next pass).
+        # Attribute path: manager → _job_queue_mgmt_service → _dispatch_bus.
+        # Set at daemon/api.py:210 (direct assignment, not via setter).
+        # NOT self._manager._dispatch_bus — InstanceManager has no such attribute.
+        mgmt = getattr(self._manager, '_job_queue_mgmt_service', None)
+        bus = getattr(mgmt, '_dispatch_bus', None) if mgmt is not None else None
+        if bus is not None:
+            try:
+                bus.notify_all()
+            except Exception as e:
+                logger.warning(
+                    f"Failed to notify dispatch bus during terminate of {instance_id[:8]}... "
+                    f"({type(e).__name__}: {e})"
+                )
 
         # 7.7. Clean up MessageQueue entries for this instance
         if hasattr(self._manager, '_queue_repository') and self._manager._queue_repository:
@@ -565,6 +630,16 @@ class InstanceLifecycleService:
                 error=None,
                 parent_id=parent_id,
             )
+
+        # Summary log: surface total duration and unwind cost in one line so the
+        # next latency regression is self-explanatory. Matches the [TRACE] style
+        # used in daemon/services/job_processor.py and daemon/services/instance_lifecycle.py.
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            f"[TRACE] terminate_instance: {instance_id[:8]}... complete "
+            f"(graph_unwind_ms={graph_unwind_ms}, jobs_cancelled={jobs_cancelled}, "
+            f"children={len(child_ids)}, duration_ms={duration_ms})"
+        )
 
         return True
 
