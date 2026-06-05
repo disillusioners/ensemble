@@ -142,6 +142,11 @@
 | pg_startup_manual_test | tests/manual_test_pg_startup.py | PG startup integration: env config dispatch, PostgresCheckpointerAdapter, asyncpg pool queries | 2 min | 2026-06-03 | ✅ PASS (real asyncpg queries against ensemble_test) |
 | sqlite_startup_manual_test | tests/manual_test_sqlite_startup.py | SQLite startup integration: default path, SqliteCheckpointerAdapter, write/read/delete | 2 min | 2026-06-03 | ✅ PASS (default SQLite path verified) |
 
+### Terminate/Pause Latency Fix Tests
+
+| terminate_latency_unit_test | tests/services/test_instance_lifecycle_terminate.py | terminate_instance: re-entrancy guard, bounded-await 5s graph-task cancel, parallel cascade via asyncio.gather, dispatch-bus notify_all wakeup, defensive getattr, cascade trigger logging, summary log | 2 min | 2026-06-05 | ✅ PASS (9/9, feature/terminate-pause-latency, mock-path correctness verified) |
+| terminate_regression_unit_test | tests/test_instance_cascade.py + tests/job_queue/test_instance_termination_job_cleanup.py | Regression: FK cascade ordering (5) + job queue cleanup during terminate (29) | 2 min | 2026-06-05 | ✅ PASS (34/34, feature/terminate-pause-latency, no regressions) |
+
 ---
 
 ## Updating PACKS.md
