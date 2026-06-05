@@ -38,6 +38,51 @@ class ThinkingChatOpenAI(ChatOpenAI):
     is done from the response metadata if available, without additional API calls.
     """
     
+    def _create_chat_result(
+        self,
+        response: Any,
+        generation_info: dict | None = None,
+    ) -> ChatResult:
+        """Override to extract reasoning_content from the raw OpenAI response.
+
+        LangChain's _convert_dict_to_message() does NOT extract the
+        ``reasoning_content`` (or ``reasoning``) field that GLM/DeepSeek-style
+        extended-thinking responses include at the top level of the assistant
+        message dict. Without this override, the non-streaming path silently
+        drops the model's thinking, and the web UI cannot render it.
+        """
+        result = super()._create_chat_result(response, generation_info)
+
+        try:
+            response_dict = (
+                response if isinstance(response, dict) else response.model_dump()
+            )
+            choices = response_dict.get("choices") or []
+            for i, res in enumerate(choices):
+                if i >= len(result.generations):
+                    break
+                msg_dict = res.get("message") or {}
+                reasoning = msg_dict.get("reasoning_content")
+                if reasoning is None:
+                    reasoning = msg_dict.get("reasoning")
+                if reasoning is None:
+                    continue
+                gen_message = result.generations[i].message
+                if not hasattr(gen_message, "additional_kwargs"):
+                    continue
+                # Store guard: only set if not already present (avoid clobbering
+                # streaming path that may have already populated it).
+                if gen_message.additional_kwargs.get("reasoning_content") is None:
+                    gen_message.additional_kwargs["reasoning_content"] = reasoning
+                    logger.debug(
+                        f"[LLM] Extracted reasoning_content from raw response: "
+                        f"{str(reasoning)[:100]}..."
+                    )
+        except Exception as e:
+            logger.debug(f"[LLM] Could not extract reasoning_content in _create_chat_result: {e}")
+
+        return result
+
     def _generate(
         self,
         messages: list[BaseMessage],
@@ -45,32 +90,38 @@ class ThinkingChatOpenAI(ChatOpenAI):
         run_manager: Any = None,
         **kwargs: Any,
     ) -> ChatResult:
-        """Override to capture reasoning_content from response metadata."""
-        # Call parent implementation (this is the ONLY HTTP request)
+        """Override to capture reasoning_content from response metadata.
+
+        This is a secondary safety net for the non-streaming path. The primary
+        extraction now happens in _create_chat_result() which has access to the
+        raw response message dict (where reasoning_content lives for GLM/DeepSeek
+        responses). This method keeps the legacy fallback chain for any case
+        where reasoning_content was already promoted to additional_kwargs or
+        response_metadata by an upstream parser.
+        """
         result = super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
-        
-        # Try to extract reasoning_content from the result's additional_kwargs
-        # (no additional HTTP request needed)
+
         try:
             if result.generations:
                 gen_message = result.generations[0].message
+                if hasattr(gen_message, 'additional_kwargs') and gen_message.additional_kwargs.get('reasoning_content') is not None:
+                    # Already populated by _create_chat_result override.
+                    return result
                 if hasattr(gen_message, 'additional_kwargs'):
-                    # Check for reasoning_content in various places
-                    reasoning = gen_message.additional_kwargs.get('reasoning_content')
-                    if reasoning is None:                                              # ← is NONE: try next source
-                        reasoning = gen_message.additional_kwargs.get('reasoning')
-                    if reasoning is None and hasattr(gen_message, 'response_metadata'):  # ← is NONE: try next source
-                        meta = gen_message.response_metadata or {}
-                        reasoning = meta.get('reasoning_content') or meta.get('reasoning')
-
-                    if reasoning is not None and hasattr(gen_message, 'additional_kwargs'):  # ← is NOT NONE: store guard
+                    reasoning = gen_message.additional_kwargs.get('reasoning')
+                    if reasoning is not None:
                         gen_message.additional_kwargs['reasoning_content'] = reasoning
-                        logger.debug(f"[LLM] Extracted reasoning: {str(reasoning)[:100]}...")
-                        
+                if hasattr(gen_message, 'response_metadata'):
+                    meta = gen_message.response_metadata or {}
+                    reasoning = meta.get('reasoning_content') or meta.get('reasoning')
+                    if reasoning is not None and hasattr(gen_message, 'additional_kwargs') \
+                            and gen_message.additional_kwargs.get('reasoning_content') is None:
+                        gen_message.additional_kwargs['reasoning_content'] = reasoning
+                        logger.debug(f"[LLM] Extracted reasoning from metadata: {str(reasoning)[:100]}...")
+
         except Exception as e:
-            # Don't fail the whole request if thinking extraction fails
             logger.debug(f"[LLM] Could not extract reasoning_content: {e}")
-        
+
         return result
 
     def _get_request_payload(
@@ -245,14 +296,25 @@ def should_continue(state: MessagesState) -> str:
     if getattr(last_message, 'tool_calls', None):
         return "tools"
     
-    # Check if model is still outputting thinking/reasoning content.
-    # If reasoning_content is present in additional_kwargs, the model is still
-    # processing internally and hasn't produced its final answer yet.
+    # Check if the model produced a "thinking-only" response.
+    # Some models (e.g. Claude with extended thinking) emit an AIMessage that
+    # carries reasoning_content but no content and no tool_calls — meaning the
+    # model intends the next LLM call to produce the final answer. In that
+    # case we re-route to "agent" to invoke the LLM again.
+    #
+    # However, streaming models like GLM/DeepSeek return BOTH reasoning_content
+    # AND content in a single response. Re-invoking the LLM in that case would
+    # either loop indefinitely or overwrite the correct response with a fresh
+    # one that lacks reasoning_content, breaking the web UI's "show thinking"
+    # feature. So we only re-invoke when the response is genuinely
+    # thinking-only.
     if hasattr(last_message, 'additional_kwargs'):
         reasoning = last_message.additional_kwargs.get('reasoning_content')
-        if reasoning:
-            logger.debug(f"[Graph] Model still outputting thinking, continuing...")
-            return "agent"  # Re-invoke agent to continue processing
+        content = getattr(last_message, 'content', '') or ''
+        has_tool_calls = bool(getattr(last_message, 'tool_calls', None))
+        if reasoning and not content and not has_tool_calls:
+            logger.debug(f"[Graph] Thinking-only response, continuing...")
+            return "agent"
     
     # Ghost promise detection: LLM promised action but didn't emit tool_call
     # Common pattern: "Now let me write the document:" (ends with ':')

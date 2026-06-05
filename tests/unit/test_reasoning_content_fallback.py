@@ -1,10 +1,13 @@
 """Tests for reasoning_content fallback chain and edge cases in ThinkingChatOpenAI.
 
-These tests verify the 4 bug fixes in ThinkingChatOpenAI:
+These tests verify the bug fixes in ThinkingChatOpenAI:
 1. Fallback chain in _generate uses `is None` checks (reasoning_content → reasoning → response_metadata)
 2. Store guard in _convert_delta_to_message_chunk uses `is not None` (preserves empty strings)
 3. Added `reasoning` key fallback in streaming path
 4. Logging wrapped with str() to prevent TypeError
+5. _create_chat_result extracts reasoning_content from raw OpenAI response
+   message dict (LangChain's _convert_dict_to_message drops it, which broke
+   the web UI "show thinking" toggle for non-streaming GLM/DeepSeek responses)
 """
 
 import pytest
@@ -195,3 +198,179 @@ class TestLoggingEdgeCases:
 
         # Should complete without raising and store the value
         assert result.additional_kwargs.get("reasoning_content") == 12345
+
+
+class TestCreateChatResultReasoningExtraction:
+    """Tests for the _create_chat_result override.
+
+    LangChain's stock _convert_dict_to_message() silently drops the
+    ``reasoning_content`` (or ``reasoning``) field from non-streaming
+    OpenAI-compatible responses. The override re-extracts it from the raw
+    response message dict and stores it on additional_kwargs so the web UI
+    can render the model's thinking.
+    """
+
+    def _make_response(self, choices: list[dict]) -> dict:
+        """Build a minimal OpenAI chat.completion response dict."""
+        return {
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "glm-5",
+            "choices": choices,
+        }
+
+    def test_reasoning_content_extracted_from_raw_response(self):
+        """reasoning_content at the top level of the message dict must end
+        up on additional_kwargs after _create_chat_result runs.
+        """
+        llm = ThinkingChatOpenAI(model="glm-5", api_key="test-key")
+        response = self._make_response([{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Hello world",
+                "reasoning_content": "an AI, the user wants a greeting...",
+            },
+        }])
+
+        result = llm._create_chat_result(response)
+
+        assert len(result.generations) == 1
+        reasoning = result.generations[0].message.additional_kwargs.get("reasoning_content")
+        assert reasoning == "an AI, the user wants a greeting..."
+
+    def test_reasoning_key_fallback_in_create_chat_result(self):
+        """When the response uses the ``reasoning`` key (DeepSeek style)
+        instead of ``reasoning_content``, it should still be extracted.
+        """
+        llm = ThinkingChatOpenAI(model="deepseek", api_key="test-key")
+        response = self._make_response([{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Sure",
+                "reasoning": "user wants confirmation",
+            },
+        }])
+
+        result = llm._create_chat_result(response)
+
+        assert result.generations[0].message.additional_kwargs.get(
+            "reasoning_content"
+        ) == "user wants confirmation"
+
+    def test_no_reasoning_content_unchanged(self):
+        """When the response has no reasoning_content/reasoning, the message
+        additional_kwargs should not gain a spurious empty key.
+        """
+        llm = ThinkingChatOpenAI(model="gpt-4", api_key="test-key")
+        response = self._make_response([{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "Hello"},
+        }])
+
+        result = llm._create_chat_result(response)
+
+        assert result.generations[0].message.additional_kwargs.get("reasoning_content") is None
+
+    def test_existing_reasoning_content_not_clobbered(self):
+        """If reasoning_content is already set on additional_kwargs (e.g. by
+        the streaming path), the override should not overwrite it.
+        """
+        llm = ThinkingChatOpenAI(model="glm-5", api_key="test-key")
+
+        # Pre-populate by patching the parent's _create_chat_result to return
+        # a ChatResult that already has reasoning_content set.
+        from langchain_core.outputs import ChatGeneration, ChatResult
+        from langchain_core.messages import AIMessage
+
+        existing = ChatResult(generations=[
+            ChatGeneration(message=AIMessage(
+                content="Hello",
+                additional_kwargs={"reasoning_content": "preserved"},
+            ))
+        ])
+
+        response = self._make_response([{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Hello",
+                "reasoning_content": "from raw response",
+            },
+        }])
+
+        with patch.object(
+            ThinkingChatOpenAI.__bases__[0],
+            "_create_chat_result",
+            return_value=existing,
+        ):
+            result = llm._create_chat_result(response)
+
+        assert result.generations[0].message.additional_kwargs.get(
+            "reasoning_content"
+        ) == "preserved"
+
+    def test_multiple_choices_reasoning_extracted_per_choice(self):
+        """n>1 choices (n-best) should each get their own reasoning_content
+        attached to the corresponding generation.
+        """
+        llm = ThinkingChatOpenAI(model="glm-5", api_key="test-key")
+        response = self._make_response([
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "First",
+                    "reasoning_content": "thinking one",
+                },
+            },
+            {
+                "index": 1,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "Second",
+                    "reasoning_content": "thinking two",
+                },
+            },
+        ])
+
+        result = llm._create_chat_result(response)
+
+        assert len(result.generations) == 2
+        assert result.generations[0].message.additional_kwargs.get(
+            "reasoning_content"
+        ) == "thinking one"
+        assert result.generations[1].message.additional_kwargs.get(
+            "reasoning_content"
+        ) == "thinking two"
+
+    def test_basemodel_response_supported(self):
+        """OpenAI's client returns a Pydantic BaseModel for non-streaming
+        responses, not a dict. The override should call model_dump() and
+        still find reasoning_content.
+        """
+        llm = ThinkingChatOpenAI(model="glm-5", api_key="test-key")
+        response = MagicMock()
+        response.model_dump.return_value = self._make_response([{
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {
+                "role": "assistant",
+                "content": "Hello",
+                "reasoning_content": "model dump path",
+            },
+        }])
+
+        result = llm._create_chat_result(response)
+
+        assert result.generations[0].message.additional_kwargs.get(
+            "reasoning_content"
+        ) == "model dump path"

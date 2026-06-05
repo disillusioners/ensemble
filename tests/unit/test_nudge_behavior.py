@@ -203,6 +203,84 @@ class TestShouldContinue:
         state = self._make_state(messages)
         assert should_continue(state) == "tools"
 
+    def test_thinking_only_response_routes_to_agent(self):
+        """A response with reasoning_content but no content/tool_calls should
+        route back to 'agent' so the LLM can produce the final answer on the
+        next call. This preserves the original Claude-style extended thinking
+        behavior.
+        """
+        messages = [
+            HumanMessage(content="Think about this"),
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "an AI, let me think hard..."},
+            ),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "agent"
+
+    def test_response_with_reasoning_and_content_returns_end(self):
+        """A response with BOTH reasoning_content AND content should end the
+        graph. This is the streaming model case (GLM/DeepSeek) where the model
+        emits thinking + final answer in a single response. Re-invoking the
+        LLM in this case would overwrite the response with one that lacks
+        reasoning_content, breaking the web UI's 'show thinking' feature.
+        """
+        messages = [
+            HumanMessage(content="Tell me a joke"),
+            AIMessage(
+                content="Why did the chicken cross the road?",
+                additional_kwargs={"reasoning_content": "an AI, the user wants a joke..."},
+            ),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "__end__"
+
+    def test_response_with_reasoning_and_tool_calls_returns_tools(self):
+        """A response with reasoning_content AND tool_calls should route to
+        'tools'. tool_calls has higher priority than the thinking-only check.
+        """
+        messages = [
+            HumanMessage(content="Search for X"),
+            AIMessage(
+                content="",
+                tool_calls=[ToolCall(id="call_1", name="search", args={"q": "X"})],
+                additional_kwargs={"reasoning_content": "need to search..."},
+            ),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "tools"
+
+    def test_response_with_reasoning_and_ghost_promise_returns_agent(self):
+        """Ghost promise (content ending with ':') should still route to
+        'agent' even when reasoning_content is present, because the model
+        explicitly promised to continue.
+        """
+        messages = [
+            HumanMessage(content="Write a file"),
+            AIMessage(
+                content="Now I will:",
+                additional_kwargs={"reasoning_content": "I need to write a file..."},
+            ),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "agent"
+
+    def test_empty_content_with_reasoning_no_tool_result_returns_end(self):
+        """Empty content + reasoning_content without a recent tool result
+        should still end (not nudge). The thinking-only re-route is the
+        primary continuation mechanism now.
+        """
+        messages = [
+            HumanMessage(content="Hello"),
+            AIMessage(
+                content="",
+                additional_kwargs={"reasoning_content": "the user said hello..."},
+            ),
+        ]
+        state = self._make_state(messages)
+        assert should_continue(state) == "agent"
+
 
 class TestNudgeMessage:
     """Tests for NUDGE_MESSAGE constant."""

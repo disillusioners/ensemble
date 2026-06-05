@@ -491,7 +491,16 @@ class TestReasoningContentEdgeCases:
     def test_conversation_without_reasoning_content_via_http(
         self, mock_http_server
     ):
-        """Conversation without reasoning_content should work without errors."""
+        """Conversations should round-trip reasoning_content end-to-end through
+        the non-streaming path (sync invoke).
+
+        Previously this test asserted that reasoning_content was dropped from
+        the second request's assistant message — that was a symptom of the
+        bug where LangChain's _convert_dict_to_message() discarded the field
+        and ThinkingChatOpenAI's _create_chat_result() didn't re-extract it.
+        With the fix, reasoning_content is now correctly preserved across
+        turns.
+        """
         llm = ThinkingChatOpenAI(
             model="mock-deepseek",
             api_key="test-key",
@@ -503,7 +512,12 @@ class TestReasoningContentEdgeCases:
         messages = [HumanMessage(content="Hello!")]
         r1 = llm.invoke(messages)
 
-        # Second turn - plain response without reasoning_content
+        # Verify r1 got the reasoning_content from the raw response
+        assert r1.additional_kwargs.get("reasoning_content") == (
+            "Thinking about the user's question for response 1."
+        ), "Non-streaming invoke should now preserve reasoning_content"
+
+        # Second turn
         messages.extend([r1, HumanMessage(content="How are you?")])
         r2 = llm.invoke(messages)
 
@@ -518,11 +532,13 @@ class TestReasoningContentEdgeCases:
         req1 = server_state.request_history[0]
         assert len(req1["messages"]) == 1
 
-        # Second request should have user + assistant (no reasoning_content)
+        # Second request should have user + assistant with reasoning_content
+        # preserved via _get_request_payload injection
         req2 = server_state.request_history[1]
         assistant_msgs = [m for m in req2["messages"] if m.get("role") == "assistant"]
         assert len(assistant_msgs) == 1
-        # The assistant message from r1 doesn't have reasoning_content
-        assert assistant_msgs[0].get("reasoning_content") is None
+        assert assistant_msgs[0].get("reasoning_content") == (
+            "Thinking about the user's question for response 1."
+        ), "reasoning_content from turn 1 should be preserved in turn 2 payload"
 
-        print("\n[No Reasoning Test] Verified: Conversations without reasoning_content work")
+        print("\n[No Reasoning Test] Verified: Conversations correctly round-trip reasoning_content")
