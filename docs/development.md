@@ -4,7 +4,7 @@ This guide covers everything you need to know to develop, test, and deploy agent
 
 ## Prerequisites
 
-- **Python 3.11+** (required)
+- **Python 3.13+** (required)
 - **Node.js 18+** (required for frontend)
 - **Git**
 - **uv** (optional, but recommended for fast Python package management)

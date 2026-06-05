@@ -36,7 +36,7 @@ A comprehensive installation and configuration guide for the agents-ensemble mul
 
 ```bash
 python --version
-# Must output Python 3.11.x or higher
+# Must output Python 3.13.x or higher
 ```
 
 ### Verifying Node.js Version

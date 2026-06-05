@@ -9,7 +9,7 @@ Fix correctness bugs (last_run_at, race conditions, missing indexes), refactor d
 ## Context
 - **Project**: agents-ensemble
 - **Working Directory**: `/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble`
-- **Backend**: Python 3.11+, FastAPI, SQLModel, aiosqlite
+- **Backend**: Python 3.13+, FastAPI, SQLModel, aiosqlite
 - **Frontend**: Angular 21 (already expects `last_run_at` in schedule responses — no frontend changes needed)
 
 ### Critical Root Cause Discovery

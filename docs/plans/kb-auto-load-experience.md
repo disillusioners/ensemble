@@ -115,7 +115,7 @@ graph TD
 ## Project Profile: agents-ensemble
 
 ### Tech Stack
-- **Backend**: Python 3.11+, FastAPI, LangGraph 0.3+, SQLModel, aiosqlite
+- **Backend**: Python 3.13+, FastAPI, LangGraph 0.3+, SQLModel, aiosqlite
 - **Frontend**: Angular 21 (TypeScript)
 - **Package Manager**: uv (Python), npm (Frontend)
 - **Knowledge**: LightRAG (knowledge graph)
