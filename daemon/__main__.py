@@ -24,15 +24,26 @@ def main():
     # Load config to get host/port
     config = load_config()
 
+    # Apply LLM-specific class-level config that must be set before any
+    # ThinkingChatOpenAI instance is created.
+    from .graph import ThinkingChatOpenAI
+    ThinkingChatOpenAI.reasoning_echo_models = list(
+        config.llm.reasoning_echo_models or []
+    )
+    logger.info(
+        f"[Config] reasoning_echo_models={ThinkingChatOpenAI.reasoning_echo_models} "
+        f"(echo reasoning_content back in multi-turn for matching model names)"
+    )
+
     # Log version for debugging
     from . import __version__
     logger.info(f"Starting Ensemble v{__version__}")
-    
+
     # Note: uvicorn handles SIGTERM and SIGINT automatically.
     # The FastAPI lifespan shutdown (via @asynccontextmanager) will be
     # triggered when uvicorn shuts down, which calls manager.shutdown()
     # for graceful cleanup.
-    
+
     # Run server (access_log=False: custom SelectiveAccessLogMiddleware handles selective logging)
     uvicorn.run(
         "daemon.api:app",

@@ -12,7 +12,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.messages import BaseMessageChunk
 from langchain_core.runnables import RunnableLambda
 from langchain_core.messages.ai import AIMessageChunk, UsageMetadata
-from typing import Any, Mapping, cast
+from typing import Any, ClassVar, Mapping, cast
 import asyncio
 import logging
 import openai
@@ -33,11 +33,38 @@ from .response_validation import LLMResponseValidationError
 
 class ThinkingChatOpenAI(ChatOpenAI):
     """Custom ChatOpenAI that captures reasoning_content from OpenAI-compatible APIs.
-    
+
     Note: This class does NOT make duplicate requests. The thinking extraction
     is done from the response metadata if available, without additional API calls.
     """
-    
+
+    # Class-level config: model name patterns (case-insensitive substring
+    # match) for which reasoning_content MUST be echoed back in multi-turn
+    # assistant messages.
+    #
+    # Why this is configurable:
+    #   - DeepSeek thinking mode requires reasoning_content in the assistant
+    #     history whenever the prior turn included a tool call, or the model
+    #     loses its chain-of-thought context. See:
+    #     https://api-docs.deepseek.com/guides/thinking_mode
+    #   - Other providers (e.g. raw OpenAI) reject unknown fields like
+    #     reasoning_content, so we must NOT echo for those.
+    #
+    # The daemon sets this from LLMConfig.reasoning_echo_models at startup
+    # (see daemon/__main__.py and daemon/manager.py). Default keeps DeepSeek
+    # behavior working out of the box.
+    reasoning_echo_models: ClassVar[list[str]] = ["deepseek"]
+
+    def _should_echo_reasoning(self) -> bool:
+        """Return True if the current model requires reasoning_content echo.
+
+        Substring match (case-insensitive) against ``reasoning_echo_models``.
+        """
+        model = (self.model_name or "").lower()
+        if not model:
+            return False
+        return any(pattern.lower() in model for pattern in self.reasoning_echo_models)
+
     def _create_chat_result(
         self,
         response: Any,
@@ -132,11 +159,30 @@ class ThinkingChatOpenAI(ChatOpenAI):
         **kwargs: Any,
     ) -> dict:
         """Override to preserve reasoning_content in assistant message dicts.
-        
-        Providers like DeepSeek require reasoning_content as a top-level field
-        in assistant messages when tool calls are involved, for multi-turn reasoning.
-        The parent's _convert_message_to_dict() strips this field, so we re-inject it.
+
+        Only injects ``reasoning_content`` for models listed in
+        ``reasoning_echo_models`` (default: ``["deepseek"]``).
+
+        Why this is gated by model name:
+          - DeepSeek thinking mode requires reasoning_content in the assistant
+            history whenever the prior turn included a tool call, or the model
+            loses its chain-of-thought context. See:
+            https://api-docs.deepseek.com/guides/thinking_mode
+          - Other providers (e.g. raw OpenAI) reject unknown fields like
+            reasoning_content with a 400 error, so we must skip echo for them.
+          - Some proxies ignore unknown fields silently, in which case echo is
+            harmless but wastes a few hundred bytes of payload per turn.
+
+        The parent class's ``_convert_message_to_dict()`` strips
+        ``reasoning_content`` from additional_kwargs, so we re-inject it after
+        the parent has built the payload.
         """
+        # Fast path: skip the entire message-matching machinery for models that
+        # don't require reasoning echo. This keeps the hot path identical to
+        # stock ChatOpenAI for GPT-4o, GLM, Claude, etc.
+        if not self._should_echo_reasoning():
+            return super()._get_request_payload(input_, stop=stop, **kwargs)
+
         # Extract original messages once BEFORE calling super() to avoid double conversion.
         # super()._get_request_payload() internally calls _convert_input().to_messages(),
         # so we extract messages here first and use them for matching.

@@ -12,6 +12,15 @@ llm:
   request_timeout: 660  # HTTP client timeout per LLM call (seconds). Counts
                         # toward task_timeout_minutes budget for each retry.
 
+  # Models for which reasoning_content from a previous turn must be echoed
+  # back in subsequent assistant messages. Case-insensitive substring match
+  # against the model name. Required by DeepSeek's thinking-mode API for
+  # tool-calling turns — see https://api-docs.deepseek.com/guides/thinking_mode
+  # Override via OPENAI_REASONING_ECHO_MODELS env var (comma-separated or
+  # JSON array). Default: ["deepseek"].
+  reasoning_echo_models:
+    - deepseek
+
 # Server Configuration  
 daemon:
   host: ${HOST:-0.0.0.0}

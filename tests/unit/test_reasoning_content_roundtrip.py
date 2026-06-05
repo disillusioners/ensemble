@@ -12,6 +12,21 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from daemon.graph import ThinkingChatOpenAI
 
 
+@pytest.fixture(autouse=True)
+def enable_test_model_echo():
+    """These tests use model="test-model" which should trigger echo.
+
+    The default echo list is ["deepseek"], so we add "test-model" so the
+    pre-existing test assertions (which expect echo to happen) still hold.
+    """
+    original = list(ThinkingChatOpenAI.reasoning_echo_models)
+    ThinkingChatOpenAI.reasoning_echo_models = list(
+        set(original) | {"test-model"}
+    )
+    yield
+    ThinkingChatOpenAI.reasoning_echo_models = original
+
+
 class TestGetRequestPayloadPreservesReasoningContent:
     """Tests for _get_request_payload preserving reasoning_content."""
 

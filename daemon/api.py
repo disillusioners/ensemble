@@ -145,6 +145,19 @@ async def lifespan(app: FastAPI):
     # Load config first
     config = load_config()
 
+    # Apply LLM-specific class-level config that must be set before any
+    # ThinkingChatOpenAI instance is created. Mirrors what __main__.py does
+    # for the `python -m daemon` entry point so that `uvicorn daemon.api:app`
+    # works the same way.
+    from daemon.graph import ThinkingChatOpenAI
+    ThinkingChatOpenAI.reasoning_echo_models = list(
+        config.llm.reasoning_echo_models or []
+    )
+    daemon_logger.info(
+        f"[Config] reasoning_echo_models={ThinkingChatOpenAI.reasoning_echo_models} "
+        f"(echo reasoning_content back in multi-turn for matching model names)"
+    )
+
     # Run RAG auto-test to verify LightRAG connectivity
     # This gracefully disables RAG if it's misconfigured (wrong API key, connection refused, etc.)
     from daemon.rag import auto_test_rag

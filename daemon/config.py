@@ -3,11 +3,11 @@
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict
+from typing import Annotated, Any, Dict
 
 import yaml
-from pydantic import Field, ConfigDict, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, ConfigDict, model_validator, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from .constants import (
     CHECKPOINT_TTL_HOURS,
@@ -41,7 +41,7 @@ class LLMConfig(BaseSettings):
     """LLM configuration settings."""
 
     model_config = SettingsConfigDict(env_prefix="OPENAI_")
-    
+
     base_url: str = Field(default="https://api.openai.com/v1")
     api_key: str = Field(default="")
     model: str = Field(default="gpt-4")
@@ -49,7 +49,54 @@ class LLMConfig(BaseSettings):
     model_vision: str | None = Field(default=None, description="Model for vision/image processing (e.g., gpt-4o)")
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=660, description="Request timeout in seconds (default: 11 minutes)")
-    
+
+    # Models for which reasoning_content from a previous turn must be echoed
+    # back in subsequent assistant messages. Substring match is performed
+    # against the model name (case-insensitive). Default: DeepSeek (required
+    # by their thinking-mode API for tool-calling turns).
+    # Override via OPENAI_REASONING_ECHO_MODELS env var, e.g.
+    #   OPENAI_REASONING_ECHO_MODELS="deepseek,glm,zai"
+    # The NoDecode annotation prevents pydantic-settings from auto-JSON-decoding
+    # the env value, so our field_validator can handle comma-separated input.
+    reasoning_echo_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["deepseek"],
+        description=(
+            "Model name patterns (case-insensitive substring match) for which "
+            "reasoning_content must be echoed back in multi-turn conversations. "
+            "Default: ['deepseek']."
+        ),
+    )
+
+    @field_validator("reasoning_echo_models", mode="before")
+    @classmethod
+    def _parse_reasoning_echo_models(cls, value: Any) -> Any:
+        """Accept comma-separated strings (and JSON arrays) from env / YAML.
+
+        The ``NoDecode`` annotation prevents pydantic-settings from
+        auto-parsing env values, so we handle both forms here:
+          - ``"deepseek,glm"`` → ``["deepseek", "glm"]``
+          - ``'["deepseek", "glm"]'`` → ``["deepseek", "glm"]``
+          - ``["deepseek", "glm"]`` → unchanged (passthrough)
+          - ``""`` or whitespace → ``[]``
+        """
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            # JSON array form
+            if stripped.startswith("[") and stripped.endswith("]"):
+                import json
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+                # Fall through to comma-split
+            # Comma-separated form (also covers "a, b , c")
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        return value
+
     @model_validator(mode="after")
     def set_title_model_fallback(self) -> "LLMConfig":
         """Ensure model_title falls back to model if not set or empty."""

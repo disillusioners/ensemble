@@ -460,6 +460,25 @@ def clean_env():
             os.environ[key] = value
 
 
+@pytest.fixture(autouse=True)
+def reset_reasoning_echo_models():
+    """Reset ThinkingChatOpenAI.reasoning_echo_models after each test.
+
+    The daemon's __main__/lifespan sets this from config; tests that import
+    ``daemon.graph`` shouldn't leak state between modules. We snapshot and
+    restore around every test.
+    """
+    try:
+        from daemon.graph import ThinkingChatOpenAI
+    except Exception:
+        yield
+        return
+
+    original = list(getattr(ThinkingChatOpenAI, "reasoning_echo_models", ["deepseek"]))
+    yield
+    ThinkingChatOpenAI.reasoning_echo_models = original
+
+
 # ==================== Scheduler Test Fixtures ====================
 
 
