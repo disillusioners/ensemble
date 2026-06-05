@@ -64,7 +64,7 @@ CHECKPOINT_INTERVAL: int = 1  # Checkpoint interval (messages)
 CHECKPOINT_TTL_HOURS: int = 168  # Checkpoint TTL (7 days)
 CHECKPOINT_CLEANUP_INTERVAL_HOURS: int = 24  # Checkpoint cleanup interval
 CHECKPOINT_MAX_PER_THREAD: int = 50  # Max checkpoints per thread (preserves parent chain)
-MAX_INSTANCE_HISTORY: int = 300  # Max terminal instances to keep checkpoint data for
+MAX_INSTANCE_HISTORY: int = 500  # Max terminal instances to keep checkpoint data for
 MAINTENANCE_CHECK_INTERVAL_MINUTES: int = 15  # Maintenance service check interval
 IDEMPOTENCY_KEY_TTL_HOURS: int = 24  # Idempotency key deduplication TTL
 
