@@ -134,7 +134,7 @@ class McpService:
                             # Stale connection — close it, fall back to cold-start
                             logger.warning(f"Stale pooled connection for '{server.name}', falling back")
                             try:
-                                await conn.session.close()
+                                await conn.session.stop()
                                 await conn.stream_cm.__aexit__(None, None, None)
                             except Exception:
                                 pass

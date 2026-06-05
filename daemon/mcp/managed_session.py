@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
-import anyio
 from mcp import ClientSession
 
 logger = logging.getLogger(__name__)
@@ -12,32 +12,48 @@ logger = logging.getLogger(__name__)
 
 class ManagedClientSession(ClientSession):
     """
-    Extended ClientSession that properly manages its task group lifecycle.
+    Extended ClientSession with cross-task-safe lifecycle management.
 
-    The base ClientSession requires being used as an async context manager to start
-    its receive loop. This subclass allows manual lifecycle management so sessions
-    can be returned to callers while keeping the receive loop running.
+    The base ``ClientSession`` uses an anyio task group for its receive
+    loop, which binds the cancel scope to the task that called
+    ``__aenter__``. When ``__aexit__`` runs in a different task, anyio
+    raises ``RuntimeError: Attempted to exit cancel scope in a different
+    task than it was entered in``.
+
+    This subclass exposes explicit ``start()`` / ``stop()`` methods and
+    runs the receive loop in a regular ``asyncio.Task`` instead of an
+    anyio task group. ``asyncio.Task`` can be cancelled from any task,
+    so ``start()`` and ``stop()`` may run in different tasks safely.
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._receive_task: asyncio.Task | None = None
 
     async def start(self) -> None:
         """Start the session's receive loop. Must be called before use."""
-        if hasattr(self, "_task_group") and self._task_group is not None:
-            return  # Already started
-        self._task_group = anyio.create_task_group()
-        await self._task_group.__aenter__()
-        self._task_group.start_soon(self._receive_loop)
+        if self._receive_task is not None and not self._receive_task.done():
+            return
+        self._receive_task = asyncio.create_task(
+            self._receive_loop(), name="mcp-managed-session-rx"
+        )
 
     async def stop(self) -> None:
-        """Stop the session's receive loop and clean up resources."""
-        if not hasattr(self, "_task_group") or self._task_group is None:
+        """Stop the session's receive loop and clean up resources.
+
+        Safe to call from any asyncio task. The receive task is cancelled
+        and awaited here so the caller knows cleanup has finished.
+        """
+        task = self._receive_task
+        self._receive_task = None
+        if task is None or task.done():
             return
         try:
             await self._exit_stack.aclose()
         except Exception as e:
             logger.debug(f"Error closing exit stack during stop: {e}")
-        self._task_group.cancel_scope.cancel()
+        task.cancel()
         try:
-            await self._task_group.__aexit__(None, None, None)
-        except Exception:
+            await task
+        except (asyncio.CancelledError, Exception):
             pass
-        self._task_group = None

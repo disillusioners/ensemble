@@ -530,7 +530,7 @@ class TestContext7NpxUnavailable:
         manager._stream_contexts = {}
 
         # Mock mcp.stdio_client to raise FileNotFoundError
-        with patch("daemon.mcp.connection_manager.mcp.stdio_client") as mock_stdio:
+        with patch("daemon.mcp.stdio_wrapper.mcp.stdio_client") as mock_stdio:
             mock_stdio.side_effect = FileNotFoundError(
                 "npx not found"
             )

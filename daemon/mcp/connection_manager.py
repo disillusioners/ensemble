@@ -6,7 +6,6 @@ import asyncio
 import logging
 from typing import Any
 
-import mcp
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
@@ -18,6 +17,7 @@ from daemon.mcp.config import (
     validate_mcp_server_config,
 )
 from daemon.mcp.managed_session import ManagedClientSession
+from daemon.mcp.stdio_wrapper import TaskScopedStdioClient
 from daemon.repositories.mcp_server.models import McpServer
 
 logger = logging.getLogger(__name__)
@@ -208,7 +208,7 @@ class McpConnectionManager:
             args=config.args,
             env=config.env,
         )
-        streams_cm = mcp.stdio_client(server_params)
+        streams_cm = TaskScopedStdioClient(server_params)
         try:
             async with asyncio.timeout(timeout):
                 read_stream, write_stream = await streams_cm.__aenter__()
@@ -418,7 +418,7 @@ class McpConnectionManager:
             args=config.args,
             env=config.env,
         )
-        streams_cm = mcp.stdio_client(server_params)
+        streams_cm = TaskScopedStdioClient(server_params)
         return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=False)
 
     async def _create_test_sse_session(

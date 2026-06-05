@@ -12,13 +12,13 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-import mcp
 from langchain_core.tools import BaseTool
 from mcp import StdioServerParameters
 from langchain_mcp_adapters.tools import load_mcp_tools
 
 from daemon.mcp.config import McpStdioConfig
 from daemon.mcp.managed_session import ManagedClientSession
+from daemon.mcp.stdio_wrapper import TaskScopedStdioClient
 from daemon.mcp.tool_adapter import adapt_mcp_tools
 
 logger = logging.getLogger(__name__)
@@ -176,7 +176,7 @@ class McpWarmupPool:
             args=config.args,
             env=config.env,
         )
-        streams_cm = mcp.stdio_client(server_params)
+        streams_cm = TaskScopedStdioClient(server_params)
         read_stream = write_stream = None
         session: ManagedClientSession | None = None
 
