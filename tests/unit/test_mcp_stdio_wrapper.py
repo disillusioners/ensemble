@@ -193,6 +193,126 @@ class TestTaskScopedStdioClient:
             # Second call should be a no-op
             await wrapper.__aexit__(None, None, None)
 
+    @pytest.mark.asyncio
+    async def test_concurrent_aexit_is_safe(self):
+        """Calling __aexit__ from two tasks concurrently should not raise.
+
+        This is the realistic risk scenario: a connection manager close path
+        races with a health-check close path. Both must succeed without one
+        observing a torn-down wrapper.
+        """
+        inner_cm = _make_mock_inner_cm()
+
+        with patch("daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=inner_cm):
+            wrapper = TaskScopedStdioClient(_make_server_params())
+            await wrapper.__aenter__()
+
+            async def closer():
+                await wrapper.__aexit__(None, None, None)
+
+            # Fire two concurrent __aexit__ calls
+            t1 = asyncio.create_task(closer())
+            t2 = asyncio.create_task(closer())
+            await asyncio.gather(t1, t2)  # Must not raise
+
+        # Inner __aexit__ should have been called exactly once (idempotency)
+        inner_cm.__aexit__.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_caller_cancellation_during_aenter_propagates(self):
+        """If the *caller* of __aenter__ is cancelled mid-wait, the cancellation propagates.
+
+        Regression guard: the pre-fix ``except BaseException: pass`` pattern
+        in the cleanup path could swallow the caller's ``CancelledError``
+        (depending on how cleanup was structured). With the fix, the
+        caller's ``CancelledError`` is preserved and re-raised.
+        """
+        # Use a slow inner __aenter__ so the caller can be cancelled while
+        # the background task is still mid-start.
+        release_enter = asyncio.Event()
+
+        class SlowCM:
+            async def __aenter__(self):
+                # Block until the test releases us; the test will cancel
+                # the caller and then release us so the background task
+                # unwinds cleanly.
+                await release_enter.wait()
+                return (MagicMock(name="read"), MagicMock(name="write"))
+
+            async def __aexit__(self, *exc_info):
+                return False
+
+        wrapper = TaskScopedStdioClient(_make_server_params())
+        try:
+            with patch("daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=SlowCM()):
+                caller_task = asyncio.create_task(wrapper.__aenter__())
+                # Give the background task time to enter the inner __aenter__
+                # and block on release_enter.
+                await asyncio.sleep(0.05)
+                caller_task.cancel()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await caller_task
+        finally:
+            # Release the blocked inner __aenter__ and clean up the task
+            release_enter.set()
+            task = wrapper._task
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=2.0)
+                except BaseException:
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_caller_cancellation_during_aexit_propagates(self):
+        """If the *caller* of __aexit__ is cancelled mid-await, the cancellation propagates.
+
+        Mirrors the ``ManagedClientSession.stop()`` cancellation-propagation
+        fix: ``__aexit__`` should not silently swallow the caller's
+        ``CancelledError`` while awaiting the background task.
+        """
+        # Make the inner __aexit__ block on an event so we can cancel the
+        # caller while the wrapper is awaiting the background task.
+        release_exit = asyncio.Event()
+
+        class BlockingExitCM:
+            async def __aenter__(self):
+                return (MagicMock(name="read"), MagicMock(name="write"))
+
+            async def __aexit__(self, *exc_info):
+                # Block until the test releases us
+                await release_exit.wait()
+                return False
+
+        wrapper = TaskScopedStdioClient(_make_server_params())
+        try:
+            with patch("daemon.mcp.stdio_wrapper.mcp.stdio_client", return_value=BlockingExitCM()):
+                await wrapper.__aenter__()
+
+                # Run __aexit__ in a task so we can cancel it
+                exit_task = asyncio.create_task(wrapper.__aexit__(None, None, None))
+                # Give the background task time to enter the inner __aexit__
+                # and block on release_exit.
+                await asyncio.sleep(0.05)
+                exit_task.cancel()
+
+                with pytest.raises(asyncio.CancelledError):
+                    await exit_task
+        finally:
+            # Release the blocked inner __aexit__ and let the task finish
+            release_exit.set()
+            task = wrapper._task
+            if task is not None and not task.done():
+                try:
+                    await asyncio.wait_for(task, timeout=2.0)
+                except BaseException:
+                    task.cancel()
+                    try:
+                        await task
+                    except BaseException:
+                        pass
+
 
 async def _exit_in_task(wrapper: TaskScopedStdioClient, event: asyncio.Event) -> None:
     """Helper: call __aexit__ in a separate task and signal when done."""

@@ -244,11 +244,20 @@ class McpConnectionManager:
             config: SSE transport configuration
             instance_id: Unique identifier for the agent instance (for stream tracking)
             server_name: Name of the MCP server (for stream tracking)
-            timeout: Connection timeout in seconds
+            timeout: Connection timeout in seconds (default: 5s)
 
         Returns:
             Initialized MCP ManagedClientSession
         """
+        # TODO(2026-06-05, fix-mcp-anyio-task-scope): wrap with
+        # ``TaskScopedContextManager`` (or a generalised
+        # ``TaskScopedStdioClient``) once the fix is extended to
+        # SSE/HTTP. ``sse_client`` is also anyio-task-group backed, so
+        # closing ``streams_cm`` from a different task will raise
+        # ``RuntimeError: Attempted to exit cancel scope in a different
+        # task`` for pooled SSE MCP servers closed from instance
+        # termination / pool health check / replenish tasks. Same bug
+        # class as the STDIO fix in commit ``c025480``.
         streams_cm = sse_client(config.url, headers=config.headers or {})
         try:
             async with asyncio.timeout(timeout):
@@ -278,11 +287,15 @@ class McpConnectionManager:
             config: Streamable HTTP transport configuration
             instance_id: Unique identifier for the agent instance (for stream tracking)
             server_name: Name of the MCP server (for stream tracking)
-            timeout: Connection timeout in seconds
+            timeout: Connection timeout in seconds (default: 5s)
 
         Returns:
             Initialized MCP ManagedClientSession
         """
+        # TODO(2026-06-05, fix-mcp-anyio-task-scope): see
+        # ``_create_sse_session``. ``streamablehttp_client`` is also
+        # anyio-task-group backed and exhibits the same cross-task
+        # cancel-scope error.
         streams_cm = streamablehttp_client(config.url, headers=config.headers or {})
         try:
             async with asyncio.timeout(timeout):
