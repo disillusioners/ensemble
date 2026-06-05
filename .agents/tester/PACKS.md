@@ -8,7 +8,7 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-04 | ⚠️ 30 FAIL (Phase 3 write-pause guard fixture issue, NOT source bug — 662/662 pass in isolation) |
+| core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-05 | ✅ PASS (665/665, fix/windows-encoding-paths, 0 regressions) |
 | write_pause_guard_unit_test | tests/unit/test_write_pause_guard.py | WritePauseGuard: state machine, drain event, pause/resume, RuntimeError, sync/async interop, WriteGuardSession | 2 min | 2026-06-04 | ✅ PASS (27/27, Phase 3, 0 failures) |
 | data_migrator_unit_test | tests/unit/test_data_migrator.py | TableMigrator: FK-safe ordering, ON CONFLICT idempotent, batch processing, cancel, validate, _table_exists | 2 min | 2026-06-04 | ✅ PASS (30/30, Phase 3, 0 failures) |
 | checkpoint_migrator_unit_test | tests/unit/test_checkpoint_migrator.py | CheckpointMigrator: alist→aput, channel_versions warning, progress, cancel, single failure handling | 2 min | 2026-06-04 | ✅ PASS (23/23, Phase 3, 0 failures) |
@@ -17,7 +17,7 @@
 | migration_e2e_test | tests/e2e/test_migration_e2e.py | Real SQLite→PostgreSQL E2E migration against ensemble_test: full migration, availability, idempotency | 5 min | 2026-06-04 | ✅ PASS (3/3, Phase 3, real PG migration verified) |
 | sources_unit_test | test/packs/sources_unit_test.sh | Sources subsystem (circuit breaker, dispatcher, mapper, persistence, rate limiter, registry) | 2 min | 2026-04-24 | ✅ PASS (137 passed, system_default_project no regression) |
 | compaction_unit_test | test/packs/compaction_unit_test.sh | Compaction, find_near_instance, graph retry, idle timeout, LLM error classifier, response validation | 2 min | 2026-04-25 | ✅ PASS (fuzzy-match branch, find_near_instance: 26/26, no regression) |
-| api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-06-02 | ✅ PASS (209/217, 8 skipped, feature/fix-maintenance-cleanup, 0 regressions) |
+| api_unit_test | test/packs/api_unit_test.sh | API endpoints, scheduler adapter, spawn instance | 2 min | 2026-06-05 | ✅ PASS (209 passed, 8 skipped, fix/windows-encoding-paths, 0 regressions) |
 | vision_unit_test | tests/unit/test_vision.py | Vision backend pipeline (validation, multimodal construction, serialization, DB storage) | 2 min | 2026-04-23 | ✅ PASS (45 tests, Phase 6 no regression) |
 | message_job_queue_test | tests/job_queue/test_message_job_queue.py | HTTP API Message → JobQueue: job creation, concurrency gate, orphan recovery, cancellation, termination, backward compat, side effects, status endpoint, error handling, no-project-context | 2 min | 2026-05-25 | ✅ PASS (29/29, feature/message-api-job-queue, 0 failures) |
 | defer_race_condition_test | tests/job_queue/test_select_next_eligible_job.py | Defer job race condition fix: _select_next_eligible_job idle check, priority bypass, multiple defer queues, edge cases, _get_next_job integration | 2 min | 2026-05-25 | ✅ PASS (16/16, c4f6e17 fix, 0 failures, 1089 suite pass) |
