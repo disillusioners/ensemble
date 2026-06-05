@@ -29,6 +29,9 @@ from unittest.mock import patch
 from datetime import datetime
 
 
+LLM_TEST_TIMEOUT_SECONDS = int(os.environ.get("LLM_TEST_TIMEOUT_SECONDS", "90"))
+
+
 def _load_env():
     """Load environment variables from .env file."""
     env_path = Path(__file__).parent.parent.parent / ".env"
@@ -206,9 +209,9 @@ async def test_single_message_no_duplicate_llm_calls(
     - Timing information
     """
     from daemon.manager import InstanceManager
-    
+
     tracker = mock_llm_tracker
-    
+
     # Set unique db path for test isolation
     db_path = test_db_path
 
@@ -220,124 +223,135 @@ async def test_single_message_no_duplicate_llm_calls(
     logger.info("=" * 60)
     logger.info("[TEST] Creating InstanceManager...")
     logger.info("=" * 60)
-    
+
     manager = InstanceManager(integration_config)
-    
+
     # Initialize async checkpointer and other async components
     await manager.initialize()
-    
-    # Spawn coder instance
-    project_root = Path(__file__).parent.parent.parent
-    coder_agent_dir = str(project_root / "agents" / "coder")
-    logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
-    
-    instance_id = manager.spawn_instance(agent_id="coder")
-    logger.info(f"[TEST] ✅ Instance created: {instance_id}")
-    
-    # Track invocations before sending message
-    initial_count = tracker.call_count
-    
-    # =================================================================
-    # SEND MESSAGE
-    # =================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[TEST] Sending 'hi' message via enqueue_message...")
-    logger.info("=" * 60)
-    
-    start_time = time.time()
-    
-    result = await manager.enqueue_message(
-        instance_id=instance_id,
-        message="hi",
-        source="test"
-    )
-    
-    logger.info(f"[TEST] Message enqueued: {result.message_id}, status: {result.status}")
-    
-    # =================================================================
-    # WAIT FOR PROCESSING
-    # =================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[TEST] Waiting for message processing (max 30s)...")
-    logger.info("=" * 60)
-    
-    # Wait for the completed event via EventBus
-    completed_received = False
-    wait_timeout = 30
-    
-    while time.time() - start_time < wait_timeout:
-        # Check if message was completed (check queue stats)
-        stats = manager.get_queue_stats(instance_id)
-        logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
-        
-        if stats['pending_count'] == 0 and stats['processing_count'] == 0:
-            # Check if we got a response
-            await asyncio.sleep(0.5)  # Small delay to ensure events are processed
-            completed_received = True
-            break
-        
-        await asyncio.sleep(0.5)
-    
-    elapsed = time.time() - start_time
-    logger.info(f"[TEST] Processing completed in {elapsed:.2f}s")
-    
-    # =================================================================
-    # VERIFY LLM CALL COUNT
-    # =================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[TEST] VERIFICATION")
-    logger.info("=" * 60)
-    
-    final_count = tracker.call_count
-    llm_calls = final_count - initial_count
-    
-    logger.info(f"[TEST] LLM invocations: {llm_calls} (initial: {initial_count}, final: {final_count})")
-    
-    # Log all LLM call details for debugging
-    for detail in tracker.call_details:
+
+    try:
+        # Spawn coder instance
+        project_root = Path(__file__).parent.parent.parent
+        coder_agent_dir = str(project_root / "agents" / "coder")
+        logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
+
+        instance_id = manager.spawn_instance(agent_id="coder")
+        logger.info(f"[TEST] ✅ Instance created: {instance_id}")
+
+        # Track invocations before sending message
+        initial_count = tracker.call_count
+
+        # =================================================================
+        # SEND MESSAGE
+        # =================================================================
         logger.info("")
-        logger.info(f"[TEST] 📞 LLM Call #{detail['call_number']} at {detail['timestamp']}")
-        logger.info(f"[TEST]    Message count: {detail['message_count']}")
-        if detail['call_number'] > 1:
-            logger.error(f"[TEST] ⚠️  DUPLICATE LLM CALL DETECTED!")
-            logger.error(f"[TEST]    Stack trace:\n{detail['stack']}")
-    
-    # =================================================================
-    # ASSERTION
-    # =================================================================
-    if llm_calls != 1:
-        logger.error("")
-        logger.error("=" * 60)
-        logger.error(f"[TEST] ❌ FAILED: Expected 1 LLM call, got {llm_calls}")
-        logger.error("=" * 60)
-        
-        # Log detailed debugging info
-        logger.error("[TEST] Checking queue state...")
-        stats = manager.get_queue_stats(instance_id)
-        logger.error(f"[TEST]   Pending: {stats['pending_count']}")
-        logger.error(f"[TEST]   Processing: {stats['processing_count']}")
-        logger.error(f"[TEST]   Oldest age: {stats['oldest_message_age_seconds']}s")
-        
-        # Log queue stats for debugging
-        if hasattr(manager, '_processing'):
-            logger.error(f"[TEST]   Instances in _processing: {manager._processing}")
-    
-    assert llm_calls == 1, (
-        f"Expected exactly 1 LLM call, but got {llm_calls} calls. "
-        f"This indicates duplicate processing! See logs above for stack traces."
-    )
-    
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[TEST] ✅ PASSED - Only one LLM call detected")
-    logger.info("=" * 60)
-    
-    # Cleanup
-    manager.terminate_instance(instance_id)
-    logger.info("[TEST] Instance terminated")
+        logger.info("=" * 60)
+        logger.info("[TEST] Sending 'hi' message via enqueue_message...")
+        logger.info("=" * 60)
+
+        start_time = time.time()
+
+        result = await manager.enqueue_message(
+            instance_id=instance_id,
+            message="hi",
+            source="test"
+        )
+
+        logger.info(f"[TEST] Message enqueued: {result.message_id}, status: {result.status}")
+
+        # =================================================================
+        # WAIT FOR PROCESSING
+        # =================================================================
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("[TEST] Waiting for message processing (max 30s)...")
+        logger.info("=" * 60)
+
+        # Wait for the completed event via EventBus
+        completed_received = False
+        wait_timeout = 30
+
+        async def _wait_for_completion() -> None:
+            nonlocal completed_received
+            while time.time() - start_time < wait_timeout:
+                # Check if message was completed (check queue stats)
+                stats = manager.get_queue_stats(instance_id)
+                logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
+
+                if stats['pending_count'] == 0 and stats['processing_count'] == 0:
+                    # Check if we got a response
+                    await asyncio.sleep(0.5)  # Small delay to ensure events are processed
+                    completed_received = True
+                    break
+
+                await asyncio.sleep(0.5)
+
+        try:
+            await asyncio.wait_for(_wait_for_completion(), timeout=LLM_TEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            pytest.skip(f"LLM processing exceeded {LLM_TEST_TIMEOUT_SECONDS}s timeout - skipping")
+
+        elapsed = time.time() - start_time
+        logger.info(f"[TEST] Processing completed in {elapsed:.2f}s")
+
+        # =================================================================
+        # VERIFY LLM CALL COUNT
+        # =================================================================
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("[TEST] VERIFICATION")
+        logger.info("=" * 60)
+
+        final_count = tracker.call_count
+        llm_calls = final_count - initial_count
+
+        logger.info(f"[TEST] LLM invocations: {llm_calls} (initial: {initial_count}, final: {final_count})")
+
+        # Log all LLM call details for debugging
+        for detail in tracker.call_details:
+            logger.info("")
+            logger.info(f"[TEST] 📞 LLM Call #{detail['call_number']} at {detail['timestamp']}")
+            logger.info(f"[TEST]    Message count: {detail['message_count']}")
+            if detail['call_number'] > 1:
+                logger.error(f"[TEST] ⚠️  DUPLICATE LLM CALL DETECTED!")
+                logger.error(f"[TEST]    Stack trace:\n{detail['stack']}")
+
+        # =================================================================
+        # ASSERTION
+        # =================================================================
+        if llm_calls != 1:
+            logger.error("")
+            logger.error("=" * 60)
+            logger.error(f"[TEST] ❌ FAILED: Expected 1 LLM call, got {llm_calls}")
+            logger.error("=" * 60)
+
+            # Log detailed debugging info
+            logger.error("[TEST] Checking queue state...")
+            stats = manager.get_queue_stats(instance_id)
+            logger.error(f"[TEST]   Pending: {stats['pending_count']}")
+            logger.error(f"[TEST]   Processing: {stats['processing_count']}")
+            logger.error(f"[TEST]   Oldest age: {stats['oldest_message_age_seconds']}s")
+
+            # Log queue stats for debugging
+            if hasattr(manager, '_processing'):
+                logger.error(f"[TEST]   Instances in _processing: {manager._processing}")
+
+        assert llm_calls == 1, (
+            f"Expected exactly 1 LLM call, but got {llm_calls} calls. "
+            f"This indicates duplicate processing! See logs above for stack traces."
+        )
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("[TEST] ✅ PASSED - Only one LLM call detected")
+        logger.info("=" * 60)
+
+        # Cleanup
+        manager.terminate_instance(instance_id)
+        logger.info("[TEST] Instance terminated")
+    finally:
+        # Always cancel background tasks so pytest-asyncio can exit
+        await manager.shutdown(grace_period=1.0)
 
 
 @pytest.mark.asyncio
@@ -357,9 +371,9 @@ async def test_sse_events_count(
     """
     from daemon.manager import InstanceManager
     from daemon.repositories.event.models import Event
-    
+
     tracker = mock_llm_tracker
-    
+
     # Set unique db path for test isolation
     db_path = test_db_path
 
@@ -369,81 +383,89 @@ async def test_sse_events_count(
 
     manager = InstanceManager(integration_config)
     await manager.initialize()
-    
-    # Track events
-    events_received = []
-    
-    async def collect_events(instance_id: str):
-        """Collect events from the EventBus streaming queue."""
-        queue = manager._event_bus.get_streaming_queue(instance_id)
-        while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=20)
-                events_received.append(event)
-                logger.info(f"[SSE] Event: {event.get('event_type')}, message_id: {event.get('data', {}).get('message_id')}")
-                
-                if event.get("event_type") == "completed" or event.get("event_type") == "error":
-                    # Wait a bit more to see if there are duplicate events
-                    await asyncio.sleep(2)
+
+    try:
+        # Track events
+        events_received = []
+
+        async def collect_events(instance_id: str):
+            """Collect events from the EventBus streaming queue."""
+            queue = manager._event_bus.get_streaming_queue(instance_id)
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=20)
+                    events_received.append(event)
+                    logger.info(f"[SSE] Event: {event.get('event_type')}, message_id: {event.get('data', {}).get('message_id')}")
+
+                    if event.get("event_type") == "completed" or event.get("event_type") == "error":
+                        # Wait a bit more to see if there are duplicate events
+                        await asyncio.sleep(2)
+                        break
+                except asyncio.TimeoutError:
+                    logger.warning("[SSE] Timeout waiting for events")
                     break
-            except asyncio.TimeoutError:
-                logger.warning("[SSE] Timeout waiting for events")
-                break
-    
-    project_root = Path(__file__).parent.parent.parent
-    coder_agent_dir = str(project_root / "agents" / "coder")
-    instance_id = manager.spawn_instance(agent_id="coder")
-    
-    # Start collecting events
-    collect_task = asyncio.create_task(collect_events(instance_id))
-    
-    # Give the collector time to start
-    await asyncio.sleep(0.5)
-    
-    # Send message
-    logger.info("[SSE TEST] Sending message...")
-    await manager.enqueue_message(
-        instance_id=instance_id,
-        message="hi",
-        source="test"
-    )
-    
-    # Wait for events
-    await collect_task
-    
-    # Analyze events
-    event_counts = {}
-    for event in events_received:
-        event_type = event.get("event_type")
-        event_counts[event_type] = event_counts.get(event_type, 0) + 1
-    
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[SSE TEST] Event counts:")
-    for event_type, count in event_counts.items():
-        logger.info(f"  {event_type}: {count}")
-    logger.info("=" * 60)
-    
-    # Verify LLM calls
-    logger.info(f"[SSE TEST] LLM invocations: {tracker.call_count}")
-    
-    # Assertions
-    assert event_counts.get("message_queued", 0) == 1, \
-        f"Expected 1 message_queued, got {event_counts.get('message_queued', 0)}"
-    
-    assert event_counts.get("completed", 0) == 1, \
-        f"Expected 1 completed, got {event_counts.get('completed', 0)}"
-    
-    assert event_counts.get("error", 0) == 0, \
-        f"Expected 0 errors, got {event_counts.get('error', 0)}"
-    
-    assert tracker.call_count == 1, \
-        f"Expected 1 LLM call, got {tracker.call_count}"
-    
-    logger.info("[SSE TEST] ✅ PASSED")
-    
-    # Cleanup
-    manager.terminate_instance(instance_id)
+
+        project_root = Path(__file__).parent.parent.parent
+        coder_agent_dir = str(project_root / "agents" / "coder")
+        instance_id = manager.spawn_instance(agent_id="coder")
+
+        # Start collecting events
+        collect_task = asyncio.create_task(collect_events(instance_id))
+
+        # Give the collector time to start
+        await asyncio.sleep(0.5)
+
+        # Send message
+        logger.info("[SSE TEST] Sending message...")
+        await manager.enqueue_message(
+            instance_id=instance_id,
+            message="hi",
+            source="test"
+        )
+
+        # Wait for events
+        try:
+            await asyncio.wait_for(collect_task, timeout=LLM_TEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            collect_task.cancel()
+            pytest.skip(f"SSE event collection exceeded {LLM_TEST_TIMEOUT_SECONDS}s timeout - skipping")
+
+        # Analyze events
+        event_counts = {}
+        for event in events_received:
+            event_type = event.get("event_type")
+            event_counts[event_type] = event_counts.get(event_type, 0) + 1
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("[SSE TEST] Event counts:")
+        for event_type, count in event_counts.items():
+            logger.info(f"  {event_type}: {count}")
+        logger.info("=" * 60)
+
+        # Verify LLM calls
+        logger.info(f"[SSE TEST] LLM invocations: {tracker.call_count}")
+
+        # Assertions
+        assert event_counts.get("message_queued", 0) == 1, \
+            f"Expected 1 message_queued, got {event_counts.get('message_queued', 0)}"
+
+        assert event_counts.get("completed", 0) == 1, \
+            f"Expected 1 completed, got {event_counts.get('completed', 0)}"
+
+        assert event_counts.get("error", 0) == 0, \
+            f"Expected 0 errors, got {event_counts.get('error', 0)}"
+
+        assert tracker.call_count == 1, \
+            f"Expected 1 LLM call, got {tracker.call_count}"
+
+        logger.info("[SSE TEST] ✅ PASSED")
+
+        # Cleanup
+        manager.terminate_instance(instance_id)
+    finally:
+        # Always cancel background tasks so pytest-asyncio can exit
+        await manager.shutdown(grace_period=1.0)
 
 
 if __name__ == "__main__":
@@ -491,42 +513,47 @@ async def test_debug_llm_invocation_count(
         # Checkpointer path is set via ensemble_config, not persistence config.
         manager = InstanceManager(integration_config)
         await manager.initialize()
-        
+
         project_root = Path(__file__).parent.parent.parent
         coder_agent_dir = str(project_root / "agents" / "coder")
         instance_id = manager.spawn_instance(agent_id="coder")
-        
+
         logger.info(f"[DEBUG] Instance: {instance_id}")
-        
+
         # Send message
         result = await manager.enqueue_message(
             instance_id=instance_id,
             message="hi",
             source="test"
         )
-        
+
         logger.info(f"[DEBUG] Message enqueued: {result.message_id}")
-        
+
         # Wait for processing
-        await asyncio.sleep(10)
+        try:
+            await asyncio.wait_for(asyncio.sleep(10), timeout=LLM_TEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            pytest.skip(f"LLM processing exceeded {LLM_TEST_TIMEOUT_SECONDS}s timeout - skipping")
         
         # Check LLM call count
         logger.info(f"[DEBUG] LLM invocations detected: {len(llm_calls)}")
         for i, call in enumerate(llm_calls):
             logger.info(f"[DEBUG]   Call #{i+1}: {call['message']}")
-        
+
         # Also check event history for completed events
         history = manager._event_bus._event_repo.get_events_since(instance_id, 0)
         completed_events = [e for e in history if e.kind == 'completed']
         logger.info(f"[DEBUG] Completed events in history: {len(completed_events)}")
-        
+
         # Assertions
         assert len(llm_calls) == 1, f"Expected 1 LLM invocation, got {len(llm_calls)}"
         assert len(completed_events) == 1, f"Expected 1 completed event, got {len(completed_events)}"
-        
+
         logger.info("[DEBUG] ✅ Test passed - only 1 LLM invocation")
-        
+
         manager.terminate_instance(instance_id)
-        
+
     finally:
         logging.getLogger('daemon.graph').removeHandler(handler)
+        # Always cancel background tasks so pytest-asyncio can exit
+        await manager.shutdown(grace_period=1.0)

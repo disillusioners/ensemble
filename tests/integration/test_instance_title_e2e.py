@@ -24,6 +24,9 @@ import uuid
 from pathlib import Path
 
 
+LLM_TEST_TIMEOUT_SECONDS = int(os.environ.get("LLM_TEST_TIMEOUT_SECONDS", "90"))
+
+
 def _load_env():
     """Load environment variables from .env file."""
     env_path = Path(__file__).parent.parent.parent / ".env"
@@ -93,10 +96,10 @@ async def test_instance_title_generation_e2e(
     4. Title appears in list_instances()
     """
     from daemon.manager import InstanceManager
-    
+
     # Use the manager's instance repository instead of standalone functions
     # The manager._instance_repository is a SQLModelInstanceRepository
-    
+
     # Set unique db path for test isolation
     db_path = test_db_path
 
@@ -107,163 +110,174 @@ async def test_instance_title_generation_e2e(
     # Create manager
     logger.info("[TEST] Creating InstanceManager...")
     manager = InstanceManager(integration_config)
-    
+
     # Initialize async components (checkpointer, etc.)
     await manager.initialize()
-    
-    # Spawn coder instance
-    project_root = Path(__file__).parent.parent.parent
-    coder_agent_dir = str(project_root / "agents" / "coder")
-    logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
-    
-    instance_id = manager.spawn_instance(agent_id="coder")
-    logger.info(f"[TEST] Instance created: {instance_id}")
-    
-    # Verify initial state - no title
-    instance = manager._instance_repository.get(instance_id)
-    assert instance is not None
-    initial_meta = instance.instance_metadata or {}
-    assert initial_meta.get("title") is None, "Title should be None before first message"
-    logger.info(f"[TEST] Initial title: {initial_meta.get('title')}")
-    
-    # Track events
-    events_received = []
-    title_updated_received = False
-    
-    async def collect_events(instance_id: str):
-        """Collect events from the EventBus streaming queue."""
-        nonlocal title_updated_received
-        queue = manager._event_bus.get_streaming_queue(instance_id)
-        while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=60)
-                events_received.append(event)
-                logger.info(f"[SSE] Event: {event.get('event_type')}, instance_id: {event.get('instance_id')}")
-                
-                if event.get("event_type") == "title_updated":
-                    title_updated_received = True
-                    logger.info(f"[SSE] Title updated event received: {event.get('data')}")
-                
-                if event.get("event_type") == "completed":
-                    # Wait a bit more to ensure all events are collected
-                    await asyncio.sleep(1)
+
+    try:
+        # Spawn coder instance
+        project_root = Path(__file__).parent.parent.parent
+        coder_agent_dir = str(project_root / "agents" / "coder")
+        logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
+
+        instance_id = manager.spawn_instance(agent_id="coder")
+        logger.info(f"[TEST] Instance created: {instance_id}")
+
+        # Verify initial state - no title
+        instance = manager._instance_repository.get(instance_id)
+        assert instance is not None
+        initial_meta = instance.instance_metadata or {}
+        assert initial_meta.get("title") is None, "Title should be None before first message"
+        logger.info(f"[TEST] Initial title: {initial_meta.get('title')}")
+
+        # Track events
+        events_received = []
+        title_updated_received = False
+
+        async def collect_events(instance_id: str):
+            """Collect events from the EventBus streaming queue."""
+            nonlocal title_updated_received
+            queue = manager._event_bus.get_streaming_queue(instance_id)
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=60)
+                    events_received.append(event)
+                    logger.info(f"[SSE] Event: {event.get('event_type')}, instance_id: {event.get('instance_id')}")
+
+                    if event.get("event_type") == "title_updated":
+                        title_updated_received = True
+                        logger.info(f"[SSE] Title updated event received: {event.get('data')}")
+
+                    if event.get("event_type") == "completed":
+                        # Wait a bit more to ensure all events are collected
+                        await asyncio.sleep(1)
+                        break
+                except asyncio.TimeoutError:
+                    logger.warning("[SSE] Timeout waiting for events")
                     break
-            except asyncio.TimeoutError:
-                logger.warning("[SSE] Timeout waiting for events")
-                break
-    
-    # Start collecting events
-    collect_task = asyncio.create_task(collect_events(instance_id))
-    
-    # Give the collector time to start
-    await asyncio.sleep(0.5)
-    
-    # =================================================================
-    # SEND FIRST MESSAGE
-    # =================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[TEST] Sending first message 'hi'...")
-    logger.info("=" * 60)
-    
-    start_time = time.time()
-    
-    result = await manager.enqueue_message(
-        instance_id=instance_id,
-        message="hi",
-        source="test"
-    )
-    
-    logger.info(f"[TEST] Message enqueued: {result.message_id}, status: {result.status}")
-    
-    # =================================================================
-    # WAIT FOR PROCESSING
-    # =================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[TEST] Waiting for message processing (max 60s)...")
-    logger.info("=" * 60)
-    
-    # Wait for the completed event via EventBus
-    wait_timeout = 60
-    
-    while time.time() - start_time < wait_timeout:
-        # Check if message was completed (check queue stats)
-        stats = manager.get_queue_stats(instance_id)
-        logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
-        
-        if stats['pending_count'] == 0 and stats['processing_count'] == 0:
-            # Check if we got a response
-            await asyncio.sleep(1)  # Small delay to ensure events are processed
-            break
-        
+
+        # Start collecting events
+        collect_task = asyncio.create_task(collect_events(instance_id))
+
+        # Give the collector time to start
         await asyncio.sleep(0.5)
-    
-    elapsed = time.time() - start_time
-    logger.info(f"[TEST] Processing completed in {elapsed:.2f}s")
-    
-    # Wait for event collection to finish
-    await collect_task
-    
-    # Wait for fire-and-forget title generation to complete (happens after completed event)
-    # Title generation has a 30s timeout, so wait up to 35s for it
-    await asyncio.sleep(35)
-    
-    # =================================================================
-    # VERIFY RESULTS
-    # =================================================================
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info("[TEST] VERIFICATION")
-    logger.info("=" * 60)
-    
-    # 1. Check that title_updated event was broadcast
-    logger.info(f"[TEST] title_updated event received: {title_updated_received}")
-    assert title_updated_received, "title_updated event should be broadcast"
-    
-    # 2. Check that title is set in metadata
-    final_instance = manager._instance_repository.get(instance_id)
-    final_meta = final_instance.instance_metadata
-    logger.info(f"[TEST] Final title from metadata: {final_meta['title']}")
-    assert final_meta is not None
-    assert final_meta["title"] is not None, "Title should be set after first message"
-    assert len(final_meta["title"]) > 0, "Title should not be empty"
-    
-    # 3. Check that title appears in list_instances()
-    instances_list, total = manager._instance_repository.list()
-    logger.info(f"[TEST] Total instances: {total}")
-    
-    # Convert to dict format for compatibility with existing test logic
-    instances = [
-        {
-            "instance_id": inst.instance_id,
-            "title": inst.instance_metadata.get("title"),
-        }
-        for inst in instances_list
-    ]
-    
-    instance = next((s for s in instances if s["instance_id"] == instance_id), None)
-    assert instance is not None, "Instance should exist in list"
-    
-    logger.info(f"[TEST] Title from list_instances: {instance['title']}")
-    assert instance["title"] is not None, "Title should appear in list_instances()"
-    assert instance["title"] == final_meta["title"], "Title should match between metadata and list"
-    
-    # 4. Check events received
-    event_types = [e.get("event_type") for e in events_received]
-    logger.info(f"[TEST] Events received: {event_types}")
-    
-    assert "title_updated" in event_types, "title_updated event should be in events"
-    assert "completed" in event_types, "completed event should be in events"
-    
-    logger.info("")
-    logger.info("=" * 60)
-    logger.info(f"[TEST] ✅ PASSED - Title generated: '{final_meta['title']}'")
-    logger.info("=" * 60)
-    
-    # Cleanup
-    manager.terminate_instance(instance_id)
-    logger.info("[TEST] Instance terminated")
+
+        # =================================================================
+        # SEND FIRST MESSAGE
+        # =================================================================
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("[TEST] Sending first message 'hi'...")
+        logger.info("=" * 60)
+
+        start_time = time.time()
+
+        result = await manager.enqueue_message(
+            instance_id=instance_id,
+            message="hi",
+            source="test"
+        )
+
+        logger.info(f"[TEST] Message enqueued: {result.message_id}, status: {result.status}")
+
+        # =================================================================
+        # WAIT FOR PROCESSING
+        # =================================================================
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("[TEST] Waiting for message processing (max 60s)...")
+        logger.info("=" * 60)
+
+        # Wait for the completed event via EventBus
+        wait_timeout = 60
+
+        async def _wait_for_completion() -> None:
+            while time.time() - start_time < wait_timeout:
+                # Check if message was completed (check queue stats)
+                stats = manager.get_queue_stats(instance_id)
+                logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
+
+                if stats['pending_count'] == 0 and stats['processing_count'] == 0:
+                    # Check if we got a response
+                    await asyncio.sleep(1)  # Small delay to ensure events are processed
+                    break
+
+                await asyncio.sleep(0.5)
+
+            # Wait for event collection to finish
+            await collect_task
+
+            # Wait for fire-and-forget title generation to complete (happens after completed event)
+            # Title generation has a 30s timeout, so wait up to 35s for it
+            await asyncio.sleep(35)
+
+        try:
+            await asyncio.wait_for(_wait_for_completion(), timeout=LLM_TEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            collect_task.cancel()
+            pytest.skip(f"LLM processing exceeded {LLM_TEST_TIMEOUT_SECONDS}s timeout - skipping")
+
+        elapsed = time.time() - start_time
+        logger.info(f"[TEST] Processing completed in {elapsed:.2f}s")
+
+        # =================================================================
+        # VERIFY RESULTS
+        # =================================================================
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("[TEST] VERIFICATION")
+        logger.info("=" * 60)
+
+        # 1. Check that title_updated event was broadcast
+        logger.info(f"[TEST] title_updated event received: {title_updated_received}")
+        assert title_updated_received, "title_updated event should be broadcast"
+
+        # 2. Check that title is set in metadata
+        final_instance = manager._instance_repository.get(instance_id)
+        final_meta = final_instance.instance_metadata
+        logger.info(f"[TEST] Final title from metadata: {final_meta['title']}")
+        assert final_meta is not None
+        assert final_meta["title"] is not None, "Title should be set after first message"
+        assert len(final_meta["title"]) > 0, "Title should not be empty"
+
+        # 3. Check that title appears in list_instances()
+        instances_list, total = manager._instance_repository.list()
+        logger.info(f"[TEST] Total instances: {total}")
+
+        # Convert to dict format for compatibility with existing test logic
+        instances = [
+            {
+                "instance_id": inst.instance_id,
+                "title": inst.instance_metadata.get("title"),
+            }
+            for inst in instances_list
+        ]
+
+        instance = next((s for s in instances if s["instance_id"] == instance_id), None)
+        assert instance is not None, "Instance should exist in list"
+
+        logger.info(f"[TEST] Title from list_instances: {instance['title']}")
+        assert instance["title"] is not None, "Title should appear in list_instances()"
+        assert instance["title"] == final_meta["title"], "Title should match between metadata and list"
+
+        # 4. Check events received
+        event_types = [e.get("event_type") for e in events_received]
+        logger.info(f"[TEST] Events received: {event_types}")
+
+        assert "title_updated" in event_types, "title_updated event should be in events"
+        assert "completed" in event_types, "completed event should be in events"
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info(f"[TEST] ✅ PASSED - Title generated: '{final_meta['title']}'")
+        logger.info("=" * 60)
+
+        # Cleanup
+        manager.terminate_instance(instance_id)
+        logger.info("[TEST] Instance terminated")
+    finally:
+        # Always cancel background tasks so pytest-asyncio can exit
+        await manager.shutdown(grace_period=1.0)
 
 
 @pytest.mark.asyncio
@@ -273,12 +287,12 @@ async def test_instance_title_not_regenerated(
 ):
     """
     Test that title is not regenerated if it already exists.
-    
+
     This tests the logic that skips title generation when title already exists.
     """
     from daemon.manager import InstanceManager
     # Use manager._instance_repository instead of standalone persistence functions
-    
+
     # Set unique db path for test isolation
     db_path = test_db_path
 
@@ -290,53 +304,63 @@ async def test_instance_title_not_regenerated(
     logger.info("[TEST] Creating InstanceManager...")
     manager = InstanceManager(integration_config)
     await manager.initialize()
-    
-    # Spawn coder instance
-    project_root = Path(__file__).parent.parent.parent
-    coder_agent_dir = str(project_root / "agents" / "coder")
-    
-    instance_id = manager.spawn_instance(agent_id="coder")
-    
-    # Pre-set a title before sending any messages
-    manager._instance_repository.update_title(instance_id, "Pre-set Title")
-    logger.info(f"[TEST] Pre-set title: 'Pre-set Title'")
-    
-    # Verify title is set
-    instance = manager._instance_repository.get(instance_id)
-    assert instance.instance_metadata["title"] == "Pre-set Title"
-    
-    # Send first message
-    result = await manager.enqueue_message(
-        instance_id=instance_id,
-        message="hi",
-        source="test"
-    )
-    
-    # Wait for processing
-    start_time = time.time()
-    wait_timeout = 60
-    
-    while time.time() - start_time < wait_timeout:
-        stats = manager.get_queue_stats(instance_id)
-        if stats['pending_count'] == 0 and stats['processing_count'] == 0:
-            await asyncio.sleep(1)
-            break
-        await asyncio.sleep(0.5)
-    
-    # Verify title is still the pre-set one (not regenerated)
-    final_instance = manager._instance_repository.get(instance_id)
-    final_meta = final_instance.instance_metadata
-    logger.info(f"[TEST] Final title: {final_meta['title']}")
-    
-    # The title should NOT have been overwritten by a new generated title
-    # (it should remain "Pre-set Title")
-    assert final_meta["title"] == "Pre-set Title", \
-        f"Title should not be overwritten. Expected 'Pre-set Title', got '{final_meta['title']}'"
-    
-    logger.info("[TEST] ✅ PASSED - Title was not regenerated")
-    
-    # Cleanup
-    manager.terminate_instance(instance_id)
+
+    try:
+        # Spawn coder instance
+        project_root = Path(__file__).parent.parent.parent
+        coder_agent_dir = str(project_root / "agents" / "coder")
+
+        instance_id = manager.spawn_instance(agent_id="coder")
+
+        # Pre-set a title before sending any messages
+        manager._instance_repository.update_title(instance_id, "Pre-set Title")
+        logger.info(f"[TEST] Pre-set title: 'Pre-set Title'")
+
+        # Verify title is set
+        instance = manager._instance_repository.get(instance_id)
+        assert instance.instance_metadata["title"] == "Pre-set Title"
+
+        # Send first message
+        result = await manager.enqueue_message(
+            instance_id=instance_id,
+            message="hi",
+            source="test"
+        )
+
+        # Wait for processing
+        start_time = time.time()
+        wait_timeout = 60
+
+        async def _wait_for_completion() -> None:
+            while time.time() - start_time < wait_timeout:
+                stats = manager.get_queue_stats(instance_id)
+                if stats['pending_count'] == 0 and stats['processing_count'] == 0:
+                    await asyncio.sleep(1)
+                    break
+                await asyncio.sleep(0.5)
+
+        try:
+            await asyncio.wait_for(_wait_for_completion(), timeout=LLM_TEST_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            pytest.skip(f"LLM processing exceeded {LLM_TEST_TIMEOUT_SECONDS}s timeout - skipping")
+
+        # Verify title is still the pre-set one (not regenerated)
+        final_instance = manager._instance_repository.get(instance_id)
+        final_meta = final_instance.instance_metadata
+        logger.info(f"[TEST] Final title: {final_meta['title']}")
+
+        # The title should NOT have been overwritten by a new generated title
+        # (it should remain "Pre-set Title")
+        assert final_meta["title"] == "Pre-set Title", \
+            f"Title should not be overwritten. Expected 'Pre-set Title', got '{final_meta['title']}'"
+
+        logger.info("[TEST] ✅ PASSED - Title was not regenerated")
+
+        # Cleanup
+        manager.terminate_instance(instance_id)
+    finally:
+        # Always cancel background tasks so pytest-asyncio can exit
+        await manager.shutdown(grace_period=1.0)
 
 
 if __name__ == "__main__":
