@@ -1,11 +1,11 @@
-# Plan: Reduce Pause / Terminate Latency (Cancel + Cascade + Job State Transition)
+# Plan: Reduce Pause / Terminate Latency (Cascade + Graph Unwind + Job State)
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT — awaiting team review |
-| **Author** | Kilo (proposed), prepared 2026-06-05 |
-| **Scope** | `daemon/services/instance_lifecycle.py`, `daemon/services/job_processor.py`, `daemon/services/dispatch_event_bus.py`, `daemon/services/message_job_handler.py`, `daemon/repositories/instance/repository.py` |
-| **Estimated effort** | ~1 day implementation + ~1 day test/review |
+| **Status** | REVISION 2 — addresses review at `.agents/reviewer/RESULTS/2026-06-05-terminate-pause-latency-plan-review.md` |
+| **Scope** | `daemon/services/instance_lifecycle.py`, `daemon/services/dispatch_event_bus.py` |
+| **Estimated effort** | ~0.5 day implementation + ~0.5 day test/review |
+| **Defers to follow-up** | Fix 1 (synchronous MESSAGE job cancel) — see §6 Investigation Plan; pause-path graph-task unwind — see §4.1 |
 
 ---
 
@@ -22,139 +22,94 @@ The following timeline was observed in production logs:
 23:06:18  DELETE /api/instances/9a230d55... → 200
 23:06:22  Cascading terminate to child instance: 3bbc43af...   ← 4 s after DELETE
 23:06:49  JobProcessor: MESSAGE job 0cc15623... terminated (instance status=terminated)
-23:06:49  Job transition: 0cc15623... | processing -> cancelled (abort)   ← 27 s after DELETE, 31 s after pause
+23:06:49  Job transition: 0cc15623... | processing -> cancelled (abort)   ← 27 s after DELETE
 ```
 
-User-visible behavior: deleting an instance that has a child and an in-flight MESSAGE job takes **~30 s** to fully settle, and the cascade to the child appears to lag the DELETE by several seconds.
+User-visible: deleting an instance with a child and an in-flight MESSAGE job takes **~30 s** to fully settle, and the cascade log to the child appears to lag the DELETE by several seconds.
 
-This plan proposes four targeted changes to compress that window to < 5 s with deterministic state transitions.
+This plan compresses the graph-task unwind latency and adds diagnostic logging. The MESSAGE-job state transition is **deferred to an investigation** (see §6) because review revealed that step 7.6 should already be handling it, and the root cause of the 27 s delay is not yet known.
 
 ---
 
 ## 2. Root Cause Analysis
 
-Three structural issues were identified (verified by reading the code paths):
-
-### RC1 — MESSAGE job `processing → cancelled` is never written in the terminate path
-`daemon/services/instance_lifecycle.py:505-514` (step 7.5) calls `cancel_message_job` for every MESSAGE job of the instance. `cancel_message_job` (`daemon/services/message_job_handler.py:267-292`) does this for a `processing` job:
-
-```python
-elif job.status == "processing":
-    # Signal CancellationToken — handler will catch OperationCancelledError
-    cts = self._active_tokens.get(job_id)
-    if cts:
-        cts.cancel(reason=CancellationReason.MANUAL)
-    # ... falls through without writing the job row
-```
-
-Only the `CancellationToken` is signalled. The DB row stays in `processing` until *either* the handler coroutine observes `OperationCancelledError` / `asyncio.CancelledError` and calls `complete_job(..., CANCELLED)` (lines 231-237, 244-253), *or* the JobProcessor's 30 s sweep catches the mismatch (`daemon/services/job_processor.py:279-289`).
-
-> Note: step 7.6 (lines 516-549) does call `complete_job(..., CANCELLED)` for processing jobs, but it runs **after** 7.5 and only catches jobs whose status is still non-terminal. The MESSAGE jobs in 7.5 are still in `processing`, so 7.6 *should* catch them — but 7.5's `cancel_message_job` may race with 7.6 by flipping the token. In practice the 27 s delay shows 7.6 is not the path that lands the transition. Investigation is required to confirm (see Open Question Q1).
-
-### RC2 — `JobProcessor` is a 30 s polling loop, not event-driven for terminations
-`daemon/api.py:320-325` constructs `JobProcessor(..., poll_interval=30.0)`. `_process_loop` (`daemon/services/job_processor.py:138-175`) gates on `await self._dispatch_bus.wait_for_job(None, timeout=30.0)` (line 146-149) — so it can sleep up to 30 s before sweeping queues. There is **no wakeup path from `terminate_instance` to the JobProcessor** for terminations.
-
-### RC3 — Graph task `cancel()` is fire-and-forget
-`daemon/services/instance_lifecycle.py:438-442` and `:629-631`:
-
-```python
-graph_task = self._manager._graph_tasks.pop(instance_id, None)
-if graph_task and not graph_task.done():
-    graph_task.cancel()    # NOT awaited
-```
-
-`task.cancel()` schedules `CancelledError` to be raised on the coroutine's next yield. The actual unwinding happens later, asynchronously, when the in-flight LLM HTTP request returns or times out. The HTTP DELETE handler returns 200 immediately; the graph coroutine continues to consume resources, emit SSE events, and hold MCP connections until the LLM call resolves.
-
-The same fire-and-forget pattern exists in `daemon/manager.py:1059-1062` (TTL eviction) and `daemon/routers/projects.py:818` (project cleanup). See Scope Notes for whether those should be fixed in the same change.
-
-### RC4 (Diagnostic) — 4 s DELETE → cascade lag
-The "Cascading terminate to child instance" log fires inside `terminate_instance` at line 432 *immediately* after the `meta.children` check. There is no `await` between the DB read (line 422) and the log emission, so a 4 s gap cannot originate inside this single call. The most plausible explanation: when DELETE on 9a230d55 ran, `meta.children` was already empty (possibly mutated by the pause that happened milliseconds earlier, or never populated for this parent/child pair), so the cascade log was **not** emitted by the DELETE handler. The 23:06:22 log was emitted by a *different* code path — most likely the project cleanup or TTL eviction in `daemon/manager.py:1059` or `daemon/routers/projects.py:818`, which use their own child-discovery mechanism. Diagnosis requires a `trigger` tag on the log line (Fix 4).
+| # | Symptom | Root cause | Status |
+|---|---|---|---|
+| **RC1** | MESSAGE job stays in `processing` 27 s | Step 7.6 *should* transition it synchronously; the 27 s delay strongly suggests 7.6 didn't run, threw, or didn't see the job. **Unverified.** | **INVESTIGATE** (§6) |
+| **RC2** | JobProcessor is 30 s polling, not event-driven for terminations | `daemon/services/job_processor.py:146-149` waits on global event with 30 s timeout. No wakeup path from `terminate_instance`. | **FIX in §4.3** (reuses `notify_all()`; **attribute path is `self._manager._job_queue_mgmt_service._dispatch_bus`** — see review W-NEW-1) |
+| **RC3** | Graph task `cancel()` is fire-and-forget; DELETE returns 200 while LLM stream still in flight | `daemon/services/instance_lifecycle.py:438-442` calls `task.cancel()` without awaiting the unwind | **FIX A** (this PR) |
+| **RC4** | 4 s DELETE → "Cascading terminate to child" gap | Suspected: a different code path emitted that log (`manager.py:1059` or `routers/projects.py:818`); the DELETE handler's own `meta.children` was empty. **Hypothesis only.** | **DIAGNOSE** (Fix B's `trigger=...` tag) |
 
 ---
 
 ## 3. Goals & Non-Goals
 
 ### Goals
-- **G1.** Compress pause → job-row-cancelled from 30 s to < 5 s in the common case.
-- **G2.** Compress DELETE → child-instance-terminated log from 4 s to < 100 ms.
-- **G3.** Make the DELETE response time predictable (currently dominated by `task.cancel()` racing with the LLM socket).
-- **G4.** Preserve existing semantics: paused instance is still resumable; child cascade is still recursive; token-based cancellation still works for in-flight handlers.
-- **G5.** Add diagnostic logging so the next occurrence is self-explanatory.
+- **G1.** DELETE response time is bounded by graph-task unwind (≤ 5 s) plus cascade (parallel, ≤ 5 s), not by handler teardown race.
+- **G2.** Total settle time (job-row terminal state visible to clients) ≤ 5 s in the common case after Fix 1's investigation lands.
+- **G3.** Preserve pause/terminate semantics: pause is resumable, terminate is final, cascade is recursive, token-based cancellation still works.
+- **G4.** Add diagnostic logging so the next occurrence of RC4/RC1 is self-explanatory.
 
 ### Non-Goals
-- **NG1.** Reworking the JobProcessor's polling strategy for new-job dispatch (that's a separate concern with different latency targets).
-- **NG2.** Changing the LLM client's per-call timeout values.
-- **NG3.** Touching the TTL eviction path (`manager.py:1059`) or project cleanup path (`routers/projects.py:818`) beyond what is required to keep them consistent with Fix 2.
-- **NG4.** Removing the 30 s `JobProcessor` poll interval — it remains a safety net.
+- **NG1.** Touching the pause path's graph-task unwind (see §4.1 — `_pause_single` is sync, and applying Fix A there introduces 5 s × N regression for tree pauses).
+- **NG2.** Re-architecting JobProcessor's poll model for new-job dispatch.
+- **NG3.** Changing LLM client per-call timeouts.
+- **NG4.** Touching TTL eviction (`manager.py:1059`) or project cleanup (`routers/projects.py:818`) beyond what consistency with Fix A requires.
+- **NG5.** Removing the 30 s JobProcessor poll (it remains a safety net; Fix B's `notify_all` shortens the typical wait).
 
 ---
 
 ## 4. Proposed Changes
 
-### Fix 1 — Write MESSAGE job terminal state in terminate, not in the poll loop
+### 4.1 Fix A — Bounded-await graph task + parallelize cascade (terminate only)
 
-**Why.** Closes RC1. The terminate path is already the authoritative point for marking jobs as cancelled (step 7.6 does this for non-MESSAGE jobs). MESSAGE jobs should be treated symmetrically.
+**Why.** Closes RC3 for the terminate path. Makes DELETE latency deterministic. Parallelization keeps the cascade from compounding per-child unwind time.
+
+**Scope rationale.** `_pause_single` at `daemon/services/instance_lifecycle.py:603` is a **sync** function (`def _pause_single(target_id, prefetched_meta=None) -> bool:`), so the proposed `await asyncio.wait_for(...)` cannot be inserted there without cascading changes (caller at `:662-675` is async, so making `_pause_single` async is straightforward but introduces 5 s × N regression for trees with N children — worse than the current behavior). The terminate path is where the user-visible DELETE latency matters; pause latency is dominated by the existing sequential tree walk and is acceptable as-is. Pause-path graph-task unwind is **deferred to a follow-up PR** that will (a) make `_pause_single` async, (b) bound the per-child wait to ~500 ms, and (c) consider parallelization. See §7 Q3.
 
 **File:** `daemon/services/instance_lifecycle.py`
-**Lines:** 505-514 (step 7.5)
+**Lines:** 419-442 (cascade block + graph-task cancel in `terminate_instance`)
 
-Replace the current body of the `for msg_job in message_jobs:` loop with logic that branches on the job's current status:
+Replace the cascade and graph-task-cancel block with:
 
 ```python
-for msg_job in message_jobs:
-    try:
-        if msg_job.status == "pending":
-            # PENDING → CANCELLED via the canonical message-handler path
-            await self._job_queue_service.cancel_message_job(msg_job.job_id)
-        elif msg_job.status == "processing":
-            # Processing MESSAGE jobs: signal the token (soft cancel) AND
-            # synchronously write the terminal row. The row write is the
-            # source of truth; the token is best-effort for the running handler.
-            await self._job_queue_service.cancel_message_job(msg_job.job_id)
-            await self._job_queue_service.complete_job(
-                msg_job.job_id,
-                demand_state=DemandState.CANCELLED,
-                error="Instance terminated during message processing",
-            )
-        else:
-            # terminal or unknown — skip
-            continue
-    except Exception as e:
-        logger.warning(
-            f"Failed to cancel MESSAGE job {msg_job.job_id[:8]}... on terminate: {e}"
+# Get instance metadata BEFORE modifying state (needed for children cascade)
+meta = None
+if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
+    meta = self._manager._instance_repository.get(instance_id)
+
+# Re-entrancy guard: if already terminated, return early
+if meta and meta.status == InstanceStatus.TERMINATED.value:
+    logger.info(f"Instance {instance_id[:8]}... already terminated, skipping")
+    return True
+
+# Cascade to children FIRST - terminate all child instances in parallel
+# (Parallel because each child may itself unwind an in-flight LLM call;
+# serial cascade would compound to 5s*N worst case.)
+child_ids: list[str] = list(meta.children) if meta and meta.children else []
+if child_ids:
+    await asyncio.gather(
+        *(self.terminate_instance(cid) for cid in child_ids),
+        return_exceptions=True,
+    )
+    for cid in child_ids:
+        logger.info(
+            f"Cascading terminate to child instance: {cid[:8]}... "
+            f"(trigger=DELETE, parent={instance_id[:8]}...)"
         )
-```
 
-**Idempotency / races.** Two concerns:
+# 1. Cancel active requests for this instance
+self._manager._request_registry.cancel_by_instance(instance_id)
 
-1. The handler coroutine may *also* call `complete_job(..., CANCELLED)` when it observes `OperationCancelledError` / `asyncio.CancelledError` (`message_job_handler.py:231-253`). This is a benign double-write **only if `complete_job` is idempotent** — i.e., rejects writes when the job is already in a terminal state.
-   - **Action required:** verify `complete_job` / `terminate_job` in `daemon/services/job_queue_service.py:1256-1259` and `daemon/repositories/job_queue/repository.py:599` reject state transitions from a terminal status. If they don't, add that guard. (Open Question Q2.)
-2. The `cancel_message_job` token signal is now strictly informational; the handler can still observe it and try to write — same idempotency requirement applies.
-
-**Test plan.**
-- Unit: spawn instance → enqueue MESSAGE job → call `terminate_instance` → assert job row is `cancelled` within the same await.
-- Unit: spawn instance with a *blocked* handler (e.g., mock handler that never observes cancellation) → call `terminate_instance` → assert job row is still `cancelled` (i.e., Fix 1 doesn't depend on the handler cooperating).
-- Integration: existing `tests/job_queue/` and `tests/integration/test_terminate_cascade.py` should still pass.
-
----
-
-### Fix 2 — Bounded-await the cancelled graph task
-
-**Why.** Closes RC3. Makes DELETE latency deterministic; ensures MCP/SSE cleanup runs before the response.
-
-**File:** `daemon/services/instance_lifecycle.py`
-**Lines:** 438-442 (terminate path) and 629-631 (pause path)
-
-Replace the bare `graph_task.cancel()` with a bounded wait. Apply identically in both places.
-
-```python
+# 1.5. Cancel any running graph task for this instance, bounded-await unwind
 graph_task = self._manager._graph_tasks.pop(instance_id, None)
 if graph_task and not graph_task.done():
     graph_task.cancel()
     try:
-        # Bounded wait: graph task unwinds when its in-flight LLM call returns
-        # or hits the LLM client's socket timeout. We cap so a stuck LLM call
-        # doesn't make DELETE hang; the LLM client timeout is the real backstop.
+        # Bounded wait: graph task unwinds when its in-flight LLM call
+        # returns or hits the LLM client's socket timeout. We cap so a
+        # stuck LLM call doesn't make DELETE hang; the LLM client's
+        # timeout is the real backstop.
         await asyncio.wait_for(asyncio.shield(graph_task), timeout=5.0)
     except asyncio.TimeoutError:
         logger.warning(
@@ -162,232 +117,259 @@ if graph_task and not graph_task.done():
             f"relying on LLM socket timeout to free resources"
         )
     except asyncio.CancelledError:
-        # Defensive: shield prevents the outer cancel from reaching the inner
-        # task, but a propagation from elsewhere can still bubble up.
         logger.debug(f"Graph task {instance_id[:8]}... cancelled during await")
     logger.info(f"Cancelled graph task for instance {instance_id[:8]}...")
 ```
 
-**Why 5 s.** Long enough to flush a normal SSE write and let the LLM client's typical 10-30 s timeout take over (we want to be gone before that). Short enough that DELETE feels responsive. Configurable later if real-world data suggests a different value.
+**Why `asyncio.shield`.** Protects the inner `await` from being cancelled if the outer coroutine (request handler) is itself cancelled (e.g., client disconnect). Without shield, a client disconnect during the 5 s wait would leak the unwinding graph task — the very problem Fix A is closing.
 
-**`asyncio.shield` rationale.** Protects the inner `await` from being cancelled if the *outer* coroutine (the request handler) is itself cancelled. Without shield, a client disconnect during the 5 s wait would leak the unwinding graph task and we'd return to the same problem we're trying to fix.
+**Why 5 s.** Long enough to flush a normal SSE write and let the LLM client's typical 10-30 s timeout take over (we want to be gone before that). Short enough that DELETE feels responsive. If real-world data suggests a different value, revisit (see §7 Q4).
 
 **Scope notes.**
-- `daemon/manager.py:1059-1062` (TTL eviction): this runs from a background task, not a request handler. Blocking it for 5 s is acceptable but not necessary for user-visible latency. **Out of scope for this PR** — leave a TODO comment.
-- `daemon/routers/projects.py:818` (project cleanup): runs from a project-delete request, latency matters. **In scope** — apply the same bounded-await pattern, but as a separate commit so this PR is reviewable in isolation. *Confirm with team whether to bundle.*
+- `daemon/manager.py:1059-1062` (TTL eviction): runs in a background task, not a request handler. Blocking it for 5 s is acceptable but not necessary for user-visible latency. **Out of scope.**
+- `daemon/routers/projects.py:818` (project cleanup): runs from a project-delete request, latency matters. **In scope** for the same bounded-await pattern, in a separate commit (or bundled if small). *Team decision — see §7 Q3.*
 
 **Test plan.**
-- Unit: mock a graph task that sleeps 2 s → `terminate_instance` returns in ~2 s with `cancelled` status.
-- Unit: mock a graph task that sleeps 10 s → `terminate_instance` returns in ~5 s with a warning log; task continues unwinding in the background.
-- Integration: SSE subscriber sees the final `status_change: terminated` event before the HTTP DELETE response.
+- Unit: mock graph task that sleeps 2 s → `terminate_instance` returns in ~2 s with `cancelled` status.
+- Unit: mock graph task that sleeps 10 s → `terminate_instance` returns in ~5 s with a warning log; task continues unwinding in the background.
+- Unit: parent with 3 children each sleeping 2 s → `terminate_instance` returns in ~2 s (parallel), not ~6 s (serial).
+- Integration: existing `tests/test_instance_cascade.py` should still pass (cascade semantics unchanged).
 
 ---
 
-### Fix 3 — Event-driven wakeup of JobProcessor on instance termination
+### 4.2 Fix B — Diagnostic logging: cascade trigger + terminate summary
 
-**Why.** Closes RC2. Even after Fix 1 makes the MESSAGE job row transition synchronous, the JobProcessor still has other responsibilities (retry scheduling, deferred queue draining, watcher notifications) that benefit from an immediate wakeup. Cheap to add; complements Fix 1.
+**Why.** Closes RC4 (diagnose, not fix). Future occurrences of the 4 s cascade gap will be self-explanatory once we know which code path emitted the log.
 
-**File 1:** `daemon/services/dispatch_event_bus.py`
-**Lines:** 1-125 (class `DispatchEventBus`)
+**File:** `daemon/services/instance_lifecycle.py`
+**Lines:** 419-433 (cascade log), end of `terminate_instance` (before `return True`)
 
-Add a public method:
+Two logging changes:
+
+**B.1.** Tag the cascade log with a trigger (covered above in Fix A's snippet — `trigger=DELETE`). For symmetry, when this code path is reused from pause or cleanup, the same log shape applies with a different `trigger` value.
+
+**B.2.** Add a single summary log at the end of `terminate_instance`:
 
 ```python
-def notify_terminated(self, instance_id: str) -> None:
-    """Wake JobProcessor immediately when an instance terminates.
-    
-    Sets the global event so any project-scoped wait_for_job() call wakes up
-    on its next event-loop tick. The JobProcessor's next sweep will then see
-    the TERMINATED instance and process the corresponding MESSAGE jobs.
-    """
-    if self._loop is None:
-        return
-    
-    def _set():
-        self._global_event.set()
-        # Also wake all known project events (defensive — in case a future
-        # JobProcessor refactor narrows the wait scope to a project).
-        for event in self._events.values():
-            event.set()
-    
-    try:
-        if self._loop.is_running():
-            self._loop.call_soon_threadsafe(_set)
-        else:
-            _set()
-    except RuntimeError:
-        logger.debug("[TRACE] notify_terminated: SKIP — event loop closed")
+duration_ms = int((time.monotonic() - t0) * 1000)
+jobs_cancelled = <count from step 7.5 + 7.6>
+logger.info(
+    f"[TRACE] terminate_instance: {instance_id[:8]}... complete "
+    f"(graph_unwind_ms={graph_unwind_ms}, jobs_cancelled={jobs_cancelled}, "
+    f"children={len(child_ids)}, duration_ms={duration_ms})"
+)
 ```
 
-**File 2:** `daemon/services/instance_lifecycle.py`
-**Lines:** end of `terminate_instance` (just before `return True` at line 569)
+**Logging style note.** The daemon uses `[TRACE]` prefix liberally (e.g., `daemon/services/job_processor.py:140, 192`; `daemon/services/instance_lifecycle.py:555`). The plan uses the same prefix for consistency.
 
-Add the wakeup call *after* Fix 1's job-cancellation completes:
+**Test plan.**
+- Unit: assert the summary log is emitted with all four fields populated.
+- Integration: a regression test that asserts cascade log line contains `trigger=DELETE` for DELETE-originated cascades, `trigger=PAUSE` for pause-originated cascades.
+
+---
+
+### 4.3 Wakeup — reuse `DispatchEventBus.notify_all()` (no new method)
+
+**Why.** Closes RC2 with zero new code. `notify_all()` at `daemon/services/dispatch_event_bus.py:108-125` already sets the global event and all per-project events, which is exactly what the previous plan's `notify_terminated()` proposed — and the previous plan's `instance_id` parameter was unused (cosmetic only).
+
+**File:** `daemon/services/instance_lifecycle.py`
+**Lines:** end of `terminate_instance`, *after* the DB status update at `:473` and the job-row transitions in step 7.5/7.6
 
 ```python
 # 9. Wake the JobProcessor so it can sweep TERMINATED-instance artifacts
 # immediately rather than waiting up to 30s for the next poll boundary.
-if hasattr(self, "_dispatch_bus") and self._dispatch_bus is not None:
-    self._dispatch_bus.notify_terminated(instance_id)
+# Safe to call even if the DB writes haven't fully settled — early wakeup
+# is benign (JobProcessor's orphan-check at job_processor.py:304-305 will
+# just see RUNNING and skip, then catch TERMINATED on its next pass).
+# Attribute path: manager → _job_queue_mgmt_service → _dispatch_bus.
+# Set at daemon/api.py:210 (direct assignment, not via setter).
+# NOT self._manager._dispatch_bus — InstanceManager has no such attribute.
+mgmt = getattr(self._manager, '_job_queue_mgmt_service', None)
+bus = getattr(mgmt, '_dispatch_bus', None) if mgmt is not None else None
+if bus is not None:
+    bus.notify_all()
 ```
 
-**Note on ordering.** The wakeup must happen *after* the job-row transitions (Fix 1) and *after* the DB status update (line 473). Otherwise the JobProcessor may wake, sweep, and find the instance still in a non-terminal state.
+**Why this attribute path.** `daemon/api.py:206-210` creates one `DispatchEventBus` instance and stores it on `job_queue_mgmt_service._dispatch_bus` (direct assignment). The same bus is also passed to `JobProcessor` via constructor at `daemon/api.py:326` — so calling `notify_all()` on the mgmt-service's reference wakes the JobProcessor's `_process_loop`. `InstanceManager` has no `_dispatch_bus` attribute; it has `self._job_queue_mgmt_service` (declared at `daemon/manager.py:591`, set at `daemon/api.py:256`). A naive `hasattr(self._manager, '_dispatch_bus')` guard would silently never fire, defeating the fix.
+
+**Why this is sufficient.** JobProcessor's `_process_loop` waits on `self._dispatch_bus.wait_for_job(None, timeout=30.0)` (`daemon/services/job_processor.py:146-149`). `notify_all()` sets `self._global_event`, which is what `wait_for_job(None, ...)` waits on. Wakeup happens on the next event-loop tick — sub-millisecond latency.
+
+**Alternative paths (do not use here).**
+- `self._manager._job_queue_service._dispatch_bus` (set via `set_dispatch_bus` at `daemon/api.py:225`) — also points to the same bus, but goes through a setter and is a longer chain. Use only if `_job_queue_mgmt_service` is unavailable.
+- New `manager.get_dispatch_bus()` accessor — out of scope; would be a separate refactor.
+
+**Why not a new method.** A new `notify_terminated(instance_id)` would set the same events with the same body; the only added value is the parameter name in a log line, which the summary log in Fix B.2 already covers.
 
 **Test plan.**
-- Unit: assert `notify_terminated` calls `self._global_event.set()` (use a mock event).
-- Integration: start a JobProcessor, put it to sleep on `wait_for_job`, call `terminate_instance`, assert the JobProcessor's `_process_next_job` is invoked within 100 ms (not 30 s).
-
----
-
-### Fix 4 — Make child cascade robust and diagnostic
-
-**Why.** Closes RC4. Even though the 4 s gap is symptom-of-bigger-issues, two improvements make the next occurrence self-explanatory and prevent a class of similar bugs (cascade silently skipped because `meta.children` is stale or empty).
-
-**File 1:** `daemon/services/instance_lifecycle.py`
-**Lines:** 419-433 (the cascade block at the top of `terminate_instance`)
-
-Replace the cascade with a repository-based child lookup, and tag the log line with the trigger:
-
-```python
-# Get instance metadata BEFORE modifying state
-meta = None
-if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
-    meta = self._manager._instance_repository.get(instance_id)
-
-# Re-entrancy guard
-if meta and meta.status == InstanceStatus.TERMINATED.value:
-    logger.info(f"Instance {instance_id[:8]}... already terminated, skipping")
-    return True
-
-# Cascade to children — use repository as source of truth, not meta.children
-# (which may be empty if pause ran first, or stale if children were spawned
-# after the meta was last written). The hierarchy table is the canonical store.
-if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
-    try:
-        children = self._manager._instance_repository.list_by_parent(instance_id)
-    except Exception as e:
-        logger.warning(f"list_by_parent failed for {instance_id[:8]}...: {e}; falling back to meta.children")
-        children = list(meta.children) if meta and meta.children else []
-    for child in children:
-        child_id = child.id if hasattr(child, 'id') else child
-        logger.info(
-            f"Cascading terminate to child instance: {child_id[:8]}... "
-            f"(trigger=DELETE, parent={instance_id[:8]}...)"
-        )
-        await self.terminate_instance(child_id)
-```
-
-**Note.** `list_by_parent` already exists at `daemon/repositories/instance/repository.py:329` and uses the `InstanceHierarchy` join table (canonical store). No schema change needed.
-
-**File 2 (optional, smaller change):** apply the same `trigger=...` tag to the pause cascade. Pause already uses `repo.get_tree_ids(root_id)` (line 594) which is also repository-based — the gap in pause is not the same as in terminate, but the trigger tag is still useful for log correlation.
-
-**Test plan.**
-- Unit: spawn a parent + 2 children → `terminate_instance(parent)` → assert both children are terminated and the cascade log lines carry `trigger=DELETE`.
-- Unit: delete an instance whose `meta.children` is empty but `InstanceHierarchy` still references children → assert cascade still runs (this is the RC4 case).
-- Integration: existing `test_terminate_cascade.py` should still pass.
+- Unit: mock the dispatch bus on `_manager._job_queue_mgmt_service._dispatch_bus` and assert `notify_all()` is called once per `terminate_instance` call. **Important:** the test must mock at the *correct attribute path* (`_job_queue_mgmt_service._dispatch_bus`), otherwise the test passes while the production code is silently no-op.
+- Integration: start a JobProcessor in a test, force it into `wait_for_job` (via a short poll interval), call `terminate_instance`, assert `_process_next_job` is invoked within 100 ms.
 
 ---
 
 ## 5. Rollout Ordering
 
-Land as four separate commits, in this order. Each commit is independently revertable.
+Two commits, ordered by risk.
 
 | # | Commit | Files touched | Risk | Test surface |
 |---|---|---|---|---|
-| 1 | Fix 2: bounded-await graph task | `instance_lifecycle.py` | Low — only changes wait behavior, not semantics | Unit + integration |
-| 2 | Fix 1: synchronous MESSAGE job cancel | `instance_lifecycle.py` | Medium — changes job-row state machine timing; depends on idempotency check (Q2) | Unit + integration + concurrency test |
-| 3 | Fix 3: event-driven JobProcessor wakeup | `dispatch_event_bus.py`, `instance_lifecycle.py` | Low — only adds an event set; JobProcessor logic unchanged | Unit + integration |
-| 4 | Fix 4: repository-based child cascade + trigger log | `instance_lifecycle.py` | Low — only changes how children are discovered; cascade semantics unchanged | Unit + integration |
+| 1 | Fix B: diagnostic logging (cascade trigger + summary) | `instance_lifecycle.py` | **Trivial** — read-only additions | Unit (log assertions) |
+| 2 | Fix A + Wakeup: bounded-await + parallel cascade + `notify_all` | `instance_lifecycle.py` | **Medium** — changes DELETE latency, touches cascade ordering | Unit (timing) + integration |
 
-**Feature flag (optional).** If the team is risk-averse, wrap Fix 1's synchronous `complete_job` call in a config flag `terminate.sync_cancel_message_jobs: bool = true` for one release cycle, defaulting to `true` in dev and `false` in prod. Not strictly required if the idempotency check (Q2) passes.
+**No feature flag.** Both changes are small and have unit-test coverage; a flag would add complexity without proportional safety. If Fix A's behavior is unexpected in production, revert the commit.
 
 ---
 
-## 6. Observability Additions
+## 6. Investigation Plan — RC1 (MESSAGE job 27 s delay)
 
-Beyond the `trigger=...` log line in Fix 4, add one structured log at the end of `terminate_instance` summarizing the cleanup:
+**This is a prerequisite for any future "Fix 1" implementation.** Without understanding why step 7.6 doesn't catch the MESSAGE job, adding a fallback in 7.5 risks papering over a real bug.
+
+### 6.1 Reproduce locally
+
+Add `[TRACE]` logging to steps 7.5 and 7.6 in `daemon/services/instance_lifecycle.py:505-549`:
+
+```python
+# 7.5 — at the top of the MESSAGE-jobs loop
+logger.info(
+    f"[TRACE] terminate_instance: 7.5 processing MESSAGE job "
+    f"{msg_job.job_id[:8]}... (status={msg_job.status}, "
+    f"instance_id_match={msg_job.instance_id == instance_id})"
+)
+# ... and after cancel_message_job:
+logger.info(f"[TRACE] terminate_instance: 7.5 done for {msg_job.job_id[:8]}...; row state unchanged (token-only)")
+
+# 7.6 — at the top of the loop and around the complete_job call
+logger.info(
+    f"[TRACE] terminate_instance: 7.6 processing job "
+    f"{remaining_job.job_id[:8]}... (type={remaining_job.job_type}, "
+    f"status={remaining_job.status})"
+)
+try:
+    if remaining_job.status == "processing":
+        await self._job_queue_service.complete_job(
+            remaining_job.job_id,
+            demand_state=DemandState.CANCELLED,
+            error="Instance terminated during cleanup",
+        )
+        logger.info(f"[TRACE] terminate_instance: 7.6 complete_job({remaining_job.job_id[:8]}...) succeeded")
+    else:
+        await self._job_queue_service.cancel_job(remaining_job.job_id)
+        logger.info(f"[TRACE] terminate_instance: 7.6 cancel_job({remaining_job.job_id[:8]}...) returned")
+except Exception as e:
+    logger.warning(
+        f"[TRACE] terminate_instance: 7.6 raised for {remaining_job.job_id[:8]}...: "
+        f"{type(e).__name__}: {e}"
+    )
+```
+
+### 6.2 Capture the JobProcessor side
+
+In `daemon/services/job_processor.py:279-290`, add a `[TRACE]` line just before the `complete_job` call:
 
 ```python
 logger.info(
-    f"terminate_instance: {instance_id[:8]}... complete "
-    f"(graph_unwind_ms={graph_unwind_ms}, jobs_cancelled={jobs_cancelled}, "
-    f"children={len(children)}, duration_ms={duration_ms})"
+    f"[TRACE] job_processor: orphan-check sees MESSAGE job {proc_job.job_id[:8]}... "
+    f"with instance {proc_job.instance_id[:8]}... status={instance_meta.status} — "
+    f"firing complete_job(CANCELLED)"
 )
 ```
 
-Where:
-- `graph_unwind_ms` is measured around the Fix 2 bounded await.
-- `jobs_cancelled` is the count from the Fix 1 loop.
-- `duration_ms` is the wall time for the whole `terminate_instance` call.
+### 6.3 Run the original repro
 
-Wrap the function body in a `t0 = time.monotonic()` and compute at the end. Negligible overhead, big debuggability win.
+Re-create the original conditions (spawn leader → spawn child → enqueue MESSAGE job → pause → DELETE), capture both sides' logs, and identify:
 
-**Optional.** Emit a Prometheus counter `instance_terminate_duration_seconds{outcome="ok|error"}` if the daemon already exposes metrics. (Check `daemon/api.py` and `daemon/services/` for existing metrics before adding new ones.)
+| Possible cause | Diagnostic | Resolution |
+|---|---|---|
+| 7.6 reached and `complete_job` succeeded | Both `[TRACE]` lines fire, job is `cancelled` before 7.6 returns, JobProcessor never sees it | RC1 doesn't exist. The 27 s was actually 7.5's token signal, not a delay. Close investigation. |
+| 7.6 reached and `complete_job` raised | 7.6's `try/except` log fires with the exception text | Fix the underlying bug (likely a state-machine violation; check `job_state_machine.py:20-32`) |
+| 7.6 reached but MESSAGE job not in `find_jobs_by_instance` results | 7.5 fires for the MESSAGE job, 7.6 does not | Investigate `find_jobs_by_instance(job_type=None)` query — may be filtering by `job_type` despite the `None` argument |
+| 7.6 never reached | No 7.6 log line; JobProcessor's orphan-check fires 27 s later | Likely an exception between 7.5 and 7.6 swallowed at `:502-503` or `:513-514` — narrow down with try/except in 7.5 |
+
+### 6.4 Outcome
+
+Based on what the investigation finds, the next revision of this plan will propose one of:
+
+- **Outcome A** — 7.6 works. No Fix 1 needed. JobProcessor's orphan check is the safety net, not a hot path. Update plan to reflect.
+- **Outcome B** — 7.6 has a bug. Fix 7.6 (e.g., `find_jobs_by_instance` is dropping MESSAGE rows, or `complete_job` is raising due to a state-machine edge case).
+- **Outcome C** — 7.6 doesn't reach MESSAGE jobs. Add the `complete_job(CANCELLED)` call in 7.5's processing branch (the original Fix 1 from revision 1 of this plan, justified by the new evidence).
+
+Q2 from revision 1 is **resolved** — `complete_job` is idempotent via the `except (ValueError, InvalidTransitionError)` swallow at `daemon/services/job_queue_service.py:1181-1183` (and `:1265-1267` for the sync variant). `terminate_job` raises `InvalidTransitionError` from `atomic_transition` at `daemon/repositories/job_queue/repository.py:434-439` when `job.status != from_status`, and the state machine at `daemon/services/job_state_machine.py:20-32` has no transitions out of terminal states. The handler's later `complete_job` write (if it wins the race) will swallow cleanly. Lock release in the `finally` block at `:1184-1194` is also safe (idempotent via `release_by_job` returning False on no-op). No guard or feature flag is required for any future Fix 1.
 
 ---
 
 ## 7. Open Questions for the Team
 
-- **Q1.** Step 7.6 (`instance_lifecycle.py:516-549`) already calls `complete_job(..., CANCELLED)` for any remaining processing job, which should in theory catch MESSAGE jobs left in `processing` by step 7.5. Why doesn't it? Possible causes: (a) 7.6 runs in the same coroutine, so the token-cancel from 7.5 may not have yielded control yet — but `await` should yield; (b) `complete_job` is rejecting the transition because the job was *already* marked terminal by the token path; (c) some ordering issue with `_repository.find_jobs_by_instance(job_type=None)` excluding MESSAGE jobs. **Action:** reproduce locally and add a `[TRACE]` log to step 7.6 confirming whether MESSAGE jobs are being seen there.
-- **Q2.** Is `complete_job` / `terminate_job` idempotent against a job already in a terminal state? Required for Fix 1's safety. If not, we need to add a guard.
-- **Q3.** Should Fix 2's bounded-await pattern be applied to the project-cleanup path (`routers/projects.py:818`) in the same PR, or split out?
-- **Q4.** Should the 5 s timeout in Fix 2 be configurable via `config.yaml`? Recommend **no** for v1; revisit if real-world data shows it should be tunable.
-- **Q5.** Is the `meta.children` field on `InstanceMeta` still needed, or is `InstanceHierarchy` the new source of truth? If only the hierarchy table is used, the field can be removed. (Separate cleanup; out of scope here, but flag for follow-up.)
-- **Q6.** Should we add a regression integration test that times `POST /pause` → `DELETE` → `GET /jobs/{id}` and asserts the job is in `cancelled` within, say, 6 s? This would catch future regressions of RC1.
+- **Q1.** (investigation) Why doesn't 7.6 catch MESSAGE jobs? — see §6. **Blocker for Fix 1.**
+- **Q2.** ~~Is `complete_job` idempotent?~~ **RESOLVED.** Yes, via exception swallow at `daemon/services/job_queue_service.py:1181-1183`. No code change required.
+- **Q3.** Apply the bounded-await pattern to `daemon/routers/projects.py:818` (project cleanup) in the same PR, or split? Recommend **split** — keep this PR small.
+- **Q4.** Make the 5 s timeout configurable via `config.yaml`? Recommend **no** for v1; revisit if real-world data shows a different value is needed.
+- **Q5.** Pause-path graph-task unwind (the follow-up mentioned in §4.1): what's the right design? Options are (a) make `_pause_single` async and bound each wait to ~500 ms, (b) only await the root's graph task (children typically don't have in-flight LLM calls during pause cascade), or (c) parallelize the tree. This needs its own PR with a latency-budget analysis.
+- **Q6.** Should we add a regression integration test that times `POST /pause` → `DELETE` → `GET /jobs/{id}` and asserts the job is in `cancelled` within, say, 6 s? Recommend **yes**, in the test surface for the Fix 1 follow-up PR.
+- **Q7.** The `meta.children` field is populated by `_enrich_instance` from `InstanceHierarchy` on every `get()` (`daemon/repositories/instance/repository.py:59-65`). The `children` column on the `Instance` model (`models.py:63`) is denormalized but **never read on the read path**. Should we remove the column? (Out of scope here, but flag for follow-up.)
+- **Q8.** `resume_processing_job` at `daemon/manager.py:2022-2109` queries `find_processing_message_jobs_by_instance` which only returns PROCESSING rows. If pause+resume+terminate happen quickly, Fix 1's eventual `complete_job(CANCELLED)` may run between resume's `find` and its `enqueue_message`, causing resume to see an empty list and fall into the "child instance" branch at `manager.py:2064+`. This is **benign** but the follow-up plan for Fix 1 should document it.
+- **Q9.** Test file references: this plan refers to `tests/integration/test_terminate_cascade.py`, which does **not exist**. The actual cascade test is `tests/test_instance_cascade.py` (different focus: FK cascade in repo layer). New tests for Fix A's bounded-await and parallel-cascade behavior should be added to `tests/integration/` (or a new `tests/services/test_instance_lifecycle_terminate.py`).
 
 ---
 
 ## 8. Out of Scope (Explicitly)
 
-- Re-architecting the JobProcessor's 30 s poll into a push model for new jobs.
-- Changing LLM client timeouts.
+- Fix 1 (synchronous MESSAGE job cancel) — deferred to a follow-up PR gated on the §6 investigation.
+- Pause-path graph-task unwind — deferred to a follow-up PR (Q5).
+- Project-cleanup path bounded-await — deferred (Q3).
+- TTL eviction bounded-await (`manager.py:1059`) — not user-visible.
+- Re-architecting JobProcessor's 30 s poll into a push model for new jobs.
+- Changing LLM client per-call timeouts.
 - Removing the 30 s `JobProcessor` poll entirely (it remains a safety net).
-- TTL eviction path (`manager.py:1059`) — Fix 2 may be applied later, not in this PR.
-- Any change to the SSE / live-hub streaming code beyond what the bounded-await in Fix 2 implies.
-- Removing the `meta.children` field on `InstanceMeta` (separate cleanup).
+- Any change to the SSE / live-hub streaming code beyond what Fix A's bounded-await implies.
+- Removing the `children` column from the `Instance` model (Q7).
 
 ---
 
 ## 9. Appendix: Timeline Reconstruction
 
-Mapping observed log lines to the proposed fixes:
+### Pre-fix (observed)
 
-| Log line | Timestamp | Root cause | Fixed by |
+| Log line | Timestamp | Root cause | Addressed by |
 |---|---|---|---|
-| `POST /pause 200` | 23:06:18 | — | — |
-| `Cancelled graph task for instance 9a230d55...` | 23:06:18 | log emitted at `cancel()` call site, not at unwind | — |
-| `Paused instance 9a230d55...` | 23:06:18 | pause path | — |
-| `Paused instance 3bbc43af...` | 23:06:18 | pause path (`pause_instance_cascade` tree walk) | — |
-| `Graph execution cancelled for instance 9a230d55...` | 23:06:18 | log emitted when handler observes the cancel | Fix 2 makes the await bounded |
-| `DELETE 200` | 23:06:18 | — | Fix 2 makes the response time ~5 s, not instantaneous-but-lying |
-| `Cascading terminate to child instance: 3bbc43af...` | 23:06:22 | emitted by a *second* code path; `meta.children` was empty for the DELETE call | Fix 4 makes the cascade repository-based and tags the trigger |
-| `JobProcessor: MESSAGE job ... terminated` | 23:06:49 | emitted by `job_processor.py:282` on the next 30 s poll boundary | Fix 1 makes this happen synchronously in terminate |
-| `Job transition: processing -> cancelled` | 23:06:49 | written by `job_processor.py:285-289` | Fix 1 makes this write happen in terminate (line 7.5) |
+| `POST /pause 200` | T+0 | — | — |
+| `Cancelled graph task for instance 9a230d55...` | T+0 | log at `cancel()` call site | Fix A's bounded await makes this log emit *after* the await, so the timestamp reflects the unwind time |
+| `Paused instance 9a230d55...` | T+0 | pause path | — |
+| `Paused instance 3bbc43af...` | T+0 | `pause_instance_cascade` tree walk | — |
+| `DELETE 200` | T+0 | — | Fix A bounds the response time at ~5 s (LLM unwind) |
+| `Cascading terminate to child ...` | T+4 s | emitted by a *second* code path; `meta.children` empty in DELETE handler | Fix B's `trigger=...` tag diagnoses this |
+| `JobProcessor: MESSAGE job ... terminated` | T+27 s | `job_processor.py:281-289` on next 30 s poll | **Deferred** to §6 investigation + follow-up Fix 1 PR |
+| `Job transition: processing -> cancelled` | T+27 s | `job_processor.py:285-289` write | Same as above |
 
-After all four fixes, the expected post-fix timeline is:
+### Post-fix (expected for the two fixes in this PR; assumes Fix 1 not yet landed)
+
+For a single instance with one in-flight LLM call and one child (similar to observed log):
 
 ```
-T+0ms      POST /pause
-T+0ms      Cancelled graph task ...
-T+~3s      DELETE ... (after LLM stream finishes or hits socket)
-T+~3s      Paused instance ...
-T+~3s      Cascading terminate to child ... (trigger=DELETE)
-T+~3s      MESSAGE job ... processing -> cancelled (synchronous in 7.5)
-T+~3s      JobProcessor: MESSAGE job ... terminated (immediate wake via Fix 3)
-T+~3s      DELETE 200
+T+0ms       POST /pause
+T+0ms       Paused instance 9a230d55...
+T+0ms       Paused instance 3bbc43af...      (pause cascades to child)
+T+~3s       DELETE arrives
+T+~3s       Cancelled graph task 9a230d55...  (after bounded await, 3s unwind)
+T+~3s       Cascading terminate to child 3bbc43af... (trigger=DELETE, parallel)
+T+~3s       terminate_instance: 9a230d55... complete (summary log)
+T+~3s       JobProcessor: MESSAGE job ... terminated  (notify_all wakeup, but 7.5/7.6 may not have fired — see §6)
+T+~3s       DELETE 200
+T+~3s       [Job may still be in 'processing' if RC1 root cause is in 7.6] — see §6
+T+~30s      Job transition: processing -> cancelled  (JobProcessor safety net, or Fix 1)
 ```
 
-i.e. a 3-5 s settle time, bounded by the LLM stream unwind.
+For an N-child tree in the pause path, the pause latency is unchanged (Fix A doesn't apply). For an N-child tree in the terminate path, terminate latency is **max(per-child unwind)** rather than **sum**, because of the parallel cascade — worst case 5 s for any reasonable N.
 
 ---
 
 ## 10. Review Checklist (for reviewers)
 
-- [ ] Has Q1 (why step 7.6 doesn't catch MESSAGE jobs) been investigated and resolved?
-- [ ] Has Q2 (`complete_job` idempotency) been verified or a guard added?
-- [ ] Does Fix 1's `complete_job(..., CANCELLED)` interaction with the handler's later `complete_job` produce the right final state and error message?
-- [ ] Does Fix 2's `asyncio.shield` correctly protect against outer-cancel during the 5 s wait?
-- [ ] Does Fix 3's wakeup happen *after* Fix 1's DB write and the DB status update? (Race condition if reordered.)
-- [ ] Does Fix 4's `list_by_parent` return the same set of children that `meta.children` would, modulo the cases Fix 4 is trying to fix?
-- [ ] Are existing tests in `tests/job_queue/` and `tests/integration/test_terminate_cascade.py` updated or still passing?
-- [ ] Is the observability log at the end of `terminate_instance` consistent with the daemon's logging style (no `[TRACE]` prefix, structured fields)?
+- [ ] Q1 (RC1 root cause) — has the §6 investigation been completed? **Required before any future Fix 1 PR.**
+- [ ] Does Fix A's `await` block on a sync context? (No — `terminate_instance` is already async.)
+- [ ] Does Fix A's `asyncio.shield` correctly protect against outer-cancel during the 5 s wait?
+- [ ] Does Fix A's `asyncio.gather(..., return_exceptions=True)` correctly handle a child whose `terminate_instance` raises? (Yes — `return_exceptions=True` aggregates, doesn't propagate.)
+- [ ] Is the pause-path latency budget for N-child trees acceptable as-is? (Yes — current behavior, not regressed.)
+- [ ] Are existing tests in `tests/test_instance_cascade.py` (and any related integration tests) still passing?
+- [ ] Do new test files go in `tests/integration/` per Q9?
+- [ ] Does the `[TRACE]` prefix in Fix B match the daemon's existing style? (Yes — see `daemon/services/job_processor.py:140, 192` and `daemon/services/instance_lifecycle.py:555`.)
+- [ ] Is the `notify_all()` reuse in §4.3 appropriate, or should it be a new method? (Per W3 in the review, reuse is preferred.)
+- [ ] Is the dispatch-bus attribute path `self._manager._job_queue_mgmt_service._dispatch_bus` correct? (Yes — see §4.3 "Why this attribute path". A unit test that mocks at the wrong path will pass while production is silently no-op.)
