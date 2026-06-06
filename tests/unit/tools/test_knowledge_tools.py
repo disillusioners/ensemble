@@ -1722,6 +1722,64 @@ class TestCheckRagQueriedViaCheckpoint:
         result = await _check_rag_queried_via_checkpoint(checkpointer, "instance-1")
         assert result is False
 
+    @pytest.mark.asyncio
+    async def test_unwraps_raw_saver_when_checkpointer_is_checkpointer_adapter(self):
+        """Regression for context-dir-empty bug: when the checkpointer is a
+        real ``CheckpointerAdapter`` (has ``raw_saver`` but no ``aget``
+        directly), the function must unwrap ``raw_saver`` and call ``aget``
+        on it. Previously, calling ``checkpointer.aget(...)`` raised
+        ``AttributeError`` that was silently swallowed at DEBUG level,
+        always returning False and disabling the explorer's auto-save path.
+
+        This test uses a real ``SqliteCheckpointerAdapter`` (a concrete
+        ``CheckpointerAdapter``) wrapping a ``MagicMock`` saver. The mock
+        saver is not a bare ``MagicMock`` on the wrapper — exactly the
+        shape the production code receives from
+        ``InstanceManager._checkpointer``.
+        """
+        from daemon.checkpoint_adapter import SqliteCheckpointerAdapter
+
+        raw_saver = MagicMock()
+        raw_saver.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                ]
+            }
+        })
+        adapter = SqliteCheckpointerAdapter(raw_saver)
+
+        result = await _check_rag_queried_via_checkpoint(adapter, "inst-123")
+
+        assert result is True
+        # Verify aget was awaited on the raw_saver (not on the adapter,
+        # which has no aget and would have raised AttributeError before
+        # the fix).
+        raw_saver.aget.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unwraps_raw_saver_returns_false_when_no_rag_tool_calls(self):
+        """Regression companion: real ``CheckpointerAdapter`` wrapper where
+        the underlying checkpoint contains no RAG tool calls. Must return
+        False (correctly) rather than silently False-due-to-AttributeError.
+        """
+        from daemon.checkpoint_adapter import SqliteCheckpointerAdapter
+
+        raw_saver = MagicMock()
+        raw_saver.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                ]
+            }
+        })
+        adapter = SqliteCheckpointerAdapter(raw_saver)
+
+        result = await _check_rag_queried_via_checkpoint(adapter, "inst-456")
+
+        assert result is False
+        raw_saver.aget.assert_awaited_once()
+
 
 # =============================================================================
 # Explore() Checkpoint Integration Tests

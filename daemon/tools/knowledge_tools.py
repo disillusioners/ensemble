@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from langchain_core.tools import tool
 
 from ._tool_registry import register_tool_category
+from daemon.persistence import CheckpointerAdapter
 from daemon.rag.config import is_rag_enabled
 from daemon.services.context_injection import get_shared_context
 from daemon.utils import invoke_agent_and_wait
@@ -77,7 +78,17 @@ async def _check_rag_queried_via_checkpoint(
     """
     try:
         config = {"configurable": {"thread_id": instance_id}}
-        state = await checkpointer.aget(config)
+        # Unwrap CheckpointerAdapter to its raw saver. Production's
+        # manager._checkpointer is a CheckpointerAdapter (introduced in
+        # commit 8c76247 for PostgreSQL support) which exposes the raw
+        # saver via .raw_saver — the adapter itself has no aget. Tests
+        # pass plain mocks (or real savers) directly, so fall through.
+        # Pattern matches daemon/persistence.py:280.
+        if isinstance(checkpointer, CheckpointerAdapter):
+            saver = checkpointer.raw_saver
+        else:
+            saver = checkpointer
+        state = await saver.aget(config)
         if not state:
             logger.debug("Checkpoint inspection: no state found for %s", instance_id[:8])
             return False
@@ -99,7 +110,7 @@ async def _check_rag_queried_via_checkpoint(
         logger.info("Checkpoint inspection: no RAG tools found (scanned %d messages)", scanned)
         return False
     except Exception:
-        logger.debug("Failed to check RAG tool calls from checkpoint", exc_info=True)
+        logger.warning("Failed to check RAG tool calls from checkpoint", exc_info=True)
         return False
 
 
