@@ -315,6 +315,15 @@ class ThinkingChatOpenAI(ChatOpenAI):
         )
 
 
+def clean_llm_config(cfg: dict) -> dict:
+    """Strip non-kwarg keys before passing to ThinkingChatOpenAI(**cfg).
+
+    model_vision is used for vision routing decisions but is not a valid
+    LangChain/ChatOpenAI parameter and must be removed before LLM construction.
+    """
+    return {k: v for k, v in cfg.items() if k != "model_vision"}
+
+
 class SessionState(MessagesState):
     """Extended state schema for agent sessions.
     
@@ -569,7 +578,7 @@ def build_instance_llms(
     if model_vision:
         logger.info(f"[Graph] Vision model configured: {model_vision}")
         # Filter model_vision from config to avoid passing it to the API
-        vision_config = {k: v for k, v in llm_config_with_headers.items() if k != "model_vision"}
+        vision_config = clean_llm_config(llm_config_with_headers)
         vision_config["model"] = model_vision
         llm_with_tools = ThinkingChatOpenAI(**vision_config).bind_tools(tools)
     else:
@@ -577,7 +586,7 @@ def build_instance_llms(
 
     # Create standard LLM (always needed, even if vision is configured)
     # Filter model_vision from config to avoid noisy LangChain warnings
-    standard_config = {k: v for k, v in llm_config_with_headers.items() if k != "model_vision"}
+    standard_config = clean_llm_config(llm_config_with_headers)
     standard_config["model"] = model_standard
     llm_standard = ThinkingChatOpenAI(**standard_config)
 

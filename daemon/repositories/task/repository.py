@@ -11,7 +11,14 @@ from sqlalchemy import delete as sql_delete, func, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
+from ..job_queue.models import JobStatus
+from ..instance.models import InstanceStatus
 from .models import Task, TaskStatus, TaskType
+
+# Job type string for MESSAGE jobs. job_type is a free-form string column
+# (see JobItem.job_type), not an enum — the canonical job-side query
+# (find_processing_message_jobs_by_instance) uses the same literal.
+JOB_TYPE_MESSAGE = "message"
 
 
 logger = logging.getLogger(__name__)
@@ -124,10 +131,37 @@ class TaskRepository:
         Only one worker can claim a task at a time.
 
         Per-instance guard: a pending task is only claimable if no other task
-        for the same ``instance_id`` is currently ``RUNNING``. This prevents
-        two workers from concurrently processing tasks for the same langgraph
-        thread_id, which would race on ``graph.astream`` and shadow channel
-        writes in the Postgres checkpointer.
+        for the same ``instance_id`` is currently ``RUNNING`` AND no MESSAGE
+        job for the same instance is *actively* ``PROCESSING`` (i.e. the
+        job is still driving ``graph.astream`` for this instance, not just
+        sitting in PROCESSING because the instance is WAITING_CHILDREN).
+        This prevents two workers from concurrently processing tasks for the
+        same langgraph thread_id, which would race on ``graph.astream`` and
+        shadow channel writes in the Postgres checkpointer.
+
+        The MESSAGE-job check is critical because the child-completion
+        handler enqueues completion reports as tasks, but the parent's
+        original user message is typically being processed by the job-queue
+        path. Without the cross-system guard, the task forks the checkpoint
+        from a stale state and the "Done! 👋" AIMessage produced by the
+        original job is shadowed/lost.
+
+        WAITING_CHILDREN carve-out: when a job is mid-flight and the
+        instance transitions to ``WAITING_CHILDREN`` (the parent spawned
+        children and is awaiting their reports), ``MessageJobHandler``
+        defers job completion — the job stays ``PROCESSING`` until the
+        instance lifecycle resolves. But the job is *not* driving
+        ``graph.astream`` in this window; ``JobFeedbackObserver`` will
+        complete the job when the instance finally completes. If we
+        blocked on the PROCESSING status alone, the child-completion
+        report task would be unable to claim and deliver the child
+        result to the parent — a deadlock where the job waits for the
+        child report and the child report waits for the job. We therefore
+        also check the instance's ``waiting_for > 0`` / ``WAITING_CHILDREN``
+        status and only treat the job as a blocker when the instance is
+        NOT in that deferred state.
+        Both lookups exclude soft-deleted rows (``deleted_at IS NULL``) so a
+        soft-deleted PROCESSING job can't permanently block task claims.
 
         Heartbeat init: ``last_heartbeat_at`` is set to the same value as
         ``started_at`` on claim, so the recovery service can distinguish
@@ -161,6 +195,33 @@ class TaskRepository:
                         SELECT instance_id FROM task
                         WHERE status = :status_running_guard
                     )
+                    AND instance_id NOT IN (
+                        -- Cross-system guard: a MESSAGE job only blocks the
+                        -- task when it is *actively* driving graph.astream.
+                        -- When the instance has transitioned to
+                        -- WAITING_CHILDREN, the job is just a FIFO placeholder
+                        -- (JobFeedbackObserver will complete it when the
+                        -- instance lifecycle resolves) — it is NOT holding
+                        -- the langgraph thread, so the child-completion
+                        -- report task must be allowed to claim and deliver
+                        -- the child result. Without this carve-out, the
+                        -- job waits for the child report and the child
+                        -- report waits for the job: deadlock.
+                        --
+                        -- ``deleted_at IS NULL`` matches the canonical
+                        -- job-side query
+                        -- (``find_processing_message_jobs_by_instance``):
+                        -- a soft-deleted PROCESSING job never auto-completes
+                        -- and would otherwise permanently block the instance.
+                        SELECT j.instance_id FROM job_queue_items j
+                        LEFT JOIN instances i ON j.instance_id = i.instance_id
+                        WHERE j.status = :status_processing
+                        AND j.job_type = :job_type_message
+                        AND j.instance_id IS NOT NULL
+                        AND j.deleted_at IS NULL
+                        AND COALESCE(i.waiting_for, 0) = 0
+                        AND (i.status IS NULL OR i.status != :status_waiting_children)
+                    )
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
@@ -172,6 +233,9 @@ class TaskRepository:
                 "started_at": now,
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running_guard": TaskStatus.RUNNING.value,
+                "status_processing": JobStatus.PROCESSING.value,
+                "job_type_message": JOB_TYPE_MESSAGE,
+                "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
                 "now_str": now_str,
             }).fetchone()
 
@@ -423,12 +487,20 @@ class TaskRepository:
         """Check whether any pending task is blocked by a per-instance guard.
 
         Returns True if there is at least one PENDING task whose ``instance_id``
-        also has a RUNNING task. Used by the worker pool to distinguish
-        "no work" from "work exists but instance is busy" in the empty-claim
-        path. Cheap: two index lookups.
+        also has a RUNNING task OR an *actively* PROCESSING MESSAGE job. A
+        MESSAGE job is only "actively" blocking when the instance is NOT in
+        ``WAITING_CHILDREN`` (and has ``waiting_for = 0``) — in that state
+        the job is just a FIFO placeholder waiting for the instance
+        lifecycle to resolve, not holding the langgraph thread, so a
+        child-completion report task is not actually blocked. Used by the
+        worker pool to distinguish "no work" from "work exists but instance
+        is busy" in the empty-claim path. The job-queue probe joins
+        ``instances`` (via ``idx_instances_status``) and the
+        ``job_queue_items.instance_id`` index, so it stays cheap.
 
         Returns:
-            True if any pending task is blocked by Fix B's per-instance guard.
+            True if any pending task is blocked by Fix B's per-instance guard
+            (task-level or job-queue-level).
         """
         with self.engine.begin() as conn:
             stmt = text("""
@@ -436,10 +508,22 @@ class TaskRepository:
                 WHERE EXISTS (
                     SELECT 1 FROM task t_pending
                     WHERE t_pending.status = :status_pending
-                    AND EXISTS (
-                        SELECT 1 FROM task t_running
-                        WHERE t_running.status = :status_running
-                        AND t_running.instance_id = t_pending.instance_id
+                    AND (
+                        EXISTS (
+                            SELECT 1 FROM task t_running
+                            WHERE t_running.status = :status_running
+                            AND t_running.instance_id = t_pending.instance_id
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM job_queue_items j_running
+                            LEFT JOIN instances i ON j_running.instance_id = i.instance_id
+                            WHERE j_running.status = :status_processing
+                            AND j_running.job_type = :job_type_message
+                            AND j_running.instance_id = t_pending.instance_id
+                            AND j_running.deleted_at IS NULL
+                            AND COALESCE(i.waiting_for, 0) = 0
+                            AND (i.status IS NULL OR i.status != :status_waiting_children)
+                        )
                     )
                 )
                 LIMIT 1
@@ -447,6 +531,9 @@ class TaskRepository:
             row = conn.execute(stmt, {
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
+                "status_processing": JobStatus.PROCESSING.value,
+                "job_type_message": JOB_TYPE_MESSAGE,
+                "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
             }).fetchone()
             return row is not None
 

@@ -59,8 +59,19 @@ Need to do something?
 |-------------|----------|-------------------|
 | Planning, analysis, roadmap, strategy | **Planning** | Only markdown files change |
 | Code changes, bug fixes, features, tests, scripts | **Implementation** | Code/script/test files change |
+| Bug report, error, crash, "X is broken" | **Debug** | Cause is UNKNOWN — investigate before any fix |
 
 **When uncertain which workflow:** Default to Implementation. Most requests involve code changes.
+
+---
+
+### 🐛 DEBUG DISCIPLINE (MANDATORY)
+
+**Debugging is diagnosis-first, fix-second.** See `workflow.md` → Debug Workflow for the full flow. The 3 rules I never break:
+
+1. **Investigate BEFORE fix** — delegate investigation to coder/tester, wait for the confirmed root cause, THEN fix. Never assume the cause from a log scan or a single `explore()`.
+2. **Hand over the evidence** — every investigation or fix delegation gets the FULL logs, stack trace, and repro. Evidence is input to the team, not just an instruction.
+3. **Close against the original symptom** — done means Tester reproduces the ORIGINAL failing scenario and it passes, not just that unrelated tests pass.
 
 ---
 

@@ -2,12 +2,15 @@
 
 ## Overview
 
-I support two workflows. The user may invoke them sequentially within a single session (e.g., Planning first, then Implementation).
+I support three workflows. The user may invoke them sequentially within a single session (e.g., Planning first, then Implementation; or Debug to fix a reported bug).
 
 | Workflow | Purpose | What Changes |
 |----------|---------|-------------|
 | **Planning** | Create and approve a structured plan | Only markdown files |
 | **Implementation** | Execute code changes, tests, scripts | Code, config, scripts, tests |
+| **Debug** | Diagnose a bug, find the real cause, then fix it | Investigation first, then code changes |
+
+**⚠️ When the user reports a bug / error / "X is broken":** use **Debug** — NOT Implementation. Implementation assumes the goal is known; Debug assumes the cause is unknown and must be proven first.
 
 ---
 
@@ -333,6 +336,132 @@ PHASE 2:
 
 ---
 
+## Debug Workflow
+
+**Purpose:** Diagnose a bug/issue, find the **REAL** root cause, then fix it. Investigation BEFORE action.
+
+**When to use:** User reports a bug, error, crash, exception, test failure, or "X is broken / doesn't work" — ANY situation where the true cause is not yet known.
+
+### 🛑 Golden Rule — Investigate First, Fix Second
+
+**NEVER assume the root cause from logs or a quick exploration.** A bug report means the cause is UNKNOWN. Treating your guess as the cause wastes an entire fix cycle on the wrong thing.
+
+```
+Report "X is broken"
+   → My first job is to PROVE the cause, not to patch a symptom.
+   → Diagnose via the team FIRST, fix SECOND.
+```
+
+### Why Debug ≠ Implementation
+
+| Implementation Workflow | Debug Workflow |
+|--------------------------|----------------|
+| Goal is known ("build X") | Cause is UNKNOWN ("X is broken") |
+| Coder starts building immediately | Team INVESTIGATES before anyone fixes |
+| One delegation kicks off work | Evidence collected & shared first |
+| Done = feature works | Done = ORIGINAL symptom is gone |
+
+### 🔑 The Evidence-First Principle
+
+**Raw logs and error details MUST be handed to every investigator. NEVER summarize the evidence away, NEVER send only an instruction.**
+
+```raw
+❌ WRONG:  Coder: "Fix the login bug."
+          → coder has zero evidence → guesses the cause → wrong fix → loop
+
+✅ RIGHT:  Coder: "Investigate this bug.
+          FULL error: [paste stack trace]
+          FULL logs: [paste raw logs]
+          Repro: [steps]
+          Find WHERE in the code this fails and WHY. Report the root cause + exact location.
+          DO NOT fix yet."
+```
+
+**Logs and detail > instructions.** The more raw evidence you pass, the faster and more accurate the diagnosis. `explore()` alone is NOT enough — it returns quick facts, not a deep root-cause analysis. Always hand the evidence to **coder / tester / planner** for real investigation.
+
+### Flow
+
+```raw
+PHASE 1 — COLLECT EVIDENCE  (Leader)
+1. Gather EVERYTHING the user provided, verbatim:
+   - Full error message + stack trace (do NOT paraphrase)
+   - Raw logs (the actual lines, not a summary)
+   - Reproduction steps / command
+   - Expected vs actual behavior
+   - Environment/version, and what changed recently (last commit, last deploy, config change)
+2. **Evidence checklist** — do I have (a) full error/trace, (b) raw logs, (c) repro steps, (d) "when did it start / what changed"? If any is missing: ask the user OR delegate a repro to Tester. **Do not proceed to Phase 2 with gaps.**
+3. Assemble a Problem Brief: symptoms + full evidence + repro + context
+
+PHASE 2 — INVESTIGATE  (Team — DIAGNOSIS ONLY, NO FIX)
+   Delegate investigation to the right specialists, EACH receiving the full Problem Brief:
+
+   Coder:    "Investigate bug [brief]. FULL logs: [paste]. Find WHERE the code fails
+             and WHY. Report root cause + exact file:line. DO NOT fix yet."
+   Tester:   "Reproduce bug [brief]. FULL logs: [paste]. Capture the failing scenario
+             as a reproducible test. Report the exact trigger conditions."
+   Explorer: "Retrieve past experiences / gotchas for [symptom or error] — has this
+             broken before? related conventions?"
+   (Planner) for BIG/multi-system bugs: "Map the full failure path across modules,
+             identify every suspect point."
+
+4. Leader does NOT design the fix here. WAIT for investigation findings.
+5. If root cause is still unclear → send investigators more targeted questions + more
+   evidence → loop (~3 rounds by default, see cap below).
+
+PHASE 3 — SYNTHESIZE ROOT CAUSE  (Leader)
+6. Combine the investigation findings. Confirm the ACTUAL root cause — evidence-based,
+   not assumed. Write it down explicitly: "Confirmed cause: [X], supported by [evidence]."
+7. Define the fix: what to change, why it resolves the confirmed cause, how to verify.
+8. If causes conflict or stay unclear → do not guess; return to Phase 2 (or escalate).
+
+PHASE 4 — FIX  (Implementation Workflow)
+9. Delegate to Coder with: confirmed root cause + the fix + the FULL evidence/logs.
+   "Confirmed root cause: [X]. Evidence: [paste]. Fix: [plan]. Implement, then confirm
+   the original repro now passes."
+10. Continue through the normal Implementation review/test flow.
+
+PHASE 5 — VERIFY THE ORIGINAL ISSUE
+11. Tester reproduces the ORIGINAL failing scenario (the exact repro from Phase 2).
+    The bug is only CLOSED when the original symptom is gone — not when unrelated tests pass.
+```
+
+### Evidence Briefing Template (use in every Phase 2 & 4 delegation)
+
+```raw
+## Problem
+[1-2 sentence symptom description]
+
+## Evidence (FULL — do not paraphrase)
+Error: [full stack trace / error message]
+Logs: [paste the relevant raw log lines]
+Repro: [exact steps or command]
+Expected: [what should happen]
+Actual: [what happens instead]
+Context: [version, environment, what changed recently]
+
+## Task
+[ "Investigate root cause — DO NOT fix yet"  (Phase 2)
+  OR
+  "Implement fix for confirmed root cause: [X]"  (Phase 4) ]
+```
+
+### Investigation Loop Limit
+
+**Cap at ~3 investigation rounds by default** in Phase 2. If the cause is still unclear:
+- **TrueAuto:** Pick the best-supported hypothesis, attempt the fix, and verify aggressively. Expect extra fix cycles.
+- **SemiAuto:** Surface the competing hypotheses to the user and ask for direction.
+
+### Scope Behavior
+
+| Scope | Debug Depth |
+|-------|-------------|
+| **Tiny** | The error message itself pinpoints the fix (e.g. `SyntaxError`, `ModuleNotFoundError: x`, `NameError: y`). Still delegate to Coder with the full error; one investigation round. Original repro must still pass. |
+| **Small** | Single component. Coder + Tester investigate in parallel with full evidence. |
+| **Big** | Cross-module. Coder + Tester + Planner map the failure path; investigate per area. |
+| **Huge** | Platform-level outage. Planner leads diagnosis across systems; phases per system. |
+
+---
+
 ## Phase Scheduling — Parallelism & Pipelining
 
 **The leader MUST assess dependencies between phases and schedule them intelligently. Never default to fully sequential if parallelism is possible.**
@@ -540,4 +669,8 @@ Implementation Workflow (varies by complexity):
    Medium: User → Leader → Coder → Reviewer → Tidier → Tester → Done → User
    High:   User → Leader → Coder → Reviewer → Tidier → Tester → Reviewer → Done → User
    Tiny:   User → Leader → Coder → Done → User
+
+Debug Workflow (investigate BEFORE fix; full evidence handed to every investigator):
+   Collect Evidence → Coder+Tester investigate (NO fix) → Leader confirms root cause
+       → Coder fixes → Tester reproduces ORIGINAL repro → Done
 ```

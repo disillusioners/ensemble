@@ -971,3 +971,82 @@ class TestCompactionRetrySkip:
                 await manager._maybe_compact_context("test-session", mock_session_graph, {"configurable": {"thread_id": "test"}})
             
             assert len(compaction_called) == 0, "Compaction should be skipped when is_retry=True"
+
+
+class TestSummarizationLLMStripsModelVision:
+    """Tests that _call_summarization_llm strips model_vision from LLM kwargs.
+
+    Compaction summarization is text-only, so model_vision must never leak into
+    ThinkingChatOpenAI constructor kwargs (it would be forwarded to the OpenAI
+    client and rejected as an unknown kwarg).
+    """
+
+    @pytest.mark.asyncio
+    async def test_summarization_does_not_pass_model_vision(self):
+        """model_vision must be filtered out before constructing ThinkingChatOpenAI."""
+        config = make_compaction_config()
+        llm_config = {
+            "base_url": "http://localhost:1234/v1",
+            "api_key": "test-key",
+            "model": "gpt-4o",
+            "model_vision": "gpt-4o-vision",  # Must NOT leak into constructor
+            "temperature": 0.7,
+            "request_timeout": 60,
+        }
+        compactor = ContextCompactor(config, llm_config)
+
+        mock_response = AIMessage(content="Summary.", id="mock-response")
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+
+        context = CompactionContext(
+            messages=[],
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config=llm_config,
+        )
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True) as mock_cls:
+            await compactor._call_summarization_llm("Summarize this.", context)
+
+        # Inspect kwargs actually passed to the LLM constructor
+        assert mock_cls.call_count == 1
+        call_kwargs = mock_cls.call_args.kwargs
+        assert "model_vision" not in call_kwargs, (
+            f"model_vision leaked into ThinkingChatOpenAI kwargs: {call_kwargs}"
+        )
+        # Sanity: other expected fields should still be there
+        assert call_kwargs.get("model") == "gpt-4o"
+
+    @pytest.mark.asyncio
+    async def test_summarization_strips_model_vision_with_summarization_model_override(self):
+        """model_vision must be stripped even when summarization_model override is used."""
+        config = make_compaction_config(summarization_model="gpt-4o-mini")
+        llm_config = {
+            "base_url": "http://localhost:1234/v1",
+            "api_key": "test-key",
+            "model": "gpt-4o",
+            "model_vision": "gpt-4o-vision",
+            "temperature": 0.7,
+        }
+        compactor = ContextCompactor(config, llm_config)
+
+        mock_response = AIMessage(content="Summary.", id="mock-response")
+        mock_llm_instance = MagicMock()
+        mock_llm_instance.invoke = MagicMock(return_value=mock_response)
+
+        context = CompactionContext(
+            messages=[],
+            system_prompt_tokens=0,
+            model_name="gpt-4o",
+            config=config,
+            llm_config=llm_config,
+        )
+
+        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm_instance, create=True) as mock_cls:
+            await compactor._call_summarization_llm("Summarize this.", context)
+
+        call_kwargs = mock_cls.call_args.kwargs
+        assert "model_vision" not in call_kwargs
+        assert call_kwargs.get("model") == "gpt-4o-mini"

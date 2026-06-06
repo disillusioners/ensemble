@@ -396,7 +396,7 @@ class TestTitleGenerationIdempotency:
         mock_llm = MagicMock()
         mock_llm.invoke = MagicMock()
 
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+        with patch("daemon.services.title_generation.ThinkingChatOpenAI", return_value=mock_llm):
             await service._generate_and_broadcast_title(
                 "instance-123", "Some message content"
             )
@@ -424,7 +424,7 @@ class TestTitleGenerationIdempotency:
         mock_llm = MagicMock()
         mock_llm.invoke = MagicMock(side_effect=RuntimeError("LLM API error"))
 
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+        with patch("daemon.services.title_generation.ThinkingChatOpenAI", return_value=mock_llm):
             with patch.object(service._logger, "warning") as mock_warning:
                 # Should not raise - error should be caught
                 await service._generate_and_broadcast_title(
@@ -454,7 +454,7 @@ class TestTitleGenerationIdempotency:
         mock_llm = MagicMock()
         mock_llm.invoke = MagicMock()
 
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+        with patch("daemon.services.title_generation.ThinkingChatOpenAI", return_value=mock_llm):
             # Test with empty string
             await service._generate_and_broadcast_title("instance-123", "")
             mock_llm.invoke.assert_not_called()
@@ -490,7 +490,7 @@ class TestTitleGenerationIdempotency:
         mock_llm = MagicMock()
         mock_llm.invoke = MagicMock(return_value=mock_response)
 
-        with patch("daemon.graph.ThinkingChatOpenAI", return_value=mock_llm):
+        with patch("daemon.services.title_generation.ThinkingChatOpenAI", return_value=mock_llm):
             await service._generate_and_broadcast_title(
                 "instance-123", "Some message content"
             )
