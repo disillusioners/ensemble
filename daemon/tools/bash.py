@@ -55,6 +55,17 @@ async def _kill_process(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+def _read_file_bytes(path):
+    """Read file contents as bytes; return b'' if path is None or read fails."""
+    if path is None:
+        return b""
+    try:
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+
+
 @register_tool_category("bash")
 @tool
 async def bash(
@@ -98,11 +109,13 @@ async def bash(
             subproc_kwargs["start_new_session"] = True
 
         # Open temp files for stdout and stderr capture.
-        # We use NamedTemporaryFile with delete=False so we can pass the path
-        # to the subprocess and unlink it ourselves after reading.
+        # Use tempfile.mkstemp so we get the fd and path directly. We close the
+        # raw fd and reopen via Python file objects, then pass those to the
+        # subprocess and unlink ourselves after reading.
         # Files are opened in read+write binary mode (O_RDWR) so the child
         # shell can write to them while the parent still holds a read-capable
-        # handle. (PIPE-style: child writes, parent reads after wait().)
+        # handle.
+        # w+b: binary mode since asyncio.subprocess writes raw bytes.
         stdout_fd, stdout_path = tempfile.mkstemp(prefix="bash-stdout-", suffix=".tmp")
         stderr_fd, stderr_path = tempfile.mkstemp(prefix="bash-stderr-", suffix=".tmp")
         # Close the parent's raw fds; we'll reopen via Python file objects.
@@ -114,8 +127,6 @@ async def bash(
 
         # If input is provided, write it to a temp file and pass that to the
         # child's stdin (so the shell can read it without blocking on a pipe).
-        stdin_file = None
-        stdin_path = None
         if input:
             stdin_fd, stdin_path = tempfile.mkstemp(prefix="bash-stdin-", suffix=".tmp")
             # Use a Python file object so partial writes are handled internally.
@@ -152,58 +163,33 @@ async def bash(
             if stdin_file is not None:
                 stdin_file.close()
 
+        # timeout=0 means "no timeout" — pass None to wait_for
+        actual_timeout = None if timeout == 0 else timeout
         try:
-            # timeout=0 means "no timeout" — pass None to wait_for
-            actual_timeout = None if timeout == 0 else timeout
             await asyncio.wait_for(proc.wait(), timeout=actual_timeout)
+            timed_out = False
         except asyncio.TimeoutError:
             await _kill_process(proc)
-            # Best-effort: still try to read whatever was written before the kill.
-            try:
-                with open(stdout_path, "rb") as f:
-                    stdout_bytes = f.read()
-            except OSError:
-                stdout_bytes = b""
-            try:
-                with open(stderr_path, "rb") as f:
-                    stderr_bytes = f.read()
-            except OSError:
-                stderr_bytes = b""
-            stdout_str = stdout_bytes.decode(errors="replace") if stdout_bytes else ""
-            stderr_str = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
-            content = ""
-            if stdout_str:
-                content += f"STDOUT:\n{stdout_str}\n\n"
-            if stderr_str:
-                content += f"STDERR:\n{stderr_str}\n\n"
-            return content + f"ERROR: Command timed out after {timeout} seconds"
+            timed_out = True
 
-        # Read captured output from the temp files.
-        try:
-            with open(stdout_path, "rb") as f:
-                stdout_bytes = f.read()
-        except OSError:
-            stdout_bytes = b""
-        try:
-            with open(stderr_path, "rb") as f:
-                stderr_bytes = f.read()
-        except OSError:
-            stderr_bytes = b""
-
+        # Read captured output from the temp files (best-effort: also try on
+        # timeout to surface whatever was written before the kill).
+        stdout_bytes = _read_file_bytes(stdout_path)
+        stderr_bytes = _read_file_bytes(stderr_path)
         stdout_str = stdout_bytes.decode(errors="replace") if stdout_bytes else ""
         stderr_str = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
 
         output_parts = []
-
         if stdout_str:
             output_parts.append(f"STDOUT:\n{stdout_str}")
-
         if stderr_str:
             output_parts.append(f"STDERR:\n{stderr_str}")
-
-        output_parts.append(f"EXIT CODE: {proc.returncode}")
-
+        if not timed_out:
+            output_parts.append(f"EXIT CODE: {proc.returncode}")
         content = "\n\n".join(output_parts)
+
+        if timed_out:
+            return content + f"ERROR: Command timed out after {timeout} seconds"
 
         # Apply character limit only (no line limit)
         if len(content) > 150000:
