@@ -886,7 +886,10 @@ class ContextCompactor:
             }
         else:
             llm_config = self.llm_config_with_headers
-        
+
+        # Strip model_vision — compaction summarization is text-only, vision model is irrelevant
+        llm_config = {k: v for k, v in llm_config.items() if k != "model_vision"}
+
         llm = ThinkingChatOpenAI(**llm_config)
         
         response = await asyncio.to_thread(
