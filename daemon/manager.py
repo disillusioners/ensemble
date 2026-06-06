@@ -1248,11 +1248,15 @@ class InstanceManager:
         svc = self.config.services
         
         # Run startup crash recovery with config values
+        # NOTE: threshold_minutes is sourced from stale_task_recovery_threshold_minutes
+        # (separate from task_timeout_minutes) so that sibling tasks blocked by
+        # Fix B's per-instance guard are unblocked within ~5 minutes of a worker
+        # crash, not the much longer task_timeout_minutes.
         stale_recovery = StaleTaskRecovery(
             task_repository=task_repo,
             message_repository=self._queue_repository,
             event_repository=event_repo,
-            threshold_minutes=int(svc.task_timeout_minutes),
+            threshold_minutes=svc.stale_task_recovery_threshold_minutes,
             check_interval_seconds=svc.stale_task_recovery_interval,
             cancel_grace_seconds=svc.stale_task_cancel_grace_seconds,
             max_retries=svc.max_task_retries,

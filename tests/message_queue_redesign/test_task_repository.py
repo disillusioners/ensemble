@@ -155,6 +155,76 @@ class TestTaskClaiming:
         assert claimed is not None
         assert claimed.instance_id == "i1"
 
+    def test_claim_skips_pending_tasks_for_busy_instance(self, repository):
+        """Fix B: a pending task for an instance with a RUNNING task must not be claimed."""
+        # Two pending tasks for inst-A, one for inst-B
+        t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-A", message_id="m1")
+        t2 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-A", message_id="m2")
+        t3 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-B", message_id="m3")
+
+        # Worker 1 claims t1 (now RUNNING for inst-A)
+        claimed1 = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed1 is not None
+        assert claimed1.id == t1.id
+
+        # Worker 2 cannot claim t2 (inst-A is busy); must claim t3 (inst-B) instead
+        claimed2 = repository.claim_pending_task(worker_id="worker-2")
+        assert claimed2 is not None
+        assert claimed2.id == t3.id
+        assert claimed2.instance_id == "inst-B"
+
+        # Worker 3 cannot claim t2 — inst-A still busy
+        claimed3 = repository.claim_pending_task(worker_id="worker-3")
+        assert claimed3 is None
+
+        # Worker 1 finishes t1
+        repository.complete_task(t1.id, {"success": True})
+
+        # Now t2 is claimable
+        claimed4 = repository.claim_pending_task(worker_id="worker-3")
+        assert claimed4 is not None
+        assert claimed4.id == t2.id
+
+    def test_claim_unblocks_when_sibling_fails(self, repository):
+        """Fix B: a sibling task for a busy instance becomes claimable after the
+        running task fails (not just completes)."""
+        t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-X", message_id="m1")
+        t2 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-X", message_id="m2")
+
+        claimed1 = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed1.id == t1.id
+
+        # t2 not claimable while t1 running
+        assert repository.claim_pending_task(worker_id="worker-2") is None
+
+        # t1 fails → t2 should be claimable
+        repository.fail_task(t1.id, "boom")
+        claimed2 = repository.claim_pending_task(worker_id="worker-2")
+        assert claimed2 is not None
+        assert claimed2.id == t2.id
+
+    def test_has_pending_tasks_blocked_by_busy_instance(self, repository):
+        """The empty-claim-due-to-guard signal returns True when a pending
+        task is blocked by a busy instance, False otherwise."""
+        # Initially: no pending, no busy → False
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
+
+        # Need TWO tasks for the same instance: one RUNNING (blocks), one
+        # PENDING (blocked).
+        t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-Y", message_id="m1")
+        t2 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-Y", message_id="m2")
+        # Both PENDING, no RUNNING → False
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
+
+        # Claim t1 → t1 is RUNNING, t2 is PENDING and blocked by t1's instance
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed.id == t1.id
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
+
+        # Complete t1 → t2 is still PENDING but no RUNNING blocks it → False
+        repository.complete_task(t1.id, {"ok": True})
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
+
 
 class TestTaskCompletion:
     """Tests for task completion."""

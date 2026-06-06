@@ -223,6 +223,16 @@ class ServicesConfig(BaseSettings):
         default=10,
         description="Seconds to wait for graceful shutdown after requesting task cancellation in stale task recovery."
     )
+    stale_task_recovery_threshold_minutes: int = Field(
+        default=5,
+        description=(
+            "Minutes after which a RUNNING task is considered stale and "
+            "recovered (transitioned to CANCELLED, with a retry task). "
+            "Sized to limit how long sibling tasks for the same instance "
+            "are blocked when a worker crashes (Fix B makes sibling-block "
+            "the dominant visible symptom). Lower than task_timeout_minutes."
+        ),
+    )
     graph_timeout_minutes: float = Field(
         default=55.0,
         description="Hard timeout for LangGraph execution via MainLoopBridge (minutes). Set to 0 to disable."

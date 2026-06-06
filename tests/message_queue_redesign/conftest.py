@@ -89,6 +89,13 @@ class MockTaskProcessor:
         self.should_claim = True
         self.claim_delay = 0
         self.tasks_to_return = []
+        # Mock task repository exposing the metrics Worker checks
+        # on the empty-claim path. Defaults to "nothing blocked".
+        self._task_repo = self._MockTaskRepoForMetrics()
+
+    class _MockTaskRepoForMetrics:
+        def has_pending_tasks_blocked_by_busy_instance(self):
+            return False
     
     def claim_task(self, worker_id):
         self.claim_count += 1
@@ -260,13 +267,22 @@ class MockWorkerPool:
         self._condition = threading.Condition()
         self._notification_count = 0
         self._wait_timeout = wait_timeout
+        # Stats dict mirroring the real WorkerPool. Worker.run() increments
+        # empty_claim_attempts; the new claims_skipped_due_to_busy_instance
+        # metric is also tracked here for tests that inspect it.
+        self._stats = {
+            "notifications_sent": 0,
+            "empty_claim_attempts": 0,
+            "workers_woken_by_timeout": 0,
+            "claims_skipped_due_to_busy_instance": 0,
+        }
     
     def notify_work(self):
         with self._condition:
             self._notification_count += 1
             self._condition.notify_all()
     
-    def wait_for_work(self, timeout: float = 3.0):
+    def wait_for_work(self, timeout: float = 3.0, stop_event=None):
         with self._condition:
             if self._notification_count > 0:
                 self._notification_count -= 1

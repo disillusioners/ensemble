@@ -109,7 +109,14 @@ class Worker(threading.Thread):
                 
                 # No task available → this is an empty claim attempt
                 self._worker_pool._stats["empty_claim_attempts"] += 1
-                
+
+                # Track whether the empty claim was due to the per-instance
+                # guard (pending tasks exist but all are blocked by a RUNNING
+                # task for the same instance). This surfaces "is Fix B causing
+                # excessive deferral?" in production.
+                if self._task_processor._task_repo.has_pending_tasks_blocked_by_busy_instance():
+                    self._worker_pool._stats["claims_skipped_due_to_busy_instance"] += 1
+
                 # Wait for notification OR safety timeout OR stop signal
                 self._worker_pool.wait_for_work(timeout=3.0, stop_event=self._stop_event)
                 # Loop back to try claiming again
@@ -358,6 +365,7 @@ class WorkerPool:
             "notifications_sent": 0,
             "empty_claim_attempts": 0,
             "workers_woken_by_timeout": 0,
+            "claims_skipped_due_to_busy_instance": 0,
         }
         
         # Event for test instrumentation - set when wait_for_work() is called
@@ -482,6 +490,7 @@ class WorkerPool:
             "notifications_sent": notifications,
             "empty_claim_attempts": empty_claims,
             "workers_woken_by_timeout": timeouts,
+            "claims_skipped_due_to_busy_instance": self._stats["claims_skipped_due_to_busy_instance"],
             "wakeup_efficiency": round(wakeup_efficiency, 3),
             "workers": [w.get_stats() for w in self._workers],
             "pool_pending_tasks": self._task_processor.get_pending_count(),

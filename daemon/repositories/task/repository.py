@@ -123,6 +123,12 @@ class TaskRepository:
         Uses UPDATE-RETURNING pattern for SQLite compatibility.
         Only one worker can claim a task at a time.
 
+        Per-instance guard: a pending task is only claimable if no other task
+        for the same ``instance_id`` is currently ``RUNNING``. This prevents
+        two workers from concurrently processing tasks for the same langgraph
+        thread_id, which would race on ``graph.astream`` and shadow channel
+        writes in the Postgres checkpointer.
+
         Args:
             worker_id: ID of the worker claiming the task.
 
@@ -142,6 +148,10 @@ class TaskRepository:
                     SELECT id FROM task
                     WHERE status = :status_pending
                     AND (next_retry_at IS NULL OR next_retry_at <= :now_str)
+                    AND instance_id NOT IN (
+                        SELECT instance_id FROM task
+                        WHERE status = :status_running_guard
+                    )
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
@@ -152,6 +162,7 @@ class TaskRepository:
                 "worker_id": worker_id,
                 "started_at": now,
                 "status_pending": TaskStatus.PENDING.value,
+                "status_running_guard": TaskStatus.RUNNING.value,
                 "now_str": now_str,
             }).fetchone()
 
@@ -326,6 +337,37 @@ class TaskRepository:
                 Task.status == TaskStatus.PENDING.value
             )
             return db_session.exec(stmt).one()
+
+    def has_pending_tasks_blocked_by_busy_instance(self) -> bool:
+        """Check whether any pending task is blocked by a per-instance guard.
+
+        Returns True if there is at least one PENDING task whose ``instance_id``
+        also has a RUNNING task. Used by the worker pool to distinguish
+        "no work" from "work exists but instance is busy" in the empty-claim
+        path. Cheap: two index lookups.
+
+        Returns:
+            True if any pending task is blocked by Fix B's per-instance guard.
+        """
+        with self.engine.begin() as conn:
+            stmt = text("""
+                SELECT 1
+                WHERE EXISTS (
+                    SELECT 1 FROM task t_pending
+                    WHERE t_pending.status = :status_pending
+                    AND EXISTS (
+                        SELECT 1 FROM task t_running
+                        WHERE t_running.status = :status_running
+                        AND t_running.instance_id = t_pending.instance_id
+                    )
+                )
+                LIMIT 1
+            """)
+            row = conn.execute(stmt, {
+                "status_pending": TaskStatus.PENDING.value,
+                "status_running": TaskStatus.RUNNING.value,
+            }).fetchone()
+            return row is not None
 
     def count_by_status(self) -> dict[str, int]:
         """Get count of tasks by status.
