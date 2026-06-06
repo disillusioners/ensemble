@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
 
+from daemon.opencode.constants import POLL_INTERVAL_S
 from daemon.opencode.server import (
     external_opencode_send_message as _server_send_message,  # Blocker 1 (Rev 4): alias to avoid name collision with LangChain tool of same name
 )
@@ -53,17 +54,17 @@ def create_opencode_tools(
     """Create opencode orchestration tools with injected manager reference.
     
     Args:
-        manager: The InstanceManager instance (provides _opencode_registry).
+        manager: The InstanceManager instance (provides opencode_registry).
         current_instance_id: The ID of the current instance (unused for now
             but kept for pattern parity with knowledge_tools).
-    
+
     Returns:
         List of 8 tool functions.
     """
-    
+
     def _get_registry() -> "OpenCodeSessionRegistry":
         """Get the opencode session registry from manager (Phase 3 wiring)."""
-        registry = getattr(manager, '_opencode_registry', None)
+        registry = getattr(manager, 'opencode_registry', None)
         if registry is None:
             raise RuntimeError(
                 "OpenCode session registry not initialized. "
@@ -278,7 +279,7 @@ Returns:
                     return f"[COMPLETED] Session completed.\n{_format_response(resp)}"
                 if state == "WAITING_FOR_INPUT":
                     return f"[WAITING_FOR_INPUT] Session needs input. Use external_opencode_get_status() to see questions."
-            await asyncio.sleep(30)  # Match Go's POLL_INTERVAL_S
+            await asyncio.sleep(POLL_INTERVAL_S)
         
         return f"[TIMEOUT] Session did not complete within {timeout}s. Use external_opencode_resume_session() to continue."
     
@@ -367,8 +368,8 @@ Returns:
                     lines.append(_format_response(resp))
                 return "\n".join(lines)
             
-            await asyncio.sleep(30)
-        
+            await asyncio.sleep(POLL_INTERVAL_S)
+
         return f"[TIMEOUT] No session completed within {timeout}s. Use external_opencode_get_status() to check each."
     
     external_opencode_wait_any._full_doc_ = """\

@@ -9,6 +9,8 @@ binary's defaults; override per-process via environment variables when needed.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 # ── OpenCode HTTP API ──────────────────────────────────────────────────────────
 OPENCODE_URL: str = "http://127.0.0.1:4095"  # Go: config.OpenCodeURL
 """Base URL of the local OpenCode HTTP server. The wrapper always talks to the
@@ -77,3 +79,15 @@ LEGACY_WRAPPER_DIR: str = "~/.opencode_skill/"
 """Matches ``config.WrapperDir`` in the Go binary. Used only for fallback
 credential resolution; ensemble's primary storage lives under
 ``<data_dir>/opencode_sessions``."""
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _now_rfc3339() -> str:
+    """Return current UTC time in RFC3339 — matches ``time.RFC3339`` in Go.
+
+    Used for ``last_activity`` columns. The Go binary writes
+    ``sm.lastActivity.Format(time.RFC3339)`` (manager.go:125).
+    """
+    return datetime.now(timezone.utc).isoformat()

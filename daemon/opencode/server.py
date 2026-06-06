@@ -221,7 +221,7 @@ async def external_opencode_send_message(
                 status="error",
                 message="project and session_name are required",
             )
-        record = registry._repository.get(project, session_name)  # type: ignore[attr-defined]
+        record = await registry.get_session_record(project, session_name)
         if record is None:
             return OpenCodeResponse(status="error", message="not found")
         # Load into memory if not present
@@ -317,8 +317,8 @@ async def external_opencode_send_message(
                 return OpenCodeResponse(
                     status="error",
                     message=(
-                        "Session is busy. Please patience wait for the "
-                        "previous message result before send new message."
+                        "Session is busy. Please wait for the previous "
+                        "message result before sending a new message."
                     ),
                 )
 

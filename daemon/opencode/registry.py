@@ -22,11 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from .client import OpenCodeClient
-from .constants import ABORT_REMOTE_SETTLE_S
+from .constants import ABORT_REMOTE_SETTLE_S, _now_rfc3339
 from .repository import OpenCodeSessionRepository
 from .session_manager import (
     IDLE,
@@ -35,11 +34,6 @@ from .session_manager import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _now_rfc3339() -> str:
-    """Match ``time.RFC3339`` format used by the Go binary."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

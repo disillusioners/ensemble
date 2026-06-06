@@ -26,13 +26,14 @@ to avoid polluting the dedicated engine with ensemble's other 22+ tables.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column, Index
 from sqlalchemy.engine import Engine
 from sqlalchemy.types import JSON
 from sqlmodel import Field, Session, SQLModel, select
+
+from .constants import _now_rfc3339
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,9 @@ class OpenCodeSessionRecord(SQLModel, table=True):
         last_activity    TEXT DEFAULT '',
         PRIMARY KEY (project, session_name)
 
-    We add an index on ``id`` to make ``FindByID`` O(log N) — see
-    migration ``20260606_000002_create_opencode_sessions_table.sql``.
+    We add an index on ``id`` to make ``FindByID`` O(log N) — the table is
+    created at engine-factory time via ``OpenCodeSessionRecord.__table__.create()``
+    in ``create_opencode_session_repository()`` (no migration file).
     """
 
     __tablename__ = "opencode_sessions"
@@ -104,20 +106,6 @@ class OpenCodeSessionRecord(SQLModel, table=True):
             "questions": self.questions or [],
             "last_activity": self.last_activity,
         }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-
-def _now_rfc3339() -> str:
-    """Return current UTC time in RFC3339 — matches ``time.RFC3339`` in Go.
-
-    Used for ``last_activity`` columns. The Go binary writes
-    ``sm.lastActivity.Format(time.RFC3339)`` (manager.go:125).
-    """
-    return datetime.now(timezone.utc).isoformat()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -73,11 +73,6 @@ T = TypeVar("T")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class SessionState_(str):
-    """Type alias for the session state string values used in the API."""
-    pass
-
-
 # Re-export the enum values at module level so callers can use
 # SessionManager.IDLE etc.
 IDLE = SessionState.IDLE

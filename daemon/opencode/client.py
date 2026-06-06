@@ -178,18 +178,6 @@ class SessionResponse(BaseModel):
     title: str = ""
 
 
-class APIResponse(BaseModel):
-    """Go: api.APIResponse (api/types.go:98-104). Generic envelope."""
-
-    model_config = ConfigDict(populate_by_name=True, extra="ignore")
-
-    status: str | None = None
-    message: str | None = None
-    result: Any | None = None
-    data: Any | None = None
-    error: str | None = None
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP client — port of client.go (190 lines)
 # ─────────────────────────────────────────────────────────────────────────────
