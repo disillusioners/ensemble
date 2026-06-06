@@ -151,6 +151,7 @@ def mock_registry() -> AsyncMock:
     registry.abort_session = AsyncMock(return_value={"status": "ok", "message": "Aborted"})
     registry.load_session_into_memory = AsyncMock(return_value=None)
     registry.handle_start_work = AsyncMock(return_value=None)
+    registry.get_session_record = AsyncMock(return_value=None)
     return registry
 
 
@@ -236,8 +237,7 @@ class TestGetSession:
 
     @pytest.mark.asyncio
     async def test_returns_not_found_when_missing(self, mock_registry: AsyncMock):
-        mock_registry._repository = MagicMock()
-        mock_registry._repository.get = MagicMock(return_value=None)
+        mock_registry.get_session_record = AsyncMock(return_value=None)
 
         req = OpenCodeRequest(
             action="GET_SESSION",
@@ -273,8 +273,7 @@ class TestGetSession:
     @pytest.mark.asyncio
     async def test_returns_ok_with_record(self, mock_registry: AsyncMock):
         record = {"project": "myapp", "session_name": "s1", "id": "sid-123"}
-        mock_registry._repository = MagicMock()
-        mock_registry._repository.get = MagicMock(return_value=record)
+        mock_registry.get_session_record = AsyncMock(return_value=record)
 
         req = OpenCodeRequest(
             action="GET_SESSION",
@@ -289,8 +288,7 @@ class TestGetSession:
     async def test_loads_into_memory_when_manager_not_in_memory(self, mock_registry: AsyncMock):
         """When a session record exists but manager is not in memory, lazy-load it."""
         record = {"project": "myapp", "session_name": "s1", "id": "sid-123"}
-        mock_registry._repository = MagicMock()
-        mock_registry._repository.get = MagicMock(return_value=record)
+        mock_registry.get_session_record = AsyncMock(return_value=record)
         mock_registry.get_manager = AsyncMock(return_value=None)
         mock_registry.load_session_into_memory = AsyncMock()
 

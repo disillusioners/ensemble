@@ -62,9 +62,9 @@ def mock_registry() -> AsyncMock:
 
 @pytest.fixture
 def mock_manager(mock_registry: AsyncMock) -> MagicMock:
-    """Return a MagicMock InstanceManager with an ``_opencode_registry``."""
+    """Return a MagicMock InstanceManager with an ``opencode_registry``."""
     manager = MagicMock()
-    manager._opencode_registry = mock_registry
+    manager.opencode_registry = mock_registry
     return manager
 
 
