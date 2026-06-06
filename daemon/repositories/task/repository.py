@@ -215,7 +215,13 @@ class TaskRepository:
 
             db_session.commit()
             db_session.refresh(task)
-            return task
+
+        # Notify workers that a pending task may now be claimable.
+        # (Sibling tasks for the same instance are unblocked by this terminal
+        # transition; without notification they'd wait up to 3s for the next poll.)
+        self._notify_pending_task()
+
+        return task
 
     def fail_task(self, task_id: int, error: str) -> Task | None:
         """Mark task as failed with error message.
@@ -240,7 +246,11 @@ class TaskRepository:
 
             db_session.commit()
             db_session.refresh(task)
-            return task
+
+        # Notify workers (see complete_task for rationale).
+        self._notify_pending_task()
+
+        return task
 
     # --------------------------------------------------------
     # RECOVERY
@@ -571,6 +581,7 @@ class TaskRepository:
         cancel_requested flag within grace period.
         """
         now = datetime.now(timezone.utc)
+        result = None
 
         with self.engine.begin() as conn:
             # Check current status
@@ -611,7 +622,14 @@ class TaskRepository:
                 text("SELECT * FROM task WHERE id = :id"),
                 {"id": task_id}
             ).fetchone()
-            return self._row_to_task(updated_row) if updated_row else None
+            result = self._row_to_task(updated_row) if updated_row else None
+
+        # Notify workers (see complete_task for rationale). Notification
+        # is safe after the commit; the worst case is a spurious wakeup
+        # that finds nothing to claim.
+        self._notify_pending_task()
+
+        return result
 
     def force_cancel_and_schedule_retry(
         self,
