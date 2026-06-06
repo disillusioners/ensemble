@@ -34,6 +34,7 @@ from .project import create_project_tools
 from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
+from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
@@ -657,6 +658,11 @@ Returns:
 
         knowledge_tool_list = create_knowledge_tools(manager, current_instance_id)
         tools.extend(knowledge_tool_list)
+
+    # ── OpenCode tools (external system integration, always available) ──
+    # NOTE: NOT inside the is_rag_enabled() block — these are always available.
+    opencode_tool_list = create_opencode_tools(manager, current_instance_id)
+    tools.extend(opencode_tool_list)
 
     # ── MCP tools: load BEFORE creating help tool so we have the names ──
     # IMPORTANT: MCP tools MUST be loaded BEFORE help tool creation

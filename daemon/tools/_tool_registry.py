@@ -196,6 +196,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "knowledge": "daemon.tools.knowledge_tools",
     "rag": "daemon.tools.rag_tools",
     "mcp": "daemon.tools.mcp_tools",
+    "external_opencode": "daemon.tools.external_opencode",
 }
 
 
