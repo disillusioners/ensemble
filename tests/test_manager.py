@@ -540,19 +540,19 @@ class TestGenerateAndBroadcastTitle:
     async def test_generate_and_broadcast_title_success(self, mock_config, mock_llm, mock_instance_repository):
         """Test that title is generated and update_title is called correctly."""
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
-            
+             patch('daemon.services.title_generation.ThinkingChatOpenAI', return_value=mock_llm):
+
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            
+
             # Mock the instance repository to return a instance with no title
             mock_instance = MagicMock()
             mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
-            
+
             # Call the method
             await manager._generate_and_broadcast_title("test-instance", "Hello, how are you?")
-            
+
             # Verify update_title was called with correct title
             mock_instance_repository.update_title.assert_called_once_with("test-instance", "Test Instance Title")
 
@@ -582,17 +582,17 @@ class TestGenerateAndBroadcastTitle:
         mock_llm_instance.invoke.side_effect = Exception("LLM Error")
         
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm_instance), \
+             patch('daemon.services.title_generation.ThinkingChatOpenAI', return_value=mock_llm_instance), \
              patch('daemon.manager.logger') as mock_logger:
-            
+
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            
+
             # Mock the instance repository
             mock_instance = MagicMock()
             mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
-            
+
             # Call the method - should not raise (exception is caught)
             await manager._generate_and_broadcast_title("test-instance", "Hello!")
             
@@ -613,19 +613,19 @@ class TestGenerateAndBroadcastTitle:
         mock_llm.invoke.return_value = mock_response
         
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
-            
+             patch('daemon.services.title_generation.ThinkingChatOpenAI', return_value=mock_llm):
+
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            
+
             # Mock the instance repository
             mock_instance = MagicMock()
             mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
-            
+
             # Call the method
             await manager._generate_and_broadcast_title("test-instance", "Hello!")
-            
+
             # Verify update_title was called with truncated title
             mock_instance_repository.update_title.assert_called_once()
             call_args = mock_instance_repository.update_title.call_args
@@ -663,19 +663,19 @@ class TestGenerateAndBroadcastTitle:
         mock_llm.invoke.return_value = mock_response
         
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm):
-            
+             patch('daemon.services.title_generation.ThinkingChatOpenAI', return_value=mock_llm):
+
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            
+
             # Mock the instance repository
             mock_instance = MagicMock()
             mock_instance.instance_metadata = {}
             mock_instance_repository.get.return_value = mock_instance
-            
+
             # Call the method
             await manager._generate_and_broadcast_title("test-instance", "Hello!")
-            
+
             # Verify title was extracted from list and update_title was called
             mock_instance_repository.update_title.assert_called_once()
             call_args = mock_instance_repository.update_title.call_args
@@ -689,7 +689,7 @@ class TestGenerateAndBroadcastTitle:
         mock_llm_instance.invoke.side_effect = Exception("LLM Error")
         
         with patch('daemon.manager.PromptCache', return_value=Mock()), \
-             patch('daemon.graph.ThinkingChatOpenAI', return_value=mock_llm_instance), \
+             patch('daemon.services.title_generation.ThinkingChatOpenAI', return_value=mock_llm_instance), \
              patch('daemon.manager.logger') as mock_logger:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
