@@ -225,6 +225,84 @@ class TestTaskClaiming:
         repository.complete_task(t1.id, {"ok": True})
         assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
+    def test_claim_skips_when_message_job_processing_for_instance(self, repository, engine):
+        """Cross-system guard: a task for an instance with a PROCESSING MESSAGE
+        job in job_queue_items must not be claimed concurrently. This prevents
+        the langgraph checkpoint race where the task forks from a stale state
+        and shadows the AIMessage produced by the job (the
+        "Done! 👋 lost" bug)."""
+        from sqlmodel import Session as SQLModelSession
+        from datetime import datetime, timezone
+        from daemon.repositories.job_queue.models import JobItem, JobStatus
+
+        now = datetime.now(timezone.utc).isoformat()
+        # Insert a PROCESSING MESSAGE job for inst-J
+        with SQLModelSession(engine) as session:
+            session.add(JobItem(
+                job_id="job-J1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                status=JobStatus.PROCESSING.value,
+                job_type="message",
+                instance_id="inst-J",
+                created_at=now,
+                started_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # A pending task for the same instance must NOT be claimable
+        t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-J", message_id="m1")
+        assert repository.claim_pending_task(worker_id="worker-1") is None
+
+        # has_pending_tasks_blocked_by_busy_instance should also report True
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
+
+        # Complete the job → t1 becomes claimable
+        with SQLModelSession(engine) as session:
+            job = session.get(JobItem, "job-J1")
+            job.status = JobStatus.COMPLETED.value
+            session.commit()
+
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == t1.id
+
+    def test_claim_unaffected_by_non_message_job_types(self, repository, engine):
+        """Cross-system guard only blocks on MESSAGE jobs, not other job types
+        (cleanup, send_report, etc.) that don't touch the langgraph thread."""
+        from sqlmodel import Session as SQLModelSession
+        from datetime import datetime, timezone
+        from daemon.repositories.job_queue.models import JobItem, JobStatus
+
+        now = datetime.now(timezone.utc).isoformat()
+        with SQLModelSession(engine) as session:
+            session.add(JobItem(
+                job_id="job-K1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="cleanup",
+                source="system",
+                status=JobStatus.PROCESSING.value,
+                job_type="cleanup",
+                instance_id="inst-K",
+                created_at=now,
+                started_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # A pending task for inst-K SHOULD be claimable because the active
+        # job is cleanup, not message — no langgraph thread contention.
+        t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-K", message_id="m1")
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == t1.id
+
 
 class TestTaskCompletion:
     """Tests for task completion."""

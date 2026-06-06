@@ -124,10 +124,16 @@ class TaskRepository:
         Only one worker can claim a task at a time.
 
         Per-instance guard: a pending task is only claimable if no other task
-        for the same ``instance_id`` is currently ``RUNNING``. This prevents
+        for the same ``instance_id`` is currently ``RUNNING`` AND no MESSAGE
+        job for the same instance is currently ``PROCESSING``. This prevents
         two workers from concurrently processing tasks for the same langgraph
         thread_id, which would race on ``graph.astream`` and shadow channel
-        writes in the Postgres checkpointer.
+        writes in the Postgres checkpointer. The MESSAGE-job check is
+        critical because the child-completion handler enqueues completion
+        reports as tasks, but the parent's original user message is typically
+        being processed by the job-queue path. Without the cross-system
+        guard, the task forks the checkpoint from a stale state and the
+        "Done! 👋" AIMessage produced by the original job is shadowed/lost.
 
         Heartbeat init: ``last_heartbeat_at`` is set to the same value as
         ``started_at`` on claim, so the recovery service can distinguish
@@ -161,6 +167,12 @@ class TaskRepository:
                         SELECT instance_id FROM task
                         WHERE status = :status_running_guard
                     )
+                    AND instance_id NOT IN (
+                        SELECT instance_id FROM job_queue_items
+                        WHERE status = :status_processing
+                        AND job_type = :job_type_message
+                        AND instance_id IS NOT NULL
+                    )
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
@@ -172,6 +184,8 @@ class TaskRepository:
                 "started_at": now,
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running_guard": TaskStatus.RUNNING.value,
+                "status_processing": "processing",
+                "job_type_message": "message",
                 "now_str": now_str,
             }).fetchone()
 
@@ -423,12 +437,13 @@ class TaskRepository:
         """Check whether any pending task is blocked by a per-instance guard.
 
         Returns True if there is at least one PENDING task whose ``instance_id``
-        also has a RUNNING task. Used by the worker pool to distinguish
-        "no work" from "work exists but instance is busy" in the empty-claim
-        path. Cheap: two index lookups.
+        also has a RUNNING task OR a PROCESSING MESSAGE job. Used by the
+        worker pool to distinguish "no work" from "work exists but instance
+        is busy" in the empty-claim path. Cheap: two index lookups.
 
         Returns:
-            True if any pending task is blocked by Fix B's per-instance guard.
+            True if any pending task is blocked by Fix B's per-instance guard
+            (task-level or job-queue-level).
         """
         with self.engine.begin() as conn:
             stmt = text("""
@@ -436,10 +451,18 @@ class TaskRepository:
                 WHERE EXISTS (
                     SELECT 1 FROM task t_pending
                     WHERE t_pending.status = :status_pending
-                    AND EXISTS (
-                        SELECT 1 FROM task t_running
-                        WHERE t_running.status = :status_running
-                        AND t_running.instance_id = t_pending.instance_id
+                    AND (
+                        EXISTS (
+                            SELECT 1 FROM task t_running
+                            WHERE t_running.status = :status_running
+                            AND t_running.instance_id = t_pending.instance_id
+                        )
+                        OR EXISTS (
+                            SELECT 1 FROM job_queue_items j_running
+                            WHERE j_running.status = :status_processing
+                            AND j_running.job_type = :job_type_message
+                            AND j_running.instance_id = t_pending.instance_id
+                        )
                     )
                 )
                 LIMIT 1
@@ -447,6 +470,8 @@ class TaskRepository:
             row = conn.execute(stmt, {
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
+                "status_processing": "processing",
+                "job_type_message": "message",
             }).fetchone()
             return row is not None
 
