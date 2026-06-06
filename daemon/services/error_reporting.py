@@ -184,15 +184,24 @@ class ErrorReportingService:
                 # Fix C: symmetric to the decrement in child_reports.py. A
                 # non-atomic read-modify-write races with concurrent
                 # child-completion decrements. SQL UPDATE is atomic in both
-                # SQLite and Postgres. RETURNING gives us the post-UPDATE
-                # value for accurate logging (see child_reports.py for the
-                # rationale on why we don't log a from-value).
+                # SQLite and Postgres. Use CASE (not MAX, not GREATEST) for
+                # the clamp-at-zero: PostgreSQL's MAX is aggregate-only and
+                # errors on multi-arg scalar ``MAX(0, ...)``; GREATEST is a
+                # SQLite *extension* function the stdlib sqlite3 driver
+                # doesn't load. CASE is portable SQL — same shape in both
+                # dialects, no dialect branch needed. RETURNING gives us the
+                # post-UPDATE value for accurate logging (see child_reports.py
+                # for the rationale on why we don't log a from-value).
                 parent = session.get(Instance, parent_id)
                 if parent:
                     result = session.execute(
                         text(
                             "UPDATE instances "
-                            "SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                            "SET waiting_for = CASE "
+                            "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                            "        THEN COALESCE(waiting_for, 0) - 1 "
+                            "    ELSE 0 "
+                            "END "
                             "WHERE instance_id = :pid "
                             "RETURNING waiting_for"
                         ),

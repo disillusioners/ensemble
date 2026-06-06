@@ -404,20 +404,32 @@ Provide a concise summary:"""
         # child completions (two decrements can both read the same starting
         # value, both write N-1, leaving the counter stuck at N-1 instead of
         # N-2). The SQL UPDATE is atomic in both SQLite and Postgres; COALESCE
-        # guards against NULL and MAX clamps at 0.
+        # guards against NULL and the CASE clamps at 0.
+        #
+        # Dialect note: SQLite's scalar MAX(a, b) is multi-arg, but PostgreSQL
+        # only exposes MAX as an aggregate, so it errors with
+        # ``function max(integer, integer) does not exist``. GREATEST looks
+        # like the obvious fix but is a SQLite *extension* function, not a
+        # core builtin, so the stdlib ``sqlite3`` driver raises
+        # ``no such function: GREATEST``. CASE is the portable form — same
+        # shape in both dialects, no dialect branch needed.
         #
         # RETURNING gives us the post-UPDATE value as observed by THIS
         # statement, so the log line is honest about what THIS decrement
         # actually saw. We do NOT log a from-value: under concurrent
         # decrements, the pre-value would be a stale session-cache
         # read, and the inferred "from" via ``new + 1`` is wrong when
-        # MAX(0, ...) clamped (0-1 stays at 0, so +1 misleads). Log
+        # the clamp kept it at 0 (0-1 stays at 0, so +1 misleads). Log
         # just the new value; chains of decrements reconstruct the
         # sequence from successive log lines.
         result = session.execute(
             text(
                 "UPDATE instances "
-                "SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                "SET waiting_for = CASE "
+                "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                "        THEN COALESCE(waiting_for, 0) - 1 "
+                "    ELSE 0 "
+                "END "
                 "WHERE instance_id = :pid "
                 "RETURNING waiting_for"
             ),

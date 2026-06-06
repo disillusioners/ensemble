@@ -95,11 +95,21 @@ def _read_waiting(engine, instance_id):
 
 
 def _decrement_waiting_atomic(engine, instance_id):
-    """Mirror the SQL from child_reports.py:402-410 (Fix C)."""
+    """Mirror the SQL from child_reports.py:402-410 (Fix C).
+
+    Uses CASE (not MAX, not GREATEST) so the test mirrors production on
+    both SQLite and Postgres: PostgreSQL's MAX is aggregate-only, and
+    GREATEST is a SQLite *extension* function the stdlib sqlite3 driver
+    doesn't load by default.
+    """
     with engine.begin() as conn:
         conn.execute(
             text(
-                "UPDATE instances SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                "UPDATE instances SET waiting_for = CASE "
+                "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                "        THEN COALESCE(waiting_for, 0) - 1 "
+                "    ELSE 0 "
+                "END "
                 "WHERE instance_id = :pid"
             ),
             {"pid": instance_id},
@@ -217,7 +227,11 @@ class TestMixedIncrementDecrement:
             for _ in range(4):
                 conn.execute(
                     text(
-                        "UPDATE instances SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                        "UPDATE instances SET waiting_for = CASE "
+                        "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                        "        THEN COALESCE(waiting_for, 0) - 1 "
+                        "    ELSE 0 "
+                        "END "
                         "WHERE instance_id = :pid"
                     ),
                     {"pid": parent_id},
@@ -262,7 +276,11 @@ class TestMixedIncrementDecrement:
             with engine.connect() as conn:
                 conn.execute(
                     text(
-                        "UPDATE instances SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                        "UPDATE instances SET waiting_for = CASE "
+                        "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                        "        THEN COALESCE(waiting_for, 0) - 1 "
+                        "    ELSE 0 "
+                        "END "
                         "WHERE instance_id = :pid"
                     ),
                     {"pid": parent_id},
