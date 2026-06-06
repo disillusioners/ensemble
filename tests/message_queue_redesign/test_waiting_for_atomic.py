@@ -238,11 +238,14 @@ class TestMixedIncrementDecrement:
         and the test would pass deterministically there. This test runs
         as a smoke test on Postgres in CI; on SQLite it documents the
         expected behavior but allows the run to flake.
-        """
-        from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
-        from sqlalchemy.dialects.postgresql import dialect as pg_dialect
 
-        if engine.dialect == sqlite_dialect():
+        Implementation note: SQLAlchemy's ``dialect`` attribute is a
+        per-engine instance and ``dialect()`` factory returns a fresh
+        instance each call (no ``__eq__`` override on DefaultDialect),
+        so ``engine.dialect == sqlite_dialect()`` is always False and
+        the xfail never fires. Compare on ``dialect.name`` instead.
+        """
+        if engine.dialect.name == "sqlite":
             pytest.xfail(
                 "SQLite pysqlite has known cross-thread write contention; "
                 "this is the production behavior on Postgres. Run on "

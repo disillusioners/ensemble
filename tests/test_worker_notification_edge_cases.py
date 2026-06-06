@@ -31,6 +31,18 @@ class MockTaskProcessor:
         self.claim_count = 0
         self.run_count = 0
         self.claimed_tasks = []
+        # Worker.__init__ constructs a TaskHeartbeat which calls
+        # task_repo.update_heartbeat on the eager first beat, and
+        # Worker.run calls task_repo.has_pending_tasks_blocked_by_busy_instance
+        # on the empty-claim path. Both must return without raising.
+        self._task_repo = self._MockTaskRepoForMetrics()
+
+    class _MockTaskRepoForMetrics:
+        def has_pending_tasks_blocked_by_busy_instance(self):
+            return False
+
+        def update_heartbeat(self, task_id):
+            return True
 
     def claim_task(self, worker_id):
         self.claim_count += 1
@@ -625,6 +637,19 @@ class TestNotificationWithWorkersRunning:
         claimed_task.instance_id = "test"
 
         class OneTaskProcessor:
+            def __init__(self):
+                # Worker.__init__ constructs a TaskHeartbeat which
+                # calls task_repo.update_heartbeat on the eager first
+                # beat. Both must return without raising.
+                self._task_repo = self._MockTaskRepoForMetrics()
+
+            class _MockTaskRepoForMetrics:
+                def has_pending_tasks_blocked_by_busy_instance(self):
+                    return False
+
+                def update_heartbeat(self, task_id):
+                    return True
+
             def claim_task(self, worker_id):
                 claim_count[0] += 1
                 if claim_count[0] == 1:

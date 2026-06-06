@@ -286,6 +286,16 @@ class MockWorkerPool:
             self._notification_count += 1
             self._condition.notify_all()
 
+    def incr_stat(self, key: str, delta: int = 1) -> None:
+        """Mirror WorkerPool.incr_stat so Worker.run's empty-claim
+        path doesn't hit AttributeError on this mock.
+
+        Same lock-and-increment contract as the real pool. Tests
+        that need to assert on counter values call get_stats().
+        """
+        with self._stats_lock:
+            self._stats[key] = self._stats.get(key, 0) + delta
+
     def wait_for_work(self, timeout: float = 3.0, stop_event=None):
         # Mirror the real WorkerPool.wait_for_work: a set stop_event
         # returns False immediately so workers exit their main loop

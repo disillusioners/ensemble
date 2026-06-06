@@ -44,7 +44,7 @@ ALTER TABLE task ADD COLUMN last_heartbeat_at TIMESTAMP;
 -- Partial index on RUNNING tasks: the recovery predicate filters by
 -- status='running' AND last_heartbeat_at < threshold, so a partial
 -- index keeps the lookup O(log n) even as completed/old rows accumulate.
--- (SQLite ignores the WHERE clause; the index is still useful on Postgres.)
+-- SQLite ignores the WHERE clause but the index is still useful on Postgres.
 CREATE INDEX IF NOT EXISTS idx_task_running_heartbeat
     ON task(last_heartbeat_at)
     WHERE status = 'running';
