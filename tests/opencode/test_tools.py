@@ -549,6 +549,348 @@ class TestAbortSessionExecution:
 
 
 # =============================================================================
+# wait_for_result execution tests
+# =============================================================================
+
+
+class TestWaitForResultExecution:
+    """End-to-end tests of ``external_opencode_wait_for_result``.
+
+    This tool has a polling loop that alternates GET_STATUS requests with
+    ``asyncio.sleep(POLL_INTERVAL_S)`` (30s in production). To keep the tests
+    fast, we patch ``asyncio.sleep`` to a no-op coroutine and control the
+    session state returned by the dispatcher.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_returns_completed_on_idle(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When the session state is IDLE, returns ``[COMPLETED]`` immediately."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-idle"}
+        )
+        ok_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "IDLE", "latest_response": "done!"},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_returns_waiting_for_input(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When the session is WAITING_FOR_INPUT, returns ``[WAITING_FOR_INPUT]``."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-ask"}
+        )
+        ok_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "WAITING_FOR_INPUT", "questions": [{"id": "q1"}]},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[WAITING_FOR_INPUT]")
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_returns_timeout_when_never_completes(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """If the session never reaches IDLE/WAITING_FOR_INPUT, returns ``[TIMEOUT]``.
+
+        We patch ``asyncio.sleep`` to a no-op so the loop spins through all
+        its iterations without real delays. The session state stays ``BUSY``
+        every poll, so the loop exhausts the deadline and returns ``[TIMEOUT]``.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-busy"}
+        )
+        busy_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "BUSY", "latest_response": "still working..."},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=busy_response,
+        ) as mock_send, patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "timeout": 1,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[TIMEOUT]")
+        # The poll loop ran at least once before timing out.
+        assert mock_send.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_returns_error_when_session_not_found(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """If the session is not in the registry, returns ``[ERROR]``."""
+        mock_registry.get_session_record = AsyncMock(return_value=None)
+        tools = create_opencode_tools(mock_manager, "test-id")
+        wait_tool = next(
+            t for t in tools if t.name == "external_opencode_wait_for_result"
+        )
+
+        result = await wait_tool.ainvoke({
+            "project": "myapp",
+            "session_name": "ghost",
+            "timeout": 60,
+        })
+
+        assert isinstance(result, str)
+        assert result.startswith("[ERROR]")
+        assert "ghost" in result
+
+
+# =============================================================================
+# wait_any execution tests
+# =============================================================================
+
+
+class TestWaitAnyExecution:
+    """End-to-end tests of ``external_opencode_wait_any``.
+
+    Like ``wait_for_result``, this tool polls in a loop; we patch
+    ``asyncio.sleep`` to a no-op coroutine to keep tests fast.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wait_any_returns_summary_when_first_session_completes(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Returns ``[SUMMARY]`` with 1/N completed when one session is IDLE."""
+        # Both sessions resolve to records in the registry.
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-a"}
+        )
+
+        # The dispatcher returns IDLE for both — emulating both complete.
+        completed_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "IDLE", "latest_response": "finished"},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=completed_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [
+                    {"project": "p1", "session_name": "s1"},
+                    {"project": "p2", "session_name": "s2"},
+                ],
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[SUMMARY]")
+        # Both completed: 2/2
+        assert "2/2" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_any_marks_completed_and_running_sessions_in_summary(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """The summary shows ✓ for completed sessions and ... for running ones."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-x"}
+        )
+
+        # First session IDLE, second BUSY — but the dispatcher mock returns the
+        # same response for every call. We use a side_effect to differentiate.
+        idle_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "IDLE", "latest_response": "done"},
+        )
+        busy_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "BUSY", "latest_response": "running"},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            side_effect=[idle_response, busy_response],
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [
+                    {"project": "p1", "session_name": "s1"},
+                    {"project": "p2", "session_name": "s2"},
+                ],
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[SUMMARY]")
+        # 1 of 2 completed
+        assert "1/2" in result
+        # The completed session is marked ✓, the running one with ...
+        assert "✓" in result
+        assert "..." in result
+
+    @pytest.mark.asyncio
+    async def test_wait_any_returns_error_on_empty_sessions(
+        self,
+        mock_manager: MagicMock,
+    ) -> None:
+        """An empty ``sessions`` list returns ``[ERROR] sessions list is empty``."""
+        tools = create_opencode_tools(mock_manager, "test-id")
+        wait_any_tool = next(
+            t for t in tools if t.name == "external_opencode_wait_any"
+        )
+
+        result = await wait_any_tool.ainvoke({
+            "sessions": [],
+            "timeout": 60,
+        })
+
+        assert isinstance(result, str)
+        assert result.startswith("[ERROR]")
+        assert "empty" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_wait_any_returns_error_when_no_valid_sessions(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When every session fails to resolve, returns ``[ERROR] No valid``."""
+        mock_registry.get_session_record = AsyncMock(return_value=None)
+        tools = create_opencode_tools(mock_manager, "test-id")
+        wait_any_tool = next(
+            t for t in tools if t.name == "external_opencode_wait_any"
+        )
+
+        result = await wait_any_tool.ainvoke({
+            "sessions": [
+                {"project": "p1", "session_name": "ghost1"},
+                {"project": "p2", "session_name": "ghost2"},
+            ],
+            "timeout": 60,
+        })
+
+        assert isinstance(result, str)
+        assert result.startswith("[ERROR]")
+        assert "No valid sessions" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_any_returns_timeout_when_none_complete(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """If no session completes within the deadline, returns ``[TIMEOUT]``."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-stuck"}
+        )
+        busy_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "BUSY", "latest_response": "grinding..."},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=busy_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [
+                    {"project": "p1", "session_name": "s1"},
+                    {"project": "p2", "session_name": "s2"},
+                ],
+                "timeout": 1,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[TIMEOUT]")
+
+
+# =============================================================================
 # Registry-availability edge case
 # =============================================================================
 

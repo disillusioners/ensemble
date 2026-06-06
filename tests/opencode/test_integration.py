@@ -453,20 +453,18 @@ class TestPersistenceAcrossRestart:
                 )
                 assert new_id
                 assert reg1._repository.get(project, session_name) is not None
-
-                # Shut down the first registry — background loops die.
-                await reg1.shutdown()
-
-                # The in-memory map should be empty after shutdown.
-                assert reg1._managers == {}
-
-                # But the row in the repository is still there.
-                record_in_db = reg1._repository.get(project, session_name)
-                assert record_in_db is not None
-                assert record_in_db["id"] == new_id
             finally:
-                # Defensive: in case any manager is still alive.
+                # Single shutdown: background loops die.
                 await reg1.shutdown()
+
+            # After shutdown (via finally), the in-memory map is empty
+            # but the persisted row survives — that is the persistence guarantee.
+            assert reg1._managers == {}
+
+            # But the row in the repository is still there.
+            record_in_db = reg1._repository.get(project, session_name)
+            assert record_in_db is not None
+            assert record_in_db["id"] == new_id
 
             # ── Phase 2: build a fresh registry on the same engine ───
             repo2 = create_opencode_session_repository(engine)

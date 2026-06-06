@@ -235,3 +235,50 @@ class TestFactoryCreatesExpectedColumns:
         # The composite PK uses the (project, session_name) pair.
         assert "project" in pk["constrained_columns"]
         assert "session_name" in pk["constrained_columns"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Engine disposal — regression coverage for the opencode engine cleanup
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The dedicated ``_opencode_engine`` is owned by ``daemon/manager.py`` (a
+# separate SQLite file at ``{data_dir}/opencode_sessions.db``). The
+# opencode module itself does not dispose the engine — the orchestrator
+# (InstanceManager.shutdown) is responsible.  These tests verify the
+# engine-disposal pattern is safe and idempotent on the opencode engine.
+
+
+class TestOpencodeEngineDisposal:
+    """Verify the ``engine.dispose()`` pattern used by the opencode engine.
+
+    The production code in ``daemon/manager.py`` disposes the engine
+    during shutdown to release WAL file handles (see commit fixing the
+    "engine.dispose() never called" bug).  This test class verifies the
+    pattern itself is safe on the opencode engine, so the production
+    disposal call cannot regress in a way that breaks the test suite.
+    """
+
+    def test_engine_dispose_is_safe_after_factory_creation(self):
+        """``engine.dispose()`` runs cleanly on a factory-built opencode engine."""
+        engine = _fresh_engine()
+        create_opencode_session_repository(engine)
+        # Should not raise.
+        engine.dispose()
+
+    def test_engine_dispose_is_safe_with_data(self):
+        """``engine.dispose()`` works on an engine that holds persisted rows."""
+        engine = _fresh_engine()
+        repo = create_opencode_session_repository(engine)
+        repo.create("p", "s", "id-1", "/work/dir")
+        # Should not raise even with a live row in the table.
+        engine.dispose()
+
+    def test_engine_dispose_is_idempotent(self):
+        """Calling ``engine.dispose()`` more than once is safe (idempotent)."""
+        engine = _fresh_engine()
+        create_opencode_session_repository(engine)
+        engine.dispose()
+        # A second call must not raise — the pattern must be safe to
+        # invoke from both the opencode fixture teardown and the
+        # production manager shutdown.
+        engine.dispose()

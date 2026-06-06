@@ -1041,3 +1041,130 @@ class TestPersistenceCallback:
         assert state.state == SessionState.BUSY.value
         assert state.latest_response == {"result": "ok"}
         assert state.questions == [{"id": "q1"}]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 11. Regression: ANSWER-branch nested-lock deadlock fix
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestAnswerDeadlockFix:
+    """Regression tests for the ANSWER-branch nested-lock deadlock bug.
+
+    Bug: ``_handle_request`` originally acquired ``self._lock`` twice in
+    the ANSWER branch — an outer ``async with self._lock:`` and an inner
+    ``async with self._lock:`` for state mutation. Since ``asyncio.Lock``
+    is **not** reentrant, the second acquisition would block forever,
+    hanging every ``answer_question`` call.
+
+    Fix: the HTTP call now runs *outside* the lock, and a single lock
+    scope handles the state mutation.  These tests specifically verify
+    the deadlock is gone.
+    """
+
+    @pytest.mark.asyncio
+    async def test_handle_request_answer_completes_within_timeout(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """The ANSWER path completes in finite time (does not deadlock).
+
+        Before the fix, this test would have hit the test-runner's
+        hang-protection timeout because the inner ``async with
+        self._lock:`` would block forever waiting for the outer lock.
+        """
+        manager._questions = [{"id": "q1"}]
+        mock_client.answer_question = AsyncMock(return_value=None)
+
+        req = Request("ANSWER", payload=AnswerRequest(request_id="q1", answers=[["A"]]))
+
+        # The 2s timeout is the key assertion: if the deadlock is
+        # reintroduced, this raises asyncio.TimeoutError.
+        await asyncio.wait_for(manager._handle_request(req), timeout=2.0)
+
+        # Question removed and state moved to IDLE (no remaining questions,
+        # worker not busy).
+        assert manager._questions == []
+        assert manager._state == SessionState.IDLE
+
+    @pytest.mark.asyncio
+    async def test_handle_request_answer_does_not_hold_lock_during_http(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """While ``answer_question`` is awaiting HTTP, the lock is NOT held.
+
+        This is the structural guarantee that prevents the deadlock: a
+        concurrent task that grabs the lock (e.g. a status poll) must
+        not be blocked by an in-flight answer call.
+        """
+        lock_held_during_http: list[bool] = []
+        block_event = asyncio.Event()
+
+        async def slow_answer(*args, **kwargs):
+            # Record the lock state at the moment the HTTP call is in flight.
+            lock_held_during_http.append(manager._lock.locked())
+            await block_event.wait()
+            return None
+
+        mock_client.answer_question = slow_answer
+        manager._questions = [{"id": "q1"}]
+
+        req = Request("ANSWER", payload=AnswerRequest(request_id="q1", answers=[["A"]]))
+        task = asyncio.create_task(manager._handle_request(req))
+
+        # Yield once so the task reaches the HTTP call.
+        await asyncio.sleep(0.05)
+
+        assert lock_held_during_http == [False], (
+            f"Lock was held during answer_question HTTP call: "
+            f"{lock_held_during_http}"
+        )
+
+        block_event.set()
+        await task
+
+    @pytest.mark.asyncio
+    async def test_handle_request_answer_works_while_lock_held_externally(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """The ANSWER path is callable while another task holds the lock.
+
+        With the bug, this would deadlock because the inner lock
+        acquisition would wait forever. After the fix, the HTTP call
+        runs without the lock, so the outer task can hold the lock
+        freely.
+        """
+        lock_release = asyncio.Event()
+        answer_complete = asyncio.Event()
+        answer_was_called = False
+
+        async def track_answer(*args, **kwargs):
+            nonlocal answer_was_called
+            answer_was_called = True
+            answer_complete.set()
+
+        mock_client.answer_question = track_answer
+        manager._questions = [{"id": "q1"}]
+
+        # Hold the lock from another coroutine.
+        async def hold_lock():
+            async with manager._lock:
+                await lock_release.wait()
+
+        holder = asyncio.create_task(hold_lock())
+        await asyncio.sleep(0.05)  # let the holder acquire
+
+        # Now run the ANSWER flow — must NOT deadlock on the held lock.
+        req = Request("ANSWER", payload=AnswerRequest(request_id="q1", answers=[["A"]]))
+        answer_task = asyncio.create_task(manager._handle_request(req))
+
+        # The HTTP call should run (and complete) even while the lock is held.
+        await asyncio.wait_for(answer_complete.wait(), timeout=2.0)
+        assert answer_was_called, "answer_question was never called"
+
+        # Release the holder so the answer_task's state mutation can proceed.
+        lock_release.set()
+        await asyncio.wait_for(answer_task, timeout=2.0)
+        await holder
+
+        # Question was removed.
+        assert manager._questions == []
