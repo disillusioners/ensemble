@@ -1,6 +1,7 @@
 """Tests for daemon/tools/ - bash, filesystem tools"""
 
 import os
+import sys
 import time
 
 import pytest
@@ -117,6 +118,58 @@ class TestBashTool:
 
         assert "timed out" in result.lower()
         assert "0.5" in result  # Error message should contain the timeout value
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="process groups are Unix-only")
+    @pytest.mark.asyncio
+    async def test_bash_backgrounded_subprocess_returns_immediately(self):
+        """Test that backgrounded subprocess (&) returns immediately without hanging."""
+        result = await bash.ainvoke({
+            "command": "(sleep 10 & echo 'done')",
+            "timeout": 5
+        })
+
+        assert "done" in result
+        assert "EXIT CODE: 0" in result
+        assert "timed out" not in result.lower()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="process groups are Unix-only")
+    @pytest.mark.asyncio
+    async def test_bash_nohup_background_returns_immediately(self):
+        """Test that nohup background process returns immediately."""
+        result = await bash.ainvoke({
+            "command": "nohup sleep 10 > /dev/null 2>&1 & echo 'started'",
+            "timeout": 5
+        })
+
+        assert "started" in result
+        assert "EXIT CODE: 0" in result
+        assert "timed out" not in result.lower()
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="process groups are Unix-only")
+    @pytest.mark.asyncio
+    async def test_bash_process_group_killed_on_timeout(self):
+        """Test that process group is killed when timeout triggers."""
+        import subprocess
+
+        result = await bash.ainvoke({
+            "command": "sleep 60 & wait",
+            "timeout": 2
+        })
+
+        # Should return timeout error
+        assert "timed out" in result.lower()
+        assert "2 seconds" in result or "2.0 seconds" in result
+
+        # Verify the backgrounded sleep 60 was killed by checking it's not running
+        # Use pgrep to check for any lingering sleep 60 processes from this test
+        check = subprocess.run(
+            ["pgrep", "-f", "sleep 60"],
+            capture_output=True,
+            text=True
+        )
+        # If pgrep found processes, kill any found to clean up (belt and suspenders)
+        if check.returncode == 0:
+            subprocess.run(["pkill", "-f", "sleep 60"], capture_output=True)
 
 
 class TestListDirectoryTool:
