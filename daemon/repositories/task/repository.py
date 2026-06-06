@@ -11,6 +11,7 @@ from sqlalchemy import delete as sql_delete, func, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
+from ..job_queue.models import JobStatus
 from .models import Task, TaskStatus, TaskType
 
 
@@ -134,6 +135,8 @@ class TaskRepository:
         being processed by the job-queue path. Without the cross-system
         guard, the task forks the checkpoint from a stale state and the
         "Done! 👋" AIMessage produced by the original job is shadowed/lost.
+        Both lookups exclude soft-deleted rows (``deleted_at IS NULL``) so a
+        soft-deleted PROCESSING job can't permanently block task claims.
 
         Heartbeat init: ``last_heartbeat_at`` is set to the same value as
         ``started_at`` on claim, so the recovery service can distinguish
@@ -172,6 +175,7 @@ class TaskRepository:
                         WHERE status = :status_processing
                         AND job_type = :job_type_message
                         AND instance_id IS NOT NULL
+                        AND deleted_at IS NULL
                     )
                     ORDER BY created_at ASC
                     LIMIT 1
@@ -184,7 +188,7 @@ class TaskRepository:
                 "started_at": now,
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running_guard": TaskStatus.RUNNING.value,
-                "status_processing": "processing",
+                "status_processing": JobStatus.PROCESSING.value,
                 "job_type_message": "message",
                 "now_str": now_str,
             }).fetchone()
@@ -462,6 +466,7 @@ class TaskRepository:
                             WHERE j_running.status = :status_processing
                             AND j_running.job_type = :job_type_message
                             AND j_running.instance_id = t_pending.instance_id
+                            AND j_running.deleted_at IS NULL
                         )
                     )
                 )
@@ -470,7 +475,7 @@ class TaskRepository:
             row = conn.execute(stmt, {
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
-                "status_processing": "processing",
+                "status_processing": JobStatus.PROCESSING.value,
                 "job_type_message": "message",
             }).fetchone()
             return row is not None

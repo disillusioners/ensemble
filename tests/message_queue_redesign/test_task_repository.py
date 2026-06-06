@@ -303,6 +303,51 @@ class TestTaskClaiming:
         assert claimed is not None
         assert claimed.id == t1.id
 
+    def test_claim_unaffected_by_soft_deleted_processing_job(self, repository, engine):
+        """Regression: a soft-deleted PROCESSING MESSAGE job must NOT block
+        task claiming. The cross-system guard must filter ``deleted_at IS NULL``
+        just like the canonical job-side query
+        (``find_processing_message_jobs_by_instance``). Without that filter a
+        soft-deleted processing job lingers forever (soft-deleted jobs are
+        never auto-completed) and permanently blocks the instance's task
+        queue — a livelock."""
+        from datetime import datetime, timezone
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, JobStatus
+
+        now = datetime.now(timezone.utc).isoformat()
+        with SQLModelSession(engine) as session:
+            session.add(JobItem(
+                job_id="job-L1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                status=JobStatus.PROCESSING.value,
+                job_type="message",
+                instance_id="inst-L",
+                created_at=now,
+                started_at=now,
+                deleted_at=now,  # soft-deleted while still PROCESSING
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        t1 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-L", message_id="m1"
+        )
+
+        # The busy-instance probe must not report a false block: inst-L has a
+        # PENDING task and a soft-deleted processing job, but no RUNNING task.
+        # If the guard forgets ``deleted_at IS NULL`` this returns True.
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
+
+        # The task MUST be claimable — the only blocker is a soft-deleted job.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == t1.id
+
 
 class TestTaskCompletion:
     """Tests for task completion."""
