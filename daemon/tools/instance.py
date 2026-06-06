@@ -480,7 +480,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # Increment waiting_for counter if sender is the parent of the target instance
         # This handles the case where a parent reuses an existing child (vs first spawn)
         # Fix C: atomic SQL UPDATE eliminates the read-modify-write race against
-        # concurrent decrements from sibling child completions.
+        # concurrent decrements from sibling child completions. RETURNING
+        # gives us the post-update value for an honest log line — under
+        # concurrent decrements a separate SELECT could read a value
+        # already past the increment we're about to log.
         from sqlalchemy import text as _sa_text
         from sqlmodel import Session
         from ..repositories.instance.models import Instance
@@ -488,22 +491,20 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
             target_instance = session.get(Instance, instance_id)
             if target_instance and target_instance.parent_id == current_instance_id:
-                # Read for the log line (informational only — not used for the write).
-                old_val_row = session.exec(
-                    _sa_text("SELECT COALESCE(waiting_for, 0) FROM instances WHERE instance_id = :pid"),
-                    {"pid": current_instance_id},
-                ).first()
-                old_val = int(old_val_row[0]) if old_val_row is not None else 0
-                session.execute(
+                result = session.execute(
                     _sa_text(
-                        "UPDATE instances SET waiting_for = COALESCE(waiting_for, 0) + 1 "
-                        "WHERE instance_id = :pid"
+                        "UPDATE instances "
+                        "SET waiting_for = COALESCE(waiting_for, 0) + 1 "
+                        "WHERE instance_id = :pid "
+                        "RETURNING waiting_for"
                     ),
                     {"pid": current_instance_id},
                 )
+                new_row = result.first()
+                new_val = int(new_row[0]) if new_row is not None else 0
                 session.commit()
                 logger.info(
-                    f"waiting_for incremented: {old_val} -> {old_val + 1} "
+                    f"waiting_for incremented -> {new_val} "
                     f"(parent={current_instance_id[:8]}..., child={instance_id[:8]}...)"
                 )
         

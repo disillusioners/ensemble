@@ -31,10 +31,12 @@ DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 def _truncate_error(error: str, max_len: int = MAX_ERROR_LEN) -> str:
-    """Truncate error string, stripping HTML if present."""
+    """Truncate error message, stripping HTML if present."""
+    # Strip HTML tags and reduce whitespace
     if "<" in error and ">" in error:
         error = error.replace("<", " <").replace(">", "> ")
         error = re.sub(r"<[^>]+>", "", error)
+        error = " ".join(error.split())
     if len(error) > max_len:
         return error[:max_len] + "..."
     return error
@@ -257,14 +259,14 @@ class Worker(threading.Thread):
                         continue  # Check for more work immediately
 
                     # No task available → this is an empty claim attempt
-                    self._worker_pool._stats["empty_claim_attempts"] += 1
+                    self._worker_pool.incr_stat("empty_claim_attempts")
 
                     # Track whether the empty claim was due to the per-instance
                     # guard (pending tasks exist but all are blocked by a RUNNING
                     # task for the same instance). This surfaces "is Fix B causing
                     # excessive deferral?" in production.
                     if self._task_processor._task_repo.has_pending_tasks_blocked_by_busy_instance():
-                        self._worker_pool._stats["claims_skipped_due_to_busy_instance"] += 1
+                        self._worker_pool.incr_stat("claims_skipped_due_to_busy_instance")
 
                     # Wait for notification OR safety timeout OR stop signal
                     self._worker_pool.wait_for_work(timeout=3.0, stop_event=self._stop_event)
@@ -519,7 +521,16 @@ class WorkerPool:
         self._condition = threading.Condition()
         self._notification_count = 0
 
-        # Metrics
+        # Metrics. ``_stats`` is mutated from multiple worker threads
+        # (and the API path for ``notifications_sent``); a plain
+        # ``dict[key] += 1`` is a read-modify-write that the CPython
+        # GIL does NOT make atomic across the bytecode boundary, so
+        # concurrent writes can lose increments. Wrap writes in
+        # ``_stats_lock`` to keep the counters accurate. Reads from
+        # ``get_stats`` are best-effort: a snapshot under the lock is
+        # consistent, but a snapshot without the lock can see a value
+        # that just got incremented in another thread.
+        self._stats_lock = threading.Lock()
         self._stats = {
             "notifications_sent": 0,
             "empty_claim_attempts": 0,
@@ -536,7 +547,21 @@ class WorkerPool:
         with self._condition:
             self._notification_count += 1
             self._condition.notify()
+        with self._stats_lock:
             self._stats["notifications_sent"] += 1
+
+    def incr_stat(self, key: str, delta: int = 1) -> None:
+        """Atomically increment a counter in ``_stats``.
+
+        Single-call site for all worker-side metric writes. The lock
+        here is the same one used by ``notify_work`` and
+        ``wait_for_work``, so all writers serialize through one
+        mutex. Contention is low (≤1 increment per claim attempt per
+        worker, with 4 workers at idle the rate is ~80/min) — well
+        below the cost of per-worker counters.
+        """
+        with self._stats_lock:
+            self._stats[key] = self._stats.get(key, 0) + delta
     
     def wait_for_work(self, timeout: float = 3.0, stop_event: threading.Event = None) -> bool:
         """Worker calls this when idle. Returns True if notified, False if timed out.
@@ -566,7 +591,8 @@ class WorkerPool:
             if self._notification_count > 0:
                 self._notification_count -= 1
                 return True
-            self._stats["workers_woken_by_timeout"] += 1
+            with self._stats_lock:
+                self._stats["workers_woken_by_timeout"] += 1
             return False
     
     def start(self) -> None:
@@ -633,15 +659,22 @@ class WorkerPool:
     
     def get_stats(self) -> dict:
         """Get statistics for the pool and all workers."""
-        notifications = self._stats["notifications_sent"]
-        timeouts = self._stats["workers_woken_by_timeout"]
-        empty_claims = self._stats["empty_claim_attempts"]
-        
+        # Snapshot under the lock so the four counters are mutually
+        # consistent. Outside the lock, two concurrent increments can
+        # produce a snapshot that pairs e.g. the pre-increment value
+        # of one counter with the post-increment value of another,
+        # which would skew the ratio-based efficiency metric below.
+        with self._stats_lock:
+            notifications = self._stats["notifications_sent"]
+            timeouts = self._stats["workers_woken_by_timeout"]
+            empty_claims = self._stats["empty_claim_attempts"]
+            skipped = self._stats["claims_skipped_due_to_busy_instance"]
+
         # Wakeup efficiency: useful notifications / total notifications
         # A useful notification = one that leads to claiming work
         # A timeout = notification was unnecessary (workers would have polled anyway)
         wakeup_efficiency = notifications / max(1, notifications + empty_claims)
-        
+
         return {
             "num_workers": len(self._workers),
             "started": self._started,
@@ -650,7 +683,7 @@ class WorkerPool:
             "notifications_sent": notifications,
             "empty_claim_attempts": empty_claims,
             "workers_woken_by_timeout": timeouts,
-            "claims_skipped_due_to_busy_instance": self._stats["claims_skipped_due_to_busy_instance"],
+            "claims_skipped_due_to_busy_instance": skipped,
             "wakeup_efficiency": round(wakeup_efficiency, 3),
             "workers": [w.get_stats() for w in self._workers],
             "pool_pending_tasks": self._task_processor.get_pending_count(),

@@ -347,11 +347,55 @@ The 3-commit split (notification hook → Fix B + alert → Fix C) is adopted. E
 | **1. Notification hook** | Add `self._notify_pending_task()` to `complete_task`, `fail_task`, `cancel_task`. No behavior change for current callers; removes up to 3 s of latency when Fix B lands. | Yes — pure additive |
 | **2. Fix B + observability + threshold tuning** | (a) SQL claim guard in `claim_pending_task`. (b) New `claims_skipped_due_to_busy_instance` metric. (c) Alert at >50% skip rate. (d) New config `stale_task_recovery_threshold_minutes=5` wired into `StaleTaskRecovery`. (e) Test in Step 4 of §3. | Yes — revert restores FIFO claim |
 | **3. Fix C — atomic counter** | SQL UPDATE at all 3 sites (`child_reports.py`, `error_reporting.py`, `tools/instance.py`). Concurrency test in Step 4 of §3. | Yes — independent of Fix B |
+| **4. Per-task liveness heartbeat (Option 1 follow-up)** | Added in response to a regression introduced by Commit 2's threshold reduction. Without it, a live long-running task whose `started_at` exceeds the 5-min stale threshold is force-cancel-and-retried, wasting the original worker's result. See §10.1 below. | Yes — revert restores the regression, but only do so after also reverting Commit 2's threshold reduction |
 
 **Out of scope, separate follow-up:**
 - Per-instance `asyncio.Lock` in `_process_message_with_tracking` as defense-in-depth (per §9.2).
 - Any change to `child_reports.py`'s "enqueue a new task" pattern (kept as-is).
+- Postgres schema-evolution unification: see §10.2.
 
 **Drop from original §9:** Commit 4 (`GraphRecursionError` catch-and-retry) — not needed, see §9.2.
 
-Roll back strategy: each commit is independently revertible. Fix C is the safest to keep even if Fix B is reverted.
+Roll back strategy: each commit is independently revertible. Fix C is the safest to keep even if Fix B is reverted. **Commits 2 and 4 are coupled** — reverting only Commit 4 re-introduces the regression (§10.1); reverting only Commit 2 loses the sibling-block improvement.
+
+### 10.1 Why Commit 4 exists (regression introduced by Commit 2)
+
+Commit 2 lowered the stale-recovery threshold from 60 min to 5 min to limit how long a crashed worker blocks sibling tasks under the per-instance claim guard. But the recovery predicate was on `started_at` alone, with no way to distinguish a LIVE long-running task from a CRASHED one:
+
+- A live 10-min opencode_skill exploration with several bash tool calls: `started_at` is 10 min old, but the worker is alive and processing.
+- A crashed worker: `started_at` is also 10 min old, and the worker is dead.
+
+Both look identical in the DB. Under the 5-min threshold:
+
+1. `StaleTaskRecovery.recover_stale_tasks` matches both
+2. `request_cancel` sets the DB `cancel_requested` flag — but the **live worker doesn't poll this flag**; its only cancellation signal is the in-memory `CancellationToken` from `TimeoutMonitor` (60 min)
+3. After 10 s grace, `force_cancel_and_schedule_retry` marks the task CANCELLED and creates a new PENDING retry
+4. The retry is claimed by another worker, which redoes the same work
+5. The original worker eventually finishes, calls `complete_task` on the now-CANCELLED row, and its result is wasted
+
+The original review (this document) §3 step (d) treated threshold reduction as a tuning decision and the old code (which had `threshold = task_timeout_minutes = 60`) as safe because the user-facing timeout fired first. That was correct for the old code, but Commit 2's threshold change exposed the structural flaw: **stale detection based on `started_at` alone cannot distinguish live from crashed**.
+
+**Commit 4's fix:** add `task.last_heartbeat_at`, updated periodically by a per-worker `TaskHeartbeat` daemon thread. The recovery predicate becomes `COALESCE(last_heartbeat_at, started_at) < threshold`. A live worker's heartbeat (refreshed every `task_heartbeat_interval_seconds=30`) keeps the task off the stale list regardless of how long `started_at` has been. A crashed worker's heartbeat stops being updated, and the task is flagged within the configured threshold of the last successful update.
+
+This commit was not in the original 3-commit plan (§10 above) — it was added after Commit 2's regression was discovered during code review of the threshold change. The bug doc has been updated to reflect this.
+
+### 10.2 Postgres schema evolution (unification follow-up)
+
+Every new column added via this work needs TWO places updated:
+1. A `.sql` migration file in `daemon/migrations/versions/` (auto-applied by `MigrationRunner` for **SQLite only**)
+2. A new `ALTER TABLE IF NOT EXISTS` statement in `InstanceManager._ensure_postgres_columns` (auto-applied at startup for **Postgres only**)
+
+This divergence accumulates tech debt. Two paths to unification:
+- Extend `MigrationRunner.run_pending_migrations()` to also run for Postgres, with dialect-aware statement dispatch (only run `IF NOT EXISTS` Postgres-safe statements on Postgres; run plain `ALTER TABLE` on SQLite)
+- Adopt Alembic for both dialects
+
+Not blocking for this PR, but flagged for a follow-up issue.
+
+### 10.3 Code-review findings (from `.codereview.md`)
+
+The code review surfaced 3 required changes that were applied before merge:
+1. **Restore `_truncate_error` whitespace-collapse line** — accidentally dropped during Commit 4's `worker_pool.py` rewrite. Single-line fix.
+2. **`_stats` dict thread-safety** — `dict[key] += 1` is not atomic across the GIL boundary under high contention. Added `_stats_lock` + `WorkerPool.incr_stat(key)` helper. Snapshot consistency for `get_stats()` is now guaranteed.
+3. **`_ensure_postgres_columns` exception handling** — the catch-all was hiding real errors (permission denied, connection lost). Removed the try/except; `IF NOT EXISTS` makes the idempotent case a no-op, and a real error should propagate and fail startup loudly rather than crash on the first task claim.
+
+Plus 5 low-priority nits (stale `old_waiting` in log lines → use `RETURNING`; `MockWorkerPool.wait_for_work` honors `stop_event` now; doc trail updated here in §10.1; `hasattr` for new column follows pre-existing pattern).

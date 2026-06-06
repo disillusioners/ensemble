@@ -268,8 +268,12 @@ class MockWorkerPool:
         self._notification_count = 0
         self._wait_timeout = wait_timeout
         # Stats dict mirroring the real WorkerPool. Worker.run() increments
-        # empty_claim_attempts; the new claims_skipped_due_to_busy_instance
-        # metric is also tracked here for tests that inspect it.
+        # empty_claim_attempts via incr_stat(); the new
+        # claims_skipped_due_to_busy_instance metric is also tracked here
+        # for tests that inspect it. The lock mirrors the real pool's
+        # _stats_lock so tests that read the dict while a worker thread
+        # is incrementing don't see torn values.
+        self._stats_lock = threading.Lock()
         self._stats = {
             "notifications_sent": 0,
             "empty_claim_attempts": 0,
@@ -281,14 +285,21 @@ class MockWorkerPool:
         with self._condition:
             self._notification_count += 1
             self._condition.notify_all()
-    
+
     def wait_for_work(self, timeout: float = 3.0, stop_event=None):
+        # Mirror the real WorkerPool.wait_for_work: a set stop_event
+        # returns False immediately so workers exit their main loop
+        # instead of waiting out the full timeout.
+        if stop_event is not None and stop_event.is_set():
+            return False
         with self._condition:
             if self._notification_count > 0:
                 self._notification_count -= 1
                 return True
             # Use shorter timeout for tests
             self._condition.wait(timeout=self._wait_timeout)
+            if stop_event is not None and stop_event.is_set():
+                return False
             if self._notification_count > 0:
                 self._notification_count -= 1
                 return True

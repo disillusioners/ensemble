@@ -184,15 +184,25 @@ class ErrorReportingService:
                 # Fix C: symmetric to the decrement in child_reports.py. A
                 # non-atomic read-modify-write races with concurrent
                 # child-completion decrements. SQL UPDATE is atomic in both
-                # SQLite and Postgres.
+                # SQLite and Postgres. RETURNING gives us the post-UPDATE
+                # value for accurate logging (see child_reports.py for the
+                # rationale on why we don't log a from-value).
                 parent = session.get(Instance, parent_id)
                 if parent:
-                    session.execute(
+                    result = session.execute(
                         text(
-                            "UPDATE instances SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
-                            "WHERE instance_id = :pid"
+                            "UPDATE instances "
+                            "SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                            "WHERE instance_id = :pid "
+                            "RETURNING waiting_for"
                         ),
                         {"pid": parent_id},
+                    )
+                    new_waiting_row = result.first()
+                    new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
+                    logger.info(
+                        f"waiting_for decremented (error path) -> {new_waiting} "
+                        f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
                     )
                     session.expire(parent)
                     parent = session.get(Instance, parent_id)

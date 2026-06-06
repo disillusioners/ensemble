@@ -1247,6 +1247,14 @@ class InstanceManager:
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
         "ALTER TABLE" without IF NOT EXISTS — that breaks re-runs
         on databases that already have the column.
+
+        Failure semantics: this method does NOT catch exceptions. If
+        any statement fails (permission denied, connection lost, SQL
+        syntax error, table missing), the exception propagates and
+        startup aborts. Better to fail loudly at startup than to
+        continue and crash on the first query that references the
+        missing column. ``IF NOT EXISTS`` makes the idempotent case
+        a no-op, so there's nothing to swallow.
         """
         from sqlalchemy import text
 
@@ -1261,16 +1269,7 @@ class InstanceManager:
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
-                try:
-                    conn.execute(text(stmt))
-                except Exception as e:
-                    # Idempotent. Log and continue rather than fail
-                    # startup — the recovery predicate is the only
-                    # consumer of the index, and the column has a
-                    # COALESCE fallback to started_at in the
-                    # recovery predicate so missing it is a degraded
-                    # state, not a crash.
-                    logger.warning(f"Postgres column migration statement skipped: {stmt[:60]}... ({e})")
+                conn.execute(text(stmt))
 
     def setup_worker_pool(
         self,

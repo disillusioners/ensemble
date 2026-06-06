@@ -405,22 +405,34 @@ Provide a concise summary:"""
         # value, both write N-1, leaving the counter stuck at N-1 instead of
         # N-2). The SQL UPDATE is atomic in both SQLite and Postgres; COALESCE
         # guards against NULL and MAX clamps at 0.
-        old_waiting = parent.waiting_for or 0
-        session.execute(
+        #
+        # RETURNING gives us the post-UPDATE value as observed by THIS
+        # statement, so the log line is honest about what THIS decrement
+        # actually saw. We do NOT log a from-value: under concurrent
+        # decrements, the pre-value would be a stale session-cache
+        # read, and the inferred "from" via ``new + 1`` is wrong when
+        # MAX(0, ...) clamped (0-1 stays at 0, so +1 misleads). Log
+        # just the new value; chains of decrements reconstruct the
+        # sequence from successive log lines.
+        result = session.execute(
             text(
-                "UPDATE instances SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
-                "WHERE instance_id = :pid"
+                "UPDATE instances "
+                "SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                "WHERE instance_id = :pid "
+                "RETURNING waiting_for"
             ),
             {"pid": parent.instance_id},
         )
-        # Force the session to re-read the new value for the cascade check below
-        # and the log line. SQLAlchemy would otherwise return the stale cached
-        # value on subsequent attribute access.
+        new_waiting_row = result.first()
+        new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
+
+        # Force the session to re-read for the cascade check below.
+        # SQLAlchemy would otherwise return the stale cached value on
+        # subsequent attribute access.
         session.expire(parent)
         parent = session.get(Instance, instance.parent_id)
-        new_waiting = parent.waiting_for or 0 if parent else 0
         logger.info(
-            f"waiting_for decremented: {old_waiting} -> {new_waiting} "
+            f"waiting_for decremented -> {new_waiting} "
             f"(parent={parent.instance_id[:8] if parent else '?'}..., "
             f"child={instance.instance_id[:8]}...)"
         )
