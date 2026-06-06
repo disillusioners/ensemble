@@ -36,7 +36,7 @@ async def _kill_process(proc: asyncio.subprocess.Process) -> None:
         if is_unix:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
+            except OSError:
                 pass
         else:
             proc.send_signal(signal.SIGTERM)
@@ -46,12 +46,12 @@ async def _kill_process(proc: asyncio.subprocess.Process) -> None:
             if is_unix:
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
+                except OSError:
                     pass
             else:
                 proc.kill()
             await proc.wait()
-    except ProcessLookupError:
+    except OSError:
         pass
 
 
@@ -70,6 +70,15 @@ async def bash(
             return f"ERROR: Timeout must be ≥ 0 seconds. Got: {timeout}s"
         if timeout > 1800:
             return f"ERROR: Timeout must be ≤ 1800 seconds. Got: {timeout}s"
+    # Initialize temp-file variables before the try block so the function-level
+    # finally can safely close/unlink them even if an exception occurs mid-setup
+    # (e.g., the second mkstemp fails after the first succeeds).
+    stdout_path = None
+    stderr_path = None
+    stdin_path = None
+    stdout_file = None
+    stderr_file = None
+    stdin_file = None
     try:
         # start_new_session=True (Unix) creates a new process group so that
         # backgrounded children (e.g., `nohup ... &`) can be killed together
@@ -109,8 +118,9 @@ async def bash(
         stdin_path = None
         if input:
             stdin_fd, stdin_path = tempfile.mkstemp(prefix="bash-stdin-", suffix=".tmp")
-            os.write(stdin_fd, input.encode())
-            os.close(stdin_fd)
+            # Use a Python file object so partial writes are handled internally.
+            with os.fdopen(stdin_fd, 'wb') as f:
+                f.write(input.encode())
             stdin_file = open(stdin_path, "rb")
 
         try:
@@ -211,6 +221,13 @@ For full output, redirect to file:
         return f"ERROR: {str(e)}"
     finally:
         # Clean up temp files.
+        for f in (stdout_file, stderr_file, stdin_file):
+            if f is None:
+                continue
+            try:
+                f.close()
+            except OSError:
+                pass
         for path in (stdout_path, stderr_path, stdin_path):
             if path is None:
                 continue

@@ -135,41 +135,105 @@ class TestBashTool:
     @pytest.mark.skipif(sys.platform == "win32", reason="process groups are Unix-only")
     @pytest.mark.asyncio
     async def test_bash_nohup_background_returns_immediately(self):
-        """Test that nohup background process returns immediately."""
-        result = await bash.ainvoke({
-            "command": "nohup sleep 10 > /dev/null 2>&1 & echo 'started'",
-            "timeout": 5
-        })
+        """Test that bare nohup background process returns immediately.
 
-        assert "started" in result
-        assert "EXIT CODE: 0" in result
-        assert "timed out" not in result.lower()
+        Regression test for the pipe-FD inheritance hang: without explicit
+        redirection, a bare ``nohup ... &`` inherits the parent's stdout/stderr
+        FDs. With pipes this hangs forever (waiting for EOF); the fix uses
+        temp files so the inherited FDs being held open is harmless.
+        """
+        import signal
+        import tempfile
+
+        # Track the PID of the backgrounded sleep so we can clean it up safely
+        # without unsafe pattern-matching like ``pkill -f "sleep 10"``.
+        fd, pid_path = tempfile.mkstemp(suffix=".pid", prefix="bash-test-")
+        os.close(fd)
+
+        try:
+            result = await bash.ainvoke({
+                "command": f"nohup sleep 10 & echo $! > {pid_path}; echo 'started'",
+                "timeout": 5
+            })
+
+            assert "started" in result
+            assert "EXIT CODE: 0" in result
+            assert "timed out" not in result.lower()
+        finally:
+            # Safe cleanup: kill the specific PID we tracked.
+            try:
+                with open(pid_path) as f:
+                    sleep_pid = int(f.read().strip())
+                os.kill(sleep_pid, signal.SIGKILL)
+            except (FileNotFoundError, ValueError, ProcessLookupError, PermissionError):
+                pass
+            try:
+                os.unlink(pid_path)
+            except OSError:
+                pass
 
     @pytest.mark.skipif(sys.platform == "win32", reason="process groups are Unix-only")
     @pytest.mark.asyncio
     async def test_bash_process_group_killed_on_timeout(self):
         """Test that process group is killed when timeout triggers."""
-        import subprocess
+        import signal
+        import tempfile
 
-        result = await bash.ainvoke({
-            "command": "sleep 60 & wait",
-            "timeout": 2
-        })
+        # Track the PID of the backgrounded sleep so we can (a) explicitly
+        # assert it's gone after the timeout, and (b) clean up safely without
+        # unsafe pattern-matching like ``pkill -f "sleep 60"`` which could
+        # match unrelated processes in CI.
+        fd, pid_path = tempfile.mkstemp(suffix=".pid", prefix="bash-test-")
+        os.close(fd)
+        sleep_pid = None
 
-        # Should return timeout error
-        assert "timed out" in result.lower()
-        assert "2 seconds" in result or "2.0 seconds" in result
+        try:
+            result = await bash.ainvoke({
+                "command": f"sleep 60 & echo $! > {pid_path}; wait",
+                "timeout": 2
+            })
 
-        # Verify the backgrounded sleep 60 was killed by checking it's not running
-        # Use pgrep to check for any lingering sleep 60 processes from this test
-        check = subprocess.run(
-            ["pgrep", "-f", "sleep 60"],
-            capture_output=True,
-            text=True
-        )
-        # If pgrep found processes, kill any found to clean up (belt and suspenders)
-        if check.returncode == 0:
-            subprocess.run(["pkill", "-f", "sleep 60"], capture_output=True)
+            # Should return timeout error
+            assert "timed out" in result.lower()
+            assert "2 seconds" in result or "2.0 seconds" in result
+
+            # Read the PID of the backgrounded sleep
+            try:
+                with open(pid_path) as f:
+                    sleep_pid = int(f.read().strip())
+            except (FileNotFoundError, ValueError):
+                pass
+
+            # Brief wait for OS to reap killed processes
+            time.sleep(0.5)
+
+            # Explicit regression assertion: the process group kill must
+            # have terminated the backgrounded child. If this fails, the
+            # process group leak silently regressed.
+            if sleep_pid is not None:
+                try:
+                    os.kill(sleep_pid, 0)  # Signal 0 = existence check, no kill
+                    alive = True
+                except ProcessLookupError:
+                    alive = False
+                except PermissionError:
+                    # Process exists but owned by another user; treat as alive.
+                    alive = True
+                assert not alive, (
+                    f"Backgrounded sleep (pid={sleep_pid}) still running "
+                    "after timeout kill — process group leak detected"
+                )
+        finally:
+            # Belt-and-suspenders cleanup using the tracked PID.
+            if sleep_pid is not None:
+                try:
+                    os.kill(sleep_pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                os.unlink(pid_path)
+            except OSError:
+                pass
 
 
 class TestListDirectoryTool:
