@@ -36,9 +36,12 @@ from asyncio import Lock
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, TypeVar
 
+import httpx
+
 from .client import (
     AnswerRequest,
     CommandRequest,
+    OpenCodeAPIError,
     OpenCodeClient,
     PromptRequest,
 )
@@ -706,55 +709,61 @@ class OpenCodeSessionManager:
             # Go: if req.ResultChan != nil { defer close(req.ResultChan) }
             pass
 
-        async with self._lock:
-            if req.type in ("PROMPT", "COMMAND"):
-                # manager.go:391-407: update state + extract agent
-                if req.type == "PROMPT":
-                    if isinstance(req.payload, PromptRequest):
-                        self._last_agent = req.payload.agent
-                elif req.type == "COMMAND":
-                    if isinstance(req.payload, CommandRequest):
-                        self._last_agent = req.payload.agent
+        if req.type == "ANSWER":
+            # manager.go:413-437: answer + update state
+            # CRITICAL: HTTP call must happen OUTSIDE the lock to avoid deadlock
+            # and to allow the lock to be released while waiting for the server.
+            payload = req.payload
+            if isinstance(payload, AnswerRequest):
+                try:
+                    await self._client.answer_question(payload)
+                except Exception as exc:
+                    logger.warning("Answer failed: %s", exc)
+                else:
+                    # Single lock scope for state mutation only — no nesting.
+                    async with self._lock:
+                        new_questions = [
+                            q for q in self._questions
+                            if q.get("id") != payload.request_id
+                        ]
+                        self._questions = new_questions
 
-                self._state = SessionState.BUSY
-                self._latest_response = None
-                self._is_worker_busy = True
+                        if len(self._questions) == 0:
+                            if self._is_worker_busy:
+                                self._state = SessionState.BUSY
+                            else:
+                                self._state = SessionState.IDLE
+        else:
+            # PROMPT, COMMAND, RESUME — single lock scope (existing pattern).
+            # State mutations and the fire-and-forget worker task happen under
+            # one lock acquisition. asyncio.Lock is not reentrant, so we must
+            # NOT nest another `async with self._lock:` inside this block.
+            async with self._lock:
+                if req.type in ("PROMPT", "COMMAND"):
+                    # manager.go:391-407: update state + extract agent
+                    if req.type == "PROMPT":
+                        if isinstance(req.payload, PromptRequest):
+                            self._last_agent = req.payload.agent
+                    elif req.type == "COMMAND":
+                        if isinstance(req.payload, CommandRequest):
+                            self._last_agent = req.payload.agent
 
-                logger.info("Starting worker for %s...", req.type)
-                # manager.go:411: go sm.runWorker(req) — fire and forget
-                asyncio.create_task(self._run_worker(req))
-
-            elif req.type == "ANSWER":
-                # manager.go:413-437: answer + update state
-                payload = req.payload
-                if isinstance(payload, AnswerRequest):
-                    try:
-                        await self._client.answer_question(payload)
-                    except Exception as exc:
-                        logger.warning("Answer failed: %s", exc)
-                    else:
-                        async with self._lock:
-                            new_questions = [
-                                q for q in self._questions
-                                if q.get("id") != payload.request_id
-                            ]
-                            self._questions = new_questions
-
-                            if len(self._questions) == 0:
-                                if self._is_worker_busy:
-                                    self._state = SessionState.BUSY
-                                else:
-                                    self._state = SessionState.IDLE
-
-            elif req.type == "RESUME":
-                # manager.go:439-448: resume + worker
-                async with self._lock:
                     self._state = SessionState.BUSY
                     self._latest_response = None
                     self._is_worker_busy = True
 
-                logger.info("Starting worker for RESUME...")
-                asyncio.create_task(self._run_worker(req))
+                    logger.info("Starting worker for %s...", req.type)
+                    # manager.go:411: go sm.runWorker(req) — fire and forget
+                    asyncio.create_task(self._run_worker(req))
+
+                elif req.type == "RESUME":
+                    # manager.go:439-448: resume + worker
+                    self._state = SessionState.BUSY
+                    self._latest_response = None
+                    self._is_worker_busy = True
+
+                    logger.info("Starting worker for RESUME...")
+                    asyncio.create_task(self._run_worker(req))
 
         # manager.go:451-453: signal completion if caller provided a future
         if req.result_future is not None and not req.result_future.done():
@@ -857,11 +866,18 @@ class OpenCodeSessionManager:
             need_abort = False
 
             if res.error is not None:
-                import socket
-
                 err = res.error
-                # manager.go:496-505: distinguish HTTP timeout from other errors
-                if isinstance(err, socket.timeout):
+                # manager.go:496-505: distinguish HTTP timeout from other errors.
+                # The client wraps network errors in OpenCodeAPIError(status_code=0)
+                # with the original httpx exception accessible via __cause__
+                # (set by `raise OpenCodeAPIError(...) from exc` in client.py).
+                # httpx.TimeoutException is the base class for all httpx timeouts.
+                is_timeout = (
+                    isinstance(err, OpenCodeAPIError)
+                    and err.status_code == 0
+                    and isinstance(err.__cause__, httpx.TimeoutException)
+                )
+                if is_timeout:
                     # HTTP timeout after 1 hour — abort remote to clean up
                     need_abort = True
                     self._latest_response = {"error": "timeout after 1 hour"}

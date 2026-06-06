@@ -2675,15 +2675,27 @@ class InstanceManager:
     async def _shutdown_opencode_registry(self) -> None:
         """Shutdown the opencode session registry during daemon shutdown.
 
-        Stops all running session managers and clears the in-memory map.
-        Errors are logged but not raised so the rest of the shutdown
-        sequence can continue.
+        Stops all running session managers, clears the in-memory map, and
+        disposes the dedicated opencode engine to release file handles and
+        finalize the SQLite WAL checkpoint. Errors are logged but not raised
+        so the rest of the shutdown sequence can continue.
         """
         if hasattr(self, "_opencode_registry") and self._opencode_registry:
             try:
                 await self._opencode_registry.shutdown()
             except Exception as exc:
                 logger.warning(f"Error during opencode registry shutdown: {exc}")
+
+        # Dispose the dedicated opencode engine to release resources.
+        # create_engine_from_config returns a sync Engine, so dispose() is sync.
+        # On SQLite this releases file handles and lets the WAL checkpoint
+        # finalize, avoiding "database is locked" on the next start.
+        # On PostgreSQL this returns pooled connections to the pool.
+        if hasattr(self, "_opencode_engine") and self._opencode_engine:
+            try:
+                self._opencode_engine.dispose()
+            except Exception as exc:
+                logger.warning(f"Error disposing opencode engine: {exc}")
     
     async def _wait_for_inflight(self, grace_period: float) -> None:
         """Wait for in-flight processing to finish.

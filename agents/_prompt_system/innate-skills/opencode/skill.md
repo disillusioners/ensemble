@@ -6,8 +6,12 @@ The tools call the OpenCode HTTP API directly (no external binary required).
 ## Prerequisites
 
 1. **OpenCode running**: The OpenCode service must be running at `http://127.0.0.1:4095`
-2. **Configuration**: Settings at `{data_dir}/opencode_skill.json`
-   - Defaults work out-of-box: `opencode`/`opencode` auth, `http://127.0.0.1:4095`
+2. **No configuration file is read**. Defaults are hardcoded in `daemon/opencode/constants.py`:
+   - URL: `http://127.0.0.1:4095`
+   - Basic Auth: `opencode:opencode`
+   - Default model: `litellm/coding`
+   - Default agent: `orchestrator`
+3. **To customize**: Override the OpenCodeClient by passing `base_url`, `api_user`, `api_key` to its constructor. The `create_opencode_tools()` factory does **not** currently accept overrides, so non-default endpoints require modifying the factory wiring.
 
 ## Context Before Delegation
 
@@ -159,17 +163,21 @@ These can be sent even when the session is BUSY:
 
 ## Configuration
 
-`{data_dir}/opencode_skill.json`:
-```json
-{
-    "default_model": "litellm/coding",
-    "api_user": "opencode",
-    "api_key": "opencode",
-    "opencode_url": "http://127.0.0.1:4095"
-}
-```
+There is **no runtime config file** for the opencode tools. All values are hardcoded as Python constants in `daemon/opencode/constants.py`:
 
-The `data_dir` is `./data/` in production and `./data_dev/` in development.
+| Constant | Default | Purpose |
+|----------|---------|---------|
+| `OPENCODE_URL` | `http://127.0.0.1:4095` | Base URL of the local OpenCode HTTP server |
+| `OPENCODE_HTTP_TIMEOUT_S` | `3600` | HTTP request timeout (1 hour) |
+| `DEFAULT_AGENT` | `orchestrator` | Default agent name for new sessions |
+| `DEFAULT_MODEL_PROVIDER_ID` | `litellm` | Default model provider |
+| `DEFAULT_MODEL_ID` | `coding` | Default model ID |
+| `DEFAULT_API_USER` | `opencode` | Basic Auth username |
+| `DEFAULT_API_KEY` | `opencode` | Basic Auth password |
+| `POLL_INTERVAL_S` | `30` | Question-polling interval (seconds) |
+| `ABORT_REMOTE_SETTLE_S` | `3.0` | Settle delay after remote abort |
+
+To change these values, edit `daemon/opencode/constants.py` and restart the daemon. Environment-variable overrides are **not currently implemented** (the module docstring mentions them but no `os.getenv()` is wired up).
 
 ## Key Changes from Current Prompt
 
@@ -187,4 +195,4 @@ The `data_dir` is `./data/` in production and `./data_dev/` in development.
 | Sync mode | `--sync` flag | `wait_for_result` is inherently blocking |
 | File prompt | `@file.txt` syntax | Pass text directly to `send_message` |
 | Daemon | Port 44111 TCP | No daemon (runs in-process) |
-| Config | `~/.opencode_skill/config.json` | `{data_dir}/opencode_skill.json` |
+| Config | `~/.opencode_skill/config.json` | None (hardcoded in `daemon/opencode/constants.py`) |
