@@ -180,10 +180,22 @@ class ErrorReportingService:
                         message.status = MessageStatus.FAILED.value
                         message.completed_at = datetime.now(timezone.utc)
                 
-                # d) Decrement parent's waiting_for counter
+                # d) Decrement parent's waiting_for counter atomically.
+                # Fix C: symmetric to the decrement in child_reports.py. A
+                # non-atomic read-modify-write races with concurrent
+                # child-completion decrements. SQL UPDATE is atomic in both
+                # SQLite and Postgres.
                 parent = session.get(Instance, parent_id)
                 if parent:
-                    parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
+                    session.execute(
+                        text(
+                            "UPDATE instances SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                            "WHERE instance_id = :pid"
+                        ),
+                        {"pid": parent_id},
+                    )
+                    session.expire(parent)
+                    parent = session.get(Instance, parent_id)
                     parent.last_activity_at = datetime.now(timezone.utc)
                     parent.version = (parent.version or 1) + 1
                     

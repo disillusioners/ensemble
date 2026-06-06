@@ -398,13 +398,31 @@ Provide a concise summary:"""
         parent = session.get(Instance, instance.parent_id)
         if not parent:
             return False, None, None
-        
-        # Decrement parent's waiting_for counter
+
+        # Decrement parent's waiting_for counter atomically.
+        # Fix C: a non-atomic read-modify-write here races with concurrent
+        # child completions (two decrements can both read the same starting
+        # value, both write N-1, leaving the counter stuck at N-1 instead of
+        # N-2). The SQL UPDATE is atomic in both SQLite and Postgres; COALESCE
+        # guards against NULL and MAX clamps at 0.
         old_waiting = parent.waiting_for or 0
-        parent.waiting_for = max(0, old_waiting - 1)
+        session.execute(
+            text(
+                "UPDATE instances SET waiting_for = MAX(0, COALESCE(waiting_for, 0) - 1) "
+                "WHERE instance_id = :pid"
+            ),
+            {"pid": parent.instance_id},
+        )
+        # Force the session to re-read the new value for the cascade check below
+        # and the log line. SQLAlchemy would otherwise return the stale cached
+        # value on subsequent attribute access.
+        session.expire(parent)
+        parent = session.get(Instance, instance.parent_id)
+        new_waiting = parent.waiting_for or 0 if parent else 0
         logger.info(
-            f"waiting_for decremented: {old_waiting} -> {parent.waiting_for} "
-            f"(parent={parent.instance_id[:8]}..., child={instance.instance_id[:8]}...)"
+            f"waiting_for decremented: {old_waiting} -> {new_waiting} "
+            f"(parent={parent.instance_id[:8] if parent else '?'}..., "
+            f"child={instance.instance_id[:8]}...)"
         )
         parent.last_activity_at = datetime.now(timezone.utc)
         parent.version = (parent.version or 1) + 1
