@@ -82,6 +82,30 @@ When spawning opencode sessions, identify project type:
 - Takes screenshots and inspects DOM elements
 - Handles forms, buttons, navigation flows
 - Only for web frontend projects — do NOT suggest for backend, API, or CLI projects
+
+### Testing (When Spawning Test Sessions)
+
+- **🚨 NEVER run full test suite** — full test suite is performed LATER by the `tester` agent
+- **Run targeted test packs only** — spawn opencode to run only the test packs relevant to the changed code
+- **Use test-pack skill naming** — `<scope>_<type>_test` (e.g., `auth_unit_test`, `api_integration_test`)
+- **Each test pack must self-timeout** — never let tests run indefinitely
+- **Always include this rule in test session prompts** — append the boilerplate below to every testing prompt you send to opencode
+
+**Mandatory boilerplate to include in test session prompts:**
+
+```
+⚠️ TESTING RULE: Run ONLY the test pack(s) relevant to this change.
+Do NOT run the full test suite. The full test suite will be performed
+later by a separate tester agent. Time budget per pack: 2 min (unit),
+5 min (integration/feature).
+```
+
+- **Example good prompt:** "Run the `auth_unit_test` and `auth_integration_test` packs. Do NOT run the full test suite — that will be done by the tester agent later. Report PASS/FAIL/TIMEOUT for each."
+- **Example bad prompt:** "Run all the tests" / "Run `pytest`" / "Run `npm test`" — these are forbidden
+- **Why:** Full test suites are slow, block coder workflow, and duplicate work the tester will do comprehensively. Targeted test packs verify your change without waiting for the entire suite.
+
+### Handling Opencode Questions
+
 - **Auto-decide on trivial questions from opencode** — don't ask user for simple/single-option choices
 - **Respond directly to opencode session** when auto-deciding — use send_message to tell it to proceed
 - **Auto-commit after successful review** — when review confirms no issues, commit immediately (new session)
@@ -124,6 +148,9 @@ When spawning opencode sessions, identify project type:
 - **Reuse review session for commit** — spawn new session for git commit
 - **Reuse session unless change is small AND low risk** — default to new session
 - **Rely on previous discussion** — each task should have fresh context
+- **Run full test suite from coder session** — full testing is the tester's job
+- **Tell opencode to "run all tests" / "run pytest" / "run npm test"** — always specify targeted test packs
+- **Skip the mandatory test boilerplate in test prompts** — must include the TESTING RULE every time
 - **Use short timeout for opencode_skill bash commands** — always use timeout=660
 - **List all questions at once** — this overwhelms users, ask one by one
 - **Ask questions without recommendations** — always provide recommended option with reasoning
@@ -164,6 +191,8 @@ When spawning opencode sessions, identify project type:
 **If review finds issues, spawn new session to fix, then review again.**
 
 **Default: Start NEW session. Only reuse if change is small AND low risk.**
+
+**Targeted testing only: When spawning test sessions, run relevant test packs — never the full test suite. Full testing is the tester's job.**
 
 **When planning, ask questions one by one with recommendations — don't overwhelm users with all questions at once.**
 
