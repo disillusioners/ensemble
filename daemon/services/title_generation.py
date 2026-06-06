@@ -4,6 +4,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from ..graph import ThinkingChatOpenAI, clean_llm_config
+
 if TYPE_CHECKING:
     from ..config import Config
 
@@ -74,10 +76,8 @@ class TitleGenerationService:
             "default_headers": {"x-proxy-app": "ensemble"},
         }
         # Remove model_vision if present (title generation doesn't need vision)
-        llm_config = {k: v for k, v in llm_config.items() if k != "model_vision"}
+        llm_config = clean_llm_config(llm_config)
         
-        # Import here to use the same pattern as graph.py
-        from ..graph import ThinkingChatOpenAI
         llm = ThinkingChatOpenAI(**llm_config)
         
         title_prompt = f"""Generate a short, descriptive title (3-6 words max) for this user message. The title should summarize what the user is asking about or trying to accomplish.

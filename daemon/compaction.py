@@ -38,6 +38,7 @@ from langchain_core.messages import (
 )
 
 from .config import CompactionConfig
+from .graph import clean_llm_config
 from .loader import estimate_messages_tokens
 
 logger = logging.getLogger(__name__)
@@ -888,7 +889,7 @@ class ContextCompactor:
             llm_config = self.llm_config_with_headers
 
         # Strip model_vision — compaction summarization is text-only, vision model is irrelevant
-        llm_config = {k: v for k, v in llm_config.items() if k != "model_vision"}
+        llm_config = clean_llm_config(llm_config)
 
         llm = ThinkingChatOpenAI(**llm_config)
         

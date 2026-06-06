@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import func, select, text
 from sqlmodel import Session
 
+from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
@@ -188,10 +189,8 @@ class ChildReportsService:
             "default_headers": {"x-proxy-app": "ensemble"},
         }
         # Remove model_vision if present (summarization doesn't need vision)
-        llm_config = {k: v for k, v in llm_config.items() if k != "model_vision"}
+        llm_config = clean_llm_config(llm_config)
         
-        # Import here to use the same pattern as graph.py
-        from ..graph import ThinkingChatOpenAI
         llm = ThinkingChatOpenAI(**llm_config)
         
         summarization_prompt = f"""Summarize what this agent accomplished in 2-3 sentences. Focus on the outcomes and key actions taken, not the process.
