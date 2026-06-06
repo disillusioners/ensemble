@@ -125,3 +125,33 @@ None at the user level. The bug only triggers when a user posts a message in the
 - **Stale doc comment in `repository.py:444`** — `has_pending_tasks_blocked_by_busy_instance` still claims "Cheap: two index lookups" but now has an `OR EXISTS` with a second subquery (up to four lookups in the worst case). Cost is still trivial; comment is misleading.
 - **No `FAILED`-path test for the new cross-system guard** — the test in `46cf524` covers `completed` and `cleanup`-job non-blocking, but not the `failed` job unblock path. The SQL is unambiguous (only `processing` blocks), so this is a low-value test, but cheap to add for completeness.
 - **`task.repository.claim_pending_task` could be called from the job system too** — the cleanest long-term fix is a single `instance_lock` table (or `SELECT FOR UPDATE` on `instances.instance_id`) used by both systems. Out of scope for the immediate fix; worth considering as a follow-up refactor.
+
+---
+
+## Update 2026-06-06 (Post-Commit)
+
+The carve-out above was implemented as part of the fix for an additional deadlock discovered in production:
+
+**Deadlock that motivated the carve-out:**
+1. Parent's job is mid-flight, spawns a child, instance transitions to `WAITING_CHILDREN`.
+2. `MessageJobHandler.handle` defers job completion (job stays `PROCESSING` because the FIFO queue must not start the next job).
+3. Child completes, `child_reports` enqueues a `Task` for the parent to receive the child report.
+4. Original fix would have blocked the task from claiming because the job is still `PROCESSING`.
+5. **Deadlock:** the job waits for the child report (so the instance can complete), the child report task waits for the job (so it can claim).
+
+**Resolution:** The job must stay in `PROCESSING` for FIFO correctness. The carve-out is in the task claim's view of "actively blocking" — the job is only treated as a blocker when the instance is NOT in `WAITING_CHILDREN` and has `waiting_for = 0`. When the instance IS in that deferred state, the job is just a FIFO placeholder and the task is allowed to claim.
+
+SQL carve-out (committed in the same fix):
+
+```sql
+SELECT j.instance_id FROM job_queue_items j
+LEFT JOIN instances i ON j.instance_id = i.instance_id
+WHERE j.status = 'processing'
+AND j.job_type = 'message'
+AND j.instance_id IS NOT NULL
+AND j.deleted_at IS NULL
+AND COALESCE(i.waiting_for, 0) = 0
+AND (i.status IS NULL OR i.status != 'waiting_children')
+```
+
+This means the task-claim's "actively processing" predicate is now: PROCESSING MESSAGE job AND instance is not waiting for children. The job-side fix (`MessageJobHandler` checking the task table) is still needed for the reverse direction, but with the same "is the task actually driving graph.astream?" caveat — i.e., the task check should only treat RUNNING tasks as blockers when they're not in some equivalent deferred state.
