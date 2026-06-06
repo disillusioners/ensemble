@@ -512,19 +512,34 @@ class InstanceManager:
         
         # Create tables once for all repositories
         from sqlmodel import SQLModel
-        
+
         # Import SchemaMigration to register it with SQLModel.metadata
         # This ensures the schema_migrations table is created
         from .migrations.models import SchemaMigration
-        
+
         SQLModel.metadata.create_all(self._engine)
-        
+
         # Run file-based migrations using MigrationRunner
         from .migrations.runner import MigrationRunner
         migration_runner = MigrationRunner(self._engine)
         applied = migration_runner.run_pending_migrations()
         if applied:
             logger.info(f"Applied {len(applied)} migrations: {applied}")
+
+        # Postgres-specific schema evolution. create_all() only creates
+        # tables that don't exist — it does NOT add columns to existing
+        # tables, and the migration runner skips non-SQLite engines. So
+        # for production Postgres we explicitly add columns that
+        # newer code depends on.
+        #
+        # Currently this only adds task.last_heartbeat_at (the
+        # per-task liveness signal for StaleTaskRecovery — see
+        # docs/bugs/child-completion-report-lost-under-concurrent-task-processing.md
+        # §9.1 and the per-instance guard follow-up). The IF NOT EXISTS
+        # clauses make the call idempotent — safe to re-run on every
+        # startup.
+        if self._ensemble_config is not None and self._ensemble_config.is_postgres:
+            self._ensure_postgres_columns()
 
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
@@ -1187,10 +1202,10 @@ class InstanceManager:
 
     def _on_stale_task_permanent_failure(self, instance_id: str, error: str, message_id: str | None) -> None:
         """Bridge from StaleTaskRecovery thread to InstanceManager._send_error_report.
-        
+
         Called on the recovery thread when a task permanently fails.
         Uses MainLoopBridge to safely invoke the async _send_error_report method.
-        
+
         Args:
             instance_id: The instance ID that had the stale task.
             error: The error message describing the failure.
@@ -1205,6 +1220,57 @@ class InstanceManager:
                 message_id=message_id,
             )
         )
+
+    def _ensure_postgres_columns(self) -> None:
+        """Idempotent Postgres schema evolution.
+
+        ``SQLModel.metadata.create_all`` only creates tables that don't
+        exist; it does not add columns to existing tables. The migration
+        runner (run_pending_migrations) skips non-SQLite engines. So for
+        production Postgres we explicitly add columns that newer code
+        depends on. The ``IF NOT EXISTS`` clauses make this safe to
+        re-run on every startup.
+
+        Currently:
+        - task.last_heartbeat_at: per-task liveness signal for
+          StaleTaskRecovery (Option 1 of the per-instance guard
+          follow-up). Without this column, the recovery predicate
+          fails (Postgres rejects the query) and the daemon is
+          stuck. See
+          docs/bugs/child-completion-report-lost-under-concurrent-task-processing.md
+          §9.1 and the per-instance guard follow-up.
+        - idx_task_running_heartbeat: partial index used by the
+          recovery predicate; keeps stale-task lookups O(log n)
+          even as completed/old rows accumulate.
+
+        When a new column needs this treatment: add the IF NOT EXISTS
+        ALTER + (optional) CREATE INDEX here. Do NOT add raw
+        "ALTER TABLE" without IF NOT EXISTS — that breaks re-runs
+        on databases that already have the column.
+        """
+        from sqlalchemy import text
+
+        statements = [
+            # task.last_heartbeat_at
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMP",
+            # Partial index on RUNNING tasks for the recovery predicate
+            (
+                "CREATE INDEX IF NOT EXISTS idx_task_running_heartbeat "
+                "ON task(last_heartbeat_at) WHERE status = 'running'"
+            ),
+        ]
+        with self._engine.begin() as conn:
+            for stmt in statements:
+                try:
+                    conn.execute(text(stmt))
+                except Exception as e:
+                    # Idempotent. Log and continue rather than fail
+                    # startup — the recovery predicate is the only
+                    # consumer of the index, and the column has a
+                    # COALESCE fallback to started_at in the
+                    # recovery predicate so missing it is a degraded
+                    # state, not a crash.
+                    logger.warning(f"Postgres column migration statement skipped: {stmt[:60]}... ({e})")
 
     def setup_worker_pool(
         self,
@@ -1237,12 +1303,28 @@ class InstanceManager:
         # Create repositories (use existing engine)
         from .repositories.task.models import Task
         from .repositories.event.repository import EventRepository
-        
+
         task_repo = TaskRepository(
             engine=self._engine,
             on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
         )
         event_repo = EventRepository(engine=self._engine)
+
+        # Backfill last_heartbeat_at for any RUNNING tasks that lack one
+        # (legacy rows or in-flight tasks surviving a restart). Without
+        # this, the recovery service would flag every surviving RUNNING
+        # task as stale within stale_task_recovery_threshold_minutes of
+        # the new deploy. Best-effort: the recovery predicate falls back
+        # to started_at, so a failed backfill is a recoverable degraded
+        # state, not a crash.
+        try:
+            backfilled = task_repo.backfill_heartbeats()
+            if backfilled:
+                logger.info(
+                    f"Backfilled last_heartbeat_at for {backfilled} in-flight tasks"
+                )
+        except Exception as e:
+            logger.warning(f"Startup backfill of last_heartbeat_at failed: {e}")
         
         # Get shorthand for services config
         svc = self.config.services
@@ -1288,6 +1370,7 @@ class InstanceManager:
             max_retries=svc.max_task_retries,
             retry_backoff_base=svc.task_retry_backoff_base,
             retry_backoff_max=svc.task_retry_backoff_max,
+            heartbeat_interval_seconds=svc.task_heartbeat_interval_seconds,
         )
         self._worker_pool.start()
         

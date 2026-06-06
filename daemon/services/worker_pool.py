@@ -15,42 +15,159 @@ from .main_loop_bridge import MainLoopBridge
 
 if TYPE_CHECKING:
     from daemon.services.task_processor import Task
+    from daemon.repositories.task.repository import TaskRepository
 
 logger = logging.getLogger(__name__)
 
 # Default task timeout: 5 minutes (300 seconds)
 DEFAULT_TASK_TIMEOUT = 300.0
 
+# Default heartbeat interval: 30 seconds. The recovery service's
+# stale threshold (default 5 min) is sized so a crashed worker is
+# detected within ~10 missed heartbeats. 30s keeps DB write load
+# low (≤2/min per active task) while keeping detection latency
+# bounded.
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 30.0
+
 
 def _truncate_error(error: str, max_len: int = MAX_ERROR_LEN) -> str:
-    """Truncate error message, stripping HTML if present."""
-    # Strip HTML tags and reduce whitespace
+    """Truncate error string, stripping HTML if present."""
     if "<" in error and ">" in error:
         error = error.replace("<", " <").replace(">", "> ")
         error = re.sub(r"<[^>]+>", "", error)
-        error = " ".join(error.split())
     if len(error) > max_len:
         return error[:max_len] + "..."
     return error
 
 
+class TaskHeartbeat:
+    """Per-worker daemon thread that updates a task's heartbeat timestamp.
+
+    While a worker is processing a task, this thread wakes every
+    ``interval_seconds`` and calls ``task_repo.update_heartbeat(task_id)``.
+    The recovery service uses ``last_heartbeat_at`` to distinguish a live
+    long-running task from a crashed one.
+
+    Crash semantics:
+    - If the worker process dies, the heartbeat thread dies with it.
+      ``last_heartbeat_at`` stops being updated. The recovery service
+      flags the task as stale within ``stale_task_recovery_threshold_minutes``.
+    - If only the heartbeat thread dies (e.g. unhandled exception in
+      ``_run``), the worker continues processing. ``last_heartbeat_at``
+      stops being updated; the task is eventually flagged as stale
+      and force-cancel-retry fires. The original worker's result is
+      wasted, but the next retry succeeds. The heartbeat thread is
+      re-created on the next ``set_task`` call.
+
+    Thread safety: ``set_task`` and ``_run`` coordinate through a
+    short lock. The DB write itself is atomic via UPDATE.
+    """
+
+    def __init__(
+        self,
+        task_repo: "TaskRepository",
+        interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    ):
+        self._task_repo = task_repo
+        self._interval = interval_seconds
+        self._current_task_id: int | None = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._missed_heartbeats = 0  # diagnostic; resets on successful update
+
+    def set_task(self, task_id: int | None) -> None:
+        """Set the task whose heartbeat should be kept fresh.
+
+        Pass ``None`` when the worker is idle (no task being processed).
+        The heartbeat thread remains alive but performs no DB writes
+        while ``current_task_id`` is None; this avoids restart cost on
+        the hot path.
+        """
+        with self._lock:
+            self._current_task_id = task_id
+        # Eagerly refresh on claim so the recovery service sees a fresh
+        # heartbeat even before the first interval tick.
+        if task_id is not None:
+            self._beat_now(task_id)
+
+    def start(self) -> None:
+        """Start the heartbeat thread (idempotent)."""
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name=f"TaskHeartbeat-{id(self)}",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float = 2.0) -> None:
+        """Stop the heartbeat thread. Safe to call multiple times."""
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=timeout)
+            self._thread = None
+
+    def _run(self) -> None:
+        """Heartbeat loop: every interval, update current task's heartbeat."""
+        while not self._stop_event.is_set():
+            # Sleep first, then check current task. This avoids a redundant
+            # DB write on the very first iteration (claim path already
+            # calls _beat_now() eagerly via set_task()).
+            interrupted = self._stop_event.wait(timeout=self._interval)
+            if interrupted:
+                return  # stop requested
+            with self._lock:
+                task_id = self._current_task_id
+            if task_id is not None:
+                self._beat_now(task_id)
+
+    def _beat_now(self, task_id: int) -> None:
+        """Single heartbeat update. Logs and swallows errors.
+
+        Errors are non-fatal: a failed heartbeat just means the recovery
+        service may flag the task as stale on the next pass, which is
+        recoverable via the retry path.
+        """
+        try:
+            ok = self._task_repo.update_heartbeat(task_id)
+            if ok:
+                self._missed_heartbeats = 0
+            else:
+                # Task no longer RUNNING (cancelled or completed by recovery).
+                # The worker will discover this on its next read; do nothing.
+                self._missed_heartbeats += 1
+        except Exception as e:  # noqa: BLE001
+            self._missed_heartbeats += 1
+            logger.warning(
+                f"Heartbeat update failed for task {task_id}: {type(e).__name__}: {e}"
+            )
+
+
 class Worker(threading.Thread):
     """Worker thread that processes tasks using notification-based coordination.
-    
+
     Workers are completely stateless — no in-memory state, no persistent
     connections to other services. All state is in the database.
-    
+
     Each worker:
     1. Attempts to claim a pending task from the database
     2. If no task available, waits for notification from the pool
     3. Runs the task asynchronously via the main event loop
     4. Updates task status in the database (complete or fail)
     5. Repeats
-    
+
     The worker pool coordinates via threading.Condition to wake workers
     when new work arrives, avoiding continuous polling.
+
+    Each worker also owns a TaskHeartbeat (started by the pool) that
+    updates ``task.last_heartbeat_at`` periodically while a task is
+    in flight. The recovery service uses this column to distinguish
+    a live task (heartbeat fresh) from a crashed one (heartbeat stale).
     """
-    
+
     def __init__(
         self,
         worker_id: str,
@@ -60,9 +177,10 @@ class Worker(threading.Thread):
         max_retries: int = 3,
         retry_backoff_base: int = 60,
         retry_backoff_max: int = 3600,
+        heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     ):
         """Initialize a worker thread.
-        
+
         Args:
             worker_id: Unique identifier for this worker.
             task_processor: TaskProcessor instance to delegate task processing.
@@ -70,7 +188,12 @@ class Worker(threading.Thread):
             timeout_minutes: Task timeout in minutes.
             max_retries: Maximum number of retry attempts.
             retry_backoff_base: Base for exponential backoff (seconds).
-            retry_backoff_max: Maximum backoff time (seconds).
+            retry_backoff_max: Maximum backoff delay (seconds).
+            heartbeat_interval_seconds: How often the per-worker heartbeat
+                thread updates ``task.last_heartbeat_at``. Sizing: keep
+                this smaller than ``stale_task_recovery_threshold_minutes``
+                so the recovery service sees a fresh heartbeat from
+                every live task.
         """
         super().__init__(daemon=True)
         self.worker_id = worker_id
@@ -84,48 +207,79 @@ class Worker(threading.Thread):
         self._tasks_claimed = 0
         self._tasks_completed = 0
         self._tasks_failed = 0
+
+        # Per-worker heartbeat. Lazily started in run() so the task
+        # repository is fully wired before the thread begins.
+        self._heartbeat = TaskHeartbeat(
+            task_repo=self._task_processor._task_repo,
+            interval_seconds=heartbeat_interval_seconds,
+        )
     
     def run(self) -> None:
         """Main loop: claim tasks or wait for notification."""
         logger.info(f"Worker {self.worker_id} started")
-        
-        while not self._stop_event.is_set():
-            task = None
-            try:
-                # Attempt to atomically claim a pending task
-                task = self._task_processor.claim_task(self.worker_id)
-                
-                if task is not None:
-                    self._tasks_claimed += 1
-                    logger.debug(
-                        f"Worker {self.worker_id} claimed task {task.id} "
-                        f"(type={task.task_type}, instance={task.instance_id[:8]}...)"
-                    )
-                    
-                    # Run the task asynchronously via the main event loop
-                    # This is the FIX: C1 pattern - thread to async bridge
-                    self._process_with_timeout(task)
-                    continue  # Check for more work immediately
-                
-                # No task available → this is an empty claim attempt
-                self._worker_pool._stats["empty_claim_attempts"] += 1
 
-                # Track whether the empty claim was due to the per-instance
-                # guard (pending tasks exist but all are blocked by a RUNNING
-                # task for the same instance). This surfaces "is Fix B causing
-                # excessive deferral?" in production.
-                if self._task_processor._task_repo.has_pending_tasks_blocked_by_busy_instance():
-                    self._worker_pool._stats["claims_skipped_due_to_busy_instance"] += 1
+        # Start heartbeat thread now that the worker is alive. It will
+        # run for the lifetime of the worker process and stop in stop().
+        self._heartbeat.start()
+        try:
+            while not self._stop_event.is_set():
+                task = None
+                try:
+                    # Attempt to atomically claim a pending task
+                    task = self._task_processor.claim_task(self.worker_id)
 
-                # Wait for notification OR safety timeout OR stop signal
-                self._worker_pool.wait_for_work(timeout=3.0, stop_event=self._stop_event)
-                # Loop back to try claiming again
-                
-            except Exception as e:
-                logger.error(f"Worker {self.worker_id} unexpected error: {e}", exc_info=True)
-                # Wait for work notification during error recovery
-                self._worker_pool.wait_for_work(timeout=1.0, stop_event=self._stop_event)
-        
+                    if task is not None:
+                        self._tasks_claimed += 1
+                        logger.debug(
+                            f"Worker {self.worker_id} claimed task {task.id} "
+                            f"(type={task.task_type}, instance={task.instance_id[:8]}...)"
+                        )
+
+                        # Tell the heartbeat which task is in flight. The
+                        # set_task() call also does an eager first beat so
+                        # the recovery service sees a fresh heartbeat
+                        # immediately, not after the first interval tick.
+                        self._heartbeat.set_task(task.id)
+
+                        try:
+                            # Run the task asynchronously via the main event loop
+                            # This is the FIX: C1 pattern - thread to async bridge
+                            self._process_with_timeout(task)
+                        finally:
+                            # Clear the heartbeat so it stops writing to
+                            # this task's row once the worker is done (or
+                            # mid-retry). Critical: a stale ``current_task_id``
+                            # would race the next claim and write to the
+                            # wrong row.
+                            self._heartbeat.set_task(None)
+
+                        continue  # Check for more work immediately
+
+                    # No task available → this is an empty claim attempt
+                    self._worker_pool._stats["empty_claim_attempts"] += 1
+
+                    # Track whether the empty claim was due to the per-instance
+                    # guard (pending tasks exist but all are blocked by a RUNNING
+                    # task for the same instance). This surfaces "is Fix B causing
+                    # excessive deferral?" in production.
+                    if self._task_processor._task_repo.has_pending_tasks_blocked_by_busy_instance():
+                        self._worker_pool._stats["claims_skipped_due_to_busy_instance"] += 1
+
+                    # Wait for notification OR safety timeout OR stop signal
+                    self._worker_pool.wait_for_work(timeout=3.0, stop_event=self._stop_event)
+                    # Loop back to try claiming again
+
+                except Exception as e:
+                    logger.error(f"Worker {self.worker_id} unexpected error: {e}", exc_info=True)
+                    # Make sure heartbeat doesn't keep writing to a half-claimed task
+                    self._heartbeat.set_task(None)
+                    # Wait for work notification during error recovery
+                    self._worker_pool.wait_for_work(timeout=1.0, stop_event=self._stop_event)
+        finally:
+            # Stop the heartbeat regardless of how we exit the loop
+            self._heartbeat.stop()
+
         logger.info(
             f"Worker {self.worker_id} stopped: "
             f"claimed={self._tasks_claimed}, "
@@ -335,16 +489,20 @@ class WorkerPool:
         max_retries: int = 3,
         retry_backoff_base: int = 60,
         retry_backoff_max: int = 3600,
+        heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     ):
         """Initialize the worker pool.
-        
+
         Args:
             task_processor: TaskProcessor instance for task processing.
             num_workers: Number of worker threads to spawn.
             timeout_minutes: Task timeout in minutes.
             max_retries: Maximum number of retry attempts.
             retry_backoff_base: Base for exponential backoff (seconds).
-            retry_backoff_max: Maximum backoff time (seconds).
+            retry_backoff_max: Maximum backoff delay (seconds).
+            heartbeat_interval_seconds: How often each worker's heartbeat
+                thread updates ``task.last_heartbeat_at``. Passed through
+                to each Worker.
         """
         self._task_processor = task_processor
         self._num_workers = num_workers
@@ -352,14 +510,15 @@ class WorkerPool:
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._workers: list[Worker] = []
         self._started = False
         self._stopped = False
-        
+
         # Notification coordination
         self._condition = threading.Condition()
         self._notification_count = 0
-        
+
         # Metrics
         self._stats = {
             "notifications_sent": 0,
@@ -367,7 +526,7 @@ class WorkerPool:
             "workers_woken_by_timeout": 0,
             "claims_skipped_due_to_busy_instance": 0,
         }
-        
+
         # Event for test instrumentation - set when wait_for_work() is called
         # Tests can wait on this to synchronize with workers entering wait state
         self._wait_for_work_called = threading.Event()
@@ -430,6 +589,7 @@ class WorkerPool:
                 max_retries=self._max_retries,
                 retry_backoff_base=self._retry_backoff_base,
                 retry_backoff_max=self._retry_backoff_max,
+                heartbeat_interval_seconds=self._heartbeat_interval_seconds,
             )
             worker.start()
             self._workers.append(worker)

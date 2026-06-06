@@ -233,6 +233,19 @@ class ServicesConfig(BaseSettings):
             "the dominant visible symptom). Lower than task_timeout_minutes."
         ),
     )
+    task_heartbeat_interval_seconds: int = Field(
+        default=30,
+        description=(
+            "How often the per-worker heartbeat thread updates a task's "
+            "last_heartbeat_at column while the task is in flight. The "
+            "recovery service compares last_heartbeat_at against "
+            "stale_task_recovery_threshold_minutes; a live task's heartbeat "
+            "is at most one interval old, a crashed worker's heartbeat is "
+            "the time of the last successful update. Keep this at least "
+            "5x smaller than the stale threshold so a few missed beats "
+            "don't false-positive flag live tasks."
+        ),
+    )
     graph_timeout_minutes: float = Field(
         default=55.0,
         description="Hard timeout for LangGraph execution via MainLoopBridge (minutes). Set to 0 to disable."

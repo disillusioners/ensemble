@@ -129,6 +129,14 @@ class TaskRepository:
         thread_id, which would race on ``graph.astream`` and shadow channel
         writes in the Postgres checkpointer.
 
+        Heartbeat init: ``last_heartbeat_at`` is set to the same value as
+        ``started_at`` on claim, so the recovery service can distinguish
+        a freshly-claimed task (heartbeat fresh) from a crashed one
+        (heartbeat stale). The worker's heartbeat thread keeps updating
+        ``last_heartbeat_at`` every ``task_heartbeat_interval_seconds``
+        while the task is in flight; the recovery predicate compares
+        ``last_heartbeat_at`` to the threshold.
+
         Args:
             worker_id: ID of the worker claiming the task.
 
@@ -143,7 +151,8 @@ class TaskRepository:
                 UPDATE task
                 SET status = :status_running,
                     worker_id = :worker_id,
-                    started_at = :started_at
+                    started_at = :started_at,
+                    last_heartbeat_at = :started_at
                 WHERE id = (
                     SELECT id FROM task
                     WHERE status = :status_pending
@@ -171,6 +180,67 @@ class TaskRepository:
 
             return self._row_to_task(row)
 
+    def update_heartbeat(self, task_id: int) -> bool:
+        """Update a task's heartbeat timestamp.
+
+        Called by the worker's heartbeat thread every
+        ``task_heartbeat_interval_seconds`` while the task is being
+        processed. The recovery service reads this column to distinguish
+        a live task (heartbeat fresh) from a crashed one (heartbeat stale).
+
+        The UPDATE is atomic and conditional on status='running' — a task
+        that has been CANCELLED or COMPLETED by recovery while the
+        heartbeat thread was racing will not have its heartbeat
+        refreshed, and the worker will see the cancellation on its
+        next read of the task.
+
+        Args:
+            task_id: ID of the task to heartbeat.
+
+        Returns:
+            True if the heartbeat was applied, False if the task no
+            longer exists or is no longer RUNNING.
+        """
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE task
+                    SET last_heartbeat_at = :now
+                    WHERE id = :id
+                    AND status = :status_running
+                """),
+                {
+                    "now": now,
+                    "id": task_id,
+                    "status_running": TaskStatus.RUNNING.value,
+                },
+            )
+            return result.rowcount > 0
+
+    def backfill_heartbeats(self) -> int:
+        """Backfill last_heartbeat_at = started_at for tasks that lack it.
+
+        Run on startup so that tasks inserted by older code paths
+        (before last_heartbeat_at existed) aren't immediately flagged as
+        stale by the recovery service. Also covers the rare case of a
+        daemon restart while tasks are in flight.
+
+        Returns:
+            Number of rows backfilled.
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text("""
+                    UPDATE task
+                    SET last_heartbeat_at = COALESCE(started_at, created_at)
+                    WHERE last_heartbeat_at IS NULL
+                    AND status = :status_running
+                """),
+                {"status_running": TaskStatus.RUNNING.value},
+            )
+            return result.rowcount
+
     def _row_to_task(self, row) -> Task:
         """Convert a database row to a Task object.
 
@@ -197,6 +267,7 @@ class TaskRepository:
             created_at=row.created_at,
             started_at=row.started_at,
             completed_at=row.completed_at,
+            last_heartbeat_at=row.last_heartbeat_at if hasattr(row, 'last_heartbeat_at') else None,
         )
 
     # --------------------------------------------------------
@@ -273,8 +344,20 @@ class TaskRepository:
         Used for crash recovery to detect tasks that may have been
         abandoned by crashed workers.
 
+        Liveness signal: the predicate is on ``last_heartbeat_at`` rather
+        than ``started_at``, with a fallback to ``started_at`` for rows
+        that have ``last_heartbeat_at IS NULL`` (e.g. legacy rows predating
+        the heartbeat column, or rows that the startup backfill has not
+        yet touched). A live task's heartbeat is updated every
+        ``task_heartbeat_interval_seconds`` by the worker; a crashed task's
+        heartbeat stops being updated, so the recovery service can
+        distinguish them within the configured threshold (default 5 min)
+        without false-positively flagging long-running live tasks.
+
         Args:
-            threshold_minutes: Minutes after which a running task is considered stale.
+            threshold_minutes: Minutes after which a running task is
+                considered stale. Sized for *time since last heartbeat*,
+                not *time since started*.
 
         Returns:
             List of stale running tasks.
@@ -284,7 +367,8 @@ class TaskRepository:
         with SQLModelSession(self.engine) as db_session:
             stmt = select(Task).where(
                 Task.status == TaskStatus.RUNNING.value,
-                Task.started_at < threshold,
+                # COALESCE falls back to started_at for legacy rows.
+                func.coalesce(Task.last_heartbeat_at, Task.started_at) < threshold,
             )
             return list(db_session.exec(stmt))
 
@@ -293,11 +377,8 @@ class TaskRepository:
 
         Used for crash recovery to make abandoned tasks available again.
 
-        Args:
-            threshold_minutes: Minutes after which a running task is considered stale.
-
-        Returns:
-            Number of tasks reset.
+        Liveness signal: predicate is on ``COALESCE(last_heartbeat_at,
+        started_at)`` so live long-running tasks aren't reset.
         """
         threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
         count = 0
@@ -309,7 +390,7 @@ class TaskRepository:
                     worker_id = NULL,
                     started_at = NULL
                 WHERE status = :status_running
-                AND started_at < :threshold
+                AND COALESCE(last_heartbeat_at, started_at) < :threshold
             """)
 
             result = db_session.exec(stmt, params={
@@ -596,7 +677,11 @@ class TaskRepository:
 
     def find_cancellable_tasks(self, threshold_minutes: int) -> list[Task]:
         """Find running tasks that have exceeded the timeout threshold
-        and haven't been marked for cancellation yet."""
+        and haven't been marked for cancellation yet.
+
+        Liveness signal: predicate is on ``COALESCE(last_heartbeat_at,
+        started_at)`` so live long-running tasks aren't flagged.
+        """
         threshold = datetime.now(timezone.utc) - timedelta(minutes=threshold_minutes)
 
         with self.engine.begin() as conn:
@@ -606,7 +691,7 @@ class TaskRepository:
             stmt = text("""
                 SELECT * FROM task
                 WHERE status = :status_running
-                AND started_at < :threshold
+                AND COALESCE(last_heartbeat_at, started_at) < :threshold
                 AND cancel_requested = :cancel_requested
             """)
             rows = conn.execute(stmt, {

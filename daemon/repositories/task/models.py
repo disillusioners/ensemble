@@ -74,6 +74,15 @@ class Task(SQLModel, table=True):
     started_at: datetime | None = Field(default=None)
     completed_at: datetime | None = Field(default=None)
 
+    # Liveness signal. Updated periodically by the worker's heartbeat
+    # thread (see TaskHeartbeat in worker_pool.py). The recovery service
+    # uses this instead of started_at to decide whether a RUNNING task
+    # is genuinely alive or its worker has crashed. Distinguishing
+    # live long-running tasks (e.g. a 30-min exploration with several
+    # bash tool calls) from crashed ones was impossible with started_at
+    # alone, because both look the same in the DB.
+    last_heartbeat_at: datetime | None = Field(default=None, index=True)
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         result_data = None
@@ -100,4 +109,5 @@ class Task(SQLModel, table=True):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "last_heartbeat_at": self.last_heartbeat_at.isoformat() if self.last_heartbeat_at else None,
         }

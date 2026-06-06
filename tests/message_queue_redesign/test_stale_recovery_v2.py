@@ -41,18 +41,35 @@ def create_stale_running_task(
     claimed = repository.claim_pending_task(worker_id=worker_id)
     assert claimed is not None
     assert claimed.id == task.id
-    
-    # Backdate started_at to make it stale
+
+    # Backdate BOTH started_at and last_heartbeat_at to simulate a
+    # crashed worker. The recovery predicate is
+    #     COALESCE(last_heartbeat_at, started_at) < threshold
+    # so a stale task is identified by a stale heartbeat (or, for
+    # legacy rows, a stale started_at). A live task that has been
+    # running for ``age_minutes`` but is still heartbeating must NOT
+    # be flagged — see the liveness-signal tests in
+    # test_task_heartbeat.py for that path.
     stale_time = datetime.now(timezone.utc) - timedelta(minutes=age_minutes)
-    
-    # Update the started_at directly in DB
+
+    # Update started_at and last_heartbeat_at directly in DB
     from sqlalchemy import text
     with repository.engine.begin() as conn:
         conn.execute(
-            text("UPDATE task SET started_at = :started_at, retry_count = :retry_count WHERE id = :id"),
-            {"started_at": stale_time, "retry_count": retry_count, "id": task.id}
+            text(
+                "UPDATE task SET started_at = :started_at, "
+                "last_heartbeat_at = :stale_time, "
+                "retry_count = :retry_count "
+                "WHERE id = :id"
+            ),
+            {
+                "started_at": stale_time,
+                "stale_time": stale_time,
+                "retry_count": retry_count,
+                "id": task.id,
+            },
         )
-    
+
     return repository.get(task.id)
 
 
