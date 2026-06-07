@@ -71,21 +71,3 @@ One call per insight. Keep entries focused and self-contained.
 ## Migration from File-Based Memory
 
 The old file-based memory system (`.agents/{agent-id}/memories/`) has been migrated to the RAG knowledge base. If you see references to `.agents/{agent-id}/memories/` in older documentation, use `explore()` and `experience()` instead.
-
----
-
-## Shared Context for External Agent Systems
-
-When controlling external agent systems (opencode, etc.), you MUST include the following context template in your prompt. This ensures the external system has access to shared exploration context accumulated during this session.
-
-**Context template to include**:
-
-> Current context-key is: {{ENSEMBLE_CONTEXT_KEY}}
->
-> We are working in a multi-agent system environment named ensemble. Current shared-explored context and knowledge base files are under this directory:
->
-> {{ENSEMBLE_SHARED_CONTEXT_DIR}}
->
-> Important: Read and understand all shared context files in that directory first before proceeding.
-
-The `{{ENSEMBLE_CONTEXT_KEY}}` and `{{ENSEMBLE_SHARED_CONTEXT_DIR}}` placeholders are automatically resolved when your system prompt is assembled.
