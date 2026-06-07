@@ -29,6 +29,7 @@ external_opencode_send_message(
     session_name="approve-check-1",
     message="Verify this plan's feasibility and completeness",
     council=True,
+    related_context_keywords=["plan", "feasibility", "completeness"],
 )
 external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
 
@@ -38,12 +39,15 @@ external_opencode_send_message(
     session_name="approve-check-1",
     message="Check for missing error handling in phase 2",
     council=True,
+    related_context_keywords=["error handling", "phase 2", "edge cases"],
 )
 # ... later ...
 external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
 ```
 
 > `council=True` is a parameter on `external_opencode_send_message`, not a separate flag.
+>
+> **Always pass `related_context_keywords`** (3-8 short topic phrases) alongside `council=True`.
 
 ## Delegation Rules
 

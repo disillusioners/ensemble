@@ -1314,7 +1314,13 @@ class TestSendMessageContextPreload:
         mock_manager_with_repo: MagicMock,
         mock_registry: AsyncMock,
     ) -> None:
-        """When ``get_tree_root_id`` returns None, the instance id is used."""
+        """When ``get_tree_root_id`` returns None, the instance id is used.
+
+        Note: the second positional arg is the RESOLVED query (heuristic /
+        LLM extract), not the raw message — see ``TestSendMessageKeywordResolver``
+        for the keyword-resolution contract. This test only pins the context_key
+        fallback behavior, so we suppress the heuristic with a real query.
+        """
         mock_registry.get_session_record = AsyncMock(
             return_value={"id": "session-1", "state": "IDLE"}
         )
@@ -1323,6 +1329,10 @@ class TestSendMessageContextPreload:
             "daemon.tools.external_opencode.get_shared_context",
             return_value="",
         ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+            return_value=["fallback", "kw"],
+        ), patch(
             "daemon.tools.external_opencode._server_send_message",
             new_callable=AsyncMock,
             return_value=ok_response,
@@ -1338,7 +1348,8 @@ class TestSendMessageContextPreload:
                 "message": "Do the thing",
             })
 
-        mock_get.assert_called_with("fallback-id", "Do the thing", "external")
+        assert mock_get.call_args.args[0] == "fallback-id"
+        assert mock_get.call_args.args[2] == "external"
 
     @pytest.mark.asyncio
     async def test_context_key_uses_tree_root_when_available(
@@ -1346,7 +1357,11 @@ class TestSendMessageContextPreload:
         mock_manager_with_repo: MagicMock,
         mock_registry: AsyncMock,
     ) -> None:
-        """When ``get_tree_root_id`` returns a value, it is preferred over the instance id."""
+        """When ``get_tree_root_id`` returns a value, it is preferred over the instance id.
+
+        The resolved query (LLM extract here) is the second positional arg.
+        See ``TestSendMessageKeywordResolver`` for the full keyword contract.
+        """
         mock_manager_with_repo._instance_repository.get_tree_root_id = MagicMock(
             return_value="tree-root-xyz"
         )
@@ -1358,6 +1373,10 @@ class TestSendMessageContextPreload:
             "daemon.tools.external_opencode.get_shared_context",
             return_value="",
         ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+            return_value=["fallback", "kw"],
+        ), patch(
             "daemon.tools.external_opencode._server_send_message",
             new_callable=AsyncMock,
             return_value=ok_response,
@@ -1373,7 +1392,8 @@ class TestSendMessageContextPreload:
                 "message": "Do the thing",
             })
 
-        mock_get.assert_called_with("tree-root-xyz", "Do the thing", "external")
+        assert mock_get.call_args.args[0] == "tree-root-xyz"
+        assert mock_get.call_args.args[2] == "external"
 
     @pytest.mark.asyncio
     async def test_council_trailer_is_appended_after_injection(
@@ -1412,3 +1432,350 @@ class TestSendMessageContextPreload:
         text = self._captured_text(mock_send)
         assert text.startswith(sentinel)
         assert text.endswith("Deep-Review the payment module" + COUNCIL_HINT)
+
+
+# =============================================================================
+# Auto-Preload Context: related_context_keywords param + 3-step resolver
+# =============================================================================
+
+
+class TestSendMessageKeywordResolver:
+    """Tests for the ``related_context_keywords`` param and the agent→LLM→heuristic
+    fallback chain in ``_preload_shared_context``.
+
+    The matcher only sees the resolved query string. The chain is observable
+    through the second positional arg of ``get_shared_context`` and through
+    the call/return of ``extract_keywords`` / ``_heuristic_keywords``.
+    """
+
+    @pytest.fixture
+    def mock_manager_with_repo(self, mock_manager: MagicMock) -> MagicMock:
+        repo = MagicMock()
+        repo.get_tree_root_id = MagicMock(return_value=None)
+        mock_manager._instance_repository = repo
+        return mock_manager
+
+    @staticmethod
+    def _captured_text(mock_send: AsyncMock) -> str:
+        req = mock_send.call_args.args[0]
+        return req.payload["parts"][0]["text"]
+
+    @staticmethod
+    def _captured_query(mock_get) -> str:
+        return mock_get.call_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_agent_keywords_used_directly(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Agent-provided keywords are joined with spaces and passed verbatim."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+        ) as mock_extract, patch(
+            "daemon.tools.external_opencode._heuristic_keywords",
+        ) as mock_heur, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Long prose prompt with many irrelevant tokens",
+                "related_context_keywords": ["auth", "login"],
+            })
+
+        assert self._captured_query(mock_get) == "auth login"
+        mock_extract.assert_not_awaited()
+        mock_heur.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_keywords_normalized_before_use(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Whitespace, dedupe, stop-words, and over-long entries are cleaned up."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "x",
+                "related_context_keywords": [
+                    "  AUTH ", "auth", "the", "", "x" * 50, "login",
+                ],
+            })
+
+        assert self._captured_query(mock_get) == "AUTH login"
+
+    @pytest.mark.asyncio
+    async def test_empty_keywords_falls_back_to_llm(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """``related_context_keywords=None`` → LLM extract path is tried."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+            return_value=["llm", "result"],
+        ) as mock_extract, patch(
+            "daemon.tools.external_opencode._heuristic_keywords",
+        ) as mock_heur, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Long prose prompt",
+            })
+
+        mock_extract.assert_awaited_once_with("Long prose prompt")
+        mock_heur.assert_not_called()
+        assert self._captured_query(mock_get) == "llm result"
+
+    @pytest.mark.asyncio
+    async def test_heuristic_used_when_llm_returns_empty(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Empty LLM result → heuristic path takes over."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "daemon.tools.external_opencode._heuristic_keywords",
+            return_value=["heuristic", "fallback"],
+        ), patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "msg",
+            })
+
+        assert self._captured_query(mock_get) == "heuristic fallback"
+
+    @pytest.mark.asyncio
+    async def test_no_keywords_anywhere_skips_preload(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When all three sources return empty, ``get_shared_context`` is not called."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "daemon.tools.external_opencode._heuristic_keywords",
+            return_value=[],
+        ), patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "msg",
+            })
+
+        mock_get.assert_not_called()
+        # Message is sent unchanged
+        assert self._captured_text(mock_send) == "msg"
+
+    @pytest.mark.asyncio
+    async def test_agent_keywords_short_circuit_llm(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """LLM is not awaited when agent-provided keywords are usable."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ), patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+        ) as mock_extract, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "msg",
+                "related_context_keywords": ["explicit", "list"],
+            })
+
+        mock_extract.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("control_msg", ["continue", "retry", "abort", "start-work"])
+    async def test_control_messages_skip_entire_resolver(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+        control_msg: str,
+    ) -> None:
+        """Control messages bypass preload entirely — no keywords, no extract, no heuristic."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+        ) as mock_extract, patch(
+            "daemon.tools.external_opencode._heuristic_keywords",
+        ) as mock_heur, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": control_msg,
+                "related_context_keywords": ["should", "be", "ignored"],
+            })
+
+        mock_get.assert_not_called()
+        mock_extract.assert_not_awaited()
+        mock_heur.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_keyword_extraction_exception_does_not_break_send(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """``extract_keywords`` is best-effort and never raises — when the LLM
+        path returns ``[]`` (its failure-mode contract), the heuristic still
+        runs and the send still succeeds. (The internal try/except inside
+        ``extract_keywords`` is tested in
+        ``tests/unit/services/test_keyword_extraction.py``.)"""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+            return_value=[],
+        ), patch(
+            "daemon.tools.external_opencode._heuristic_keywords",
+            return_value=["heur"],
+        ), patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "msg",
+            })
+
+        assert self._captured_query(mock_get) == "heur"

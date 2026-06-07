@@ -46,6 +46,14 @@ class LLMConfig(BaseSettings):
     api_key: str = Field(default="")
     model: str = Field(default="gpt-4")
     model_title: str | None = Field(default=None, description="Model for title generation (falls back to model)")
+    model_keywords: str | None = Field(
+        default=None,
+        description=(
+            "Model for keyword extraction from outgoing opencode prompts "
+            "(falls back to model). Set to 'quick' to mirror the explorer agent's "
+            "llm_model for cost/speed."
+        ),
+    )
     model_vision: str | None = Field(default=None, description="Model for vision/image processing (e.g., gpt-4o)")
     temperature: float = Field(default=0.7)
     request_timeout: int = Field(default=660, description="Request timeout in seconds (default: 11 minutes)")
@@ -99,9 +107,11 @@ class LLMConfig(BaseSettings):
 
     @model_validator(mode="after")
     def set_title_model_fallback(self) -> "LLMConfig":
-        """Ensure model_title falls back to model if not set or empty."""
+        """Ensure model_title and model_keywords fall back to model if not set or empty."""
         if not self.model_title:  # Handles None and empty string
             self.model_title = self.model
+        if not self.model_keywords:  # Handles None and empty string
+            self.model_keywords = self.model
         return self
 
 

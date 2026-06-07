@@ -82,6 +82,7 @@ external_opencode_send_message(
             "Focus: transaction handling, error recovery, edge cases in payment flow.\n"
             "Provide thorough analysis.",
     council=True,
+    related_context_keywords=["payment", "transaction", "error recovery", "payment processing"],
 )
 external_opencode_wait_for_result(
     project="myapp",

@@ -250,23 +250,80 @@ class TestLLMConfig:
 
     def test_llm_config_defaults(self, monkeypatch):
         """Test LLMConfig default values.
-        
+
         Clear environment variables to ensure we're testing actual defaults,
         not values from .env or environment variables.
         """
         from daemon.config import LLMConfig
-        
+
         # Clear LLM-related environment variables
         for key in list(os.environ.keys()):
             if key.startswith("OPENAI_") or key.lower() in ("base_url", "llm_base_url"):
                 monkeypatch.delenv(key, raising=False)
-        
+
         config = LLMConfig()
-        
+
         assert config.base_url == "https://api.openai.com/v1"
         assert config.api_key == ""
         assert config.model == "gpt-4"
         assert config.temperature == 0.7
+
+
+class TestModelKeywordsConfig:
+    """Tests for the ``model_keywords`` config field.
+
+    The keyword extraction service in ``daemon/services/keyword_extraction.py``
+    reads ``config.llm.model_keywords`` and falls back to ``config.llm.model``
+    when the field is unset / blank. This mirrors the existing
+    ``model_title`` behavior.
+    """
+
+    def _clean(self, monkeypatch) -> None:
+        """Clear all LLM env vars so defaults are observable."""
+        for key in list(os.environ.keys()):
+            if key.startswith("OPENAI_"):
+                monkeypatch.delenv(key, raising=False)
+
+    def test_model_keywords_falls_back_to_model_when_unset(self, monkeypatch) -> None:
+        from daemon.config import LLMConfig
+
+        self._clean(monkeypatch)
+        config = LLMConfig()
+        assert config.model_keywords == config.model == "gpt-4"
+
+    def test_model_keywords_falls_back_to_model_when_empty(self, monkeypatch) -> None:
+        from daemon.config import LLMConfig
+
+        self._clean(monkeypatch)
+        # Pass an explicit empty string via the constructor — should be
+        # normalized to ``model`` by the model_validator.
+        config = LLMConfig(model="gpt-4o", model_keywords="")
+        assert config.model_keywords == "gpt-4o"
+
+    def test_model_keywords_respects_explicit_value(self, monkeypatch) -> None:
+        from daemon.config import LLMConfig
+
+        self._clean(monkeypatch)
+        config = LLMConfig(model="gpt-4o", model_keywords="quick")
+        assert config.model_keywords == "quick"
+        assert config.model == "gpt-4o"
+
+    def test_model_keywords_honors_env_var(self, monkeypatch) -> None:
+        from daemon.config import LLMConfig
+
+        self._clean(monkeypatch)
+        monkeypatch.setenv("OPENAI_MODEL_KEYWORDS", "quick")
+        config = LLMConfig()
+        assert config.model_keywords == "quick"
+
+    def test_model_keywords_env_var_empty_falls_back(self, monkeypatch) -> None:
+        from daemon.config import LLMConfig
+
+        self._clean(monkeypatch)
+        monkeypatch.setenv("OPENAI_MODEL_KEYWORDS", "")
+        config = LLMConfig()
+        # Empty env var should be normalized to ``model`` by the validator.
+        assert config.model_keywords == config.model
 
 
 class TestDaemonConfig:

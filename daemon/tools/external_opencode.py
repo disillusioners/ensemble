@@ -20,6 +20,11 @@ from daemon.opencode.server import (
     external_opencode_send_message as _server_send_message,  # Blocker 1 (Rev 4): alias to avoid name collision with LangChain tool of same name
 )
 from daemon.services.context_injection import get_shared_context
+from daemon.services.keyword_extraction import (
+    _heuristic_keywords,
+    _normalize_keywords,
+    extract_keywords,
+)
 from ._tool_registry import register_tool_category
 
 logger = logging.getLogger(__name__)
@@ -41,10 +46,12 @@ They manage session lifecycle: create, send messages, check status, wait for res
 answer interactive questions, resume, and abort.
 
 **Auto-Preload Context**: `external_opencode_send_message` automatically prepends
-the top-matching shared-context files (scored against the outgoing message) before
-sending. This saves the remote agent from having to re-discover the caller's
-project context. Control commands (`continue`, `retry`, `abort`, `start-work`)
-bypass auto-preload.
+the top-matching shared-context files (scored against a focused query) before
+sending. The query is resolved through a 3-step chain: the caller-supplied
+`related_context_keywords` first, then an LLM extract of the outgoing message
+(uses `model_keywords`, 40s timeout), then a local heuristic. This saves the
+remote agent from having to re-discover the caller's project context. Control
+commands (`continue`, `retry`, `abort`, `start-work`) bypass auto-preload.
 
 **Workflow**:
 1. `external_opencode_init_session` — Create or replace a named session
@@ -133,13 +140,27 @@ def create_opencode_tools(
         )
         return "\n".join(parts)
 
-    async def _preload_shared_context(query: str) -> str:
+    async def _preload_shared_context(
+        message: str,
+        related_context_keywords: list[str] | None = None,
+    ) -> str:
         """Auto-match shared context files against the outgoing message.
 
         Mirrors ``explore()``'s preload behavior: resolves the caller's
         ``context_key`` from the instance tree, scores existing shared-context
-        files against the query, and returns a tiered injection string (capped
-        at ``INJECTION_TOKEN_CAP`` inside ``get_shared_context``).
+        files against a focused query, and returns a tiered injection string
+        (capped at ``INJECTION_TOKEN_CAP`` inside ``get_shared_context``).
+
+        The query is resolved through a 3-step chain so the matcher always
+        sees something better than the full raw prompt:
+
+        1. **Agent-provided keywords** (``related_context_keywords``) — best
+           path; the caller knows its own intent.
+        2. **LLM extraction** — one-shot call to ``model_keywords`` (defaults
+           to ``model``; ops typically pin to ``"quick"``). Bounded by
+           ``KEYWORD_EXTRACTION_TIMEOUT_S`` (40s). Best-effort, never raises.
+        3. **Deterministic heuristic** — pure-Python fallback (backtick terms,
+           CamelCase tokens, first line) for when the LLM is unavailable.
 
         The prepended hint line uses the hosted MCP tool names
         (``ensemble_context_list`` / ``ensemble_context_read``) because the
@@ -152,7 +173,12 @@ def create_opencode_tools(
         scope ``ensemble_kb_*`` tool calls and respect pinned warnings.
 
         Args:
-            query: The outgoing prompt — used as the scoring query.
+            message: The outgoing prompt — used as the fallback extraction
+                source when the agent does not provide keywords.
+            related_context_keywords: Optional list of short topic keywords
+                the calling agent knows are relevant. Preferred path; the
+                heuristic and LLM layers only run when this is ``None`` /
+                empty after normalization.
 
         Returns:
             Injection string to prepend to the message, or ``""`` to skip
@@ -189,6 +215,35 @@ def create_opencode_tools(
                 critical_notes = [n.to_dict() for n in notes]
             except Exception:
                 pass
+
+        # 3-step keyword resolution: agent-provided → LLM → heuristic → skip.
+        keywords = _normalize_keywords(related_context_keywords)
+        if keywords:
+            logger.debug(
+                "[OpenCode] Using %d agent-provided keyword(s) for context preload",
+                len(keywords),
+            )
+        else:
+            keywords = await extract_keywords(message)
+            if keywords:
+                logger.debug(
+                    "[OpenCode] LLM extracted %d keyword(s) for context preload",
+                    len(keywords),
+                )
+            else:
+                keywords = _heuristic_keywords(message)
+                if keywords:
+                    logger.debug(
+                        "[OpenCode] Heuristic extracted %d keyword(s) for context preload",
+                        len(keywords),
+                    )
+                else:
+                    logger.debug(
+                        "[OpenCode] No keywords resolved; skipping context preload",
+                    )
+                    return ""
+
+        query = " ".join(keywords)
 
         try:
             injection = await asyncio.to_thread(
@@ -258,13 +313,14 @@ session and deleting its registry entry before creating the new one.
         agent: str = "orchestrator",
         model: str | None = None,
         council: bool = False,
+        related_context_keywords: list[str] | None = None,
     ) -> str:
         """Send a prompt to an opencode session (fire-and-forget).
-        
+
         Use tool_help("external_opencode_send_message") for details.
         """
         from daemon.opencode.server import OpenCodeRequest
-        
+
         # Parse model "provider/model" format
         model_dict = {"providerID": "litellm", "modelID": "coding"}
         if model and "/" in model:
@@ -272,14 +328,14 @@ session and deleting its registry entry before creating the new one.
             model_dict = {"providerID": provider, "modelID": model_id}
         elif model:
             model_dict = {"providerID": "litellm", "modelID": model}
-        
+
         # Look up session_id from registry via PUBLIC delegate (Issue 4)
         registry = _get_registry()
         record = await registry.get_session_record(project, session_name)
         if record is None:
             return f"[ERROR] Session '{session_name}' not found in project '{project}'"
         session_id = record.get("id", "")
-        
+
         # Council mode appends the COUNCIL_HINT trailer to the prompt so the
         # receiving agent is nudged to delegate to the @council subagent-tool
         # for critical-path review. Mirrors the old Go binary's --council flag.
@@ -288,7 +344,9 @@ session and deleting its registry entry before creating the new one.
         # Auto-preload shared context (skipped for control messages which are
         # dispatch signals, not tasks). Mirrors explore()'s context injection.
         if message.strip().lower() not in _OPENCODE_CONTROL_MESSAGES:
-            injection = await _preload_shared_context(message)
+            injection = await _preload_shared_context(
+                message, related_context_keywords,
+            )
             if injection:
                 full_text = f"{injection}\n\n{full_text}"
                 logger.info(
@@ -322,18 +380,33 @@ Args:
     council: If True, append the COUNCIL_HINT trailer to the prompt so the
         receiving agent delegates critical-path work to the @council
         subagent-tool. Replaces the old Go binary's --council flag.
+    related_context_keywords: Optional list of short topic keywords (3-8)
+        that describe the context files this task is likely to need.
+        Strongly recommended for long, prose-heavy prompts where full-message
+        matching would dilute the score. When omitted (or empty), the daemon
+        falls back to a one-shot LLM extract (uses `model_keywords`, default
+        40s timeout) and then a local heuristic. Pass `None` to defer to the
+        fallback chain.
 
 Returns:
     Submitted confirmation or error.
 
 Auto-Preload Context:
     Before sending, the caller's shared-context directory is scanned and the
-    top-matching files (scored against `message`) are prepended to the prompt,
-    capped at INJECTION_TOKEN_CAP (2000 tokens). This saves the remote agent
-    from re-discovering context the caller already has. Control messages
-    ("continue", "retry", "abort", "start-work") bypass auto-preload because
-    they are dispatch signals, not tasks. Failures in the preload step are
-    logged and the message is sent unchanged (graceful degradation).
+    top-matching files (scored against the resolved query) are prepended to
+    the prompt, capped at INJECTION_TOKEN_CAP (2000 tokens). The query is
+    resolved through a 3-step chain:
+
+    1. `related_context_keywords` (agent-provided) — best path.
+    2. LLM extract from `message` (uses `model_keywords`; 40s timeout).
+    3. Local heuristic extract from `message` (backtick terms, CamelCase,
+       first line, high-signal tokens).
+
+    This saves the remote agent from re-discovering context the caller
+    already has. Control messages ("continue", "retry", "abort", "start-work")
+    bypass auto-preload because they are dispatch signals, not tasks. Failures
+    in the preload step are logged and the message is sent unchanged
+    (graceful degradation).
 
 Special prompts (bypass BUSY check):
 - "start-work" — also locks agent to "atlas"
