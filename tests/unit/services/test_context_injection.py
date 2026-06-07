@@ -1177,7 +1177,7 @@ class TestSharedContextHints:
         # The preamble names the master agent system, then the RAG hint
         # label tells the agent that Ensemble provides the tools.
         assert "You are working under master agent system named Ensemble" in result
-        assert "MCP RAG tools (provided by Ensemble, should use it if they available):" in result
+        assert "MCP RAG tools (provided by Ensemble,should use them if available):" in result
         # The remaining RAG-shaped tools are listed by name so external
         # agents can call them directly. The project discovery tools were
         # intentionally removed — callers are expected to know their project.

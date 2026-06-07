@@ -8,11 +8,26 @@ OpenCode is an external agent system for code generation and execution. This ope
 
 ## Context Before Delegation
 
-`external_opencode_send_message` automatically prepends relevant shared-context files to your prompt before sending. You do **not** need to gather or paste context manually. The prepended section shows the shared `context_key` (no on-disk path is exposed).
+Shared context is populated by the `explore()` tool. 
 
-**Always pass `related_context_keywords`** with 3-8 short topic phrases on every `external_opencode_send_message` call. Example: `related_context_keywords=["payment", "transaction", "error recovery"]`.
+`external_opencode_send_message` tool scans the shared-context directory for files that match the **topics** of the outgoing task and prepends them to the prompt. The accuracy of that match — and therefore whether the remote opencode session receives the right context — depends on the `related_context_keywords` you pass.
 
-**Tip:** Shared context is populated by the `explore()` tool — run it first when you need the remote session to know about a topic. Control commands (`continue`, `retry`, `abort`, `start-work`) bypass auto-preload. If the remote session needs additional context files beyond what was prepended, it can call the hosted MCP tools `ensemble_context_list` and `ensemble_context_read` directly.
+**Always pass `related_context_keywords`** with 3-8 short topic phrases on every `external_opencode_send_message` call. The keywords are what the matcher scores against, so vague or missing keywords lead to a wrong (or empty) context preload.
+
+### How to derive your keywords
+
+When you are about to call `external_opencode_send_message`, look at the `message` you are sending and pick the **3-8 noun-phrases a human would use to file this task**. They must be concrete, topic-specific, and drawn from the message itself. Look the guide below:
+
+- **Pull from the modules, components, and concepts named in the message** — backtick-quoted terms, CamelCase identifiers, file paths, and proper nouns are the strongest signal.
+  - If your message is `"Refactor the `auth` flow to use OAuth"`, pass `["auth", "OAuth", "login flow"]`.
+  - If your message is `"Update PaymentModule to handle refund edge cases"`, pass `["PaymentModule", "refund", "edge cases"]`.
+- **Add the area the task belongs to** — the subsystem / feature / domain the work touches. This is what most shared-context files are filed under.
+  - If your message is `"Add a /healthz endpoint that pings the DB"`, also include `"health check"`, `"endpoint"`, `"DB ping"`.
+- **Stay short and topic-level** — 1-3 words per phrase. No full sentences, no verbs in isolation. The matcher scores by token overlap, so brevity and topic density beat prose.
+- **Drop filler / generic words** — never include `"code"`, `"task"`, `"implement"`, `"the"`, `"function"`, `"feature"`. They dilute the signal without adding information.
+- **Aim for 4-6 keywords** — too few (≤2) is ambiguous; too many (8+) lets noise dilute the score.
+- **Tips** - keywords often is a mix of query keywords that you used in explore() to gather context, and new keywords that are specific to the task at hand.
+
 
 ## Tool Inventory
 
@@ -44,6 +59,7 @@ external_opencode_send_message(
     project="<PROJECT>",
     session_name="<SESSION_NAME>",
     message="<MESSAGE>",
+    related_context_keywords=["<TOPIC_PHRASE>", ...],  # 3-8 short topic phrases
 )
 
 # Non-blocking status check
@@ -95,6 +111,7 @@ external_opencode_send_message(
         "Return a JWT in an httpOnly cookie. "
         "Write tests in tests/test_auth.py and run pytest before finishing."
     ),
+    related_context_keywords=["auth", "login", "JWT", "User model", "FastAPI"],
 )
 
 # 3. Handle any questions, then wait for completion
@@ -129,14 +146,17 @@ for name in ("task-1", "task-2", "task-3"):
 external_opencode_send_message(
     project="myapp", session_name="task-1",
     message="Refactor app/db.py to use SQLModel and add an index on users.email.",
+    related_context_keywords=["SQLModel", "db.py", "users.email", "index"],
 )
 external_opencode_send_message(
     project="myapp", session_name="task-2",
     message="Add a /healthz endpoint that pings the DB and returns 200/503.",
+    related_context_keywords=["healthz", "endpoint", "DB ping", "health check"],
 )
 external_opencode_send_message(
     project="myapp", session_name="task-3",
     message="Upgrade pytest to >=8 and fix any failing tests in tests/.",
+    related_context_keywords=["pytest", "upgrade", "test fixes", "tests"],
 )
 
 # 3. Wait for the first to complete, then handle its result
@@ -154,6 +174,7 @@ external_opencode_init_session(
 external_opencode_send_message(
     project="myapp", session_name="task-4",
     message="Add a Makefile target `make seed` that loads fixtures from data/.",
+    related_context_keywords=["Makefile", "make seed", "fixtures", "data"],
 )
 
 # 5. Wait for the next to complete (task-2, task-3, or task-4)

@@ -450,7 +450,7 @@ def _mcp_rag_hint(
         return ""
     body = (
         "- You are working under master agent system named Ensemble.\n"
-        "- MCP RAG tools (provided by Ensemble, should use it if they available): "
+        "- MCP RAG tools (provided by Ensemble,should use them if available): "
         "`ensemble_kb_explore(query)` to search the knowledge base, "
         "`ensemble_kb_experience(text)` to record new knowledge."
     )
