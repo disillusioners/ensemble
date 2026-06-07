@@ -767,6 +767,94 @@ class TestWaitForResultExecution:
         assert mock_send.await_count >= 1
 
     @pytest.mark.asyncio
+    async def test_wait_for_result_timeout_includes_last_observed_message(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """On timeout while still BUSY, the response embeds the last snapshot.
+
+        The agent should see ``[STATE]`` and ``[LAST MESSAGE]`` from the most
+        recent GET_STATUS poll so it can decide whether to resume, abort, or
+        keep waiting — without making a separate status call.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-busy"}
+        )
+        busy_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "BUSY",
+                "latest_response": {"result": "mid-stream progress..."},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=busy_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "timeout": 1,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[TIMEOUT]")
+        assert "[STATE] BUSY" in result
+        assert "[LAST MESSAGE]" in result
+        assert "mid-stream progress..." in result
+        assert "external_opencode_resume_session" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_timeout_without_any_poll(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """If no successful poll happened before the deadline, return fallback.
+
+        Guards against crashing when ``last_resp`` is still ``None`` (e.g. the
+        dispatcher errored on every poll). The fallback is the original
+        short message without ``[STATE]`` / ``[LAST MESSAGE]`` sections.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-err"}
+        )
+        err_response = OpenCodeResponse(status="error", message="boom")
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=err_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "timeout": 1,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[TIMEOUT]")
+        assert "[STATE]" not in result
+        assert "[LAST MESSAGE]" not in result
+
+    @pytest.mark.asyncio
     async def test_wait_for_result_returns_error_when_session_not_found(
         self,
         mock_manager: MagicMock,

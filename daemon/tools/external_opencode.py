@@ -95,6 +95,44 @@ def create_opencode_tools(
             return resp.message or f"[OK] {resp.data or ''}"
         return f"[ERROR] {resp.message}"
 
+    def _format_timeout(
+        last_resp: "OpenCodeResponse | None",
+        timeout: int,
+    ) -> str:
+        """Build a TIMEOUT message that includes the last observed snapshot.
+
+        On timeout the session may still be BUSY. The snapshot contains
+        ``latest_response`` (the most recent opencode message), which gives
+        the calling agent visibility into in-flight progress without having
+        to issue a separate ``external_opencode_get_status`` call.
+        """
+        fallback = (
+            f"[TIMEOUT] Session did not complete within {timeout}s. "
+            "Use external_opencode_resume_session() to continue."
+        )
+        if last_resp is None or last_resp.status != "ok":
+            return fallback
+        data = last_resp.data or {}
+        state = data.get("state", "UNKNOWN")
+        latest = data.get("latest_response")
+        parts: list[str] = [
+            f"[TIMEOUT] Session did not complete within {timeout}s.",
+            f"[STATE] {state}",
+        ]
+        if latest:
+            rendered = (
+                latest.get("result", latest)
+                if isinstance(latest, dict)
+                else latest
+            )
+            parts.append("[LAST MESSAGE]")
+            parts.append(str(rendered))
+        parts.append(
+            "Use external_opencode_resume_session() to continue or "
+            "external_opencode_get_status() for more details."
+        )
+        return "\n".join(parts)
+
     async def _preload_shared_context(query: str) -> str:
         """Auto-match shared context files against the outgoing message.
 
@@ -379,11 +417,13 @@ Returns:
         
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        last_resp: "OpenCodeResponse | None" = None
         while loop.time() < deadline:
             from daemon.opencode.server import OpenCodeRequest
             req = OpenCodeRequest(action="GET_STATUS", session_id=session_id)
             resp = await _send(req)
             if resp.status == "ok":
+                last_resp = resp
                 data = resp.data or {}
                 state = data.get("state", "UNKNOWN")
                 if state == "IDLE":
@@ -391,8 +431,8 @@ Returns:
                 if state == "WAITING_FOR_INPUT":
                     return f"[WAITING_FOR_INPUT] Session needs input. Use external_opencode_get_status() to see questions."
             await asyncio.sleep(POLL_INTERVAL_S)
-        
-        return f"[TIMEOUT] Session did not complete within {timeout}s. Use external_opencode_resume_session() to continue."
+
+        return _format_timeout(last_resp, timeout)
     
     external_opencode_wait_for_result._full_doc_ = """\
 Block until an opencode session completes (polls every 30s, default max 10min).
@@ -403,7 +443,9 @@ Args:
     timeout: Max wait in seconds (default 600 = 10 min)
 
 Returns:
-    [COMPLETED] message with response data, [WAITING_FOR_INPUT] with question pointer, or [TIMEOUT] message.
+    [COMPLETED] message with response data, [WAITING_FOR_INPUT] with question pointer,
+    or [TIMEOUT] message that includes the last observed state and latest_response so the
+    caller can see in-flight progress without a separate status call.
 """
     
     # ── Tool 5: Wait Any ────────────────────────────────────────────
