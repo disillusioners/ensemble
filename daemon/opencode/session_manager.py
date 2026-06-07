@@ -578,12 +578,11 @@ class OpenCodeSessionManager:
         should_update_worker_busy = self._is_worker_busy and new_state == SessionState.IDLE
 
         async with self._lock:
-            # Only overwrite _latest_response when the session is no longer
-            # busy — otherwise we'd replace the previous turn's response with
-            # the in-flight message and confuse callers (e.g. get_status).
-            if new_state != SessionState.BUSY:
-                # manager.go:200: strip bloat before storing
-                self._latest_response = {"result": strip_message_bloat(last_message)}
+            # manager.go:200: always overwrite _latest_response with the latest
+            # message from OpenCode, regardless of state — agents need real-time
+            # visibility into in-flight messages during BUSY to detect progress
+            # or problems. Matches Go behavior.
+            self._latest_response = {"result": strip_message_bloat(last_message)}
             if should_update_state:
                 self._state = new_state
             if should_update_worker_busy:

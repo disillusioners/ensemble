@@ -218,7 +218,7 @@ Special prompts (bypass BUSY check):
         if resp.status == "ok":
             data = resp.data or {}
             state = data.get("state", "UNKNOWN")
-            response = data.get("latest_response", "Processing...")
+            response = data.get("latest_response")
             questions = data.get("questions", [])
             
             output = [

@@ -808,9 +808,8 @@ class TestSyncStateWithOpenCode:
     ) -> None:
         """_latest_response is set to the stripped (bloat-removed) last message.
 
-        Note: _latest_response is only overwritten when new_state != BUSY
-        (see sync_state_with_open_code). This test uses a step-finish with
-        reason="stop" so the derived state is IDLE and the response is stored.
+        _latest_response is set unconditionally on every sync (matches Go behavior).
+        The stripped message is stored regardless of derived state.
         """
         msg = {
             "info": {
