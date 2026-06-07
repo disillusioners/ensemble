@@ -8,9 +8,9 @@ OpenCode is an external agent system for code generation and execution. This ope
 
 ## Context Before Delegation
 
-`external_opencode_send_message` automatically prepends relevant shared-context files to your prompt before sending. You do **not** need to gather or paste context manually.
+`external_opencode_send_message` automatically prepends relevant shared-context files to your prompt before sending. You do **not** need to gather or paste context manually. The prepended section shows the shared `context_key` (no on-disk path is exposed).
 
-**Tip:** Shared context is populated by the `explore()` tool — run it first when you need the remote session to know about a topic. Control commands (`continue`, `retry`, `abort`, `start-work`) bypass auto-preload.
+**Tip:** Shared context is populated by the `explore()` tool — run it first when you need the remote session to know about a topic. Control commands (`continue`, `retry`, `abort`, `start-work`) bypass auto-preload. If the remote session needs additional context files beyond what was prepended, it can call the hosted MCP tools `ensemble_context_list` and `ensemble_context_read` directly.
 
 ## Tool Inventory
 

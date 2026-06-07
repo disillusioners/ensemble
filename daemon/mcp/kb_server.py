@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from mcp.server.fastmcp import FastMCP
 
 from daemon.rag.config import is_rag_enabled
+from daemon.services.context_tools import list_context_files, read_context_file
 from daemon.tools.knowledge_tools import (
     _enqueue_experience_job,
     _enqueue_kb_update_job,
@@ -434,6 +435,54 @@ def create_kb_mcp_server() -> FastMCP:
         except Exception as e:
             logger.error("ensemble_kb_search_projects failed: %s", e, exc_info=True)
             return "Error: Failed to search projects."
+
+    @mcp.tool()
+    async def ensemble_context_list(context_key: str) -> str:
+        """List .md files in the shared context directory for a context_key.
+
+        Args:
+            context_key: The CONTEXT_KEY (tree-root instance id) of the session
+                whose context you want to inspect.
+
+        Returns:
+            JSON string: list of {filename, slug, size_bytes, modified_at,
+            concise_preview}. Returns "[]" if no files exist.
+        """
+        if not context_key or not context_key.strip():
+            return "Error: context_key is required."
+        try:
+            files = await asyncio.to_thread(list_context_files, context_key)
+            return json.dumps(files, indent=2)
+        except Exception as e:
+            logger.error("ensemble_context_list failed: %s", e, exc_info=True)
+            return "Error: Failed to list context files."
+
+    @mcp.tool()
+    async def ensemble_context_read(context_key: str, filename: str) -> str:
+        """Read a specific context file.
+
+        Args:
+            context_key: The CONTEXT_KEY. Required.
+            filename: Bare filename returned by ensemble_context_list.
+
+        Returns:
+            File contents or an error string.
+        """
+        if not context_key or not context_key.strip():
+            return "Error: context_key is required."
+        if not filename or not filename.strip():
+            return "Error: filename is required."
+        try:
+            content = await asyncio.to_thread(read_context_file, context_key, filename)
+        except Exception as e:
+            logger.error("ensemble_context_read failed: %s", e, exc_info=True)
+            return "Error: Failed to read context file."
+        if content is None:
+            return (
+                f"Error: Could not read '{filename}' from context_key='{context_key}'. "
+                "The file may not exist, the filename may be invalid, or it failed a security check."
+            )
+        return content
 
     # Eagerly initialize StreamableHTTP session manager
     # (prevents RuntimeError when get_kb_mcp_session_manager() is called later)

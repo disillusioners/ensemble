@@ -80,7 +80,9 @@ Agents sometimes bypass the internal `explore()` tool and use external agent sys
 
 ### Why This Matters
 
-When you call `explore(query)`, the results are written to the shared context directory (`{{ENSEMBLE_SHARED_CONTEXT_DIR}}`). External agent systems automatically read this directory before starting work. If you skip `explore()` and use external tools directly, the shared context stays empty — both your agent and external systems lose accumulated knowledge.
+When you call `explore(query)`, the results are written to the shared context directory keyed by your `CONTEXT_KEY` (see the `## Context Key` section of your system prompt). External agent systems automatically read this directory before starting work. If you skip `explore()` and use external tools directly, the shared context stays empty — both your agent and external systems lose accumulated knowledge.
+
+To inspect the shared context directory from inside an internal agent, use the `list_context(context_key)` and `read_context(context_key, filename)` tools (pass the `CONTEXT_KEY` from your system prompt). External systems should use the hosted MCP `ensemble_context_list` / `ensemble_context_read` tools.
 
 ### Rules
 

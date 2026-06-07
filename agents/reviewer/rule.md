@@ -90,7 +90,7 @@ external_opencode_wait_for_result(
 )
 ```
 
-For long prompts, build the message string in a variable and pass it to `message=` — the new tool does not read prompt bodies from disk. Use the `{{ENSEMBLE_SHARED_CONTEXT_DIR}}` context template from `knowledge.md` so the deep-review session reads accumulated shared context.
+For long prompts, build the message string in a variable and pass it to `message=` — the new tool does not read prompt bodies from disk. Note that `external_opencode_send_message` automatically prepends the top-matching shared context files (scored against your outgoing prompt) before sending, so the deep-review session receives the relevant context without any extra step. If you need additional files, fetch them via the `list_context` / `read_context` tools (or, for the remote session, the `ensemble_context_list` / `ensemble_context_read` MCP tools).
 
 ### Deep-Review with Standard Sessions
 23. **Combine when needed** — For MEDIUM+ scope where Deep-Review triggers in one area:

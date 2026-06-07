@@ -4,7 +4,8 @@ Tests cover:
 - _save_explorer_result(): file creation, content format, slug generation, timestamps
 - _extract_concise_section(): extracting ## Concise: section from content
 - _is_duplicate_concise(): dedup checking with Jaccard similarity
-- append_context_key(): placeholder resolution ({{ENSEMBLE_CONTEXT_KEY}}, {{ENSEMBLE_SHARED_CONTEXT_DIR}})
+- append_context_key(): placeholder resolution ({{ENSEMBLE_CONTEXT_KEY}} only — the
+  legacy {{ENSEMBLE_SHARED_CONTEXT_DIR}} placeholder is no longer exposed to agents)
 - Fire-and-forget safety: exceptions don't crash explore()
 - Edge cases: empty queries, special characters, long content
 """
@@ -326,38 +327,6 @@ class TestAppendContextKeyPlaceholderResolution:
         assert "{{ENSEMBLE_CONTEXT_KEY}}" not in result
         assert "root-instance-123" in result
 
-    def test_ensemble_shared_context_dir_replacement(self):
-        """{{ENSEMBLE_SHARED_CONTEXT_DIR}} is replaced with actual path."""
-        system_prompt = "Dir: {{ENSEMBLE_SHARED_CONTEXT_DIR}}"
-        instance_id = "my-instance-456"
-        instance_repository = MagicMock()
-
-        result = append_context_key(
-            system_prompt, instance_id, instance_repository, parent_id=None
-        )
-
-        assert "{{ENSEMBLE_SHARED_CONTEXT_DIR}}" not in result
-        # Should contain the temp dir path pattern
-        assert "ensemble" in result
-        assert "context" in result
-        assert "my-instance-456" in result
-
-    def test_both_placeholders_in_string(self):
-        """String containing both placeholders gets both replaced."""
-        system_prompt = "Key={{ENSEMBLE_CONTEXT_KEY}}, Dir={{ENSEMBLE_SHARED_CONTEXT_DIR}}"
-        instance_id = "combined-test"
-        instance_repository = MagicMock()
-
-        result = append_context_key(
-            system_prompt, instance_id, instance_repository, parent_id=None
-        )
-
-        assert "{{ENSEMBLE_CONTEXT_KEY}}" not in result
-        assert "{{ENSEMBLE_SHARED_CONTEXT_DIR}}" not in result
-        assert "combined-test" in result
-        # Verify path structure exists
-        assert "ensemble/context" in result
-
     def test_no_placeholders_unchanged(self):
         """String without placeholders is returned unchanged (except context key appended)."""
         system_prompt = "You are a helpful assistant."
@@ -370,7 +339,8 @@ class TestAppendContextKeyPlaceholderResolution:
 
         assert "You are a helpful assistant." in result
         assert "{{ENSEMBLE_CONTEXT_KEY}}" not in result
-        assert "{{ENSEMBLE_SHARED_CONTEXT_DIR}}" not in result
+        # Legacy path placeholder is no longer replaced (it is left untouched so
+        # that any stray references in prompts simply do not expand).
         # Context key section should still be appended
         assert "CONTEXT_KEY:" in result
 
@@ -403,20 +373,6 @@ class TestAppendContextKeyPlaceholderResolution:
         # Should use the tree root, not the instance_id
         assert "root-from-tree" in result
         instance_repository.get_tree_root_id.assert_called_once_with("parent-id")
-
-    def test_shared_context_dir_uses_root_id(self):
-        """{{ENSEMBLE_SHARED_CONTEXT_DIR}} uses tree root ID when parent_id is set."""
-        system_prompt = "Dir: {{ENSEMBLE_SHARED_CONTEXT_DIR}}"
-        instance_id = "child"
-        instance_repository = MagicMock()
-        instance_repository.get_tree_root_id.return_value = "tree-root-id"
-
-        result = append_context_key(
-            system_prompt, instance_id, instance_repository, parent_id="parent"
-        )
-
-        # Directory should use tree root
-        assert "tree-root-id" in result
 
 
 # =============================================================================

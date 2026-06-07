@@ -1059,7 +1059,7 @@ class TestSendMessageContextPreload:
         mock_registry.get_session_record = AsyncMock(
             return_value={"id": "session-1", "state": "IDLE"}
         )
-        sentinel = "# Shared Context\n## Pre-loaded Context\n### foo (90% match)\nstuff\n"
+        sentinel = "# Shared Context\ncontext_key: test-instance-id\n\n## Pre-loaded Context\n### foo (90% match)\nstuff\n"
         ok_response = OpenCodeResponse(status="ok", message="queued")
         with patch(
             "daemon.tools.external_opencode.get_shared_context",
@@ -1102,7 +1102,7 @@ class TestSendMessageContextPreload:
         ok_response = OpenCodeResponse(status="ok", message="queued")
         with patch(
             "daemon.tools.external_opencode.get_shared_context",
-            return_value="# Shared Context\nshould not appear\n",
+            return_value="# Shared Context\ncontext_key: test-instance-id\n\nshould not appear\n",
         ) as mock_get, patch(
             "daemon.tools.external_opencode._server_send_message",
             new_callable=AsyncMock,
@@ -1135,7 +1135,7 @@ class TestSendMessageContextPreload:
         ok_response = OpenCodeResponse(status="ok", message="queued")
         with patch(
             "daemon.tools.external_opencode.get_shared_context",
-            return_value="# Shared Context\nshould not appear\n",
+            return_value="# Shared Context\ncontext_key: test-instance-id\n\nshould not appear\n",
         ) as mock_get, patch(
             "daemon.tools.external_opencode._server_send_message",
             new_callable=AsyncMock,
@@ -1299,7 +1299,7 @@ class TestSendMessageContextPreload:
         mock_registry.get_session_record = AsyncMock(
             return_value={"id": "session-1", "state": "IDLE"}
         )
-        sentinel = "# Shared Context\nINJECTED\n"
+        sentinel = "# Shared Context\ncontext_key: test-instance-id\n\nINJECTED\n"
         ok_response = OpenCodeResponse(status="ok", message="queued")
         with patch(
             "daemon.tools.external_opencode.get_shared_context",

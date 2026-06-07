@@ -46,8 +46,8 @@
 
 ## Context-First Rules
 
-- Always check shared context directory (ENSEMBLE_SHARED_CONTEXT_DIR) before querying RAG
+- Always check the shared context directory (use `list_context(CONTEXT_KEY)` and `read_context(CONTEXT_KEY, filename)`) before querying RAG. Your `CONTEXT_KEY` is in the `## Context Key` section of your system prompt.
 - Reuse existing high-confidence results from context files when they match the query topic
 - Extend, don't duplicate — if context files partially cover the query, only RAG for the gaps
-- Never re-query RAG for something already well-answered in context files
+- Never re-query RAG for something already well answered in context files
 - In Sources section, distinguish between "shared context file" and "RAG knowledge base" origins

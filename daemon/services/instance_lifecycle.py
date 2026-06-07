@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import re
-import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -65,9 +64,7 @@ def append_context_key(
             root_id = parent_id  # Fallback to parent_id if not found
 
     # Resolve ensemble shared context placeholders
-    shared_context_dir = str(Path(tempfile.gettempdir()) / "ensemble" / "context" / root_id / "")
     system_prompt = system_prompt.replace("{{ENSEMBLE_CONTEXT_KEY}}", root_id)
-    system_prompt = system_prompt.replace("{{ENSEMBLE_SHARED_CONTEXT_DIR}}", shared_context_dir)
 
     context_section = f"\n---\n\n## Context Key\n\nCONTEXT_KEY: {root_id}\n"
     return system_prompt + context_section

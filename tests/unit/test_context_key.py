@@ -110,6 +110,32 @@ class TestAppendContextKey:
         assert result == system_prompt + expected_suffix
         assert result.endswith(expected_suffix)
 
+    def test_no_path_leak_in_prompt(self):
+        """The on-disk context path must NOT appear in the system prompt."""
+        import re
+        import tempfile
+        system_prompt = "You are a helpful assistant."
+        instance_id = "test-instance"
+        instance_repository = MagicMock()
+
+        result = append_context_key(
+            system_prompt, instance_id, instance_repository, parent_id=None
+        )
+
+        # The tempdir must not appear (no path leak).
+        tempdir = tempfile.gettempdir()
+        assert tempdir not in result, f"tempdir '{tempdir}' leaked into prompt: {result!r}"
+        # And the path components must not appear either.
+        assert "ensemble/context" not in result
+        assert "/context/" not in result
+        # The CONTEXT_KEY block must still be present.
+        assert "CONTEXT_KEY:" in result
+        assert "test-instance" in result
+        # Make sure no stray placeholder remains.
+        assert "{{ENSEMBLE_SHARED_CONTEXT_DIR}}" not in result
+        # Sanity: there should be no path-like absolute structure in the prompt.
+        assert not re.search(r"/[A-Za-z]+/ensemble/context", result)
+
 
 # =============================================================================
 # Part B: Injection Site Tests

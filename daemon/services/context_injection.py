@@ -5,9 +5,10 @@ Matches queries against shared context files and returns top-2 injection text.
 
 import logging
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+from .context_tools import resolve_context_dir
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,7 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
 
 def _format_injection(
     matched_files: list[MatchedFile],
+    context_key: str,
     context_dir: Path | None = None,
 ) -> str:
     """Format matched files into injection string.
@@ -316,6 +318,7 @@ def _format_injection(
 
     Args:
         matched_files: List of matched files to format (sorted by score desc).
+        context_key: The context key (tree-root instance id) to display.
         context_dir: Directory containing context files (for file index).
 
     Returns:
@@ -460,7 +463,7 @@ def _format_injection(
 
     # Build final output
     lines = ["# Shared Context\n"]
-    lines.append(f"## Context dir: {context_dir}\n")
+    lines.append(f"context_key: {context_key}\n")
     lines.append("\n## Pre-loaded Context (auto-matched)\n")
 
     # Add entries
@@ -503,38 +506,37 @@ def get_shared_context(context_key: str, query: str) -> str | None:
     """
     logger.info("[Explorer] get_shared_context called: context_key=%s, query=%s", context_key, query[:100])
 
-    # Define context_dir outside try block so it's available in exception handler
-    # Wrap in try-except to handle OSError from tempfile.gettempdir()
-    try:
-        context_dir = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
-    except Exception:
-        # Use a placeholder path for error reporting
-        context_dir = Path("/unknown") / "ensemble" / "context" / str(context_key)
+    # Resolve context_dir once and reuse across all branches. The resolved path
+    # is not leaked into the agent-visible output — only ``context_key`` is.
+    context_dir = resolve_context_dir(context_key)
+
+    def _empty() -> str:
+        return f"# Shared Context\ncontext_key: {context_key}\n\n## Pre-loaded Context\nThere is no context yet.\n"
 
     try:
         logger.debug("[Explorer] Context dir: %s", context_dir)
         logger.debug("[Explorer] Context dir exists: %s", context_dir.exists())
         if not context_dir.exists():
             logger.info("[Explorer] Context dir does not exist, returning empty format")
-            return f"# Shared Context\n## Context dir: {context_dir}\n\n## Pre-loaded Context\nThere is no context yet."
+            return _empty()
 
         matched = _match_context_files(query, context_dir)
         logger.info("[Explorer] _match_context_files returned %d matches", len(matched))
 
         if not matched:
             logger.debug("Context auto-injection: no matches for query '%s'", query[:50])
-            return f"# Shared Context\n## Context dir: {context_dir}\n\n## Pre-loaded Context\nThere is no context yet."
+            return _empty()
 
-        injection = _format_injection(matched, context_dir=context_dir)
+        injection = _format_injection(matched, context_key=context_key, context_dir=context_dir)
         logger.debug("[Explorer] _format_injection returned length: %d", len(injection) if injection else 0)
 
         if not injection:
             logger.debug("Context auto-injection: no injection content for query '%s' (matched %d files)", query[:50], len(matched))
-            return f"# Shared Context\n## Context dir: {context_dir}\n\n## Pre-loaded Context\nThere is no context yet."
+            return _empty()
 
         logger.debug("Context auto-injection: %d files matched for query '%s'", len(matched), query[:50])
         logger.info("[Explorer] Returning injection of length %d", len(injection))
         return injection
     except Exception as e:
         logger.debug(f"[Explorer] Error in get_shared_context: {e}")
-        return f"# Shared Context\n## Context dir: {context_dir}\n\n## Pre-loaded Context\nThere is no context yet."
+        return _empty()

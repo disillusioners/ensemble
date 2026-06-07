@@ -915,7 +915,7 @@ class TestExploreAutoInjection:
         self, mock_manager_for_injection
     ):
         """When get_shared_context returns injection text, message includes it."""
-        injection_text = "# Shared Context\n## Context dir: /tmp/ensemble/context/tree-root\n\n## Pre-loaded Context (auto-matched)\n\n### test-file (85% match)\nAnswer content here.\n"
+        injection_text = "# Shared Context\ncontext_key: tree-root-instance-id\n\n## Pre-loaded Context (auto-matched)\n\n### test-file (85% match)\nAnswer content here.\n"
 
         with patch(
             "daemon.tools.knowledge_tools.asyncio.to_thread",
@@ -956,7 +956,7 @@ class TestExploreAutoInjection:
         self, mock_manager_for_injection
     ):
         """When get_shared_context returns empty format (no matches), message includes it."""
-        empty_format = "# Shared Context\n## Context dir: /tmp/ensemble/context/tree-root\n\n## Pre-loaded Context\nThere is no context yet."
+        empty_format = "# Shared Context\ncontext_key: tree-root-instance-id\n\n## Pre-loaded Context\nThere is no context yet."
 
         with patch(
             "daemon.tools.knowledge_tools.asyncio.to_thread",
@@ -1061,7 +1061,7 @@ class TestExploreAutoInjection:
         self, mock_manager_for_injection
     ):
         """Verify asyncio.to_thread is used for get_shared_context."""
-        mock_to_thread = AsyncMock(return_value="# Shared Context\n## Context dir: /tmp\n\n## Pre-loaded Context\nContent.")
+        mock_to_thread = AsyncMock(return_value="# Shared Context\ncontext_key: tree-root-instance-id\n\n## Pre-loaded Context\nContent.")
 
         with patch("daemon.tools.knowledge_tools.asyncio.to_thread", mock_to_thread):
             with patch(

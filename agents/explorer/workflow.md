@@ -32,8 +32,8 @@ Step-by-step process for exploring project knowledge.
 
 1. **Check message for "## Pre-loaded Context" section** — If present, review the auto-matched content first
 2. **Only if pre-loaded context is insufficient** (missing files you expect, or partial coverage of a specific sub-topic):
-   - If ENSEMBLE_SHARED_CONTEXT_DIR is set, use `list_directory` to find additional .md files
-   - Read files whose filenames (slugs) are relevant to gaps in the pre-loaded context
+   - Call `list_context(CONTEXT_KEY)` to enumerate additional `.md` files in the shared context directory
+   - Use `read_context(CONTEXT_KEY, filename)` to read files whose slugs are relevant to gaps in the pre-loaded context
 3. Evaluate relevance:
    - Pre-loaded + RAG fully answers the query → Return answer. Skip manual file reading.
    - Pre-loaded partially covers → Proceed to RAG for gaps (Step 3)

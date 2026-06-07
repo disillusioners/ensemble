@@ -370,7 +370,7 @@ class TestFormatInjection:
 
     def test_empty_matches(self):
         """Empty matches return empty string."""
-        result = _format_injection([])
+        result = _format_injection([], context_key="test-key")
         assert result == ""
 
     def test_top_match_always_included(self, tmp_path):
@@ -391,7 +391,7 @@ class TestFormatInjection:
                 first_sentence="First sentence.",
             )
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "# Shared Context" in result
         assert "### low-score-file (15% match)" in result
         assert "This is the full content of the file." in result
@@ -415,7 +415,7 @@ class TestFormatInjection:
                 first_sentence="Large content.",
             )
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "# Shared Context" in result
         # Content should be truncated (ends with ...)
         assert "..." in result
@@ -449,7 +449,7 @@ class TestFormatInjection:
                 first_sentence="Second.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "### match1 (90% match)" in result
         assert "### match2 (65% match)" in result
         assert "Content of first match." in result
@@ -482,7 +482,7 @@ class TestFormatInjection:
                 first_sentence="Second.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "### match1 (90% match)" in result
         assert "### match2" not in result  # Second match should not appear
         assert "Content of second match" not in result
@@ -523,7 +523,7 @@ class TestFormatInjection:
                 first_sentence="Third.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "### match1 (90% match)" in result
         assert "### match2 (70% match)" in result
         assert "### match3 (65% match)" in result
@@ -567,7 +567,7 @@ class TestFormatInjection:
                 first_sentence="Third.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "### match1 (90% match)" in result
         assert "### match2 (70% match)" in result
         assert "### match3" not in result  # Third match should not appear
@@ -613,7 +613,7 @@ class TestFormatInjection:
                 first_sentence="Fourth - should not appear.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "### match1 (90% match)" in result
         assert "### match2 (75% match)" in result
         assert "### match3 (70% match)" in result
@@ -645,7 +645,7 @@ High
                 first_sentence="Concise section content.",
             )
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         # Full file content should be used, including all sections
         assert "## Concise" in result
         assert "## Answer" in result
@@ -682,7 +682,7 @@ High
                 first_sentence="Other content.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "# Shared Context" in result
         assert "## Available Context Files" in result
         # Header format: (remaining files, pre-loaded files)
@@ -726,7 +726,7 @@ High
                 first_sentence="Large content file 2.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         # Match 1 should be present
         assert "### large1 (90% match)" in result
         # Match 2 should be present but truncated
@@ -762,7 +762,7 @@ High
                 first_sentence="Other content.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         # Pre-loaded content should appear
         assert "# Shared Context" in result
         assert "## Pre-loaded Context" in result
@@ -784,7 +784,7 @@ High
         file2.write_text("Gamma delta content.")
 
         # Don't create matched files - test the index with no pre-loaded files
-        result = _format_injection([], context_dir=context_dir)
+        result = _format_injection([], context_key="test-key", context_dir=context_dir)
         # Header should show (2 files) since no pre-loaded files exist
         assert "(2 files)" in result
         # Both files should appear in index
@@ -819,7 +819,7 @@ Regular paragraph without heading.
                 first_sentence="Title.",
             ),
         ]
-        result = _format_injection(matched, context_dir=context_dir)
+        result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         # Headings should be increased by one level
         assert "## Title" in result  # # -> ##
         assert "### Subtitle" in result  # ## -> ###
@@ -853,7 +853,7 @@ High
 
         assert result is not None
         assert "# Shared Context" in result
-        assert "## Context dir:" in result
+        assert "context_key: test-key" in result
         assert "## Pre-loaded Context" in result
         assert "auth-module" in result
 
@@ -867,7 +867,7 @@ High
 
         assert result is not None
         assert "# Shared Context" in result
-        assert "## Context dir:" in result
+        assert "context_key: empty-key" in result
         assert "## Pre-loaded Context" in result
         assert "There is no context yet" in result
 
@@ -885,7 +885,7 @@ High
 
         assert result is not None
         assert "# Shared Context" in result
-        assert "## Context dir:" in result
+        assert "context_key: no-match-key" in result
         assert "There is no context yet" in result
 
     def test_returns_empty_format_on_error(self):
@@ -940,7 +940,7 @@ Other information.
 
         assert result is not None
         assert "# Shared Context" in result
-        assert "## Context dir:" in result
+        assert "context_key: test-project" in result
         assert "## Pre-loaded Context" in result
         assert "auth-module" in result
         # Since auth-module is pre-loaded, it should not appear in index
