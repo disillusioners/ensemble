@@ -1,21 +1,15 @@
 # OpenCode_Skill
 
-Controls **Orchestrator** (oh-my-opencode-slim) via **native Python tools**.
-The tools call the OpenCode HTTP API directly (no external binary required).
+This skill controls **Orchestrator** (oh-my-opencode-slim) via **native Python tools** that call the OpenCode HTTP API directly (no external binary required). The Orchestrator handles everything end-to-end - planning, execution, and cleanup.
 
 ## Prerequisites
 
-1. **OpenCode running**: The OpenCode service must be running at `http://127.0.0.1:4095`
-2. **No configuration file is read**. Defaults are hardcoded in `daemon/opencode/constants.py`:
-   - URL: `http://127.0.0.1:4095`
-   - Basic Auth: `opencode:opencode`
-   - Default model: `litellm/coding`
-   - Default agent: `orchestrator`
-3. **To customize**: Override the OpenCodeClient by passing `base_url`, `api_user`, `api_key` to its constructor. The `create_opencode_tools()` factory does **not** currently accept overrides, so non-default endpoints require modifying the factory wiring.
+1.  **OpenCode running**: The OpenCode service must be running at `http://127.0.0.1:4095`. Defaults (URL, Basic Auth `opencode:opencode`, default model `litellm/coding`, default agent `orchestrator`) are hardcoded in `daemon/opencode/constants.py`.
+2.  **Session Initialization**: You **MUST** initialize a session with a target working directory before sending commands. The session remembers this directory, so you do not need to be in the project root when running subsequent commands.
 
 ## Context Before Delegation
 
-> **Before sending any task to OpenCode, gather and share relevant context first.**
+> **Before sending any task to an external system, gather and share relevant context first.**
 
 External agents (opencode sessions) start with zero knowledge of your session. They depend entirely on what you tell them. Before delegating:
 
@@ -42,6 +36,19 @@ External agents (opencode sessions) start with zero knowledge of your session. T
 
 ### 1. Initialize a Session
 
+**Syntax:**
+```python
+external_opencode_init_session(
+    project="<PROJECT>",
+    session_name="<SESSION_NAME>",
+    working_dir="<WORKING_DIR>"
+)
+```
+- `<PROJECT>`: Project identifier (e.g., `myapp`, `website`, `api`).
+- `<SESSION_NAME>`: Task or feature name (e.g., `task-1`, `bugfix`).
+- `<WORKING_DIR>`: Absolute path to the project root directory where the agent should work.
+
+**Example:**
 ```python
 external_opencode_init_session(
     project="myapp",
@@ -50,149 +57,169 @@ external_opencode_init_session(
 )
 ```
 
+**Re-initializing a Session:**
+If you call `external_opencode_init_session` with the same PROJECT and SESSION_NAME, the old session will be automatically aborted and a new one created. No confirmation is required.
+
 ### 2. Send a Message
 
+**Syntax:**
 ```python
 external_opencode_send_message(
-    project="myapp",
-    session_name="feature-login",
-    message="Explore the auth module structure"
+    project="<PROJECT>",
+    session_name="<SESSION_NAME>",
+    message="<MESSAGE>"
 )
 ```
+- `<PROJECT>`: The project identifier used when initializing the session.
+- `<SESSION_NAME>`: The session name used when initializing the session.
+- `<MESSAGE>`: Text to send, or a command prompt (e.g., `start-work`, `continue`, `retry`, `abort`).
 
-### 3. Check Status (non-blocking)
+### Non-Blocking Message Submission
 
-```python
-external_opencode_get_status(
-    project="myapp",
-    session_name="feature-login"
-)
-```
+All `external_opencode_send_message` calls return **immediately** with a confirmation (fire-and-forget). The Orchestrator continues processing in the background. Use `external_opencode_wait_for_result` or `external_opencode_get_status` to retrieve results when ready.
 
-### 4. Wait for Result (blocking)
+### Retrieving Results
+
+**Single Session:**
+`external_opencode_wait_for_result` retrieves results from the session:
+- **Blocking**: Waits up to 10 minutes for completion (polls every 30s)
+- **Non-blocking alternative**: Use `external_opencode_get_status` to check if results are ready
 
 ```python
 external_opencode_wait_for_result(
-    project="myapp",
-    session_name="feature-login",
+    project="<PROJECT>",
+    session_name="<SESSION_NAME>",
     timeout=600
 )
 ```
 
-### 5. Answer Questions
+**Multiple Sessions:**
+For parallel sessions, use `external_opencode_wait_any` to retrieve results from the first completed session:
 
 ```python
-external_opencode_answer_question(
-    project="myapp",
-    session_name="feature-login",
-    request_id="req_abc123",
-    answers=["ESLint"]
-)
-```
-
-### 6. Resume After Timeout
-
-```python
-external_opencode_resume_session(
-    project="myapp",
-    session_name="feature-login"
-)
-```
-
-### 7. Abort Session
-
-```python
-external_opencode_abort_session(
-    project="myapp",
-    session_name="feature-login"
-)
-```
-
-## Unified Workflow
-
-```
-1. external_opencode_init_session(project, session_name, working_dir)
-2. external_opencode_send_message(project, session_name, message)
-3. external_opencode_wait_for_result(project, session_name)  # or get_status
-4. If WAITING_FOR_INPUT → external_opencode_answer_question(...)
-5. If timeout → external_opencode_resume_session(...)
-6. external_opencode_get_status() to check progress
-```
-
-## Parallel Sessions Workflow
-
-Run up to **3 sessions in parallel** for independent tasks.
-
-```python
-# Initialize 3 sessions
-external_opencode_init_session("myapp", "task-1", "/path")
-external_opencode_init_session("myapp", "task-2", "/path")
-external_opencode_init_session("myapp", "task-3", "/path")
-
-# Send messages to all 3
-external_opencode_send_message("myapp", "task-1", "Task 1 message")
-external_opencode_send_message("myapp", "task-2", "Task 2 message")
-external_opencode_send_message("myapp", "task-3", "Task 3 message")
-
-# Wait for any to complete
 external_opencode_wait_any(
     sessions=[
         {"project": "myapp", "session_name": "task-1"},
         {"project": "myapp", "session_name": "task-2"},
-        {"project": "myapp", "session_name": "task-3"},
+        # ...
     ],
     timeout=600
 )
 ```
 
-## Special Prompts (Bypass BUSY Check)
+### Available Tools (Basic Flow)
 
-These can be sent even when the session is BUSY:
-- `start-work` — also locks agent to `atlas` (used for delegation)
-- `continue` — routes through RESUME (hardcoded prompt)
-- `retry` — routes through RESUME
-- `abort` — bypasses BUSY (use `external_opencode_abort_session` for the real action)
+```python
+# Send a message or prompt
+external_opencode_send_message(project="myapp", session_name="feature-A", message="Your request here")
+
+# Check status (non-blocking)
+external_opencode_get_status(project="myapp", session_name="feature-A")
+
+# Wait for result (blocking, up to 10 min)
+external_opencode_wait_for_result(project="myapp", session_name="feature-A", timeout=600)
+
+# Wait for any session to complete (for parallel work)
+external_opencode_wait_any(sessions=[
+    {"project": "myapp", "session_name": "task-1"},
+    {"project": "myapp", "session_name": "task-2"},
+    {"project": "myapp", "session_name": "task-3"},
+])
+
+# Resume a timed-out session
+external_opencode_resume_session(project="myapp", session_name="feature-A")
+
+# Abort and reset a session
+external_opencode_abort_session(project="myapp", session_name="feature-A")
+```
+
+### Interactive Questions
+
+If the Orchestrator asks a question, `external_opencode_get_status` returns it with a `request_id`:
+```text
+status: WAITING_FOR_INPUT
+request_id: req_abc123
+question: Which linter should I use?
+options: [...]
+```
+
+**CRITICAL INSTRUCTION**: When a question is received:
+1.  **Suggest** the best answer to the user based on context.
+2.  **Ask** the user for confirmation.
+3.  **DO NOT** automatically answer unless the user explicitly tells you to "auto-answer" or "decide for me".
+
+**To Answer:**
+```python
+# Answer with text or option label
+external_opencode_answer_question(
+    project="<PROJECT>",
+    session_name="<SESSION_NAME>",
+    request_id="req_abc123",
+    answers=["ESLint"]
+)
+
+# If multiple questions are asked, pass multiple answers
+external_opencode_answer_question(
+    project="<PROJECT>",
+    session_name="<SESSION_NAME>",
+    request_id="req_abc123",
+    answers=["ESLint", "Jest"]
+)
+```
+
+## Unified Workflow
+
+1.  **Initialize**: `external_opencode_init_session(project="myapp", session_name="feature-A", working_dir="/path/to/project")`
+2.  **Send request**: `external_opencode_send_message(project="myapp", session_name="feature-A", message="Your request here")`
+3.  **Answer questions if needed**: `external_opencode_answer_question(project="myapp", session_name="feature-A", request_id="...", answers=["Option 1"])`
+4.  **Wait for completion**: `external_opencode_wait_for_result(project="myapp", session_name="feature-A", timeout=600)`
+
+The Orchestrator handles planning, execution, and cleanup automatically.
+
+## Parallel Sessions Workflow (Async)
+
+Run up to **3 sessions in parallel** for independent tasks.
+
+> **⚠️ IMPORTANT: Only use for tasks with NO dependencies.** Parallel sessions must not rely on each other's output or modify the same files.
+
+**Basic pattern:**
+```python
+# Initialize sessions in parallel
+external_opencode_init_session(project="myapp", session_name="task-1", working_dir="/path")
+external_opencode_init_session(project="myapp", session_name="task-2", working_dir="/path")
+external_opencode_init_session(project="myapp", session_name="task-3", working_dir="/path")
+
+# Send requests (async / fire-and-forget)
+external_opencode_send_message(project="myapp", session_name="task-1", message="Task 1")
+external_opencode_send_message(project="myapp", session_name="task-2", message="Task 2")
+external_opencode_send_message(project="myapp", session_name="task-3", message="Task 3")
+
+# Wait for any session to complete
+external_opencode_wait_any(sessions=[
+    {"project": "myapp", "session_name": "task-1"},
+    {"project": "myapp", "session_name": "task-2"},
+    {"project": "myapp", "session_name": "task-3"},
+])
+
+# When one session is complete (ex: task-1), you can start a new one (ex: task-4)
+external_opencode_init_session(project="myapp", session_name="task-4", working_dir="/path")
+external_opencode_send_message(project="myapp", session_name="task-4", message="Task 4")
+
+# Use wait_any again to get the next completed session
+external_opencode_wait_any(sessions=[
+    {"project": "myapp", "session_name": "task-2"},
+    {"project": "myapp", "session_name": "task-3"},
+    {"project": "myapp", "session_name": "task-4"},
+])
+```
 
 ## Error Handling
 
-**Session did not complete within timeout**: Call `external_opencode_resume_session()`.
+**"The operation timed out" (timeout errors type)**: Call `external_opencode_resume_session()` one or two times. If it times out repeatedly, this means the task is too large and should be split into smaller tasks.
+
+```python
+# Resume a timed-out session
+external_opencode_resume_session(project="<PROJECT>", session_name="<SESSION_NAME>")
+```
 
 **Session is busy error**: Wait with `external_opencode_wait_for_result()` or abort with `external_opencode_abort_session()`.
-
-**Interactive questions**: Call `external_opencode_get_status()` to see questions, then `external_opencode_answer_question()` to respond.
-
-## Configuration
-
-There is **no runtime config file** for the opencode tools. All values are hardcoded as Python constants in `daemon/opencode/constants.py`:
-
-| Constant | Default | Purpose |
-|----------|---------|---------|
-| `OPENCODE_URL` | `http://127.0.0.1:4095` | Base URL of the local OpenCode HTTP server |
-| `OPENCODE_HTTP_TIMEOUT_S` | `3600` | HTTP request timeout (1 hour) |
-| `DEFAULT_AGENT` | `orchestrator` | Default agent name for new sessions |
-| `DEFAULT_MODEL_PROVIDER_ID` | `litellm` | Default model provider |
-| `DEFAULT_MODEL_ID` | `coding` | Default model ID |
-| `DEFAULT_API_USER` | `opencode` | Basic Auth username |
-| `DEFAULT_API_KEY` | `opencode` | Basic Auth password |
-| `POLL_INTERVAL_S` | `30` | Question-polling interval (seconds) |
-| `ABORT_REMOTE_SETTLE_S` | `3.0` | Settle delay after remote abort |
-
-To change these values, edit `daemon/opencode/constants.py` and restart the daemon. Environment-variable overrides are **not currently implemented** (the module docstring mentions them but no `os.getenv()` is wired up).
-
-## Key Changes from Current Prompt
-
-| Element | Before (Go Binary) | After (Native Tools) |
-|---------|--------------------|----------------------|
-| Prerequisites | Go binary in PATH | OpenCode service at :4095 |
-| Session init | `opencode_skill init-session` | `external_opencode_init_session()` |
-| Send message | `opencode_skill project session "message"` | `external_opencode_send_message()` |
-| Wait | `opencode_skill project session /wait` | `external_opencode_wait_for_result()` |
-| Status | `opencode_skill project session /status` | `external_opencode_get_status()` |
-| Answer | `opencode_skill project session /answer "A"` | `external_opencode_answer_question()` |
-| Wait any | `opencode_skill wait_any project s1 s2` | `external_opencode_wait_any(sessions=[...])` |
-| Resume | `opencode_skill project session /resume` | `external_opencode_resume_session()` |
-| Abort | `opencode_skill project session abort` | `external_opencode_abort_session()` |
-| Sync mode | `--sync` flag | `wait_for_result` is inherently blocking |
-| File prompt | `@file.txt` syntax | Pass text directly to `send_message` |
-| Daemon | Port 44111 TCP | No daemon (runs in-process) |
-| Config | `~/.opencode_skill/config.json` | None (hardcoded in `daemon/opencode/constants.py`) |
