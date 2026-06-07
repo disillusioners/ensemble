@@ -210,6 +210,106 @@ class TestParseLLMKeywords:
     def test_dedupes(self) -> None:
         assert _parse_llm_keywords("auth, Auth, payment") == ["auth", "payment"]
 
+    def test_strips_think_blocks(self) -> None:
+        """``<think>...</think>`` blocks are stripped before extraction.
+
+        Common CoT-style output from DeepSeek/Qwen/GLM-style chat models
+        even when the system prompt asks for a pure keyword list.
+        """
+        text = (
+            "<think>The user wants to refactor the auth flow. "
+            "Key topics: auth, payment, refund.</think>"
+            "auth, payment, refund"
+        )
+        assert _parse_llm_keywords(text) == ["auth", "payment", "refund"]
+
+    def test_strips_multiline_think_blocks(self) -> None:
+        """Multiline think blocks are stripped when they contain no quoted terms."""
+        text = (
+            "<think>\nThe user wants to refactor the auth module. "
+            "I should focus on matching auth-related topic-slugs.\n</think>"
+        )
+        assert _parse_llm_keywords(text) == []
+
+    def test_multiline_think_block_with_quoted_terms_extracts_them(self) -> None:
+        """Quoted terms inside a multiline think block are still extracted."""
+        text = (
+            "<think>\nFor matching against topic-slugs I should focus on:\n"
+            '- "greeting"\n- "confirmation"\n- "test session"\n</think>'
+        )
+        assert _parse_llm_keywords(text) == [
+            "greeting", "confirmation", "test session",
+        ]
+
+    def test_quoted_terms_preferred_over_prose(self) -> None:
+        """When 2+ quoted terms exist, they are extracted preferentially.
+
+        This is the key fix for chat-tuned models that wrap their actual
+        keyword list in quotes inside a longer prose sentence.
+        """
+        text = (
+            "For matching against topic-slugs I should focus on: "
+            '"greeting" "confirmation" "test session"'
+        )
+        assert _parse_llm_keywords(text) == [
+            "greeting", "confirmation", "test session",
+        ]
+
+    def test_quoted_terms_with_single_quotes(self) -> None:
+        text = "Keywords: 'auth' 'payment' 'refund'"
+        assert _parse_llm_keywords(text) == ["auth", "payment", "refund"]
+
+    def test_quoted_terms_with_backticks(self) -> None:
+        text = "Focus on: `auth-module` `payment-flow` `refund`"
+        assert _parse_llm_keywords(text) == [
+            "auth-module", "payment-flow", "refund",
+        ]
+
+    def test_single_quoted_term_falls_through_to_line_parser(self) -> None:
+        """One quoted term is not enough signal — fall through to line parsing."""
+        text = 'auth, payment, refund'
+        assert _parse_llm_keywords(text) == ["auth", "payment", "refund"]
+
+    def test_think_block_with_quoted_terms(self) -> None:
+        """When the think block is stripped, the remaining text is parsed."""
+        text = (
+            "<think>analysis here</think>"
+            '"greeting" "confirmation" "test session"'
+        )
+        assert _parse_llm_keywords(text) == [
+            "greeting", "confirmation", "test session",
+        ]
+
+    def test_trailing_punctuation_stripped(self) -> None:
+        """Trailing periods/commas are cleaned off keyword lines."""
+        text = "auth, payment, refund."
+        assert _parse_llm_keywords(text) == ["auth", "payment", "refund"]
+
+    def test_log_reproduction(self) -> None:
+        """Reproduces the exact noisy response from the production log.
+
+        Log showed the LLM (glm-5) returned its CoT thinking wrapped in a
+        ``<think>`` block with the actual keywords quoted inside. The
+        production query was the entire think block, which polluted the
+        matcher. After the fix, the think block is stripped and only the
+        quoted terms are kept.
+        """
+        text = (
+            "<think> For matching against topic-slugs I should focus on: "
+            '"greeting" "confirmation" "test session" </think>'
+        )
+        assert _parse_llm_keywords(text) == [
+            "greeting", "confirmation", "test session",
+        ]
+
+    def test_think_block_only_content_removed(self) -> None:
+        """When the entire response is a think block, no keywords are kept."""
+        text = (
+            "<think>The user wants a greeting. "
+            'I should focus on matching greeting patterns.</think>'
+        )
+        assert _parse_llm_keywords(text) == []
+
 
 # =============================================================================
 # extract_keywords (LLM path)

@@ -197,14 +197,26 @@ def _heuristic_keywords(message: str) -> list[str]:
     return candidates[:_HEURISTIC_MAX_KEYWORDS]
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_QUOTED_TERM_RE = re.compile(r"[\"'`]\s*([^\\[\]{}()\"'`\n]{1,40})\s*[\"'`]")
+_TRAILING_PUNCT_RE = re.compile(r"[.,;:!?]+$")
+
+
 def _parse_llm_keywords(raw_text: str) -> list[str]:
     """Parse a comma/semicolon/newline-separated keyword list from an LLM response.
 
-    Defensive against common LLM quirks: leading bullet markers, surrounding
-    quotes, numbered prefixes (``"1. auth"``), and trailing prose. The parser
-    drops lines that look like free-form prose (no delimiter, not a numbered/
-    bulleted entry) so a chatty LLM doesn't pollute the keyword list. Delegates
-    to :func:`_normalize_keywords` for the final cleanup pass.
+    Defensive against common LLM quirks:
+
+    - ``<think>...</think>`` reasoning blocks (DeepSeek, Qwen, GLM, etc.) —
+      stripped before any other parsing.
+    - Quoted terms (``"auth" "payment"``) — when the response contains
+      quoted single-/double-/backtick-wrapped tokens, those are extracted
+      first because they almost always represent the actual keyword list
+      even when the surrounding prose is chatty.
+    - Leading bullet markers, numbered prefixes (``"1. auth"``), and trailing
+      prose — dropped when they look like intro/outro sentences.
+
+    Delegates to :func:`_normalize_keywords` for the final cleanup pass.
 
     Args:
         raw_text: The raw LLM response text.
@@ -215,8 +227,28 @@ def _parse_llm_keywords(raw_text: str) -> list[str]:
     """
     if not raw_text or not raw_text.strip():
         return []
+
+    # Step 1: try quoted-term extraction on the RAW response first. If the
+    # model emitted 2+ quoted tokens anywhere (including inside a <think>
+    # block), those are almost certainly the keyword list even when the
+    # surrounding text is chatty prose or chain-of-thought reasoning. The
+    # production log showed glm-5 returning:
+    #   <think> For matching against topic-slugs I should focus on: "greeting" "confirmation" "test session" </think>
+    # — the actual keywords are the quoted terms, buried inside the think
+    # block. Extracting quoted terms FIRST avoids losing them when we strip
+    # the think block in step 2.
+    quoted = _QUOTED_TERM_RE.findall(raw_text)
+    if len(quoted) >= 2:
+        return _normalize_keywords(quoted)
+
+    # Step 2: strip <think>...</think> blocks. Many chat-tuned models emit
+    # chain-of-thought inside these tags even when the system prompt asks
+    # for a pure keyword list — the thinking is noise to us. We only get
+    # here when the model didn't wrap keywords in quotes.
+    text = _THINK_BLOCK_RE.sub(" ", raw_text)
+
     candidates: list[str] = []
-    for line in raw_text.splitlines():
+    for line in text.splitlines():
         line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip()
         if not line:
             continue
@@ -233,7 +265,10 @@ def _parse_llm_keywords(raw_text: str) -> list[str]:
         )
         if not (has_delim or looks_like_numbered or looks_like_single_keyword):
             continue
-        candidates.append(line)
+        # Strip trailing punctuation that some LLMs append out of habit.
+        line = _TRAILING_PUNCT_RE.sub("", line).strip()
+        if line:
+            candidates.append(line)
     if not candidates:
         return []
     blob = ", ".join(candidates)
