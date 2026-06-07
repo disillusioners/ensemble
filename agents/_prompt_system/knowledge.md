@@ -74,24 +74,6 @@ The old file-based memory system (`.agents/{agent-id}/memories/`) has been migra
 
 ---
 
-## Shared Context for External Agent Systems
-
-When controlling external agent systems (opencode, etc.), you MUST include the following context template in your prompt. This ensures the external system has access to shared exploration context accumulated during this session.
-
-**Context template to include**:
-
-> Current context-key is: {{ENSEMBLE_CONTEXT_KEY}}
->
-> We are working in a multi-agent system environment named ensemble. Current shared-explored context and knowledge base files are under this directory:
->
-> {{ENSEMBLE_SHARED_CONTEXT_DIR}}
->
-> Important: Read and understand all shared context files in that directory first before proceeding.
-
-The `{{ENSEMBLE_CONTEXT_KEY}}` and `{{ENSEMBLE_SHARED_CONTEXT_DIR}}` placeholders are automatically resolved when your system prompt is assembled.
-
----
-
 ## Exploration Priority Rules
 
 Agents sometimes bypass the internal `explore()` tool and use external agent systems (opencode, etc.) directly for codebase exploration. This is **wrong** — `explore()` has a critical side-effect that benefits the entire system.
