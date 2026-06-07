@@ -8,15 +8,9 @@ OpenCode is an external agent system for code generation and execution. This ope
 
 ## Context Before Delegation
 
-> **Before sending any task to an external system, gather and share relevant context first.**
+`external_opencode_send_message` automatically prepends relevant shared-context files to your prompt before sending. You do **not** need to gather or paste context manually.
 
-External agents (opencode sessions) start with zero knowledge of your session. They depend entirely on what you tell them. Before delegating:
-
-1. **Gather context** — Use your available tools to understand the task (explore knowledge, read files, review prior results)
-2. **Share context in your prompt** — Include relevant findings, constraints, and background in the message you send
-3. **Check shared context directory** — If `shared_context_dir` is available (from your system prompt), reference it so the external system can read accumulated context
-
-**Why:** External agents perform significantly better with context. A 30-second context gathering step before delegation saves minutes of back-and-forth later.
+**Tip:** Shared context is populated by the `explore()` tool — run it first when you need the remote session to know about a topic. Control commands (`continue`, `retry`, `abort`, `start-work`) bypass auto-preload.
 
 ## Tool Inventory
 

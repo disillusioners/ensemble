@@ -17,6 +17,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from typing import Any
 
 from daemon.opencode.server import OpenCodeRequest, OpenCodeResponse
 from daemon.tools.external_opencode import (
@@ -65,7 +66,26 @@ def mock_manager(mock_registry: AsyncMock) -> MagicMock:
     """Return a MagicMock InstanceManager with an ``opencode_registry``."""
     manager = MagicMock()
     manager.opencode_registry = mock_registry
+    # Stub the instance repository so the preload-context helper resolves a
+    # context key without touching the real filesystem / context dir.
+    repo = MagicMock()
+    repo.get_tree_root_id = MagicMock(return_value=None)
+    manager._instance_repository = repo
     return manager
+
+
+@pytest.fixture(autouse=True)
+def _stub_preload_context() -> Any:
+    """Default-patch ``get_shared_context`` to return empty for all tests.
+
+    Individual tests that need a specific preload response override this
+    with their own ``patch(..., return_value=...)`` context manager.
+    """
+    with patch(
+        "daemon.tools.external_opencode.get_shared_context",
+        return_value="",
+    ):
+        yield
 
 
 @pytest.fixture
@@ -996,3 +1016,311 @@ class TestRegistryAvailability:
                 )
         # The dispatcher should NOT have been reached
         mock_send.assert_not_awaited()
+
+
+# =============================================================================
+# Auto-Preload Context (shared context injection into send_message)
+# =============================================================================
+
+
+class TestSendMessageContextPreload:
+    """Tests for automatic shared-context injection in ``send_message``.
+
+    Mirrors the explore tool's behavior: before sending the prompt, the caller's
+    shared-context directory is scanned and top-matching files are prepended
+    to the message. Skipped for control messages.
+    """
+
+    @pytest.fixture
+    def mock_manager_with_repo(self, mock_manager: MagicMock) -> MagicMock:
+        """Manager with a stubbed ``_instance_repository``.
+
+        ``get_tree_root_id`` returns the current instance id (no tree root),
+        so the test can assert on the fallback path.
+        """
+        repo = MagicMock()
+        repo.get_tree_root_id = MagicMock(return_value=None)
+        mock_manager._instance_repository = repo
+        return mock_manager
+
+    @staticmethod
+    def _captured_text(mock_send: AsyncMock) -> str:
+        """Extract the outbound message text from the dispatched request."""
+        req = mock_send.call_args.args[0]
+        return req.payload["parts"][0]["text"]
+
+    @pytest.mark.asyncio
+    async def test_preload_prepends_matched_context(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When ``get_shared_context`` returns content, it is prepended to the message."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        sentinel = "# Shared Context\n## Pre-loaded Context\n### foo (90% match)\nstuff\n"
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value=sentinel,
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Refactor the login flow",
+            })
+
+        mock_get.assert_called_once()
+        text = self._captured_text(mock_send)
+        assert sentinel in text
+        assert text.endswith("Refactor the login flow")
+        # Injection appears BEFORE the original message
+        assert text.index(sentinel) < text.index("Refactor the login flow")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("control_msg", ["continue", "retry", "abort", "start-work"])
+    async def test_control_messages_bypass_preload(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+        control_msg: str,
+    ) -> None:
+        """Control commands are sent verbatim — no context lookup, no injection."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="# Shared Context\nshould not appear\n",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": control_msg,
+            })
+
+        mock_get.assert_not_called()
+        assert self._captured_text(mock_send) == control_msg
+
+    @pytest.mark.asyncio
+    async def test_control_message_check_is_case_insensitive_and_stripped(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Control-message detection is case-insensitive and ignores whitespace."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="# Shared Context\nshould not appear\n",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "  CONTINUE  ",
+            })
+
+        mock_get.assert_not_called()
+        assert self._captured_text(mock_send) == "  CONTINUE  "
+
+    @pytest.mark.asyncio
+    async def test_empty_injection_leaves_message_unchanged(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When preload returns empty (no match), the message is sent verbatim."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ), patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Write tests",
+            })
+
+        assert self._captured_text(mock_send) == "Write tests"
+
+    @pytest.mark.asyncio
+    async def test_preload_exception_does_not_break_send(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Exceptions in preload are swallowed; the message is still sent."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            side_effect=RuntimeError("disk on fire"),
+        ), patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            result = await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Do the thing",
+            })
+
+        assert result.startswith("[SUBMITTED]")
+        assert self._captured_text(mock_send) == "Do the thing"
+
+    @pytest.mark.asyncio
+    async def test_context_key_falls_back_to_instance_id(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When ``get_tree_root_id`` returns None, the instance id is used."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "fallback-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Do the thing",
+            })
+
+        mock_get.assert_called_with("fallback-id", "Do the thing")
+
+    @pytest.mark.asyncio
+    async def test_context_key_uses_tree_root_when_available(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When ``get_tree_root_id`` returns a value, it is preferred over the instance id."""
+        mock_manager_with_repo._instance_repository.get_tree_root_id = MagicMock(
+            return_value="tree-root-xyz"
+        )
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "child-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Do the thing",
+            })
+
+        mock_get.assert_called_with("tree-root-xyz", "Do the thing")
+
+    @pytest.mark.asyncio
+    async def test_council_trailer_is_appended_after_injection(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Order is: ``[injection] + [message + COUNCIL_HINT]`` (council at the very end)."""
+        from daemon.opencode.constants import COUNCIL_HINT
+
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        sentinel = "# Shared Context\nINJECTED\n"
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value=sentinel,
+        ), patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "review",
+                "message": "Deep-Review the payment module",
+                "council": True,
+            })
+
+        text = self._captured_text(mock_send)
+        assert text.startswith(sentinel)
+        assert text.endswith("Deep-Review the payment module" + COUNCIL_HINT)

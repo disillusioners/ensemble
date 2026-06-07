@@ -19,14 +19,18 @@ from daemon.opencode.constants import COUNCIL_HINT, POLL_INTERVAL_S
 from daemon.opencode.server import (
     external_opencode_send_message as _server_send_message,  # Blocker 1 (Rev 4): alias to avoid name collision with LangChain tool of same name
 )
+from daemon.services.context_injection import get_shared_context
 from ._tool_registry import register_tool_category
+
+logger = logging.getLogger(__name__)
+
+# Control messages that bypass auto-preload (dispatch signals, not tasks).
+_OPENCODE_CONTROL_MESSAGES = frozenset({"continue", "retry", "abort", "start-work"})
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
     from daemon.opencode.server import OpenCodeRequest, OpenCodeResponse
     from daemon.opencode.registry import OpenCodeSessionRegistry
-
-logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "OpenCode"
 CATEGORY_DOC = """\
@@ -35,6 +39,12 @@ OpenCode session orchestration tools for controlling the OpenCode AI coding tool
 These tools communicate with an EXTERNAL system (OpenCode at http://127.0.0.1:4095).
 They manage session lifecycle: create, send messages, check status, wait for results,
 answer interactive questions, resume, and abort.
+
+**Auto-Preload Context**: `external_opencode_send_message` automatically prepends
+the top-matching shared-context files (scored against the outgoing message) before
+sending. This saves the remote agent from having to re-discover the caller's
+project context. Control commands (`continue`, `retry`, `abort`, `start-work`)
+bypass auto-preload.
 
 **Workflow**:
 1. `external_opencode_init_session` — Create or replace a named session
@@ -84,7 +94,35 @@ def create_opencode_tools(
         if resp.status == "ok":
             return resp.message or f"[OK] {resp.data or ''}"
         return f"[ERROR] {resp.message}"
-    
+
+    async def _preload_shared_context(query: str) -> str:
+        """Auto-match shared context files against the outgoing message.
+
+        Mirrors ``explore()``'s preload behavior: resolves the caller's
+        ``context_key`` from the instance tree, scores existing shared-context
+        files against the query, and returns a tiered injection string (capped
+        at ``INJECTION_TOKEN_CAP`` inside ``get_shared_context``).
+
+        Args:
+            query: The outgoing prompt — used as the scoring query.
+
+        Returns:
+            Injection string to prepend to the message, or ``""`` to skip
+            injection (no context, no match, or any failure). Never raises.
+        """
+        try:
+            context_key = manager._instance_repository.get_tree_root_id(current_instance_id)
+            if not context_key:
+                context_key = current_instance_id
+        except Exception:
+            context_key = current_instance_id
+        try:
+            injection = await asyncio.to_thread(get_shared_context, context_key, query)
+            return injection or ""
+        except Exception as e:
+            logger.debug("[OpenCode] Preload shared context failed: %s", e)
+            return ""
+
     # ── Tool 1: Init Session ────────────────────────────────────────
     
     @register_tool_category("external_opencode")
@@ -164,7 +202,18 @@ session and deleting its registry entry before creating the new one.
         # receiving agent is nudged to delegate to the @council subagent-tool
         # for critical-path review. Mirrors the old Go binary's --council flag.
         full_text = message + COUNCIL_HINT if council else message
-        
+
+        # Auto-preload shared context (skipped for control messages which are
+        # dispatch signals, not tasks). Mirrors explore()'s context injection.
+        if message.strip().lower() not in _OPENCODE_CONTROL_MESSAGES:
+            injection = await _preload_shared_context(message)
+            if injection:
+                full_text = f"{injection}\n\n{full_text}"
+                logger.info(
+                    "[OpenCode] Preloaded shared context (%d chars) into message for %s:%s",
+                    len(injection), project, session_name,
+                )
+
         req = OpenCodeRequest(
             action="PROMPT",
             session_id=session_id,
@@ -194,6 +243,15 @@ Args:
 
 Returns:
     Submitted confirmation or error.
+
+Auto-Preload Context:
+    Before sending, the caller's shared-context directory is scanned and the
+    top-matching files (scored against `message`) are prepended to the prompt,
+    capped at INJECTION_TOKEN_CAP (2000 tokens). This saves the remote agent
+    from re-discovering context the caller already has. Control messages
+    ("continue", "retry", "abort", "start-work") bypass auto-preload because
+    they are dispatch signals, not tasks. Failures in the preload step are
+    logged and the message is sent unchanged (graceful degradation).
 
 Special prompts (bypass BUSY check):
 - "start-work" — also locks agent to "atlas"
