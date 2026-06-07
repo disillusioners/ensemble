@@ -7,6 +7,6 @@
   "version": "1.0.0",
   "innate_skills": ["opencode"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
   }
 }

@@ -5,5 +5,5 @@
   "icon": "👶",
   "color": "accent-gray",
   "version": "1.0.0",
-  "tools": {"allow": ["knowledge", "mcp"]}
+  "tools": {"allow": ["knowledge", "mcp", "context"]}
 }

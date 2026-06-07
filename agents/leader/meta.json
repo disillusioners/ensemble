@@ -8,6 +8,6 @@
   "innate_skills": ["coordination"],
   "no_force_explore": true,
   "tools": {
-    "allow": ["time", "instance", "self", "project", "help", "knowledge", "mcp", "critical_notes", "project_history"]
+    "allow": ["time", "instance", "self", "project", "help", "knowledge", "mcp", "critical_notes", "project_history", "context"]
   }
 }

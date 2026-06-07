@@ -6,6 +6,6 @@
   "color": "accent-violet",
   "version": "1.0.0",
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
   }
 }

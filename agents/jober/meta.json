@@ -8,6 +8,6 @@
   "innate_skills": ["job-orchestration"],
   "no_force_explore": true,
   "tools": {
-    "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp"]
+    "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp", "context"]
   }
 }
