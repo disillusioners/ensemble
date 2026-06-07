@@ -303,21 +303,27 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
 
 
 def _context_tools_hint(audience: str) -> str:
-    """Return the one-line hint guiding the reader to fetch more context.
+    """Return the "Context Guidelines" section guiding the reader to fetch more context.
 
     Internal agents (LangChain) call ``list_context`` / ``read_context``.
     External agent systems reach the same data through the hosted MCP
     server using ``ensemble_context_list`` / ``ensemble_context_read``.
+
+    The section is wrapped in a ``## Context Guidelines:`` header so future
+    guidelines can be appended under the same heading without re-shaping the
+    surrounding output.
     """
     if audience == "external":
-        return (
-            "Need more? Call `ensemble_context_list(context_key)` to enumerate, "
-            "`ensemble_context_read(context_key, filename)` to read.\n"
+        body = (
+            "- Need more? Call `ensemble_context_list(context_key)` to "
+            "enumerate, `ensemble_context_read(context_key, filename)` to read."
         )
-    return (
-        "Need more? Call `list_context(context_key)` to enumerate, "
-        "`read_context(context_key, filename)` to read.\n"
-    )
+    else:
+        body = (
+            "- Need more? Call `list_context(context_key)` to enumerate, "
+            "`read_context(context_key, filename)` to read."
+        )
+    return f"## Context Guidelines:\n{body}\n"
 
 
 def _format_injection(
@@ -485,7 +491,6 @@ def _format_injection(
     # Build final output
     lines = ["# Shared Context\n"]
     lines.append(f"context_key: {context_key}\n")
-    lines.append(_context_tools_hint(audience))
     lines.append("\n## Pre-loaded Context (auto-matched)\n")
 
     # Add entries
@@ -509,6 +514,11 @@ def _format_injection(
         for score, filename, summary in file_index_entries:
             score_pct = int(score * 100)
             lines.append(f"| {filename} | {score_pct}% | {summary} |")
+
+    # Append the "Need more?" hint at the very end so the LLM sees the
+    # pre-loaded content first and only then the pointer to fetch more.
+    lines.append("\n")
+    lines.append(_context_tools_hint(audience))
 
     return "".join(lines)
 
@@ -539,9 +549,9 @@ def get_shared_context(context_key: str, query: str, audience: str = "internal")
 
     def _empty() -> str:
         return (
-            f"# Shared Context\ncontext_key: {context_key}\n"
-            f"{_context_tools_hint(audience)}\n"
-            "## Pre-loaded Context\nThere is no context yet.\n"
+            f"# Shared Context\ncontext_key: {context_key}\n\n"
+            "## Pre-loaded Context\nThere is no context yet.\n\n"
+            f"{_context_tools_hint(audience)}"
         )
 
     try:

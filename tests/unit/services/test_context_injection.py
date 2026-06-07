@@ -951,7 +951,13 @@ Other information.
 
 
 class TestSharedContextHints:
-    """The preloaded section teaches agents how to read more via the context tools."""
+    """The preloaded section teaches agents how to read more via the context tools.
+
+    The hint is wrapped in a ``## Context Guidelines:`` section at the very
+    end of the injection so the LLM sees the pre-loaded content first and
+    only then the pointer to fetch more. The section header also gives future
+    guidelines a stable place to live.
+    """
 
     def test_happy_path_includes_tool_hint(self, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "hint-key"
@@ -961,16 +967,28 @@ class TestSharedContextHints:
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("hint-key", "doc")
 
+        assert "## Context Guidelines:" in result
         assert "list_context(context_key)" in result
         assert "read_context(context_key, filename)" in result
+        # Hint appears at the END, after the pre-loaded content.
+        assert result.rstrip().endswith(
+            "read_context(context_key, filename)` to read."
+        )
+        # The pre-loaded slug appears BEFORE the guidelines section.
+        assert result.index("### doc") < result.index("## Context Guidelines:")
 
     def test_empty_format_includes_tool_hint(self, tmp_path):
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("empty-hint-key", "anything")
 
+        assert "## Context Guidelines:" in result
         assert "list_context(context_key)" in result
         assert "read_context(context_key, filename)" in result
         assert "There is no context yet" in result
+        # Hint appears AFTER the "no context yet" line, not before it.
+        assert result.index("There is no context yet") < result.index(
+            "## Context Guidelines:"
+        )
 
     def test_no_matches_format_includes_tool_hint(self, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "no-match-hint"
@@ -980,8 +998,12 @@ class TestSharedContextHints:
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("no-match-hint", "zzzzz yyyyy")
 
+        assert "## Context Guidelines:" in result
         assert "list_context(context_key)" in result
         assert "read_context(context_key, filename)" in result
+        assert result.index("There is no context yet") < result.index(
+            "## Context Guidelines:"
+        )
 
     def test_external_audience_uses_mcp_tool_names(self, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "ext-hint-key"
@@ -991,6 +1013,7 @@ class TestSharedContextHints:
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("ext-hint-key", "doc", audience="external")
 
+        assert "## Context Guidelines:" in result
         # Hosted MCP tool names appear in the hint, internal names do not.
         assert "ensemble_context_list(context_key)" in result
         assert "ensemble_context_read(context_key, filename)" in result
@@ -998,14 +1021,22 @@ class TestSharedContextHints:
         # tool name, not a substring of the MCP one).
         assert "list_context(context_key)" not in result
         assert "read_context(context_key, filename)" not in result
+        # Hint is at the end.
+        assert result.rstrip().endswith(
+            "ensemble_context_read(context_key, filename)` to read."
+        )
 
     def test_external_audience_empty_format_uses_mcp_tool_names(self, tmp_path):
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("ext-empty", "x", audience="external")
 
+        assert "## Context Guidelines:" in result
         assert "ensemble_context_list(context_key)" in result
         assert "ensemble_context_read(context_key, filename)" in result
         assert "There is no context yet" in result
+        assert result.index("There is no context yet") < result.index(
+            "## Context Guidelines:"
+        )
 
     def test_internal_audience_is_default(self, tmp_path):
         """When ``audience`` is omitted, internal tool names are used."""
@@ -1016,6 +1047,7 @@ class TestSharedContextHints:
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("default-aud", "doc")
 
+        assert "## Context Guidelines:" in result
         assert "list_context(context_key)" in result
         # And the external form is not present.
         assert "ensemble_context_list(context_key)" not in result
