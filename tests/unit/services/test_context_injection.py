@@ -393,7 +393,7 @@ class TestFormatInjection:
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "# Shared Context" in result
-        assert "### low-score-file (15% match)" in result
+        assert "## low-score-file.md (15% match)" in result
         assert "This is the full content of the file." in result
 
     def test_top_match_truncated_only_if_exceeds_cap(self, tmp_path):
@@ -450,8 +450,8 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "### match1 (90% match)" in result
-        assert "### match2 (65% match)" in result
+        assert "## match1.md (90% match)" in result
+        assert "## match2.md (65% match)" in result
         assert "Content of first match." in result
         assert "Content of second match." in result
 
@@ -483,8 +483,8 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "### match1 (90% match)" in result
-        assert "### match2" not in result  # Second match should not appear
+        assert "## match1.md (90% match)" in result
+        assert "## match2.md" not in result  # Second match should not appear
         assert "Content of second match" not in result
 
     def test_third_match_included_only_if_score_gt_60(self, tmp_path):
@@ -524,9 +524,9 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "### match1 (90% match)" in result
-        assert "### match2 (70% match)" in result
-        assert "### match3 (65% match)" in result
+        assert "## match1.md (90% match)" in result
+        assert "## match2.md (70% match)" in result
+        assert "## match3.md (65% match)" in result
         assert "Content of first match." in result
         assert "Content of second match." in result
         assert "Content of third match." in result
@@ -568,9 +568,9 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "### match1 (90% match)" in result
-        assert "### match2 (70% match)" in result
-        assert "### match3" not in result  # Third match should not appear
+        assert "## match1.md (90% match)" in result
+        assert "## match2.md (70% match)" in result
+        assert "## match3.md" not in result  # Third match should not appear
         assert "Content of third match" not in result
 
     def test_fourth_match_never_included(self, tmp_path):
@@ -614,10 +614,10 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "### match1 (90% match)" in result
-        assert "### match2 (75% match)" in result
-        assert "### match3 (70% match)" in result
-        assert "### match4" not in result  # Fourth match should not appear
+        assert "## match1.md (90% match)" in result
+        assert "## match2.md (75% match)" in result
+        assert "## match3.md (70% match)" in result
+        assert "## match4.md" not in result  # Fourth match should not appear
 
     def test_full_file_content_used_not_section_based(self, tmp_path):
         """Full file content is used, not section-based extraction."""
@@ -728,9 +728,9 @@ High
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         # Match 1 should be present
-        assert "### large1 (90% match)" in result
+        assert "## large1.md (90% match)" in result
         # Match 2 should be present but truncated
-        assert "### large2 (70% match)" in result
+        assert "## large2.md (70% match)" in result
         # Total content should fit within cap - second should be truncated
         assert "..." in result  # Some truncation occurred
 
@@ -765,7 +765,7 @@ High
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         # Pre-loaded content should appear
         assert "# Shared Context" in result
-        assert "## Pre-loaded Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
         assert "auth-module" in result
         assert "other-file" in result
         # Index should be skipped (all files were pre-loaded)
@@ -792,7 +792,7 @@ High
         assert "| alpha-beta_20260531_120000.md |" in result
 
     def test_increase_heading_levels(self, tmp_path):
-        """Pre-loaded file headings are increased by one level."""
+        """Pre-loaded file headings are increased by two levels."""
         context_dir = tmp_path / "context"
         context_dir.mkdir()
 
@@ -820,10 +820,10 @@ Regular paragraph without heading.
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        # Headings should be increased by one level
-        assert "## Title" in result  # # -> ##
-        assert "### Subtitle" in result  # ## -> ###
-        assert "#### Sub-subtitle" in result  # ### -> ####
+        # Headings should be increased by two levels
+        assert "### Title" in result  # # -> ###
+        assert "#### Subtitle" in result  # ## -> ####
+        assert "##### Sub-subtitle" in result  # ### -> #####
         # Regular content should remain unchanged
         assert "Regular paragraph without heading." in result
 
@@ -854,7 +854,7 @@ High
         assert result is not None
         assert "# Shared Context" in result
         assert "context_key: test-key" in result
-        assert "## Pre-loaded Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
         assert "auth-module" in result
 
     def test_returns_empty_format_for_empty_dir(self, tmp_path):
@@ -868,7 +868,7 @@ High
         assert result is not None
         assert "# Shared Context" in result
         assert "context_key: empty-key" in result
-        assert "## Pre-loaded Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
         assert "There is no context yet" in result
 
     def test_returns_empty_format_for_no_matches(self, tmp_path):
@@ -941,7 +941,7 @@ Other information.
         assert result is not None
         assert "# Shared Context" in result
         assert "context_key: test-project" in result
-        assert "## Pre-loaded Context" in result
+        assert "# Pre-loaded Context (auto-matched)" in result
         assert "auth-module" in result
         # Since auth-module is pre-loaded, it should not appear in index
         assert "## Available Context Files" in result
@@ -975,7 +975,7 @@ class TestSharedContextHints:
             "read_context(context_key, filename)` to read."
         )
         # The pre-loaded slug appears BEFORE the guidelines section.
-        assert result.index("### doc") < result.index("## Context Guidelines:")
+        assert result.index("## doc.md") < result.index("## Context Guidelines:")
 
     def test_empty_format_includes_tool_hint(self, tmp_path):
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):

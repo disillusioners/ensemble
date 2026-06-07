@@ -33,8 +33,14 @@ _STOP_WORDS = frozenset({
 
 
 def _increase_heading_levels(content: str) -> str:
-    """Increase all markdown heading levels by 1 to avoid clashing with template headings."""
-    return re.sub(r'^(#+)', r'#\1', content, flags=re.MULTILINE)
+    """Increase all markdown heading levels by 2 to avoid clashing with template headings.
+
+    The injection template uses ``#`` for ``Shared Context`` / ``Pre-loaded
+    Context (auto-matched)`` and ``##`` for each pre-loaded entry, so the
+    file's own headings must be pushed deeper (2 levels) to keep a clean
+    visual hierarchy.
+    """
+    return re.sub(r'^(#+)', r'##\1', content, flags=re.MULTILINE)
 
 
 @dataclass
@@ -429,7 +435,7 @@ def _format_injection(
             break
 
         score_pct = int(matched.score * 100)
-        entries.append(f"### {matched.slug} ({score_pct}% match)\n{content}\n")
+        entries.append(f"## {matched.slug}.md ({score_pct}% match)\n{content}\n")
         injected_slugs.add(matched.slug)
 
     # Build file index from files NOT already injected (up to 30)
@@ -491,7 +497,7 @@ def _format_injection(
     # Build final output
     lines = ["# Shared Context\n"]
     lines.append(f"context_key: {context_key}\n")
-    lines.append("\n## Pre-loaded Context (auto-matched)\n")
+    lines.append("\n# Pre-loaded Context (auto-matched)\n")
 
     # Add entries
     lines.extend(entries)
@@ -550,7 +556,7 @@ def get_shared_context(context_key: str, query: str, audience: str = "internal")
     def _empty() -> str:
         return (
             f"# Shared Context\ncontext_key: {context_key}\n\n"
-            "## Pre-loaded Context\nThere is no context yet.\n\n"
+            "# Pre-loaded Context (auto-matched)\nThere is no context yet.\n\n"
             f"{_context_tools_hint(audience)}"
         )
 
