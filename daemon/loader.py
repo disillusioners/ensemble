@@ -89,39 +89,47 @@ def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = N
         Formatted string with tool documentation sections.
     """
     from .registry import get_registry
-    from .tools.instance import resolve_tool_filter
+    from .tools.instance import resolve_tool_filter, expand_allow_for_innate_skills
     from .tools._tool_registry import get_tool_categories, get_category_doc, _tool_metadata
-    
+
     # Ensure _tool_metadata is populated by scanning tool modules
     # This is needed because load_tools_doc_for_agent may be called before
     # create_instance_tools (which also scans tools)
     if not _tool_metadata:
         _ensure_tool_metadata_populated()
-    
+
     # Get agent's tool filter from registry
     tool_filter: ToolFilter | None = None
+    agent_innate_skills: list[str] | None = None
     try:
         registry = get_registry()
         agent_meta = registry.get(agent_id)
         if agent_meta is not None:
             tool_filter = agent_meta.tools
+            agent_innate_skills = agent_meta.innate_skills
     except (KeyError, ValueError, RuntimeError) as e:
         logger.debug(f"Registry lookup failed for {agent_id}: {e}")
         return ""
-    
+
     # Build all_tool_names set for MCP category expansion
     all_tool_names: set[str] | None = None
     if mcp_tool_names:
         all_tool_names = set(mcp_tool_names)
         logger.debug(f"Including {len(mcp_tool_names)} MCP tools in tool filter resolution for {agent_id}")
-    
-    # Resolve filter to set of allowed tool names
+
+    # Resolve filter to set of allowed tool names.
+    # Innate skills (e.g. "opencode") implicitly grant their tool categories
+    # so the system prompt lists them even when `tools.allow` omits them.
     if tool_filter is None:
         # No filter → all tools allowed, pass None to get all categories
         allowed_tools: set[str] | None = None
     else:
+        effective_allow = expand_allow_for_innate_skills(
+            tool_filter.allow,
+            agent_innate_skills,
+        )
         allowed_tools = resolve_tool_filter(
-            allow=tool_filter.allow,
+            allow=effective_allow,
             deny=tool_filter.deny,
             all_tool_names=all_tool_names,
         )

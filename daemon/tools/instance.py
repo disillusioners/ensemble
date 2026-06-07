@@ -17,6 +17,55 @@ Spawn, communicate with, and manage agent instances.
 **instance_name**: Optional short name for the instance to identify it in reports. Use concise, descriptive names. Examples: `create-feature-a`, `fix-bug-b`, `refactor-auth`.
 """
 
+
+# Innate-skill → required tool categories mapping.
+#
+# When an agent declares an innate skill, the matching tool categories are
+# automatically granted (merged into the agent's allow list) so the skill is
+# actually usable. This avoids requiring every agent to repeat
+# "external_opencode" in its `tools.allow` list just because it has
+# `innate_skills: ["opencode"]`.
+#
+# Add new entries here when introducing a new innate skill that requires
+# dedicated tool categories. The skill prompt is loaded separately by the
+# loader; this map only governs tool access.
+INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
+    "opencode": ["external_opencode"],
+}
+
+
+def expand_allow_for_innate_skills(
+    allow: list[str] | None,
+    innate_skills: list[str] | None,
+) -> list[str] | None:
+    """Append tool categories implied by innate skills to an allow list.
+
+    If the agent has no explicit allow list (None), it already has access to
+    every tool, so no expansion is needed. Otherwise, any categories mapped
+    from innate skills in :data:`INNATE_SKILL_TOOL_CATEGORIES` are appended
+    (de-duplicated) to the allow list.
+
+    Args:
+        allow: The agent's configured `tools.allow` list (or None).
+        innate_skills: The agent's `innate_skills` list (or None).
+
+    Returns:
+        The allow list with innate-skill categories merged in, or the
+        original value if no expansion was needed.
+    """
+    if not innate_skills or allow is None:
+        return allow
+
+    extra: list[str] = []
+    for skill in innate_skills:
+        for category in INNATE_SKILL_TOOL_CATEGORIES.get(skill, []):
+            if category not in allow and category not in extra:
+                extra.append(category)
+
+    if not extra:
+        return allow
+    return [*allow, *extra]
+
 from .bash import bash
 from .filesystem import (
     list_directory,
@@ -737,9 +786,15 @@ def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str
         if tool_name:
             all_tool_names.add(tool_name)
 
-    # Resolve the filter with MCP-aware category expansion
+    # Resolve the filter with MCP-aware category expansion.
+    # Innate skills (e.g. "opencode") implicitly grant the tool categories
+    # they require, so the agent does not have to repeat them in `tools.allow`.
+    effective_allow = expand_allow_for_innate_skills(
+        agent_meta.tools.allow,
+        agent_meta.innate_skills,
+    )
     allowed_tools = resolve_tool_filter(
-        allow=agent_meta.tools.allow,
+        allow=effective_allow,
         deny=agent_meta.tools.deny,
         all_tool_names=all_tool_names,
     )

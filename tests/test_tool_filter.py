@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 from daemon.tools.instance import (
     resolve_tool_filter,
     _apply_tool_filter,
+    expand_allow_for_innate_skills,
+    INNATE_SKILL_TOOL_CATEGORIES,
 )
 from daemon.registry import ToolFilter
 
@@ -669,6 +671,128 @@ class TestMcpToolFiltering:
                 assert "read_file" not in tool_names
                 assert "mcp_filesystem_read" in tool_names
                 assert "mcp_github_issues" in tool_names
+
+
+class TestExpandAllowForInnateSkills:
+    """Tests for expand_allow_for_innate_skills() helper.
+
+    Innate skills (e.g. "opencode") should implicitly grant the tool
+    categories they require, so the agent does not have to repeat them
+    in `tools.allow`.
+    """
+
+    def _create_mock_tool(self, name: str):
+        """Create a mock tool with a name attribute."""
+        tool = MagicMock()
+        tool.name = name
+        return tool
+
+    def test_no_innate_skills_returns_allow_unchanged(self):
+        assert expand_allow_for_innate_skills(["bash"], []) == ["bash"]
+        assert expand_allow_for_innate_skills(["bash"], None) == ["bash"]
+
+    def test_none_allow_returns_none(self):
+        """If allow is None, agent already has everything — no expansion."""
+        assert expand_allow_for_innate_skills(None, ["opencode"]) is None
+        assert expand_allow_for_innate_skills(None, []) is None
+
+    def test_opencode_innate_skill_adds_external_opencode_category(self):
+        result = expand_allow_for_innate_skills(
+            ["bash", "filesystem"], ["opencode"]
+        )
+        assert "external_opencode" in result
+        assert "bash" in result
+        assert "filesystem" in result
+
+    def test_does_not_duplicate_existing_category(self):
+        """If external_opencode already in allow, leave it alone."""
+        result = expand_allow_for_innate_skills(
+            ["bash", "external_opencode"], ["opencode"]
+        )
+        assert result.count("external_opencode") == 1
+
+    def test_unknown_innate_skill_is_ignored(self):
+        result = expand_allow_for_innate_skills(
+            ["bash"], ["some-unrelated-skill"]
+        )
+        assert result == ["bash"]
+
+    def test_multiple_innate_skills(self):
+        """If INNATE_SKILL_TOOL_CATEGORIES gains more entries, they merge."""
+        # Pretend a new mapping exists, then call the helper and clean up.
+        original = dict(INNATE_SKILL_TOOL_CATEGORIES)
+        INNATE_SKILL_TOOL_CATEGORIES["test-skill"] = ["test-category"]
+        try:
+            result = expand_allow_for_innate_skills(
+                ["bash"], ["opencode", "test-skill"]
+            )
+        finally:
+            INNATE_SKILL_TOOL_CATEGORIES.clear()
+            INNATE_SKILL_TOOL_CATEGORIES.update(original)
+        assert "external_opencode" in result
+        assert "test-category" in result
+        assert "bash" in result
+
+    def test_apply_tool_filter_grants_opencode_tools_for_innate_skill(self):
+        """End-to-end: agent with innate_skills=['opencode'] gets opencode tools."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("external_opencode_init_session"),
+            self._create_mock_tool("external_opencode_send_message"),
+        ]
+        categories = {
+            "bash": ["bash"],
+            "external_opencode": [
+                "external_opencode_init_session",
+                "external_opencode_send_message",
+            ],
+        }
+        with patch("daemon.registry.get_registry") as mock_registry:
+            with patch("daemon.tools.instance.list_tools_by_category") as mock_list:
+                mock_list.return_value = categories
+                mock_agent_meta = MagicMock()
+                mock_filter = MagicMock()
+                # Allow list does NOT include external_opencode
+                mock_filter.allow = ["bash"]
+                mock_filter.deny = None
+                mock_agent_meta.tools = mock_filter
+                mock_agent_meta.innate_skills = ["opencode"]
+                mock_registry.return_value.get.return_value = mock_agent_meta
+
+                result = _apply_tool_filter(tools, "coder")
+                tool_names = {t.name for t in result}
+
+        # opencode tools should be auto-included
+        assert "bash" in tool_names
+        assert "external_opencode_init_session" in tool_names
+        assert "external_opencode_send_message" in tool_names
+
+    def test_explicit_deny_still_wins_over_innate_skill_grant(self):
+        """If user explicitly denies a category, deny wins (per resolve_tool_filter)."""
+        tools = [
+            self._create_mock_tool("bash"),
+            self._create_mock_tool("external_opencode_init_session"),
+        ]
+        categories = {
+            "bash": ["bash"],
+            "external_opencode": ["external_opencode_init_session"],
+        }
+        with patch("daemon.registry.get_registry") as mock_registry:
+            with patch("daemon.tools.instance.list_tools_by_category") as mock_list:
+                mock_list.return_value = categories
+                mock_agent_meta = MagicMock()
+                mock_filter = MagicMock()
+                mock_filter.allow = ["bash"]
+                mock_filter.deny = ["external_opencode"]
+                mock_agent_meta.tools = mock_filter
+                mock_agent_meta.innate_skills = ["opencode"]
+                mock_registry.return_value.get.return_value = mock_agent_meta
+
+                result = _apply_tool_filter(tools, "coder")
+                tool_names = {t.name for t in result}
+
+        assert "bash" in tool_names
+        assert "external_opencode_init_session" not in tool_names
 
 
 

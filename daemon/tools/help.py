@@ -45,21 +45,27 @@ def _get_allowed_tools(agent_id: str, mcp_tool_names: list[str] | None = None) -
         Set of allowed tool names, or None if all tools are allowed.
     """
     from ..registry import get_registry
-    from .instance import resolve_tool_filter
-    
+    from .instance import resolve_tool_filter, expand_allow_for_innate_skills
+
     registry = get_registry()
     agent_meta = registry.get(agent_id)
-    
+
     if agent_meta is None or agent_meta.tools is None:
         return None
-    
+
     # Build all_tool_names set for MCP category expansion
     all_tool_names: set[str] | None = None
     if mcp_tool_names:
         all_tool_names = set(mcp_tool_names)
-    
+
+    # Innate skills imply certain tool categories (see INNATE_SKILL_TOOL_CATEGORIES)
+    effective_allow = expand_allow_for_innate_skills(
+        agent_meta.tools.allow,
+        agent_meta.innate_skills,
+    )
+
     return resolve_tool_filter(
-        allow=agent_meta.tools.allow,
+        allow=effective_allow,
         deny=agent_meta.tools.deny,
         all_tool_names=all_tool_names,
     )
