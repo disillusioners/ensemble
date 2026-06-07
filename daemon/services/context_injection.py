@@ -221,19 +221,56 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     return truncated.strip() + "..."
 
 
+def _build_matched_file(file_path: Path, score: float) -> MatchedFile | None:
+    """Build a :class:`MatchedFile` from a file path.
+
+    Reads the content, parses the ``## `` sections, and extracts the
+    first sentence from the ``## Concise`` or ``## Answer`` section. Returns
+    ``None`` on any failure so the caller can silently skip the file.
+    """
+    try:
+        slug = _extract_slug_from_filename(file_path.name)
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        sections = _parse_sections(content)
+        first_sentence = ""
+        if "Concise" in sections:
+            first_sentence = _extract_first_sentence(sections["Concise"])
+        elif "Answer" in sections:
+            first_sentence = _extract_first_sentence(sections["Answer"])
+        return MatchedFile(
+            filename=file_path.name,
+            slug=slug,
+            score=score,
+            sections=sections,
+            first_sentence=first_sentence,
+        )
+    except Exception as e:
+        logger.debug(f"[Explorer] _build_matched_file: Error for {file_path.name}: {e}")
+        return None
+
+
 def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
     """Find and score context files matching the query.
 
-    Return [] if context_dir is not a directory or query has no tokens.
-    Get all .md files sorted by mtime (most recent first), cap at 50.
+    Return [] if context_dir is not a directory or the dir has no .md files.
     Per-file try/except: individual file errors are caught, file is skipped.
+
+    Rule: as long as the directory has at least one readable .md file, the
+    file with the highest score is always returned — even if the score is
+    ``0%``. This honors the pre-loaded context invariant that "the highest
+    file match is always included" (which ``_format_injection`` enforces
+    for Match 1), so the pre-loaded block is never empty when the dir
+    has files. When multiple files pass the threshold, all of them are
+    returned (caller picks the top 3).
 
     Args:
         query: Query string to match against.
         context_dir: Directory containing context files.
 
     Returns:
-        List of MatchedFile objects sorted by score descending.
+        List of MatchedFile objects sorted by score descending. Contains at
+        least one entry when the dir has any readable ``.md`` files; empty
+        only when the dir is missing or empty.
     """
     logger.debug("[Explorer] _match_context_files: context_dir=%s", context_dir)
 
@@ -243,9 +280,6 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
 
     query_tokens = _tokenize_query(query)
     logger.debug("[Explorer] _match_context_files: query_tokens=%s", query_tokens)
-    if not query_tokens:
-        logger.debug("[Explorer] _match_context_files: no query tokens after filtering")
-        return []
 
     # Get all .md files sorted by mtime (most recent first), cap at 50
     try:
@@ -260,52 +294,72 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
 
     logger.info("[Explorer] _match_context_files: found %d .md files", len(md_files))
 
-    matched_files: list[MatchedFile] = []
+    if not md_files:
+        return []
+
+    # Score every file. Track all candidates so we can fall back to the
+    # highest-scoring one when nothing passes the threshold — this keeps
+    # the pre-loaded block non-empty whenever the dir has files.
+    scored: list[tuple[float, Path]] = []
+    above_threshold: list[MatchedFile] = []
+    best_below: tuple[float, Path] | None = None
 
     for file_path in md_files:
         try:
-            # Extract slug and compute score
             slug = _extract_slug_from_filename(file_path.name)
             slug_tokens = _tokenize_slug(slug)
             if not slug_tokens:
                 logger.debug("[Explorer] _match_context_files: file %s has no slug tokens", file_path.name)
                 continue
-            score = _match_score(query_tokens, slug_tokens)
-            logger.debug("[Explorer] _match_context_files: file %s score=%.2f (threshold=%.2f)", file_path.name, score, MATCH_THRESHOLD)
 
-            # Skip if below match threshold
-            if score < MATCH_THRESHOLD:
-                continue
-
-            # Read content
-            content = file_path.read_text(encoding="utf-8", errors="replace")
-
-            # Parse sections
-            sections = _parse_sections(content)
-
-            # Extract first sentence (backward compat: Concise -> Answer)
-            first_sentence = ""
-            if "Concise" in sections:
-                first_sentence = _extract_first_sentence(sections["Concise"])
-            elif "Answer" in sections:
-                first_sentence = _extract_first_sentence(sections["Answer"])
-
-            matched_files.append(MatchedFile(
-                filename=file_path.name,
-                slug=slug,
-                score=score,
-                sections=sections,
-                first_sentence=first_sentence,
-            ))
-            logger.debug("[Explorer] _match_context_files: added %s with score %.2f", slug, score)
+            if query_tokens:
+                score = _match_score(query_tokens, slug_tokens)
+            else:
+                # No usable query tokens — score is 0 but we still want
+                # the most recent file pre-loaded.
+                score = 0.0
+            scored.append((score, file_path))
+            logger.debug(
+                "[Explorer] _match_context_files: file %s score=%.2f (threshold=%.2f)",
+                file_path.name, score, MATCH_THRESHOLD,
+            )
         except Exception as e:
-            logger.debug(f"[Explorer] _match_context_files: Error processing file {file_path.name}: {e}")
+            logger.debug(f"[Explorer] _match_context_files: Error scoring {file_path.name}: {e}")
             continue
 
-    # Sort by score descending
-    matched_files.sort(key=lambda m: m.score, reverse=True)
-    logger.info("[Explorer] _match_context_files: returning %d matched files", len(matched_files))
-    return matched_files
+    if not scored:
+        return []
+
+    # Build MatchedFile objects for everything above the threshold.
+    for score, file_path in scored:
+        if score < MATCH_THRESHOLD:
+            continue
+        matched = _build_matched_file(file_path, score)
+        if matched is not None:
+            above_threshold.append(matched)
+            logger.debug(
+                "[Explorer] _match_context_files: added %s with score %.2f",
+                matched.slug, score,
+            )
+
+    if above_threshold:
+        above_threshold.sort(key=lambda m: m.score, reverse=True)
+        logger.info(
+            "[Explorer] _match_context_files: returning %d matched files",
+            len(above_threshold),
+        )
+        return above_threshold
+
+    # No file passed the threshold — fall back to the highest-scoring
+    # file (ties broken by mtime, which the list is already sorted by).
+    best_score, best_path = max(scored, key=lambda sp: sp[0])
+    logger.info(
+        "[Explorer] _match_context_files: no file above threshold; "
+        "falling back to highest-scoring file %s (score=%.2f)",
+        best_path.name, best_score,
+    )
+    fallback = _build_matched_file(best_path, best_score)
+    return [fallback] if fallback is not None else []
 
 
 def _need_more_hint(audience: str) -> str:
@@ -718,10 +772,29 @@ def get_shared_context(
     context_dir = resolve_context_dir(context_key)
 
     def _empty() -> str:
-        return (
+        """Build the "no context" payload.
+
+        Internal callers see the bare "There is no context yet." line — the
+        LangChain tool names are already in their system prompt, so adding
+        the guidelines block here would be noise.
+
+        External callers ALWAYS get the ``## Context Guidelines:`` block too:
+        even when the dir is empty, the project id / name / critical notes
+        and the MCP RAG tool names are needed for the remote session to
+        know how to talk back to us, so hiding them behind an empty context
+        dir would leave the agent with no usable path forward.
+        """
+        body = (
             f"# Shared Context\ncontext_key: {context_key}\n\n"
             "# Pre-loaded Context (auto-matched)\nThere is no context yet.\n"
         )
+        if audience == "external":
+            guidelines = _context_guidelines(
+                audience, project_id, project_name, critical_notes,
+            )
+            if guidelines:
+                body += "\n" + guidelines
+        return body
 
     try:
         logger.debug("[Explorer] Context dir: %s", context_dir)
@@ -733,10 +806,12 @@ def get_shared_context(
         matched = _match_context_files(query, context_dir)
         logger.info("[Explorer] _match_context_files returned %d matches", len(matched))
 
-        if not matched:
-            logger.debug("Context auto-injection: no matches for query '%s'", query[:50])
-            return _empty()
-
+        # Always call _format_injection — even with zero matches — because
+        # the "Available Context Files" index is built from the directory
+        # contents, not from the matched set. Without this, a query that
+        # doesn't match the file slug would hide the fact that files exist
+        # in the dir, leaving the agent with no hint that it can fetch more.
+        # _format_injection returns "" only when the dir is truly empty.
         injection = _format_injection(
             matched,
             context_key=context_key,
@@ -749,7 +824,16 @@ def get_shared_context(
         logger.debug("[Explorer] _format_injection returned length: %d", len(injection) if injection else 0)
 
         if not injection:
-            logger.debug("Context auto-injection: no injection content for query '%s' (matched %d files)", query[:50], len(matched))
+            if matched:
+                logger.debug(
+                    "Context auto-injection: no injection content for query '%s' (matched %d files)",
+                    query[:50], len(matched),
+                )
+            else:
+                logger.debug(
+                    "Context auto-injection: no matches and no file index for query '%s'",
+                    query[:50],
+                )
             return _empty()
 
         logger.debug("Context auto-injection: %d files matched for query '%s'", len(matched), query[:50])

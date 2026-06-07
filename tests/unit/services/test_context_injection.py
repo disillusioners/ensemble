@@ -304,13 +304,24 @@ High
         assert result[0].slug == "auth-module-jwt"
         assert result[0].score >= MATCH_THRESHOLD
 
-    def test_no_matching_files(self, tmp_path):
-        """No files matching query return empty list."""
+    def test_no_matching_files_falls_back_to_highest(self, tmp_path):
+        """When no file passes the threshold, fall back to the highest-
+        scoring file (even if 0%) so the pre-loaded block is never empty
+        when the dir has any files.
+
+        This honors the "highest match is always pre-loaded" rule.
+        """
         file = tmp_path / "unrelated.md"
         file.write_text("## Answer\nUnrelated content.\n")
 
         result = _match_context_files("zzzzzzz yyyyy", tmp_path)
-        assert result == []
+        assert len(result) == 1
+        assert result[0].filename == "unrelated.md"
+        # The fallback's score must be below the threshold (otherwise the
+        # fallback branch wouldn't have triggered).
+        assert result[0].score < MATCH_THRESHOLD
+        # But the file content is still parsed so the agent can use it.
+        assert result[0].sections.get("Answer", "").strip() == "Unrelated content."
 
     def test_files_without_concise_use_answer(self, tmp_path):
         """Files without Concise section use Answer for first_sentence."""
@@ -871,8 +882,13 @@ High
         assert "# Pre-loaded Context (auto-matched)" in result
         assert "There is no context yet" in result
 
-    def test_returns_empty_format_for_no_matches(self, tmp_path):
-        """Directory with no matching files returns empty format string."""
+    def test_returns_fallback_injection_when_no_threshold_match(self, tmp_path):
+        """Directory with files but no threshold match still gets a
+        pre-loaded block — the highest-scoring file is included as
+        Match 1 (even at 0%) per the "always include the highest match"
+        rule. The "There is no context yet." line is NOT shown because
+        the dir is not empty.
+        """
         context_dir = tmp_path / "ensemble" / "context" / "no-match-key"
         context_dir.mkdir(parents=True)
 
@@ -886,7 +902,12 @@ High
         assert result is not None
         assert "# Shared Context" in result
         assert "context_key: no-match-key" in result
-        assert "There is no context yet" in result
+        # Highest-match fallback: the file is pre-loaded as Match 1.
+        assert "## unrelated_20260531.md (0% match)" in result
+        assert "Unrelated content." in result
+        # The misleading "no context yet" line is gone because the dir
+        # has files.
+        assert "There is no context yet" not in result
 
     def test_returns_empty_format_on_error(self):
         """OSError during file operations returns empty format string."""
@@ -978,11 +999,12 @@ class TestSharedContextHints:
         assert result.index("## doc.md") < result.index("## Context Guidelines:")
 
     def test_empty_format_omits_tool_hint(self, tmp_path):
-        """When there is no context, the 'Need more?' hint must NOT appear.
+        """Internal audience: the 'Need more?' hint must NOT appear for an
+        empty context dir.
 
-        Suggesting ``list_context`` / ``read_context`` for an empty context
-        directory is misleading — the agent should only be pointed at the
-        tools when there is actually something to fetch.
+        Suggesting ``list_context`` / ``read_context`` to internal agents for
+        an empty context directory is misleading — the LangChain tool names
+        are already in their system prompt and there is nothing to fetch.
         """
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("empty-hint-key", "anything")
@@ -992,18 +1014,124 @@ class TestSharedContextHints:
         assert "list_context(context_key)" not in result
         assert "read_context(context_key, filename)" not in result
 
-    def test_no_matches_format_omits_tool_hint(self, tmp_path):
+    def test_empty_format_external_keeps_guidelines(self, tmp_path):
+        """External audience: guidelines block MUST still be present even
+        when the context dir is empty.
+
+        External sessions reach the system through MCP, so they need the
+        tool names (``ensemble_context_list`` / ``ensemble_context_read``),
+        the MCP RAG tool names, and the project context every time — even
+        when there is nothing pre-loaded. Hiding them behind an empty dir
+        would leave the remote agent with no usable path forward.
+        """
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "empty-ext-key",
+                "anything",
+                audience="external",
+                project_id="proj-123",
+                project_name="My Project",
+                critical_notes=[
+                    {
+                        "priority": "high",
+                        "category": "warning",
+                        "summary": "Always test the auth path.",
+                    }
+                ],
+            )
+
+        assert "There is no context yet" in result
+        # The guidelines block is still appended so the remote agent can
+        # call the right MCP tools.
+        assert "## Context Guidelines:" in result
+        assert "ensemble_context_list(context_key)" in result
+        assert "ensemble_context_read(context_key, filename)" in result
+        assert "MCP RAG tools" in result
+        # And the project context / critical notes are surfaced too.
+        assert 'project_id="proj-123"' in result
+        assert 'project_name="My Project"' in result
+        assert "Always test the auth path." in result
+
+    def test_empty_format_internal_omits_external_only_project_info(self, tmp_path):
+        """Internal audience: project metadata is NOT injected into the
+        empty format. Internal agents get the bare message — they don't
+        need the MCP RAG hint and they shouldn't be told about an external
+        project context they have no way to use.
+        """
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "empty-int-key",
+                "anything",
+                project_id="proj-123",
+                project_name="My Project",
+                critical_notes=[
+                    {
+                        "priority": "high",
+                        "category": "warning",
+                        "summary": "Internal must not see this.",
+                    }
+                ],
+            )
+
+        assert "There is no context yet" in result
+        assert "## Context Guidelines:" not in result
+        assert "MCP RAG tools" not in result
+        assert 'project_id="proj-123"' not in result
+        assert "Internal must not see this." not in result
+
+    def test_no_matches_format_preloads_fallback_and_shows_index(self, tmp_path):
+        """When the query has no threshold match but the dir has files,
+        the highest-scoring file is pre-loaded as Match 1 (even at 0%),
+        the file index is shown, and the "Need more?" hint is included.
+
+        Guards the rule "highest match is always pre-loaded when the dir
+        has files" so the pre-loaded block is never empty in that case.
+        """
         context_dir = tmp_path / "ensemble" / "context" / "no-match-hint"
         context_dir.mkdir(parents=True)
-        (context_dir / "unrelated.md").write_text("unrelated")
+        (context_dir / "unrelated_20260601_000000.md").write_text("## Answer\nfoo bar\n")
 
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("no-match-hint", "zzzzz yyyyy")
 
-        assert "There is no context yet" in result
-        assert "## Context Guidelines:" not in result
-        assert "list_context(context_key)" not in result
-        assert "read_context(context_key, filename)" not in result
+        # Match 1 fallback is present (0% match is acceptable).
+        assert "## unrelated.md (0% match)" in result
+        # The "no context yet" line is gone — the dir has files.
+        assert "There is no context yet" not in result
+        # And the "Need more?" hint is included so the agent knows how to
+        # fetch more context if Match 1's content isn't enough.
+        assert "## Context Guidelines:" in result
+        assert "list_context(context_key)" in result
+        assert "read_context(context_key, filename)" in result
+
+    def test_always_include_highest_match_even_at_zero(self, tmp_path):
+        """Regression test for the "always include highest match" rule.
+
+        When the dir has files, the pre-loaded block is never empty:
+        the file with the highest score is always pre-loaded as Match 1,
+        even if the score is 0%. This ensures the pre-loaded context is
+        non-empty whenever the dir has files, and that the agent always
+        sees *some* file content (not just the file index).
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "always-highest"
+        context_dir.mkdir(parents=True)
+        # Two unrelated files — neither matches the query.
+        (context_dir / "alpha-topic_20260601_000000.md").write_text("## Answer\nalpha stuff\n")
+        (context_dir / "beta-topic_20260602_000000.md").write_text("## Answer\nbeta stuff\n")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("always-highest", "completely unrelated query")
+
+        # Match 1 is pre-loaded with the highest-scoring file (0% in this
+        # case), so the pre-loaded block contains real content.
+        assert "(0% match)" in result
+        # The "no context yet" message is gone.
+        assert "There is no context yet" not in result
+        # The most recent (highest mtime) file wins the fallback — beta was
+        # written second, so it gets pre-loaded as Match 1, and alpha stays
+        # in the file index.
+        assert "## beta-topic.md (0% match)" in result
+        assert "alpha-topic_20260601_000000.md" in result
 
     def test_external_audience_uses_mcp_tool_names(self, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "ext-hint-key"
@@ -1255,15 +1383,19 @@ class TestSharedContextHints:
         assert "Critical notes" not in result
         assert "Internal must not see this." not in result
 
-    def test_external_audience_empty_format_omits_tool_hint(self, tmp_path):
-        """Empty context must NOT include the MCP tool hint either."""
+    def test_external_audience_empty_format_keeps_tool_hint(self, tmp_path):
+        """External audience: empty context still includes the MCP tool hint
+        (no project metadata here, but the basic MCP context tool names are
+        part of the always-on guidelines)."""
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("ext-empty", "x", audience="external")
 
         assert "There is no context yet" in result
-        assert "## Context Guidelines:" not in result
-        assert "ensemble_context_list(context_key)" not in result
-        assert "ensemble_context_read(context_key, filename)" not in result
+        # The "Need more?" bullet pointing at ensemble_context_* is always on
+        # for external audiences — even with no project metadata at all.
+        assert "## Context Guidelines:" in result
+        assert "ensemble_context_list(context_key)" in result
+        assert "ensemble_context_read(context_key, filename)" in result
 
     def test_internal_audience_is_default(self, tmp_path):
         """When ``audience`` is omitted, internal tool names are used."""
