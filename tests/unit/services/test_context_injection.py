@@ -977,20 +977,22 @@ class TestSharedContextHints:
         # The pre-loaded slug appears BEFORE the guidelines section.
         assert result.index("## doc.md") < result.index("## Context Guidelines:")
 
-    def test_empty_format_includes_tool_hint(self, tmp_path):
+    def test_empty_format_omits_tool_hint(self, tmp_path):
+        """When there is no context, the 'Need more?' hint must NOT appear.
+
+        Suggesting ``list_context`` / ``read_context`` for an empty context
+        directory is misleading — the agent should only be pointed at the
+        tools when there is actually something to fetch.
+        """
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("empty-hint-key", "anything")
 
-        assert "## Context Guidelines:" in result
-        assert "list_context(context_key)" in result
-        assert "read_context(context_key, filename)" in result
         assert "There is no context yet" in result
-        # Hint appears AFTER the "no context yet" line, not before it.
-        assert result.index("There is no context yet") < result.index(
-            "## Context Guidelines:"
-        )
+        assert "## Context Guidelines:" not in result
+        assert "list_context(context_key)" not in result
+        assert "read_context(context_key, filename)" not in result
 
-    def test_no_matches_format_includes_tool_hint(self, tmp_path):
+    def test_no_matches_format_omits_tool_hint(self, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "no-match-hint"
         context_dir.mkdir(parents=True)
         (context_dir / "unrelated.md").write_text("unrelated")
@@ -998,12 +1000,10 @@ class TestSharedContextHints:
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("no-match-hint", "zzzzz yyyyy")
 
-        assert "## Context Guidelines:" in result
-        assert "list_context(context_key)" in result
-        assert "read_context(context_key, filename)" in result
-        assert result.index("There is no context yet") < result.index(
-            "## Context Guidelines:"
-        )
+        assert "There is no context yet" in result
+        assert "## Context Guidelines:" not in result
+        assert "list_context(context_key)" not in result
+        assert "read_context(context_key, filename)" not in result
 
     def test_external_audience_uses_mcp_tool_names(self, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "ext-hint-key"
@@ -1021,22 +1021,72 @@ class TestSharedContextHints:
         # tool name, not a substring of the MCP one).
         assert "list_context(context_key)" not in result
         assert "read_context(context_key, filename)" not in result
-        # Hint is at the end.
-        assert result.rstrip().endswith(
-            "ensemble_context_read(context_key, filename)` to read."
-        )
+        # "Need more?" line precedes the MCP RAG hint line, and the block is
+        # still the very last thing in the output.
+        need_more_idx = result.index("Need more?")
+        rag_idx = result.index("MCP RAG tools")
+        assert need_more_idx < rag_idx
+        # Preamble sits above the MCP RAG hint bullet.
+        preamble_idx = result.index("master agent system named Ensemble")
+        assert preamble_idx < rag_idx
+        assert result.rstrip().endswith("to discover projects.")
 
-    def test_external_audience_empty_format_uses_mcp_tool_names(self, tmp_path):
+    def test_external_audience_includes_mcp_rag_hint(self, tmp_path):
+        """External audience must see the MCP RAG-tools hint bullet."""
+        context_dir = tmp_path / "ensemble" / "context" / "ext-rag-hint"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("ext-rag-hint", "doc", audience="external")
+
+        # The preamble names the master agent system, then the RAG hint
+        # label tells the agent that Ensemble provides the tools.
+        assert "You are working under master agent system named Ensemble" in result
+        assert "MCP RAG tools (provided by Ensemble, should use it if they available):" in result
+        # The four RAG-shaped tools we expose via the MCP server are listed
+        # by name so external agents can call them directly.
+        for tool in (
+            "ensemble_kb_explore",
+            "ensemble_kb_experience",
+            "ensemble_kb_list_projects",
+            "ensemble_kb_search_projects",
+        ):
+            assert tool in result, f"Expected {tool} in MCP RAG hint"
+
+    def test_internal_audience_omits_mcp_rag_hint(self, tmp_path):
+        """Internal audience must NOT see the MCP RAG-tools hint.
+
+        The MCP RAG hint is only useful for external systems; internal agents
+        already have the LangChain tool names in their system prompt and the
+        extra bullet would just be noise.
+        """
+        context_dir = tmp_path / "ensemble" / "context" / "int-no-rag-hint"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("int-no-rag-hint", "doc")
+
+        assert "## Context Guidelines:" in result
+        assert "MCP RAG tools" not in result
+        for tool in (
+            "ensemble_kb_explore",
+            "ensemble_kb_experience",
+            "ensemble_kb_list_projects",
+            "ensemble_kb_search_projects",
+        ):
+            assert tool not in result, f"Internal hint must not mention {tool}"
+
+    def test_external_audience_empty_format_omits_tool_hint(self, tmp_path):
+        """Empty context must NOT include the MCP tool hint either."""
         with patch("tempfile.gettempdir", return_value=str(tmp_path)):
             result = get_shared_context("ext-empty", "x", audience="external")
 
-        assert "## Context Guidelines:" in result
-        assert "ensemble_context_list(context_key)" in result
-        assert "ensemble_context_read(context_key, filename)" in result
         assert "There is no context yet" in result
-        assert result.index("There is no context yet") < result.index(
-            "## Context Guidelines:"
-        )
+        assert "## Context Guidelines:" not in result
+        assert "ensemble_context_list(context_key)" not in result
+        assert "ensemble_context_read(context_key, filename)" not in result
 
     def test_internal_audience_is_default(self, tmp_path):
         """When ``audience`` is omitted, internal tool names are used."""

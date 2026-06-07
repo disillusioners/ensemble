@@ -308,28 +308,64 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
     return matched_files
 
 
-def _context_tools_hint(audience: str) -> str:
-    """Return the "Context Guidelines" section guiding the reader to fetch more context.
+def _need_more_hint(audience: str) -> str:
+    """Return the ``Need more?`` line, or ``""`` if there is nothing to suggest.
 
     Internal agents (LangChain) call ``list_context`` / ``read_context``.
     External agent systems reach the same data through the hosted MCP
     server using ``ensemble_context_list`` / ``ensemble_context_read``.
 
-    The section is wrapped in a ``## Context Guidelines:`` header so future
-    guidelines can be appended under the same heading without re-shaping the
-    surrounding output.
+    The returned string is a single bullet line with no leading or trailing
+    newline so callers can compose multiple hints under one heading.
     """
     if audience == "external":
-        body = (
+        return (
             "- Need more? Call `ensemble_context_list(context_key)` to "
             "enumerate, `ensemble_context_read(context_key, filename)` to read."
         )
-    else:
-        body = (
-            "- Need more? Call `list_context(context_key)` to enumerate, "
-            "`read_context(context_key, filename)` to read."
-        )
-    return f"## Context Guidelines:\n{body}\n"
+    return (
+        "- Need more? Call `list_context(context_key)` to enumerate, "
+        "`read_context(context_key, filename)` to read."
+    )
+
+
+def _mcp_rag_hint(audience: str) -> str:
+    """Return the MCP RAG-tools hint for external audiences, or ``""`` otherwise.
+
+    External agent systems that reach us via the hosted MCP server get a
+    one-line summary of the other RAG-shaped tools we expose so they can
+    call them directly (search KB, record experience, list/search projects)
+    instead of going through a slower round-trip.
+
+    Returns ``""`` for internal audiences — the LangChain tool names are
+    already in their system prompt.
+    """
+    if audience != "external":
+        return ""
+    return (
+        "- You are working under master agent system named Ensemble.\n"
+        "- MCP RAG tools (provided by Ensemble, should use it if they available): "
+        "`ensemble_kb_explore(query)` to search the knowledge base, "
+        "`ensemble_kb_experience(text)` to record new knowledge, "
+        "`ensemble_kb_list_projects()` / `ensemble_kb_search_projects(query)` "
+        "to discover projects."
+    )
+
+
+def _context_guidelines(audience: str) -> str:
+    """Assemble the ``## Context Guidelines:`` section, or ``""`` if empty.
+
+    Combines :func:`_need_more_hint` and :func:`_mcp_rag_hint` under a single
+    heading. Each hint is an independent unit that returns ``""`` when not
+    applicable, so this composer is the only place that decides whether the
+    guidelines block as a whole should appear — callers can safely include
+    the return value verbatim and trust it to disappear when there is
+    nothing to say (e.g. the empty / no-context state).
+    """
+    hints = [h for h in (_need_more_hint(audience), _mcp_rag_hint(audience)) if h]
+    if not hints:
+        return ""
+    return "## Context Guidelines:\n" + "\n".join(hints) + "\n"
 
 
 def _format_injection(
@@ -521,10 +557,13 @@ def _format_injection(
             score_pct = int(score * 100)
             lines.append(f"| {filename} | {score_pct}% | {summary} |")
 
-    # Append the "Need more?" hint at the very end so the LLM sees the
-    # pre-loaded content first and only then the pointer to fetch more.
+    # Append the "Context Guidelines" hint at the very end so the LLM sees
+    # the pre-loaded content first and only then the pointer to fetch more.
+    # _context_guidelines() returns "" when there is nothing to say.
     lines.append("\n")
-    lines.append(_context_tools_hint(audience))
+    guidelines = _context_guidelines(audience)
+    if guidelines:
+        lines.append(guidelines)
 
     return "".join(lines)
 
@@ -556,8 +595,7 @@ def get_shared_context(context_key: str, query: str, audience: str = "internal")
     def _empty() -> str:
         return (
             f"# Shared Context\ncontext_key: {context_key}\n\n"
-            "# Pre-loaded Context (auto-matched)\nThere is no context yet.\n\n"
-            f"{_context_tools_hint(audience)}"
+            "# Pre-loaded Context (auto-matched)\nThere is no context yet.\n"
         )
 
     try:
