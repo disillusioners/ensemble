@@ -396,10 +396,36 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
             logger.debug("[Explorer] Context dir path: %s", context_dir_path)
             logger.debug("[Explorer] Context dir exists: %s", context_dir_path.exists())
 
+            # Resolve project metadata once so we can forward project_id,
+            # project_name, and the project's critical notes into the context
+            # injection. The MCP RAG hint surfaces all three so an external
+            # agent can scope tool calls and respect pinned warnings.
+            project_name = None
+            critical_notes: list[dict] = []
+            if pid and hasattr(manager, "_project_repository"):
+                try:
+                    proj = manager._project_repository.get(pid)
+                    if proj is not None:
+                        project_name = getattr(proj, "name", None)
+                except Exception as e:
+                    logger.debug("[Explorer] Failed to resolve project name: %s", e)
+                try:
+                    notes = manager._project_repository.list_critical_notes(pid)
+                    critical_notes = [n.to_dict() for n in notes]
+                except Exception as e:
+                    logger.debug("[Explorer] Failed to load critical notes: %s", e)
+
             # Auto-inject relevant context files via reusable service
             # Run on thread pool to avoid blocking the async event loop with sync I/O
             try:
-                injection = await asyncio.to_thread(get_shared_context, context_key, query)
+                injection = await asyncio.to_thread(
+                    get_shared_context,
+                    context_key,
+                    query,
+                    project_id=pid,
+                    project_name=project_name,
+                    critical_notes=critical_notes or None,
+                )
                 logger.info("[Explorer] get_shared_context returned: %s", type(injection).__name__)
                 if injection:
                     explorer_message += f"\n\n{injection}"

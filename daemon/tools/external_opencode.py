@@ -108,6 +108,11 @@ def create_opencode_tools(
         remote opencode session reaches the context directory through MCP,
         not through the internal LangChain tool category.
 
+        Project metadata (``project_id`` / ``project_name``) and the
+        project's critical notes are resolved from the current instance and
+        forwarded to the external MCP RAG hint so the remote agent can
+        scope ``ensemble_kb_*`` tool calls and respect pinned warnings.
+
         Args:
             query: The outgoing prompt — used as the scoring query.
 
@@ -121,9 +126,41 @@ def create_opencode_tools(
                 context_key = current_instance_id
         except Exception:
             context_key = current_instance_id
+
+        # Resolve project_id from the current instance, then look up the
+        # project name and critical notes. Every step is best-effort — the
+        # preload must never raise.
+        project_id: str | None = None
+        project_name: str | None = None
+        critical_notes: list[dict] = []
+        try:
+            instance_meta = manager._instance_repository.get(current_instance_id)
+            if instance_meta is not None:
+                project_id = getattr(instance_meta, "project_id", None)
+        except Exception:
+            pass
+        if project_id and hasattr(manager, "_project_repository"):
+            try:
+                proj = manager._project_repository.get(project_id)
+                if proj is not None:
+                    project_name = getattr(proj, "name", None)
+            except Exception:
+                pass
+            try:
+                notes = manager._project_repository.list_critical_notes(project_id)
+                critical_notes = [n.to_dict() for n in notes]
+            except Exception:
+                pass
+
         try:
             injection = await asyncio.to_thread(
-                get_shared_context, context_key, query, "external"
+                get_shared_context,
+                context_key,
+                query,
+                "external",
+                project_id=project_id,
+                project_name=project_name,
+                critical_notes=critical_notes or None,
             )
             return injection or ""
         except Exception as e:

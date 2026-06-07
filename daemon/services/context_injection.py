@@ -329,30 +329,113 @@ def _need_more_hint(audience: str) -> str:
     )
 
 
-def _mcp_rag_hint(audience: str) -> str:
+# Cap the number of critical notes surfaced into the MCP RAG hint so the
+# hint block itself stays small even if a project has many notes.
+_MCP_RAG_CRITICAL_NOTES_CAP = 5
+_MCP_RAG_CRITICAL_NOTE_SUMMARY_CAP = 100
+
+_CRITICAL_NOTE_PRIORITY_ICON = {
+    "critical": "🔴",
+    "high": "🟡",
+    "medium": "🟢",
+}
+
+
+def _format_critical_note(note: dict) -> str | None:
+    """Format a single critical-note dict for the MCP RAG hint.
+
+    Returns ``None`` when the dict is missing the required ``summary`` field
+    so the caller can skip it silently. Mirrors the visual style used in
+    :func:`daemon.manager.format_project_context` (priority icon + bracketed
+    category + summary, with an optional reference suffix) so an external
+    agent sees the same shape in the hint as it would in a full project
+    context block.
+    """
+    summary = note.get("summary")
+    if not summary or not isinstance(summary, str):
+        return None
+    summary = summary.strip()
+    if not summary:
+        return None
+    if len(summary) > _MCP_RAG_CRITICAL_NOTE_SUMMARY_CAP:
+        summary = summary[: _MCP_RAG_CRITICAL_NOTE_SUMMARY_CAP - 1].rstrip() + "…"
+    priority = str(note.get("priority", "")).lower()
+    icon = _CRITICAL_NOTE_PRIORITY_ICON.get(priority, "⚪")
+    category = str(note.get("category", "")).strip()
+    category_str = f"**[{category}]** " if category else ""
+    reference = note.get("reference")
+    ref_str = f" *(ref: {reference})*" if reference else ""
+    return f"- {icon} {category_str}{summary}{ref_str}"
+
+
+def _mcp_rag_hint(
+    audience: str,
+    project_id: str | None = None,
+    project_name: str | None = None,
+    critical_notes: list[dict] | None = None,
+) -> str:
     """Return the MCP RAG-tools hint for external audiences, or ``""`` otherwise.
 
     External agent systems that reach us via the hosted MCP server get a
-    one-line summary of the other RAG-shaped tools we expose so they can
-    call them directly (search KB, record experience, list/search projects)
-    instead of going through a slower round-trip.
+    one-line summary of the RAG-shaped tools we expose (``ensemble_kb_explore``
+    / ``ensemble_kb_experience``) so they can call them directly instead of
+    going through a slower round-trip. Project discovery was intentionally
+    dropped — callers are expected to know which project they belong to.
+
+    When ``project_id`` / ``project_name`` are provided, a follow-up bullet
+    surfaces them as scoping hints so the external agent can pass them to
+    the MCP RAG tools to scope results to the current project. If
+    ``critical_notes`` is provided, the top :data:`_MCP_RAG_CRITICAL_NOTES_CAP`
+    notes are appended as sub-bullets so the agent also sees the project's
+    pinned warnings / conventions before calling the tools.
 
     Returns ``""`` for internal audiences — the LangChain tool names are
     already in their system prompt.
     """
     if audience != "external":
         return ""
-    return (
+    body = (
         "- You are working under master agent system named Ensemble.\n"
         "- MCP RAG tools (provided by Ensemble, should use it if they available): "
         "`ensemble_kb_explore(query)` to search the knowledge base, "
-        "`ensemble_kb_experience(text)` to record new knowledge, "
-        "`ensemble_kb_list_projects()` / `ensemble_kb_search_projects(query)` "
-        "to discover projects."
+        "`ensemble_kb_experience(text)` to record new knowledge."
     )
+    project_bits: list[str] = []
+    if project_id:
+        project_bits.append(f"project_id=\"{project_id}\"")
+    if project_name:
+        project_bits.append(f"project_name=\"{project_name}\"")
+    if project_bits or critical_notes:
+        body += (
+            f"\n- Current project context: {', '.join(project_bits) or '(no project id)'} "
+            "(pass these to MCP RAG tools to scope results to this project)."
+        )
+        if critical_notes:
+            rendered = [
+                line for note in critical_notes
+                if isinstance(note, dict)
+                for line in [_format_critical_note(note)]
+                if line is not None
+            ]
+            if rendered:
+                total = len(rendered)
+                shown = rendered[:_MCP_RAG_CRITICAL_NOTES_CAP]
+                more = total - len(shown)
+                body += "\n  - ⚡ Critical notes" + (
+                    f" (showing {len(shown)} of {total}):" if more else ":"
+                )
+                body += "\n    " + "\n    ".join(shown)
+                if more > 0:
+                    body += f"\n    - …and {more} more"
+    return body
 
 
-def _context_guidelines(audience: str) -> str:
+def _context_guidelines(
+    audience: str,
+    project_id: str | None = None,
+    project_name: str | None = None,
+    critical_notes: list[dict] | None = None,
+) -> str:
     """Assemble the ``## Context Guidelines:`` section, or ``""`` if empty.
 
     Combines :func:`_need_more_hint` and :func:`_mcp_rag_hint` under a single
@@ -361,8 +444,17 @@ def _context_guidelines(audience: str) -> str:
     guidelines block as a whole should appear — callers can safely include
     the return value verbatim and trust it to disappear when there is
     nothing to say (e.g. the empty / no-context state).
+
+    ``project_id`` / ``project_name`` / ``critical_notes`` are forwarded to
+    :func:`_mcp_rag_hint` so the external hint can show which project to
+    scope RAG calls to (and which pinned warnings apply).
     """
-    hints = [h for h in (_need_more_hint(audience), _mcp_rag_hint(audience)) if h]
+    hints = [
+        h for h in (
+            _need_more_hint(audience),
+            _mcp_rag_hint(audience, project_id, project_name, critical_notes),
+        ) if h
+    ]
     if not hints:
         return ""
     return "## Context Guidelines:\n" + "\n".join(hints) + "\n"
@@ -373,6 +465,9 @@ def _format_injection(
     context_key: str,
     context_dir: Path | None = None,
     audience: str = "internal",
+    project_id: str | None = None,
+    project_name: str | None = None,
+    critical_notes: list[dict] | None = None,
 ) -> str:
     """Format matched files into injection string.
 
@@ -389,6 +484,14 @@ def _format_injection(
         context_dir: Directory containing context files (for file index).
         audience: ``"internal"`` (default) shows the LangChain tool names;
             ``"external"`` shows the hosted MCP tool names.
+        project_id: Optional project UUID — surfaced in the external MCP RAG
+            hint so the agent can scope tool calls.
+        project_name: Optional human-readable project name — surfaced in the
+            external MCP RAG hint alongside ``project_id``.
+        critical_notes: Optional list of project critical-note dicts (each
+            with ``priority`` / ``category`` / ``summary`` / optional
+            ``reference``). Forwarded to the external MCP RAG hint so the
+            top few pinned warnings are visible alongside the project id.
 
     Returns:
         Formatted injection string, or empty string if no entries and no file index.
@@ -561,14 +664,22 @@ def _format_injection(
     # the pre-loaded content first and only then the pointer to fetch more.
     # _context_guidelines() returns "" when there is nothing to say.
     lines.append("\n")
-    guidelines = _context_guidelines(audience)
+    guidelines = _context_guidelines(audience, project_id, project_name, critical_notes)
     if guidelines:
         lines.append(guidelines)
 
     return "".join(lines)
 
 
-def get_shared_context(context_key: str, query: str, audience: str = "internal") -> str | None:
+def get_shared_context(
+    context_key: str,
+    query: str,
+    audience: str = "internal",
+    *,
+    project_id: str | None = None,
+    project_name: str | None = None,
+    critical_notes: list[dict] | None = None,
+) -> str | None:
     """Get shared context for a given context key and query.
 
     Resolves context dir: {tempdir}/ensemble/context/{context_key}
@@ -582,11 +693,25 @@ def get_shared_context(context_key: str, query: str, audience: str = "internal")
             tool names — used when the injection is being prepended to a
             message that an external agent system (e.g. opencode via MCP)
             will see.
+        project_id: Optional project UUID forwarded to the external MCP RAG
+            hint so the agent can scope ``ensemble_kb_*`` tool calls. Ignored
+            for the internal audience.
+        project_name: Optional human-readable project name forwarded to the
+            external MCP RAG hint alongside ``project_id``. Ignored for the
+            internal audience.
+        critical_notes: Optional list of project critical-note dicts
+            (``priority`` / ``category`` / ``summary`` / optional
+            ``reference``) forwarded to the external MCP RAG hint so the
+            top few pinned warnings are surfaced. Ignored for the internal
+            audience.
 
     Returns:
         Injection string on success, None on failure or no matches.
     """
-    logger.info("[Explorer] get_shared_context called: context_key=%s, query=%s, audience=%s", context_key, query[:100], audience)
+    logger.info(
+        "[Explorer] get_shared_context called: context_key=%s, query=%s, audience=%s, project_id=%s, critical_notes=%d",
+        context_key, query[:100], audience, project_id, len(critical_notes) if critical_notes else 0,
+    )
 
     # Resolve context_dir once and reuse across all branches. The resolved path
     # is not leaked into the agent-visible output — only ``context_key`` is.
@@ -617,6 +742,9 @@ def get_shared_context(context_key: str, query: str, audience: str = "internal")
             context_key=context_key,
             context_dir=context_dir,
             audience=audience,
+            project_id=project_id,
+            project_name=project_name,
+            critical_notes=critical_notes,
         )
         logger.debug("[Explorer] _format_injection returned length: %d", len(injection) if injection else 0)
 

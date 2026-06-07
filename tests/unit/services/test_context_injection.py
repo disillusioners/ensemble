@@ -1029,7 +1029,13 @@ class TestSharedContextHints:
         # Preamble sits above the MCP RAG hint bullet.
         preamble_idx = result.index("master agent system named Ensemble")
         assert preamble_idx < rag_idx
-        assert result.rstrip().endswith("to discover projects.")
+        # `ensemble_kb_explore` / `ensemble_kb_experience` are still listed;
+        # `ensemble_kb_list_projects` and `ensemble_kb_search_projects` were
+        # removed because callers are expected to know their current project.
+        assert "ensemble_kb_explore" in result
+        assert "ensemble_kb_experience" in result
+        assert "ensemble_kb_list_projects" not in result
+        assert "ensemble_kb_search_projects" not in result
 
     def test_external_audience_includes_mcp_rag_hint(self, tmp_path):
         """External audience must see the MCP RAG-tools hint bullet."""
@@ -1044,15 +1050,13 @@ class TestSharedContextHints:
         # label tells the agent that Ensemble provides the tools.
         assert "You are working under master agent system named Ensemble" in result
         assert "MCP RAG tools (provided by Ensemble, should use it if they available):" in result
-        # The four RAG-shaped tools we expose via the MCP server are listed
-        # by name so external agents can call them directly.
-        for tool in (
-            "ensemble_kb_explore",
-            "ensemble_kb_experience",
-            "ensemble_kb_list_projects",
-            "ensemble_kb_search_projects",
-        ):
+        # The remaining RAG-shaped tools are listed by name so external
+        # agents can call them directly. The project discovery tools were
+        # intentionally removed — callers are expected to know their project.
+        for tool in ("ensemble_kb_explore", "ensemble_kb_experience"):
             assert tool in result, f"Expected {tool} in MCP RAG hint"
+        for tool in ("ensemble_kb_list_projects", "ensemble_kb_search_projects"):
+            assert tool not in result, f"{tool} should not appear in MCP RAG hint"
 
     def test_internal_audience_omits_mcp_rag_hint(self, tmp_path):
         """Internal audience must NOT see the MCP RAG-tools hint.
@@ -1077,6 +1081,179 @@ class TestSharedContextHints:
             "ensemble_kb_search_projects",
         ):
             assert tool not in result, f"Internal hint must not mention {tool}"
+
+    def test_external_audience_includes_project_context(self, tmp_path):
+        """External audience sees project_id / project_name in the RAG hint."""
+        context_dir = tmp_path / "ensemble" / "context" / "ext-proj-ctx"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "ext-proj-ctx",
+                "doc",
+                audience="external",
+                project_id="proj-abc-123",
+                project_name="My Cool Project",
+            )
+
+        # Both pieces of project context appear in the hint bullet so the
+        # external agent can scope MCP RAG tool calls.
+        assert 'project_id="proj-abc-123"' in result
+        assert 'project_name="My Cool Project"' in result
+        assert "Current project context:" in result
+
+    def test_external_audience_includes_critical_notes(self, tmp_path):
+        """External audience sees top-N critical notes in the RAG hint."""
+        context_dir = tmp_path / "ensemble" / "context" / "ext-crit-notes"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        critical_notes = [
+            {
+                "priority": "critical",
+                "category": "warning",
+                "summary": "Always run the auth check before any DB call.",
+                "reference": "doc.md",
+            },
+            {
+                "priority": "high",
+                "category": "convention",
+                "summary": "Use snake_case for function names.",
+            },
+            {
+                "priority": "medium",
+                "category": "tip",
+                "summary": "Prefer pure functions in the data layer.",
+            },
+        ]
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "ext-crit-notes",
+                "doc",
+                audience="external",
+                project_id="proj-xyz",
+                project_name="Demo",
+                critical_notes=critical_notes,
+            )
+
+        # Section header and each note's summary appear.
+        assert "⚡ Critical notes" in result
+        assert "Always run the auth check before any DB call." in result
+        assert "Use snake_case for function names." in result
+        assert "Prefer pure functions in the data layer." in result
+        # Priority icon for the critical-priority entry is surfaced.
+        assert "🔴" in result
+        # Reference is shown as a parenthetical suffix.
+        assert "(ref: doc.md)" in result
+
+    def test_external_audience_critical_notes_cap(self, tmp_path):
+        """Critical notes are capped to avoid blowing up the hint block."""
+        context_dir = tmp_path / "ensemble" / "context" / "ext-cap"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        # 8 notes — more than the cap of 5.
+        notes = [
+            {
+                "priority": "medium",
+                "category": "tip",
+                "summary": f"Note number {i}",
+            }
+            for i in range(8)
+        ]
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "ext-cap",
+                "doc",
+                audience="external",
+                critical_notes=notes,
+            )
+
+        # The first 5 are shown, the rest are summarized.
+        assert "Note number 0" in result
+        assert "Note number 4" in result
+        assert "Note number 5" not in result
+        assert "Note number 7" not in result
+        assert "…and 3 more" in result
+        assert "showing 5 of 8" in result
+
+    def test_external_audience_critical_notes_skips_malformed(self, tmp_path):
+        """Critical-note entries missing a summary are silently skipped."""
+        context_dir = tmp_path / "ensemble" / "context" / "ext-skip"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        notes = [
+            {"priority": "high", "category": "x", "summary": "good note"},
+            {"priority": "high", "category": "x", "summary": ""},
+            {"priority": "high", "category": "x"},
+            "not-a-dict",
+            {"priority": "high", "category": "x", "summary": "another good note"},
+        ]
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "ext-skip",
+                "doc",
+                audience="external",
+                critical_notes=notes,
+            )
+
+        assert "good note" in result
+        assert "another good note" in result
+        # No stray "…" overflow from a missing summary.
+        assert "…" not in result
+
+    def test_external_audience_critical_notes_truncate_long_summary(self, tmp_path):
+        """Long critical-note summaries are truncated with an ellipsis."""
+        context_dir = tmp_path / "ensemble" / "context" / "ext-trunc"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        long_summary = "x" * 250
+        notes = [{"priority": "high", "category": "x", "summary": long_summary}]
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "ext-trunc",
+                "doc",
+                audience="external",
+                critical_notes=notes,
+            )
+
+        # The full 250-char string must not appear verbatim — it gets
+        # truncated to <= 100 chars + ellipsis.
+        assert long_summary not in result
+        assert "…" in result
+
+    def test_internal_audience_ignores_critical_notes(self, tmp_path):
+        """Critical notes are never surfaced to the internal audience."""
+        context_dir = tmp_path / "ensemble" / "context" / "int-ignores-cn"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        notes = [
+            {
+                "priority": "critical",
+                "category": "warning",
+                "summary": "Internal must not see this.",
+            }
+        ]
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context(
+                "int-ignores-cn",
+                "doc",
+                project_id="proj",
+                project_name="P",
+                critical_notes=notes,
+            )
+
+        assert "Critical notes" not in result
+        assert "Internal must not see this." not in result
 
     def test_external_audience_empty_format_omits_tool_hint(self, tmp_path):
         """Empty context must NOT include the MCP tool hint either."""
