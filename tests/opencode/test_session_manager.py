@@ -806,7 +806,12 @@ class TestSyncStateWithOpenCode:
     async def test_sync_updates_latest_response_with_stripped_message(
         self, manager: OpenCodeSessionManager, mock_client: AsyncMock
     ) -> None:
-        """_latest_response is set to the stripped (bloat-removed) last message."""
+        """_latest_response is set to the stripped (bloat-removed) last message.
+
+        Note: _latest_response is only overwritten when new_state != BUSY
+        (see sync_state_with_open_code). This test uses a step-finish with
+        reason="stop" so the derived state is IDLE and the response is stored.
+        """
         msg = {
             "info": {
                 "id": "m1",
@@ -816,6 +821,7 @@ class TestSyncStateWithOpenCode:
             },
             "parts": [
                 {"type": "text", "text": "hello", "extra_field": "remove"},
+                {"type": "step-finish", "reason": "stop"},
             ],
         }
         mock_client.get_session_messages = AsyncMock(return_value=[msg])

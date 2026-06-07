@@ -547,11 +547,10 @@ class OpenCodeSessionManager:
         Returns:
             A ``get_snapshot()`` dict (potentially with updated state).
         """
-        messages, err = None, None
+        messages = None
         try:
             messages = await self._client.get_session_messages(self.session_id, limit=1)
         except Exception as exc:
-            err = exc
             logger.warning(
                 "SyncStateWithOpenCode: failed to get messages: %s",
                 exc,
@@ -579,8 +578,12 @@ class OpenCodeSessionManager:
         should_update_worker_busy = self._is_worker_busy and new_state == SessionState.IDLE
 
         async with self._lock:
-            # manager.go:200: strip bloat before storing
-            self._latest_response = {"result": strip_message_bloat(last_message)}
+            # Only overwrite _latest_response when the session is no longer
+            # busy — otherwise we'd replace the previous turn's response with
+            # the in-flight message and confuse callers (e.g. get_status).
+            if new_state != SessionState.BUSY:
+                # manager.go:200: strip bloat before storing
+                self._latest_response = {"result": strip_message_bloat(last_message)}
             if should_update_state:
                 self._state = new_state
             if should_update_worker_busy:
@@ -629,24 +632,30 @@ class OpenCodeSessionManager:
                     {stop_task, input_task, worker_done_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                completed = done.pop()
 
-                # Cancel the tasks that did NOT complete
-                for t in {stop_task, input_task, worker_done_task}:
-                    if t not in done:
-                        t.cancel()
+                should_stop = False
 
-                if completed is stop_task:
+                # Process ALL completed tasks — if multiple tasks complete on
+                # the same event loop tick (e.g. worker_done + input), popping
+                # only one would drop the others' results, potentially sticking
+                # the session in BUSY.
+                for task in done:
+                    if task is stop_task:
+                        should_stop = True
+                    elif task is input_task:
+                        req: Request = task.result()
+                        await self._handle_request(req)
+                    elif task is worker_done_task:
+                        res: _WorkerResult = task.result()
+                        await self._handle_worker_done(res)
+
+                # Cancel the tasks that did NOT complete before the next iteration
+                for t in {stop_task, input_task, worker_done_task} - done:
+                    t.cancel()
+
+                if should_stop:
                     logger.info("stop event received; exiting loop for %s", self.session_id)
                     return
-
-                if completed is input_task:
-                    req: Request = input_task.result()
-                    await self._handle_request(req)
-
-                elif completed is worker_done_task:
-                    res: _WorkerResult = worker_done_task.result()
-                    await self._handle_worker_done(res)
 
             except asyncio.CancelledError:
                 # One of the tasks was cancelled — this is expected during shutdown.

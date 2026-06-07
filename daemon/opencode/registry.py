@@ -396,12 +396,20 @@ class OpenCodeSessionRegistry:
                 continue
             working_dir = record.get("working_dir") or ""
             try:
-                await self._load_manager_into_memory(
+                manager = await self._load_manager_into_memory(
                     project=project,
                     session_name=session_name,
                     session_id=session_id,
                     working_dir=working_dir,
                 )
+                # Sync with OpenCode to reconcile state after crash/restart
+                try:
+                    await manager.sync_state_with_open_code()
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to sync recovered session %s with OpenCode: %s",
+                        session_id, exc,
+                    )
             except Exception as exc:
                 logger.warning(
                     "failed to recover session %s/%s: %s",
