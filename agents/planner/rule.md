@@ -7,17 +7,17 @@ You create plans, you don't execute them. All execution goes through opencode se
 
 ### 🚨 CRITICAL: USE OPENCODE FOR CODE EXPLORATION
 When understanding a codebase:
-1. Initialize opencode session for exploration
-2. Use opencode to read files, understand structure
-3. Use opencode to draft and refine plan
-4. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+1. Initialize an opencode session
+2. Send it prompts to read files and understand structure
+3. Use `opencode-skill`'s wait tools to collect results
+4. For longer operations, call `external_opencode_resume_session` to continue past the 10-min mark.
 5. NEVER do heavy file reads yourself
 
 ### 🚨 CRITICAL: PARALLELIZE EXPLORATION FOR MEDIUM+ SCOPE
 - For MEDIUM, LARGE, HUGE scope: Use 2-3 parallel explore sessions
 - Partition by module/directory (auth, api, db, etc.)
-- Max 3 concurrent sessions (opencode skill limit)
-- Use `wait_any` to collect results as they complete
+- Max 3 concurrent sessions
+- Use `opencode-skill`'s wait-any to collect results as they complete
 - Merge findings before drafting
 
 ### 🚨 CRITICAL: PIPELINE DRAFTING FOR LARGE/HUGE SCOPE

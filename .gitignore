@@ -62,3 +62,4 @@ test_e2e_instance_title.db
 test_*.db
 .inspiration-projects/*
 data_dev/*
+opencode_sessions.db

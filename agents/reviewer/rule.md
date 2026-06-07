@@ -28,16 +28,16 @@
 12. **Generate plan first** — Always create a review plan before spawning sessions
 13. **Spawn opencode to analyze code** — Never analyze large codebases directly
 14. **Spawn opencode to find patterns** — Use AST/search tools via opencode
-15. **Spawn opencode to run linters** — Use `--sync` for quick validation
+15. **Spawn opencode to run linters** — Use `opencode-skill`'s wait tool for quick validation
 16. **Use opencode to cross-reference** — Find usages, dependencies via opencode
-17. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+17. **For longer operations, call `external_opencode_resume_session` to continue past the 10-min mark.**
 
 ---
 
 ### 🚨 CRITICAL: PARALLELIZE REVIEW SESSIONS FOR MEDIUM+ SCOPE
 - For reviews requiring 2+ sessions: Spawn all in parallel (max 3 concurrent)
 - Partition by module/directory (auth, api, db, etc.)
-- Use `wait_any` to collect results as they complete
+- Use `opencode-skill`'s wait-any to collect results as they complete
 - Merge findings before final aggregation
 
 ### 🚨 CRITICAL: PIPELINE AGGREGATION FOR 3+ SESSIONS
@@ -60,32 +60,37 @@
 - **Explicit request overrides** — User can request or skip Deep-Review regardless of triggers
 
 ### Deep-Review Execution
-18. **Use `--council`** — Deep-Review sessions MUST use council mode for multi-model consensus
+18. **Use `council=True`** — Deep-Review sessions MUST pass `council=True` to `external_opencode_send_message` to enable multi-model consensus (appends the COUNCIL_HINT trailer)
 19. **Maximum ONE council session** — Deep-Review is resource-heavy. One session only, make it count
 20. **Use `review-deep` instance name** — Consistent naming for deep review sessions
 21. **Comprehensive prompt** — Pack all context, trigger reasons, and focus areas into the single session
 22. **No parallel deep reviews** — Even for MEDIUM+ scope, Deep-Review runs ONE council session
 
-### Full Bash Command Examples
-```bash
-# Deep-Review: init + sync (most common — single shot)
-opencode_skill init-session myapp review-deep /path/to/project
-opencode_skill --council --sync myapp review-deep "Deep-Review of payment processing module.
-Triggers: Business-Critical Logic, Data Integrity.
-Focus: transaction handling, error recovery, edge cases in payment flow.
-Provide thorough analysis."
-
-# Deep-Review with @file for long prompts
-cat > /tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt << 'EOF'
-Deep-Review of auth module.
-Triggers: Data Integrity / Security, Complex Concurrency / State.
-Focus: session management, token validation, race conditions in login flow.
-Provide thorough analysis of correctness, safety, edge cases.
-EOF
-opencode_skill --council --sync myapp review-deep @/tmp/opencode_skill/prompt_files/myapp/review-deep_prompt.txt
+### Full Tool-Call Examples
+```python
+# Deep-Review: init + send (with council) + wait (most common — single shot)
+external_opencode_init_session(
+    project="myapp",
+    session_name="review-deep",
+    working_dir="/path/to/project",
+)
+external_opencode_send_message(
+    project="myapp",
+    session_name="review-deep",
+    message="Deep-Review of payment processing module.\n"
+            "Triggers: Business-Critical Logic, Data Integrity.\n"
+            "Focus: transaction handling, error recovery, edge cases in payment flow.\n"
+            "Provide thorough analysis.",
+    council=True,
+)
+external_opencode_wait_for_result(
+    project="myapp",
+    session_name="review-deep",
+    timeout=600,
+)
 ```
 
- **`--council` is a flag — place it before positional arguments, like `--sync` and `--quiet`.
+For long prompts, build the message string in a variable and pass it to `message=` — the new tool does not read prompt bodies from disk. Use the `{{ENSEMBLE_SHARED_CONTEXT_DIR}}` context template from `knowledge.md` so the deep-review session reads accumulated shared context.
 
 ### Deep-Review with Standard Sessions
 23. **Combine when needed** — For MEDIUM+ scope where Deep-Review triggers in one area:
@@ -101,4 +106,4 @@ opencode_skill --council --sync myapp review-deep @/tmp/opencode_skill/prompt_fi
 Never review independent modules/files sequentially when parallel is possible.
 
 ### Multiple Council Sessions
-Never spawn more than one `--council` session per review. Deep-Review is one shot.
+Never spawn more than one council session per review. Deep-Review is one shot.

@@ -102,7 +102,7 @@ When you call `explore(query)`, the results are written to the shared context di
 
 ### Rules
 
-1. **`explore()` is MANDATORY before external exploration.** Before using any external agent system (opencode_skill, etc.) to explore or understand code/project state, you MUST first call `explore(query)` for the same topic. No exceptions.
+1. **`explore()` is MANDATORY before external exploration.** Before using any external agent system (opencode-skill, etc.) to explore or understand code/project state, you MUST first call `explore(query)` for the same topic. No exceptions.
 
 2. **Do not re-explore what `explore()` already answered.** If `explore()` provides sufficient information, do not duplicate the same query via external tools. Only use external tools for follow-up details that `explore()` could not provide.
 

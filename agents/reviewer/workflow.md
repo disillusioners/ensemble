@@ -86,22 +86,36 @@ For auto-detected or explicitly requested Deep-Review:
 ### 3. Execute Review Plan
 
 #### Deep-Review execution (when triggered)
-- Spawn single `review-deep` session with `--council`
+- Spawn single `review-deep` session, sending with `council=True`
 - Pack ALL context into one comprehensive prompt:
   - What is being reviewed and why Deep-Review triggered
   - Specific concerns and focus areas
   - Relevant code paths, files, dependencies
   - Architecture context
-- Use `--sync` to wait for completion
-- Use timeout=660 for the bash command
+- Block until completion with `opencode-skill`'s wait tool
 - **If combining with standard sessions**: spawn standard sessions in parallel, `review-deep` runs separately (still only ONE council session total)
 
-**Full command:**
-```bash
-opencode_skill init-session myapp review-deep /path/to/project
-opencode_skill --council --sync myapp review-deep "Deep-Review of [target].
-Triggers: [categories]. Focus: [concerns].
-Provide thorough analysis."
+**Full tool calls:**
+```python
+external_opencode_init_session(
+    project="myapp",
+    session_name="review-deep",
+    working_dir="/path/to/project",
+)
+external_opencode_send_message(
+    project="myapp",
+    session_name="review-deep",
+    message="Deep-Review of [target].\n"
+            "Triggers: [categories].\n"
+            "Focus: [concerns].\n"
+            "Provide thorough analysis.",
+    council=True,
+)
+external_opencode_wait_for_result(
+    project="myapp",
+    session_name="review-deep",
+    timeout=600,
+)
 ```
 
 #### SMALL scope (1 session)
@@ -112,7 +126,7 @@ Provide thorough analysis."
 - Spawn 2-3 parallel `review-<area>` sessions (max 3 concurrent)
 - Partition by module/file (auth, api, db, etc.)
 - Send instructions to all sessions immediately
-- Use `wait_any` to collect results as they complete
+- Collect results as they complete with `opencode-skill`'s wait-any
 - Feed findings to `review-aggregate` session progressively
 - Don't wait for all reviews before starting aggregation
 

@@ -10,7 +10,7 @@
 - **Monitor instance progress** — Track spawned instances, follow up on results
 - **Aggregate results** — Combine instance outputs into comprehensive reports
 - **Only read/write `.agents/tester/` files directly** — All other files through opencode
-- **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+- **For longer operations, call `external_opencode_resume_session` to continue past the 10-min mark.**
 
 ### Documentation (I do directly)
 - **Check `.agents/tester/README.md` before testing** — Understand project context

@@ -22,10 +22,10 @@
 
 ## Investigation
 
-11. **Prefer opencode for structured exploration** — Use `opencode_skill` for analysis
+11. **Prefer opencode for structured exploration** — Use `opencode-skill` for analysis
 12. **Direct file reading allowed** — For quick inspection and verifying assumptions
 13. **Use grep/ast_grep for pattern searches** — Quick and efficient
-14. **Use timeout=660 for opencode_skill bash commands** — opencode operations may run for very long time
+14. **For longer operations, call `external_opencode_resume_session` to continue past the 10-min mark.**
 
 ---
 

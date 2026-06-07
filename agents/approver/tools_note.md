@@ -1,8 +1,8 @@
 # Tool Usage Notes
 
 ## Primary
-- `opencode_skill` — for spawning opencode sessions to verify plan claims
-   **`--council` is a flag — place it before positional arguments**
+- **`opencode-skill`** — for spawning opencode sessions to verify plan claims
+- **`council=True`** parameter on `external_opencode_send_message` — mandatory for every approval session (replaces the old `--council` flag)
 
 ## Secondary (quick checks only)
 - `Read` — single file reads

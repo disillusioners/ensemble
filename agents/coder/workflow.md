@@ -427,7 +427,7 @@ ALL code file operations and code exploration goes through spawned opencode sess
 
 - Use `project_*` tools to verify context
 - Use `read_file` to read `.agents/shared/` files (phase plans, context, decisions)
-- Spawn opencode sessions via `opencode_skill`
+- Spawn opencode sessions via `opencode-skill`
 - Review session results
 - Iterate with follow-up sessions
 

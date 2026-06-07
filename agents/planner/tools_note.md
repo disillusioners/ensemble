@@ -2,22 +2,55 @@
 
 ## Primary Tools
 
-### opencode_skill
+### `opencode-skill`
 Orchestrator for code exploration and plan drafting.
 
-**Usage:**
-```bash
-# Initialize session
-opencode_skill init-session <project> <session_name> <working_dir>
+**Initialize a session:**
+```python
+external_opencode_init_session(
+    project="<project>",
+    session_name="<session_name>",   # e.g. "plan-explore", "plan-draft", "plan-track"
+    working_dir="<absolute_path>",
+)
+```
 
-# Send command (async)
-opencode_skill <project> <session_name> "<message>"
+**Send a prompt (fire-and-forget):**
+```python
+external_opencode_send_message(
+    project="<project>",
+    session_name="<session_name>",
+    message="<prompt>",
+)
+```
 
-# Sync mode (send + wait)
-opencode_skill --sync <project> <session_name> "<message>"
+**Wait for one session to complete (default 10 min, native timeout):**
+```python
+external_opencode_wait_for_result(
+    project="<project>",
+    session_name="<session_name>",
+    timeout=600,
+)
+```
 
-# Wait for result
-opencode_skill <project> <session_name> /wait
+**Wait for any of several sessions to complete:**
+```python
+external_opencode_wait_any(
+    sessions=[
+        {"project": "<project>", "session_name": "explore-auth"},
+        {"project": "<project>", "session_name": "explore-api"},
+    ],
+    timeout=600,
+)
+```
+
+**Get non-blocking status / latest response:**
+```python
+external_opencode_get_status(project="<project>", session_name="<session_name>")
+```
+
+**Resume a session that hit the 10-min limit:**
+```python
+external_opencode_resume_session(project="<project>", session_name="<session_name>")
 ```
 
 **Session Types:**
@@ -25,7 +58,7 @@ opencode_skill <project> <session_name> /wait
 - `plan-draft`: Draft and refine plan content
 - `plan-track`: Monitor execution progress
 
-### write_file()
+### `write_file()`
 Write plan documents to disk.
 
 **Usage:**

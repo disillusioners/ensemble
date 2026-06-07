@@ -1,6 +1,6 @@
-# OpenCode_Skill
+# OpenCode-Skill
 
-OpenCode is an external system for code generation and execution. This skill provides tools to interact with OpenCode's Orchestrator agent, allowing you to delegate complex coding tasks and retrieve results seamlessly.
+OpenCode is an external agent system for code generation and execution. This opencode-skill provides instructions to interact with OpenCode's Orchestrator agent, allowing you to delegate complex coding tasks and retrieve results seamlessly.
 
 ## Prerequisites
 

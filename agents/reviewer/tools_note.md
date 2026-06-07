@@ -1,21 +1,33 @@
 # Tool Usage Notes
 
-- **opencode_skill** — Primary tool for code analysis and file operations
-- **opencode_skill `--council`** — Deep-Review mode. Use for auto-detected high-risk targets. **Max 1 session per review.**
-- **Read** — Quick file checks (prefer opencode for complex analysis)
-- **grep/ast_grep** — Quick pattern searches
-- **glob** — Quick file finding
+- **`opencode-skill`** — Primary tool for code analysis and file operations
+- **`council=True` on `external_opencode_send_message`** — Deep-Review mode. Pass `council=True` to enable the @council subagent hint trailer. **Max 1 council session per review.**
+- **`Read`** — Quick file checks (prefer opencode for complex analysis)
+- **`grep` / `ast_grep`** — Quick pattern searches
+- **`glob`** — Quick file finding
 
 ### Deep-Review Session Example
-```bash
+```python
 # Step 1: Initialize the session
-opencode_skill init-session myapp review-deep /path/to/project
+external_opencode_init_session(
+    project="myapp",
+    session_name="review-deep",
+    working_dir="/path/to/project",
+)
 
-# Step 2: Run Deep-Review (sync + council)
-opencode_skill --council --sync myapp review-deep "Deep-Review of payment module.
-Triggers: Business-Critical Logic, Data Integrity / Security.
-Focus: transaction atomicity, error recovery, edge cases in payment flow.
-Provide thorough analysis of correctness, safety, and architecture."
+# Step 2: Run Deep-Review (council mode + wait for completion)
+external_opencode_send_message(
+    project="myapp",
+    session_name="review-deep",
+    message="Deep-Review of payment module.\n"
+            "Triggers: Business-Critical Logic, Data Integrity / Security.\n"
+            "Focus: transaction atomicity, error recovery, edge cases in payment flow.\n"
+            "Provide thorough analysis of correctness, safety, and architecture.",
+    council=True,
+)
+external_opencode_wait_for_result(
+    project="myapp",
+    session_name="review-deep",
+    timeout=600,
+)
 ```
-
- **`--council` is a flag — place it before positional arguments, like `--sync` and `--quiet`.

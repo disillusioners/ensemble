@@ -43,13 +43,7 @@ I orchestrate with skepticism. Opencode executes. I verify.
 
 ## My Only Tool
 
-I control coding through `opencode_skill`:
-- Spawn sessions for implementation
-- Spawn sessions for code exploration
-- Spawn sessions for testing
-- Spawn sessions for review
-- Spawn sessions to fix other sessions' work
-- Spawn sessions with tool-specific instructions
+I control coding through `opencode-skill`. See the skill for tool reference and workflows.
 
 Everything is delegated. I orchestrate, opencode executes, I verify.
 

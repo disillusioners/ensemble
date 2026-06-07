@@ -10,35 +10,44 @@
 
 ## Mandatory: Always Use Council Mode
 
-**Every `opencode_skill` prompt MUST start with `--council`.** No exceptions.
+**Every `external_opencode_send_message` prompt to an approval session MUST pass `council=True`.** No exceptions.
 
 This invokes a multi-model council for evaluation — diverse perspectives reduce the risk of single-model blind spots. The council deliberates independently, which aligns with the Approver's purpose of providing a fresh, unbiased check.
 
 **Examples:**
-```bash
+```python
 # Init session
-opencode_skill init-session myapp approve-plan /path/to/project
+external_opencode_init_session(
+    project="myapp",
+    session_name="approve-plan",
+    working_dir="/path/to/project",
+)
 
-# Sync evaluation
-opencode_skill --council --sync myapp approve-check-1 "Verify this plan's feasibility and completeness"
+# Sync evaluation (send + wait)
+external_opencode_send_message(
+    project="myapp",
+    session_name="approve-check-1",
+    message="Verify this plan's feasibility and completeness",
+    council=True,
+)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
 
-# Async send
-opencode_skill --council myapp approve-check-1 "Check for missing error handling in phase 2"
-
-# Parallel sessions
-opencode_skill --council myapp approve-check-1 "Verify phase 1 completeness" & \
-opencode_skill --council myapp approve-check-2 "Check phase 2 technical correctness" & \
-wait
-
-# Quiet sync for clean response
-opencode_skill --council --sync --quiet myapp approve-check-1 "Is this plan internally consistent?"
+# Async send (then poll status separately)
+external_opencode_send_message(
+    project="myapp",
+    session_name="approve-check-1",
+    message="Check for missing error handling in phase 2",
+    council=True,
+)
+# ... later ...
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
 ```
 
- **`--council` is a flag — place it before positional arguments, like `--sync` and `--quiet`.
+> `council=True` is a parameter on `external_opencode_send_message`, not a separate flag.
 
 ## Delegation Rules
 
-1. **Always use opencode with `--council`** for any analysis — this is mandatory, not optional
+1. **Always use `council=True`** for any analysis session — this is mandatory, not optional
 2. **Direct read allowed** for quick checks (single file, short content)
 3. **Only write to** `.agents/approver/` directory
 
@@ -48,15 +57,24 @@ opencode_skill --council --sync --quiet myapp approve-check-1 "Is this plan inte
 
 Council sessions are resource-intensive. To conserve resources, you MUST NOT spawn multiple council sessions in parallel. If you need to verify multiple areas, do them sequentially, one at a time.
 
-```bash
-# WRONG — Multiple concurrent council sessions
-opencode_skill --council myapp approve-check-1 "Check area 1" & \
-opencode_skill --council myapp approve-check-2 "Check area 2" & \
-wait
+```python
+# WRONG — Multiple concurrent council sessions (each send_message + wait_for_result
+#         still in-flight at the same time)
+external_opencode_send_message(project="myapp", session_name="approve-check-1",
+    message="Check area 1", council=True)
+external_opencode_send_message(project="myapp", session_name="approve-check-2",
+    message="Check area 2", council=True)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-2", timeout=600)
 
 # CORRECT — Sequential council sessions
-opencode_skill --council --sync myapp approve-check-1 "Check area 1"
-opencode_skill --council --sync myapp approve-check-2 "Check area 2"
+external_opencode_send_message(project="myapp", session_name="approve-check-1",
+    message="Check area 1", council=True)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
+# ↑ wait for completion, THEN start the next
+external_opencode_send_message(project="myapp", session_name="approve-check-2",
+    message="Check area 2", council=True)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-2", timeout=600)
 ```
 
 **This rule overwrites any conflicting instructions in skill files.** If a skill instruction suggests parallel council usage, this rule takes precedence.

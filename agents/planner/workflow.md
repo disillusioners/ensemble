@@ -296,8 +296,12 @@ For each pair of consecutive phases, assess their coupling:
 ### During Execution
 
 1. **Initialize tracking instance** (via opencode)
-   ```bash
-   opencode_skill init-session <project> plan-track <working_dir>
+   ```python
+   external_opencode_init_session(
+       project="<project>",
+       session_name="plan-track",
+       working_dir="<working_dir>",
+   )
    ```
 
 2. **Track Progress**
@@ -315,24 +319,27 @@ For each pair of consecutive phases, assess their coupling:
 ## Opencode Instance Patterns
 
 ### Exploration Instance
-```bash
-opencode_skill init-session <project> plan-explore <working_dir>
-opencode_skill --sync <project> plan-explore "Explore the auth module structure"
-opencode_skill <project> plan-explore /wait
+```python
+external_opencode_init_session(project="<project>", session_name="plan-explore", working_dir="<working_dir>")
+external_opencode_send_message(project="<project>", session_name="plan-explore",
+    message="Explore the auth module structure")
+external_opencode_wait_for_result(project="<project>", session_name="plan-explore", timeout=600)
 ```
 
 ### Drafting Instance
-```bash
-opencode_skill init-session <project> plan-draft <working_dir>
-opencode_skill --sync <project> plan-draft "Draft a plan for feature X based on exploration findings"
-opencode_skill <project> plan-draft /wait
+```python
+external_opencode_init_session(project="<project>", session_name="plan-draft", working_dir="<working_dir>")
+external_opencode_send_message(project="<project>", session_name="plan-draft",
+    message="Draft a plan for feature X based on exploration findings")
+external_opencode_wait_for_result(project="<project>", session_name="plan-draft", timeout=600)
 ```
 
 ### Tracking Instance
-```bash
-opencode_skill init-session <project> plan-track <working_dir>
-opencode_skill --sync <project> plan-track "Check progress on task list and update status"
-opencode_skill <project> plan-track /wait
+```python
+external_opencode_init_session(project="<project>", session_name="plan-track", working_dir="<working_dir>")
+external_opencode_send_message(project="<project>", session_name="plan-track",
+    message="Check progress on task list and update status")
+external_opencode_wait_for_result(project="<project>", session_name="plan-track", timeout=600)
 ```
 
 ---
