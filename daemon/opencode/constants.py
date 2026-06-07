@@ -80,6 +80,16 @@ LEGACY_WRAPPER_DIR: str = "~/.opencode_skill/"
 credential resolution; ensemble's primary storage lives under
 ``<data_dir>/opencode_sessions``."""
 
+# ── Prompt injection hints ────────────────────────────────────────────────────
+COUNCIL_HINT: str = (
+    "\n\nNeed to use @council subagent-tool when investigating/reviewing "
+    "critical paths (e.g., high-complexity logic, important decisions, "
+    "breaking changes, architecture-related work)."
+)
+"""Trailer appended to outbound prompts when ``council=True`` is passed to
+``external_opencode_send_message``. Mirrors ``config.CouncilHint`` in the
+Go binary (main.go:460-462)."""
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 

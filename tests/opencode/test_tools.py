@@ -432,6 +432,75 @@ class TestSendMessageExecution:
         assert result.startswith("[ERROR]")
         assert "missing" in result
 
+    @pytest.mark.asyncio
+    async def test_send_message_council_true_appends_council_hint(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """``council=True`` appends the COUNCIL_HINT trailer to the outbound text."""
+        from daemon.opencode.constants import COUNCIL_HINT
+
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-council", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager, "test-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "review-deep",
+                "message": "Deep-Review the payment module",
+                "council": True,
+            })
+
+        req = mock_send.call_args.args[0]
+        text = req.payload["parts"][0]["text"]
+        assert text == "Deep-Review the payment module" + COUNCIL_HINT
+        assert "@council subagent-tool" in text
+
+    @pytest.mark.asyncio
+    async def test_send_message_council_false_does_not_append_hint(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """``council=False`` (default) sends the message verbatim."""
+        from daemon.opencode.constants import COUNCIL_HINT
+
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-no-council", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ) as mock_send:
+            tools = create_opencode_tools(mock_manager, "test-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "Write a hello world function",
+            })
+
+        req = mock_send.call_args.args[0]
+        text = req.payload["parts"][0]["text"]
+        assert text == "Write a hello world function"
+        assert COUNCIL_HINT not in text
+
 
 class TestGetStatusExecution:
     """End-to-end test of ``external_opencode_get_status``."""

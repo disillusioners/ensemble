@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
 
-from daemon.opencode.constants import POLL_INTERVAL_S
+from daemon.opencode.constants import COUNCIL_HINT, POLL_INTERVAL_S
 from daemon.opencode.server import (
     external_opencode_send_message as _server_send_message,  # Blocker 1 (Rev 4): alias to avoid name collision with LangChain tool of same name
 )
@@ -137,6 +137,7 @@ session and deleting its registry entry before creating the new one.
         message: str,
         agent: str = "orchestrator",
         model: str | None = None,
+        council: bool = False,
     ) -> str:
         """Send a prompt to an opencode session (fire-and-forget).
         
@@ -159,13 +160,18 @@ session and deleting its registry entry before creating the new one.
             return f"[ERROR] Session '{session_name}' not found in project '{project}'"
         session_id = record.get("id", "")
         
+        # Council mode appends the COUNCIL_HINT trailer to the prompt so the
+        # receiving agent is nudged to delegate to the @council subagent-tool
+        # for critical-path review. Mirrors the old Go binary's --council flag.
+        full_text = message + COUNCIL_HINT if council else message
+        
         req = OpenCodeRequest(
             action="PROMPT",
             session_id=session_id,
             payload={
                 "agent": agent,
                 "model": model_dict,
-                "parts": [{"type": "text", "text": message}],
+                "parts": [{"type": "text", "text": full_text}],
             },
         )
         resp = await _send(req)
@@ -182,6 +188,9 @@ Args:
     message: The text message to send
     agent: Agent name (default "orchestrator")
     model: Optional model in "provider/model" format (default "litellm/coding")
+    council: If True, append the COUNCIL_HINT trailer to the prompt so the
+        receiving agent delegates critical-path work to the @council
+        subagent-tool. Replaces the old Go binary's --council flag.
 
 Returns:
     Submitted confirmation or error.
