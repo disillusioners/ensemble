@@ -948,3 +948,75 @@ Other information.
         # Only other-file should appear in index
         assert "| other-info_20260531_231256.md |" in result
         assert "| auth-module_20260531_231255.md |" not in result
+
+
+class TestSharedContextHints:
+    """The preloaded section teaches agents how to read more via the context tools."""
+
+    def test_happy_path_includes_tool_hint(self, tmp_path):
+        context_dir = tmp_path / "ensemble" / "context" / "hint-key"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("hint-key", "doc")
+
+        assert "list_context(context_key)" in result
+        assert "read_context(context_key, filename)" in result
+
+    def test_empty_format_includes_tool_hint(self, tmp_path):
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("empty-hint-key", "anything")
+
+        assert "list_context(context_key)" in result
+        assert "read_context(context_key, filename)" in result
+        assert "There is no context yet" in result
+
+    def test_no_matches_format_includes_tool_hint(self, tmp_path):
+        context_dir = tmp_path / "ensemble" / "context" / "no-match-hint"
+        context_dir.mkdir(parents=True)
+        (context_dir / "unrelated.md").write_text("unrelated")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("no-match-hint", "zzzzz yyyyy")
+
+        assert "list_context(context_key)" in result
+        assert "read_context(context_key, filename)" in result
+
+    def test_external_audience_uses_mcp_tool_names(self, tmp_path):
+        context_dir = tmp_path / "ensemble" / "context" / "ext-hint-key"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("ext-hint-key", "doc", audience="external")
+
+        # Hosted MCP tool names appear in the hint, internal names do not.
+        assert "ensemble_context_list(context_key)" in result
+        assert "ensemble_context_read(context_key, filename)" in result
+        # And the internal `list_context(` form is NOT present (as a standalone
+        # tool name, not a substring of the MCP one).
+        assert "list_context(context_key)" not in result
+        assert "read_context(context_key, filename)" not in result
+
+    def test_external_audience_empty_format_uses_mcp_tool_names(self, tmp_path):
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("ext-empty", "x", audience="external")
+
+        assert "ensemble_context_list(context_key)" in result
+        assert "ensemble_context_read(context_key, filename)" in result
+        assert "There is no context yet" in result
+
+    def test_internal_audience_is_default(self, tmp_path):
+        """When ``audience`` is omitted, internal tool names are used."""
+        context_dir = tmp_path / "ensemble" / "context" / "default-aud"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hi")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("default-aud", "doc")
+
+        assert "list_context(context_key)" in result
+        # And the external form is not present.
+        assert "ensemble_context_list(context_key)" not in result
+        assert "ensemble_context_read(context_key, filename)" not in result

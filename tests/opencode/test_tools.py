@@ -1250,7 +1250,7 @@ class TestSendMessageContextPreload:
                 "message": "Do the thing",
             })
 
-        mock_get.assert_called_with("fallback-id", "Do the thing")
+        mock_get.assert_called_with("fallback-id", "Do the thing", "external")
 
     @pytest.mark.asyncio
     async def test_context_key_uses_tree_root_when_available(
@@ -1285,7 +1285,7 @@ class TestSendMessageContextPreload:
                 "message": "Do the thing",
             })
 
-        mock_get.assert_called_with("tree-root-xyz", "Do the thing")
+        mock_get.assert_called_with("tree-root-xyz", "Do the thing", "external")
 
     @pytest.mark.asyncio
     async def test_council_trailer_is_appended_after_injection(

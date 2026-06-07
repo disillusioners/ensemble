@@ -103,6 +103,11 @@ def create_opencode_tools(
         files against the query, and returns a tiered injection string (capped
         at ``INJECTION_TOKEN_CAP`` inside ``get_shared_context``).
 
+        The prepended hint line uses the hosted MCP tool names
+        (``ensemble_context_list`` / ``ensemble_context_read``) because the
+        remote opencode session reaches the context directory through MCP,
+        not through the internal LangChain tool category.
+
         Args:
             query: The outgoing prompt — used as the scoring query.
 
@@ -117,7 +122,9 @@ def create_opencode_tools(
         except Exception:
             context_key = current_instance_id
         try:
-            injection = await asyncio.to_thread(get_shared_context, context_key, query)
+            injection = await asyncio.to_thread(
+                get_shared_context, context_key, query, "external"
+            )
             return injection or ""
         except Exception as e:
             logger.debug("[OpenCode] Preload shared context failed: %s", e)

@@ -302,10 +302,29 @@ def _match_context_files(query: str, context_dir: Path) -> list[MatchedFile]:
     return matched_files
 
 
+def _context_tools_hint(audience: str) -> str:
+    """Return the one-line hint guiding the reader to fetch more context.
+
+    Internal agents (LangChain) call ``list_context`` / ``read_context``.
+    External agent systems reach the same data through the hosted MCP
+    server using ``ensemble_context_list`` / ``ensemble_context_read``.
+    """
+    if audience == "external":
+        return (
+            "Need more? Call `ensemble_context_list(context_key)` to enumerate, "
+            "`ensemble_context_read(context_key, filename)` to read.\n"
+        )
+    return (
+        "Need more? Call `list_context(context_key)` to enumerate, "
+        "`read_context(context_key, filename)` to read.\n"
+    )
+
+
 def _format_injection(
     matched_files: list[MatchedFile],
     context_key: str,
     context_dir: Path | None = None,
+    audience: str = "internal",
 ) -> str:
     """Format matched files into injection string.
 
@@ -320,6 +339,8 @@ def _format_injection(
         matched_files: List of matched files to format (sorted by score desc).
         context_key: The context key (tree-root instance id) to display.
         context_dir: Directory containing context files (for file index).
+        audience: ``"internal"`` (default) shows the LangChain tool names;
+            ``"external"`` shows the hosted MCP tool names.
 
     Returns:
         Formatted injection string, or empty string if no entries and no file index.
@@ -464,6 +485,7 @@ def _format_injection(
     # Build final output
     lines = ["# Shared Context\n"]
     lines.append(f"context_key: {context_key}\n")
+    lines.append(_context_tools_hint(audience))
     lines.append("\n## Pre-loaded Context (auto-matched)\n")
 
     # Add entries
@@ -491,7 +513,7 @@ def _format_injection(
     return "".join(lines)
 
 
-def get_shared_context(context_key: str, query: str) -> str | None:
+def get_shared_context(context_key: str, query: str, audience: str = "internal") -> str | None:
     """Get shared context for a given context key and query.
 
     Resolves context dir: {tempdir}/ensemble/context/{context_key}
@@ -500,18 +522,27 @@ def get_shared_context(context_key: str, query: str) -> str | None:
     Args:
         context_key: The context key identifying the context directory.
         query: Query string to match against context files.
+        audience: ``"internal"`` (default) shows the LangChain tool names in
+            the "Need more?" hint. Pass ``"external"`` to show the hosted MCP
+            tool names — used when the injection is being prepended to a
+            message that an external agent system (e.g. opencode via MCP)
+            will see.
 
     Returns:
         Injection string on success, None on failure or no matches.
     """
-    logger.info("[Explorer] get_shared_context called: context_key=%s, query=%s", context_key, query[:100])
+    logger.info("[Explorer] get_shared_context called: context_key=%s, query=%s, audience=%s", context_key, query[:100], audience)
 
     # Resolve context_dir once and reuse across all branches. The resolved path
     # is not leaked into the agent-visible output — only ``context_key`` is.
     context_dir = resolve_context_dir(context_key)
 
     def _empty() -> str:
-        return f"# Shared Context\ncontext_key: {context_key}\n\n## Pre-loaded Context\nThere is no context yet.\n"
+        return (
+            f"# Shared Context\ncontext_key: {context_key}\n"
+            f"{_context_tools_hint(audience)}\n"
+            "## Pre-loaded Context\nThere is no context yet.\n"
+        )
 
     try:
         logger.debug("[Explorer] Context dir: %s", context_dir)
@@ -527,7 +558,12 @@ def get_shared_context(context_key: str, query: str) -> str | None:
             logger.debug("Context auto-injection: no matches for query '%s'", query[:50])
             return _empty()
 
-        injection = _format_injection(matched, context_key=context_key, context_dir=context_dir)
+        injection = _format_injection(
+            matched,
+            context_key=context_key,
+            context_dir=context_dir,
+            audience=audience,
+        )
         logger.debug("[Explorer] _format_injection returned length: %d", len(injection) if injection else 0)
 
         if not injection:
