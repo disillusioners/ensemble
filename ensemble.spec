@@ -84,7 +84,7 @@ a = Analysis(
     ],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=['rthook_tiktoken.py'],
+    runtime_hooks=['rthook_tiktoken.py', 'rthook_ssl.py'],
     excludes=[
         'tkinter',
         'test',
