@@ -189,7 +189,7 @@ async def external_opencode_send_message(
     session_id = request.session_id or ""
     payload = request.payload or {}
 
-    logger.info("OpenCode request: action=%s session=%s", action, session_id)
+    logger.debug("OpenCode request: action=%s session=%s", action, session_id)
 
     # ── PING (server.go:231-236) ─────────────────────────────────────────
     if action == "PING":

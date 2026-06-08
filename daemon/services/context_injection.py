@@ -837,7 +837,7 @@ def get_shared_context(
             return _empty()
 
         logger.debug("Context auto-injection: %d files matched for query '%s'", len(matched), query[:50])
-        logger.info("[Explorer] Returning injection of length %d", len(injection))
+        logger.debug("[Explorer] Returning injection of length %d", len(injection))
         return injection
     except Exception as e:
         logger.debug(f"[Explorer] Error in get_shared_context: {e}")
