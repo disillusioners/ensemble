@@ -1,6 +1,7 @@
 """File system tools for reading files and directories."""
 
 import os
+import re
 import tempfile
 from pathlib import Path
 from langchain_core.tools import tool
@@ -13,17 +14,105 @@ CATEGORY_DOC = """\
 Read, write, edit, and search files and directories.
 
 **Rules**:
-- `workdir` parameters are MUST for all file operations. Always specify them to avoid errors.
-- `path` is always relative to `workdir`. Never use absolute paths.
+- `workdir` is required when `path` is relative. If `path` is absolute (e.g. `/abs/path`
+  on Unix or `C:\\path\\to\\file` on Windows), `workdir` may be omitted and the path is
+  used as-is.
+- When `path` is relative, it is resolved against `workdir` and must stay within it.
 
-Example read_file:
+Example read_file (relative path):
 ```json
 {
   "path": ".agents/shared/planning/<feature>/plan-overview.md",
   "workdir": "/path_to/current/working/project/directory"
 }
 ```
+
+Example read_file (absolute path, workdir not required):
+```json
+{
+  "path": "/tmp/shared/plan-overview.md"
+}
+```
 """
+
+
+_WINDOWS_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+_WINDOWS_UNC_RE = re.compile(r"^[\\/]{2}")
+
+
+def _is_absolute_path(path: str) -> bool:
+    """Return True if `path` is absolute on the current OS or matches a Windows
+    absolute pattern (drive letter or UNC). Cross-platform safe: a Windows-style
+    absolute path is still recognized as absolute when the daemon runs on Unix,
+    so agents on either OS get consistent behavior.
+    """
+    if not path:
+        return False
+    try:
+        if Path(path).is_absolute():
+            return True
+    except (OSError, ValueError):
+        return False
+    if _WINDOWS_DRIVE_RE.match(path) or _WINDOWS_UNC_RE.match(path):
+        return True
+    return False
+
+
+def _resolve_target_path(
+    path: str,
+    workdir: str | None,
+) -> tuple[Path | None, Path | None, str | None]:
+    """Resolve `path` against `workdir` (relative) or use it as-is (absolute).
+
+    Returns:
+        (target_path, base_path, error). `base_path` is the workdir Path when
+        `path` is relative, and None when `path` is absolute (no boundary check
+        is applied). On error, target_path and base_path are None.
+    """
+    if _is_absolute_path(path):
+        try:
+            return Path(path).expanduser(), None, None
+        except (OSError, RuntimeError) as e:
+            return None, None, f"ERROR: Invalid absolute path: {e}"
+
+    if not workdir or not workdir.strip():
+        return (
+            None,
+            None,
+            "ERROR: workdir is required for relative paths. Agents must always "
+            "specify workdir explicitly — typically the project directory. "
+            "Absolute paths do not need workdir.",
+        )
+
+    try:
+        base = Path(workdir).expanduser().resolve()
+        target = (base / path).expanduser().resolve()
+        return target, base, None
+    except (OSError, RuntimeError) as e:
+        return None, None, f"ERROR: Invalid path: {e}"
+
+
+def _resolve_within_workdir(
+    path: str,
+    workdir: str | None,
+) -> tuple[Path | None, str | None]:
+    """Resolve `path` and verify it stays within `workdir` (when relative).
+
+    Combines `_resolve_target_path` with the `_is_within_workdir` boundary
+    check, so callers get a single (target, err) tuple and can't forget to
+    apply the boundary check.
+
+    Returns:
+        (target_path, error). On error, target_path is None. For absolute
+        paths the boundary check is intentionally skipped.
+    """
+    target, base, err = _resolve_target_path(path, workdir)
+    if err:
+        return None, err
+    if base is not None and not _is_within_workdir(base, target):
+        return None, f"ERROR: Path escapes workdir boundary: {path}"
+    return target, None
+
 
 def _normed_contains(base: Path, target: Path) -> bool:
     """Check if target is within base using OS-appropriate case normalization."""
@@ -79,16 +168,11 @@ def list_directory(
     show_hidden: bool = False
 ) -> str:
     """List directory contents. Use tool_help("list_directory") for details."""
-    if not workdir or not workdir.strip():
-        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
-    
+    dir_path, err = _resolve_within_workdir(path, workdir)
+    if err:
+        return err
+
     try:
-        base_path = Path(workdir).expanduser().resolve()
-        dir_path = (base_path / path).expanduser().resolve()
-        
-        if not _is_within_workdir(base_path, dir_path):
-            return f"ERROR: Path escapes workdir boundary: {path}"
-        
         if not dir_path.exists():
             return f"ERROR: Path does not exist: {path}"
         
@@ -136,8 +220,10 @@ def list_directory(
 list_directory._full_doc_ = """List contents of a directory.
 
 Args:
-    path: Directory path to list (relative to workdir)
-    workdir: Base directory for relative paths (required)
+    path: Directory path to list. Absolute paths are allowed (workdir not needed);
+          relative paths are resolved against `workdir`.
+    workdir: Base directory for relative paths. Required when `path` is relative;
+              optional (ignored) when `path` is absolute.
     show_hidden: Whether to show hidden files (default: False)
 
 Returns:
@@ -156,16 +242,11 @@ def read_file(
     limit: int = 2000,
 ) -> str:
     """Read file contents. Use tool_help("read_file") for details."""
-    if not workdir or not workdir.strip():
-        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
-    
+    file_path, err = _resolve_within_workdir(path, workdir)
+    if err:
+        return err
+
     try:
-        base_path = Path(workdir).expanduser().resolve()
-        file_path = (base_path / path).expanduser().resolve()
-        
-        if not _is_within_workdir(base_path, file_path):
-            return f"ERROR: Path escapes workdir boundary: {path}"
-        
         if not file_path.exists():
             return f"ERROR: File does not exist: {path}"
         
@@ -231,8 +312,10 @@ def read_file(
 read_file._full_doc_ = """Read contents of a file.
 
 Args:
-    path: File path to read (relative to workdir)
-    workdir: Base directory for relative paths (required)
+    path: File path to read. Absolute paths are allowed (workdir not needed);
+          relative paths are resolved against `workdir`.
+    workdir: Base directory for relative paths. Required when `path` is relative;
+              optional (ignored) when `path` is absolute.
     offset: Line number to start from (1-indexed, default: 1)
     limit: Maximum number of lines to read (default: 2000)
 
@@ -251,16 +334,11 @@ def glob_files(
     limit: int = 100,
 ) -> str:
     """Find files matching a glob pattern. Use tool_help("glob_files") for details."""
-    if not workdir or not workdir.strip():
-        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
-    
+    search_path, err = _resolve_within_workdir(path, workdir)
+    if err:
+        return err
+
     try:
-        base_path = Path(workdir).expanduser().resolve()
-        search_path = (base_path / path).expanduser().resolve()
-        
-        if not _is_within_workdir(base_path, search_path):
-            return f"ERROR: Path escapes workdir boundary: {path}"
-        
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
         
@@ -322,8 +400,10 @@ glob_files._full_doc_ = """Find files matching a glob pattern.
 
 Args:
     pattern: Glob pattern (e.g., "**/*.py", "*.md", "src/**/*.ts")
-    workdir: Base directory for relative paths (required)
-    path: Directory to search in (relative to workdir, default: ".")
+    workdir: Base directory for relative paths. Required when `path` is relative;
+              optional (ignored) when `path` is absolute.
+    path: Directory to search in. Absolute paths are allowed (workdir not needed);
+          relative paths are resolved against `workdir`. Default: "."
     offset: Number of results to skip (default: 0)
     limit: Maximum results to return (default: 100)
 
@@ -341,16 +421,11 @@ def write_file(
     append: bool = False
 ) -> str:
     """Write or append content to a file. Use tool_help("write_file") for details."""
-    if not workdir or not workdir.strip():
-        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
-    
+    file_path, err = _resolve_within_workdir(path, workdir)
+    if err:
+        return err
+
     try:
-        base_path = Path(workdir).expanduser().resolve()
-        file_path = (base_path / path).expanduser().resolve()
-        
-        if not _is_within_workdir(base_path, file_path):
-            return f"ERROR: Path escapes workdir boundary: {path}"
-        
         # Create parent directories if they don't exist
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -368,8 +443,10 @@ write_file._full_doc_ = """Write or append content to a file.
 
 Args:
     content: The text content to write
-    path: File path to write to (relative to workdir)
-    workdir: Base directory for relative paths (required)
+    path: File path to write to. Absolute paths are allowed (workdir not needed);
+          relative paths are resolved against `workdir`.
+    workdir: Base directory for relative paths. Required when `path` is relative;
+              optional (ignored) when `path` is absolute.
     append: If True, append to existing file; if False, overwrite (default: False)
 
 Returns:
@@ -390,18 +467,11 @@ def grep_files(
     limit: int = 100,
 ) -> str:
     """Search file contents using regex patterns. Use tool_help("grep_files") for details."""
-    if not workdir or not workdir.strip():
-        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
-    
+    search_path, err = _resolve_within_workdir(path, workdir)
+    if err:
+        return err
+
     try:
-        import re
-        
-        base_path = Path(workdir).expanduser().resolve()
-        search_path = (base_path / path).expanduser().resolve()
-        
-        if not _is_within_workdir(base_path, search_path):
-            return f"ERROR: Path escapes workdir boundary: {path}"
-        
         if not search_path.exists():
             return f"ERROR: Path does not exist: {path}"
         
@@ -471,8 +541,10 @@ grep_files._full_doc_ = """Search file contents using regex patterns.
 
 Args:
     pattern: Regex pattern to search for
-    workdir: Base directory for relative paths (required)
-    path: Directory to search in (relative to workdir, default: ".")
+    workdir: Base directory for relative paths. Required when `path` is relative;
+              optional (ignored) when `path` is absolute.
+    path: Directory to search in. Absolute paths are allowed (workdir not needed);
+          relative paths are resolved against `workdir`. Default: "."
     include: Glob pattern to filter files (e.g., "*.py", "*.{js,ts}")
     case_sensitive: Whether search is case-sensitive (default: False)
     whole_word: Match whole words only (default: False)
@@ -494,16 +566,11 @@ def edit_file(
     replace_all: bool = False
 ) -> str:
     """Replace text in a file using exact string matching. Use tool_help("edit_file") for details."""
-    if not workdir or not workdir.strip():
-        return "ERROR: workdir is required. Agents must always specify workdir explicitly — typically the project directory."
-    
+    file_path, err = _resolve_within_workdir(path, workdir)
+    if err:
+        return err
+
     try:
-        base_path = Path(workdir).expanduser().resolve()
-        file_path = (base_path / path).expanduser().resolve()
-        
-        if not _is_within_workdir(base_path, file_path):
-            return f"ERROR: Path escapes workdir boundary: {path}"
-        
         if not file_path.exists():
             return f"ERROR: File does not exist: {path}"
         
@@ -536,10 +603,12 @@ def edit_file(
 edit_file._full_doc_ = """Replace text in a file using exact string matching.
 
 Args:
-    path: File path to edit (relative to workdir)
+    path: File path to edit. Absolute paths are allowed (workdir not needed);
+          relative paths are resolved against `workdir`.
     old_string: The exact string to find and replace (supports multi-line)
     new_string: The replacement string
-    workdir: Base directory for relative paths (required)
+    workdir: Base directory for relative paths. Required when `path` is relative;
+              optional (ignored) when `path` is absolute.
     replace_all: If True, replace all occurrences; if False, replace only the first (default: False)
 
 Returns:
