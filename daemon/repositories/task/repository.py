@@ -12,7 +12,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
 from ..job_queue.models import JobStatus
-from ..instance.models import InstanceStatus
+from ..instance.models import Instance, InstanceStatus
 from .models import Task, TaskStatus, TaskType
 
 # Job type string for MESSAGE jobs. job_type is a free-form string column
@@ -433,6 +433,17 @@ class TaskRepository:
                 Task.status == TaskStatus.RUNNING.value,
                 # COALESCE falls back to started_at for legacy rows.
                 func.coalesce(Task.last_heartbeat_at, Task.started_at) < threshold,
+                # Skip tasks belonging to paused/terminated instances: pause
+                # intentionally leaves the task RUNNING so resume can continue
+                # from the same row. Recovery must not auto-resume such tasks.
+                Task.instance_id.notin_(
+                    select(Instance.instance_id).where(
+                        Instance.status.in_([
+                            InstanceStatus.PAUSED.value,
+                            InstanceStatus.TERMINATED.value,
+                        ])
+                    )
+                ),
             )
             return list(db_session.exec(stmt))
 
@@ -775,16 +786,23 @@ class TaskRepository:
             # Use bound parameter with Python False so the boolean
             # comparison works on both SQLite (INTEGER 0) and PostgreSQL
             # (BOOLEAN false).
+            # Exclude tasks whose instance is PAUSED/TERMINATED: pause
+            # intentionally leaves the task RUNNING so resume can continue
+            # from the same row. Recovery must not auto-resume such tasks.
             stmt = text("""
-                SELECT * FROM task
-                WHERE status = :status_running
-                AND COALESCE(last_heartbeat_at, started_at) < :threshold
-                AND cancel_requested = :cancel_requested
+                SELECT t.* FROM task t
+                LEFT JOIN instances i ON i.instance_id = t.instance_id
+                WHERE t.status = :status_running
+                AND COALESCE(t.last_heartbeat_at, t.started_at) < :threshold
+                AND t.cancel_requested = :cancel_requested
+                AND (i.status IS NULL OR i.status NOT IN (:paused, :terminated))
             """)
             rows = conn.execute(stmt, {
                 "status_running": TaskStatus.RUNNING.value,
                 "threshold": threshold,
                 "cancel_requested": False,
+                "paused": InstanceStatus.PAUSED.value,
+                "terminated": InstanceStatus.TERMINATED.value,
             }).fetchall()
             return [self._row_to_task(row) for row in rows]
 

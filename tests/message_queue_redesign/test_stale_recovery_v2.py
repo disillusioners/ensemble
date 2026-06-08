@@ -1162,3 +1162,145 @@ class TestPhase5Fixes:
         
         # Message should not have been failed
         assert len(mock_message_repo.failed_messages) == 0
+
+
+class TestPausedInstanceSkipped:
+    """Regression: StaleTaskRecovery must not auto-resume a paused instance.
+
+    A paused instance intentionally leaves its in-flight task RUNNING so that
+    user-initiated resume can continue from the same task row. Recovery's
+    liveness signal (stale heartbeat) cannot distinguish "crashed worker" from
+    "user-paused" — the fix is to consult the instance's status and skip
+    paused/terminated instances entirely.
+    """
+
+    def _insert_instance(self, engine, instance_id: str, status: str) -> None:
+        """Insert an Instance row with the given status.
+
+        Required because ``SQLModel.metadata.create_all`` in the conftest
+        only creates tables for SQLModels that have been imported by the
+        time the engine fixture runs. We import the Instance model here
+        and insert via the ORM so all NOT NULL columns are populated.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.instance.models import Instance
+        with SQLModelSession(engine) as session:
+            existing = session.get(Instance, instance_id)
+            if existing is not None:
+                existing.status = status
+                session.add(existing)
+            else:
+                session.add(
+                    Instance(
+                        instance_id=instance_id,
+                        agent_id="test-agent",
+                        agent_dir="/tmp/test",
+                        status=status,
+                    )
+                )
+            session.commit()
+
+    def test_find_cancellable_tasks_skips_paused_instance(self, repository, engine):
+        """find_cancellable_tasks must not return tasks whose instance is PAUSED."""
+        # Instance is paused (the user paused it) but the in-flight task
+        # is still RUNNING with a stale heartbeat (the worker was cancelled).
+        self._insert_instance(engine, "paused-inst", "paused")
+        paused_task = create_stale_running_task(
+            repository,
+            instance_id="paused-inst",
+            message_id="paused-msg",
+            age_minutes=20,
+        )
+
+        # A non-paused instance's stale task — control case, must be returned.
+        self._insert_instance(engine, "active-inst", "running")
+        active_task = create_stale_running_task(
+            repository,
+            instance_id="active-inst",
+            message_id="active-msg",
+            age_minutes=20,
+        )
+
+        cancellable = repository.find_cancellable_tasks(threshold_minutes=15)
+
+        assert len(cancellable) == 1
+        assert cancellable[0].id == active_task.id
+        assert paused_task.id not in [t.id for t in cancellable]
+
+    def test_find_stale_running_tasks_skips_paused_instance(self, repository, engine):
+        """find_stale_running_tasks must not return tasks on paused instances."""
+        self._insert_instance(engine, "paused-inst", "paused")
+        paused_task = create_stale_running_task(
+            repository,
+            instance_id="paused-inst",
+            message_id="paused-msg",
+            age_minutes=20,
+        )
+
+        self._insert_instance(engine, "terminated-inst", "terminated")
+        terminated_task = create_stale_running_task(
+            repository,
+            instance_id="terminated-inst",
+            message_id="terminated-msg",
+            age_minutes=20,
+        )
+
+        self._insert_instance(engine, "active-inst", "running")
+        active_task = create_stale_running_task(
+            repository,
+            instance_id="active-inst",
+            message_id="active-msg",
+            age_minutes=20,
+        )
+
+        stale = repository.find_stale_running_tasks(threshold_minutes=15)
+
+        stale_ids = [t.id for t in stale]
+        assert active_task.id in stale_ids
+        assert paused_task.id not in stale_ids
+        assert terminated_task.id not in stale_ids
+
+    def test_recover_stale_tasks_does_not_resume_paused_instance(self, repository, engine):
+        """End-to-end: recover_stale_tasks must not act on paused instances."""
+        self._insert_instance(engine, "paused-inst", "paused")
+        paused_task = create_stale_running_task(
+            repository,
+            instance_id="paused-inst",
+            message_id="paused-msg",
+            age_minutes=20,
+        )
+
+        mock_message_repo = MockMessageRepository()
+
+        recovery = StaleTaskRecovery(
+            task_repository=repository,
+            message_repository=mock_message_repo,
+            threshold_minutes=15,
+            cancel_grace_seconds=0,
+            max_retries=3,
+        )
+
+        recovered = recovery.recover_stale_tasks()
+
+        # No recovery action taken on the paused instance.
+        assert recovered == 0
+
+        # Task must still be RUNNING — the user has not resumed yet.
+        updated = repository.get(paused_task.id)
+        assert updated.status == TaskStatus.RUNNING.value
+
+        # No retry task was created.
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            retry_count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM task "
+                    "WHERE instance_id = :instance_id AND id != :id"
+                ),
+                {"instance_id": "paused-inst", "id": paused_task.id},
+            ).scalar()
+        assert retry_count == 0
+
+        # No message was failed (this is the symptom that triggered the
+        # user-visible auto-resume in the original bug).
+        assert len(mock_message_repo.failed_messages) == 0
