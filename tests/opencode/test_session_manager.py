@@ -61,6 +61,7 @@ def mock_client() -> AsyncMock:
     client.abort_session = AsyncMock(return_value={"ok": True})
     client.get_questions = AsyncMock(return_value=[])
     client.get_session_messages = AsyncMock(return_value=[])
+    client.get_session = AsyncMock(return_value=None)
     client.answer_question = AsyncMock(return_value={"ok": True})
     return client
 
@@ -863,11 +864,11 @@ class TestSyncStateWithOpenCode:
         assert snap["questions"][0]["id"] == "req-2"
 
     @pytest.mark.asyncio
-    async def test_questions_for_other_sessions_are_ignored(
+    async def test_questions_for_unrelated_sessions_are_ignored(
         self, manager: OpenCodeSessionManager, mock_client: AsyncMock
     ) -> None:
-        """Questions for a *different* session must not flip this manager's
-        state to WAITING_FOR_INPUT.
+        """Questions for a session unrelated to this one (no parent
+        chain link) must not flip this manager's state to WAITING_FOR_INPUT.
         """
         msg = {
             "info": {"id": "m1"},
@@ -880,6 +881,121 @@ class TestSyncStateWithOpenCode:
             questions=[],
         )
         mock_client.get_questions = AsyncMock(return_value=[other_question])
+        # Parent-chain walk for the unrelated session returns nothing
+        # useful → eventually returns None or a session with no
+        # parentID. We simulate "lineage unknown".
+        mock_client.get_session = AsyncMock(return_value=None)
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.BUSY.value
+        assert snap["questions"] == []
+
+    @pytest.mark.asyncio
+    async def test_questions_from_child_subagent_are_accepted(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """Questions raised by a child subagent (whose parentID chain
+        leads to this session) must surface as WAITING_FOR_INPUT and
+        carry ``parentSessionID`` so the caller can answer them via
+        this session.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        child_question = Question(
+            id="req-child-1",
+            session_id="ses_child",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[child_question])
+        # First lookup: child session, parentID = test-session-1
+        # Second lookup: would be test-session-1, but we short-circuit
+        # because current == ancestor_id inside the walk.
+        mock_client.get_session = AsyncMock(
+            return_value={"id": "ses_child", "parentID": manager.session_id}
+        )
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        assert len(snap["questions"]) == 1
+        assert snap["questions"][0]["id"] == "req-child-1"
+        assert snap["questions"][0]["parentSessionID"] == manager.session_id
+        assert snap["questions"][0]["sessionID"] == "ses_child"
+
+    @pytest.mark.asyncio
+    async def test_questions_from_grandchild_subagent_are_accepted(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """A multi-hop descendant (grandchild → child → parent) must
+        also be accepted.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        grandchild_question = Question(
+            id="req-grandchild-1",
+            session_id="ses_grandchild",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(
+            return_value=[grandchild_question]
+        )
+
+        async def fake_get_session(sid: str) -> dict | None:
+            if sid == "ses_grandchild":
+                return {"id": "ses_grandchild", "parentID": "ses_child"}
+            if sid == "ses_child":
+                return {"id": "ses_child", "parentID": manager.session_id}
+            return None
+
+        mock_client.get_session = AsyncMock(side_effect=fake_get_session)
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        assert snap["questions"][0]["parentSessionID"] == manager.session_id
+
+    @pytest.mark.asyncio
+    async def test_questions_from_unrelated_session_with_matching_dir_are_ignored(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """A session that shares the same working directory but has a
+        different parent chain (e.g. a sibling session spawned by a
+        different orchestrator) must still be rejected — the parent
+        chain walk is what scopes, not the directory.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        sibling_question = Question(
+            id="req-sib-1",
+            session_id="ses_sibling",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[sibling_question])
+        # Sibling has parentID = "ses_other_orchestrator" (not us)
+        mock_client.get_session = AsyncMock(
+            return_value={"id": "ses_sibling", "parentID": "ses_other_orch"}
+        )
+        # Second hop: other orch has no parent (root)
+        async def walk(sid: str):
+            if sid == "ses_sibling":
+                return {"id": "ses_sibling", "parentID": "ses_other_orch"}
+            if sid == "ses_other_orch":
+                return {"id": "ses_other_orch", "parentID": None}
+            return None
+        mock_client.get_session = AsyncMock(side_effect=walk)
         manager._state = SessionState.BUSY
 
         snap = await manager.sync_state_with_open_code()

@@ -82,6 +82,47 @@ def _question_to_dict(q: Any) -> dict[str, Any]:
     return q
 
 
+_MAX_PARENT_CHAIN_DEPTH = 10
+
+
+async def _is_descendant_of(
+    child_id: str,
+    ancestor_id: str,
+    client: "OpenCodeClient",
+) -> bool:
+    """Return ``True`` iff ``child_id`` has ``ancestor_id`` in its parent chain.
+
+    Walks OpenCode's session tree via ``GET /session/{id}`` and follows
+    ``parentID`` upward. Caps the walk at ``_MAX_PARENT_CHAIN_DEPTH`` hops
+    to bound latency. Treats any HTTP/parse error or 404 as "unknown
+    lineage" → ``False`` so the caller falls through to the directory
+    scope as a safety net.
+    """
+    if child_id == ancestor_id:
+        return True
+    seen: set[str] = set()
+    current: str | None = child_id
+    for _ in range(_MAX_PARENT_CHAIN_DEPTH):
+        if not current or current in seen:
+            return False
+        if current == ancestor_id:
+            return True
+        seen.add(current)
+        try:
+            data = await client.get_session(current)
+        except Exception as exc:
+            logger.debug(
+                "is_descendant_of: failed to fetch session %s: %s",
+                current, exc,
+            )
+            return False
+        if data is None:
+            return False
+        current = data.get("parentID") or None
+    return False
+
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public types
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,6 +260,9 @@ class OpenCodeSessionManager:
         """
         self.session_id: str = session_id
         """OpenCode session identifier. Set once at construction."""
+        self.working_dir: str = working_dir
+        """Working directory of this session — used as the scope for child
+        session question detection. Matches ``self._client.working_dir``."""
 
         # ── Mutable state (protected by self._lock) ──────────────────────
         self._state: SessionState = SessionState.IDLE
@@ -577,17 +621,31 @@ class OpenCodeSessionManager:
         # Active question probe: GET_STATUS is the path that agent-side
         # waiters poll, so it must be authoritative for WAITING_FOR_INPUT
         # rather than waiting for the 30s worker poll.
+        #
+        # The OpenCode ``/question`` endpoint is scoped by working directory
+        # (project), not by session. The orchestrator delegates to subagents
+        # via the ``task`` tool, and those subagents run as child sessions
+        # in the same project. When a child asks the user a question, the
+        # question appears in our probe but with a different ``sessionID``.
+        # We accept any question that either belongs to this session or is
+        # a descendant in the OpenCode session tree (walking ``parentID``).
         questions_for_session: list[dict[str, Any]] = []
         try:
             all_questions = await self._client.get_questions()
         except Exception as exc:
             logger.debug("SyncStateWithOpenCode: failed to get questions: %s", exc)
         else:
-            questions_for_session = [
-                _question_to_dict(q)
-                for q in all_questions
-                if q.session_id == self.session_id
-            ]
+            for q in all_questions:
+                if q.session_id == self.session_id:
+                    questions_for_session.append(_question_to_dict(q))
+                    continue
+                is_child = await _is_descendant_of(
+                    q.session_id, self.session_id, self._client,
+                )
+                if is_child:
+                    enriched = _question_to_dict(q)
+                    enriched["parentSessionID"] = self.session_id
+                    questions_for_session.append(enriched)
 
         if messages is None or len(messages) == 0:
             # manager.go:170-171: "No messages - keep current state".

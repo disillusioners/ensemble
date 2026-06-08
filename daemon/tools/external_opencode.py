@@ -115,12 +115,22 @@ def create_opencode_tools(
         Question dicts are produced by ``OpenCodeSessionManager`` and are
         guaranteed to be plain dicts (see ``_question_to_dict`` in
         ``daemon/opencode/session_manager.py``).
+
+        Each question may carry an optional ``parentSessionID`` field
+        set by ``sync_state_with_open_code`` when the question belongs
+        to a child subagent. Such questions are answered via the
+        *parent* session (since ``/question/{id}/reply`` is keyed on
+        question id, not session), so the answer instruction still
+        points at the project/session the caller is already polling.
         """
         if not questions:
             return ""
         lines = ["", "Questions:"]
         for q in questions:
-            lines.append(f"  [?] {q.get('id', '')}: {q.get('questions', [])}")
+            qid = q.get('id', '')
+            sub = q.get('sessionID', '') or q.get('session_id', '')
+            note = f" (from child subagent {sub})" if sub else ""
+            lines.append(f"  [?] {qid}{note}: {q.get('questions', [])}")
         return "\n".join(lines)
 
     def _format_timeout(

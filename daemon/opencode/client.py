@@ -455,6 +455,29 @@ class OpenCodeClient:
             raise OpenCodeAPIError(200, "expected JSON array of messages")
         return data
 
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """``GET /session/{id}`` → session metadata dict, or ``None`` if 404.
+
+        Used by the question probe to walk the OpenCode session tree
+        (parentID chain) so child subagent questions can be attributed
+        back to the parent. Returns ``None`` on missing/invalid bodies
+        so callers can treat it as "unknown lineage" and fall through
+        to the directory-scoped accept-all path.
+        """
+        import json
+
+        try:
+            body = await self._request("GET", f"/session/{session_id}", None)
+        except OpenCodeAPIError:
+            return None
+        if not body:
+            return None
+        try:
+            data = json.loads(body)
+        except (ValueError, TypeError):
+            return None
+        return data if isinstance(data, dict) else None
+
 
 class OpenCodeAPIError(RuntimeError):
     """Raised when the OpenCode server returns a non-2xx response.
