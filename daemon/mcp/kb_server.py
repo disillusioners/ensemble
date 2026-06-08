@@ -16,6 +16,8 @@ from mcp.server.fastmcp import FastMCP
 from daemon.rag.config import is_rag_enabled
 from daemon.services.context_tools import list_context_files, read_context_file
 from daemon.tools.knowledge_tools import (
+    _check_rag_errored_via_checkpoint,
+    _check_rag_queried_via_checkpoint,
     _check_read_file_called_via_checkpoint,
     _enqueue_experience_job,
     _enqueue_kb_update_job,
@@ -274,17 +276,35 @@ def create_kb_mcp_server() -> FastMCP:
             if result is None:
                 return "Explorer agent timed out or failed. Try a simpler query."
 
-            # Deterministic KB-gap detection: did the explorer have to read
-            # project files? If so, KB lacked the answer — enqueue a
-            # kb-importer job to fill the gap. Pure system check, no
-            # agent-emitted heading involved.
+            # Deterministic KB-gap detection: did the explorer query RAG
+            # successfully AND still have to read project files? Three
+            # independent guards combine to mirror the old
+            # ``## Need Update KB:`` logic:
+            #
+            # 1. ``rag_queried`` — explorer must have at least attempted
+            #    RAG (skipped-RAG + read_file is not a KB-gap signal).
+            # 2. ``not rag_errored`` — if RAG timed out / 504'd / refused
+            #    connection, the KB might already contain the information;
+            #    we just couldn't reach it. Mirrors the original "RAG
+            #    error → no KB update" rule.
+            # 3. ``read_file_called`` — the actual KB-gap signal.
+            #
+            # Pure system check, no agent-emitted heading involved.
+            rag_queried = False
+            rag_errored = False
             read_file_called = False
             if child_instance_id and hasattr(_manager, "_checkpointer") and _manager._checkpointer:
+                rag_queried = await _check_rag_queried_via_checkpoint(
+                    _manager._checkpointer, child_instance_id
+                )
+                rag_errored = await _check_rag_errored_via_checkpoint(
+                    _manager._checkpointer, child_instance_id
+                )
                 read_file_called = await _check_read_file_called_via_checkpoint(
                     _manager._checkpointer, child_instance_id
                 )
 
-            if read_file_called:
+            if read_file_called and rag_queried and not rag_errored:
                 try:
                     # Fire-and-forget: enqueue kb-importer job if explorer found new knowledge
                     asyncio.ensure_future(_enqueue_kb_update_job(

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daemon.tools.knowledge_tools import (
+    _check_rag_errored_via_checkpoint,
     _check_rag_queried_via_checkpoint,
     _check_read_file_called_via_checkpoint,
     _enqueue_experience_job,
@@ -408,7 +409,7 @@ class TestExperienceTool:
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
 
-        result =         await experience_tool.ainvoke({"text": "Test knowledge"})
+        result = await experience_tool.ainvoke({"text": "Test knowledge"})
 
         assert "Error" in result
         assert "project_id" in result.lower()
@@ -661,11 +662,18 @@ class TestExploreJobEnqueue:
             assert "## Need Update KB: true" in result
 
     @pytest.mark.asyncio
-    async def test_explore_enqueues_job_when_read_file_called(self, configured_env, mock_manager_with_checkpoint):
-        """read_file tool call in checkpoint → kb-importer job is enqueued."""
+    async def test_explore_enqueues_job_when_rag_queried_and_read_file_called(
+        self, configured_env, mock_manager_with_checkpoint
+    ):
+        """RAG queried + read_file in checkpoint → kb-importer job is enqueued.
+
+        The KB-gap signal is the conjunction of the two: a file fallback
+        from RAG is what indicates a genuine KB gap. read_file alone (no
+        RAG attempt) is NOT enough — see the RAG-error regression test
+        for the inverse case.
+        """
         explorer_response = "## Answer\nFound info from files."
 
-        # Checkpoint says read_file was called → KB gap detected
         mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
             "channel_values": {
                 "messages": [
@@ -741,7 +749,7 @@ class TestExploreJobEnqueue:
 
     @pytest.mark.asyncio
     async def test_explore_skips_job_when_no_project_id(self, configured_env, mock_manager_with_checkpoint):
-        """read_file called but no project_id means no job is enqueued."""
+        """RAG + read_file both called, but no project_id → no job enqueued."""
         # Override instance metadata to return no project
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {}
@@ -750,10 +758,13 @@ class TestExploreJobEnqueue:
             return_value=mock_instance_meta
         )
 
-        # Checkpoint says read_file was called
+        # Both RAG and read_file called — gating would normally enqueue
         mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
             "channel_values": {
-                "messages": [_make_message([_make_tool_call("read_file")])],
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
             }
         })
 
@@ -776,10 +787,13 @@ class TestExploreJobEnqueue:
         """Job service raises exception - explore() still returns normally."""
         explorer_response = "## Answer\nNew knowledge found."
 
-        # Checkpoint says read_file was called
+        # RAG + read_file both called → enqueue path is reached
         mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
             "channel_values": {
-                "messages": [_make_message([_make_tool_call("read_file")])],
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
             }
         })
 
@@ -802,7 +816,7 @@ class TestExploreJobEnqueue:
 
     @pytest.mark.asyncio
     async def test_explore_logs_warning_when_no_project_id(self, configured_env, mock_manager_with_checkpoint, caplog):
-        """Warning is logged when project_id is missing but read_file was called."""
+        """Warning is logged when project_id is missing despite RAG + read_file."""
         # Override instance metadata to return no project
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {}
@@ -811,10 +825,13 @@ class TestExploreJobEnqueue:
             return_value=mock_instance_meta
         )
 
-        # Checkpoint says read_file was called
+        # RAG + read_file both called — gating satisfied, project_id is the blocker
         mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
             "channel_values": {
-                "messages": [_make_message([_make_tool_call("read_file")])],
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
             }
         })
 
@@ -843,10 +860,18 @@ class TestExploreJobEnqueue:
         """kb-importer job receives the explorer's response (no heading stripping)."""
         explorer_response = "## Answer\nFound info from files."
 
-        # Checkpoint says read_file was called → job enqueued
+        # RAG + read_file both called → gating satisfied → job enqueued.
+        # The RAG ToolMessage has a successful response (no error).
         mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
             "channel_values": {
-                "messages": [_make_message([_make_tool_call("read_file")])],
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_tool_message(
+                        "rag_query_data",
+                        "## Entities\n- **AuthService** (Service): Handles login",
+                    ),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
             }
         })
 
@@ -863,6 +888,116 @@ class TestExploreJobEnqueue:
             mock_manager_with_checkpoint._job_queue_service.enqueue.assert_called_once()
             call_kwargs = mock_manager_with_checkpoint._job_queue_service.enqueue.call_args.kwargs
             assert "Found info from files" in call_kwargs["message"]
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_job_when_rag_errored(
+        self, configured_env, mock_manager_with_checkpoint
+    ):
+        """RAG error + read_file → no kb-importer job (KB may already have the info).
+
+        Regression for the RAG-outage scenario: when RAG times out / 504s /
+        refuses connection, the explorer falls back to read_file, but the KB
+        might already contain the requested knowledge. Without the
+        ``rag_errored`` guard, a transient RAG outage would pollute the KB
+        with a redundant update.
+        """
+        explorer_response = "## Answer\nFound info from files after RAG failed."
+
+        # RAG errored (ToolMessage content starts with "RAG error:") AND
+        # read_file was called. rag_queried=True, rag_errored=True,
+        # read_file_called=True → gating fails → no enqueue.
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_tool_message(
+                        "rag_query_data",
+                        "RAG error: TimeoutError: request timed out after 120s",
+                    ),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
+            }
+        })
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is the auth?"})
+
+            await asyncio.sleep(0.1)
+
+            # RAG errored → gating fails → no job enqueued
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_job_when_rag_504(
+        self, configured_env, mock_manager_with_checkpoint
+    ):
+        """RAG 504 error + read_file → no enqueue (504 is a transient outage)."""
+        explorer_response = "## Answer\nFallback to files."
+
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_tool_message(
+                        "rag_query_data",
+                        "RAG error: HTTP 504 Gateway Timeout from upstream LightRAG",
+                    ),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
+            }
+        })
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is X?"})
+
+            await asyncio.sleep(0.1)
+
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_enqueues_job_when_rag_succeeded(
+        self, configured_env, mock_manager_with_checkpoint
+    ):
+        """RAG succeeded (no error in ToolMessage) + read_file → enqueue.
+
+        Positive control for the RAG-error regression test: confirms that
+        the helper correctly distinguishes error responses from
+        successful ones, so legitimate KB gaps still trigger updates.
+        """
+        explorer_response = "## Answer\nFound info from files."
+
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_tool_message(
+                        "rag_query_data",
+                        "## Entities\n- **NoMatch** (concept): nothing relevant",
+                    ),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
+            }
+        })
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is the architecture?"})
+
+            await asyncio.sleep(0.1)
+
+            # Successful RAG + read_file → gating satisfied → enqueue
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_called_once()
 
 
 # =============================================================================
@@ -1530,6 +1665,24 @@ def _make_tool_call(name):
     return {"name": name, "args": {}, "id": f"call_{name}"}
 
 
+def _make_tool_message(name, content, tool_call_id=None):
+    """Build a mock ToolMessage with the given tool name and content.
+
+    Uses real ``ToolMessage`` shape (with ``name`` and ``content``
+    attributes) so the scan helpers can inspect it like a real
+    checkpoint entry. The AI-side message carrying the matching
+    ``tool_calls`` is intentionally omitted — the scan helpers only
+    look at the tool's own response message.
+    """
+    from langchain_core.messages import ToolMessage
+
+    return ToolMessage(
+        content=content,
+        tool_call_id=tool_call_id or f"call_{name}",
+        name=name,
+    )
+
+
 class TestCheckRagQueriedViaCheckpoint:
     """Tests for _check_rag_queried_via_checkpoint() helper."""
 
@@ -1757,6 +1910,292 @@ class TestCheckRagQueriedViaCheckpoint:
         result = await _check_rag_queried_via_checkpoint(adapter, "inst-456")
 
         assert result is False
+        raw_saver.aget.assert_awaited_once()
+
+
+# =============================================================================
+# Checkpoint RAG Error Detection Helper Tests
+# =============================================================================
+
+
+class TestCheckRagErroredViaCheckpoint:
+    """Tests for _check_rag_errored_via_checkpoint() helper.
+
+    Scans checkpoint ToolMessages for RAG-tool responses whose content
+    contains a known error indicator (``"RAG error"`` or leading
+    ``"Error: "``). Used to gate the "Need Update KB" enqueue so that
+    RAG outages don't trigger spurious KB updates.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rag_error_string_detected(self):
+        """RAG error: prefix in tool response → True."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "rag_query_data",
+                        "RAG error: Connection refused",
+                    ),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_rag_timeout_detected(self):
+        """RAG error: TimeoutError in tool response → True."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "rag_query_data",
+                        "RAG error: TimeoutError: request timed out after 120s",
+                    ),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_rag_504_detected(self):
+        """RAG error containing 504 → True."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "rag_get_graph",
+                        "RAG error: HTTP 504 Gateway Timeout from upstream",
+                    ),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_error_prefix_detected(self):
+        """ToolMessage content starting with 'Error: ' → True (pre-call validation)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "rag_query_data",
+                        "Error: RAG is not configured. Set LIGHTRAG_HOST environment variable.",
+                    ),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_successful_rag_response_not_detected(self):
+        """Plain text RAG result (no error) → False."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "rag_query_data",
+                        "## Entities\n- **AuthService** (Service): Handles login",
+                    ),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_empty_rag_response_not_detected(self):
+        """Empty RAG response → False (no results, not an error)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message("rag_query_data", ""),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_no_rag_tool_messages(self):
+        """No RAG ToolMessages in checkpoint → False."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                    _make_message([_make_tool_call("read_file")]),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_non_rag_tool_error_ignored(self):
+        """Error from a non-RAG tool → False (only RAG errors count)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "bash",
+                        "Error: command not found",
+                    ),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_exception(self):
+        """Returns False when checkpointer raises (graceful degradation)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_none(self):
+        """Returns False when checkpoint state is None."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value=None)
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_empty_messages(self):
+        """Returns False when state is valid but messages list is empty."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": []}
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_mixed_rag_success_and_error(self):
+        """One RAG tool errored, another succeeded → True (any error counts)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "rag_get_graph",
+                        "## Entities\n- **AuthService** (Service)",
+                    ),
+                    _make_tool_message(
+                        "rag_query_data",
+                        "RAG error: TimeoutError",
+                    ),
+                ]
+            }
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_message_without_name_attribute_ignored(self):
+        """Messages without ``name`` attribute are not RAG tool messages → False."""
+        msg = MagicMock(spec=["content"])
+        msg.content = "RAG error: something"  # would be detected if name matched
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [msg]}
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_message_without_content_attribute_skipped(self):
+        """ToolMessage with name but no content → not an error, no crash."""
+        msg = MagicMock(spec=["name"])
+        msg.name = "rag_query_data"
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [msg]}
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_list_content_with_error(self):
+        """ToolMessage with list-of-parts content (e.g. multimodal) containing error."""
+        msg = MagicMock()
+        msg.name = "rag_query_data"
+        msg.content = [
+            {"type": "text", "text": "RAG error: 504 Gateway Timeout"},
+        ]
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [msg]}
+        })
+
+        result = await _check_rag_errored_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_unwraps_raw_saver_when_checkpointer_is_checkpointer_adapter(self):
+        """Regression: CheckpointerAdapter wrapper exposes raw_saver; aget is
+        called on the raw saver, not the adapter."""
+        from daemon.checkpoint_adapter import SqliteCheckpointerAdapter
+
+        raw_saver = MagicMock()
+        raw_saver.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_tool_message(
+                        "rag_query_data",
+                        "RAG error: Connection refused",
+                    ),
+                ]
+            }
+        })
+        adapter = SqliteCheckpointerAdapter(raw_saver)
+
+        result = await _check_rag_errored_via_checkpoint(adapter, "inst-err-1")
+
+        assert result is True
         raw_saver.aget.assert_awaited_once()
 
 
@@ -2101,9 +2540,10 @@ class TestExploreCheckpointIntegration:
                 assert "Error" in result
 
                 # Checkpoint was inspected even though the agent errored.
-                # The new code calls aget() once for RAG detection AND once
-                # for read_file detection, so we expect 2 calls.
-                assert mock_manager_with_checkpointer._checkpointer.aget.await_count == 2
+                # The new code calls aget() once for RAG detection, once for
+                # RAG error detection, and once for read_file detection,
+                # so we expect 3 calls.
+                assert mock_manager_with_checkpointer._checkpointer.aget.await_count == 3
 
                 # No save on error path — we return BEFORE the save block
                 mock_save.assert_not_called()

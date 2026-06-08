@@ -151,32 +151,28 @@ class TestExploreReturnsResponseUnchanged:
 
 
 class TestExploreTriggersKbUpdateWhenReadFileCalled:
-    """Test that explore triggers KB update when the explorer called read_file.
+    """Test that explore triggers KB update based on checkpoint tool calls.
 
-    The 'Need Update KB' signal is derived from the child's checkpoint: any
-    ``read_file`` tool call implies the KB didn't have the answer.
+    The "Need Update KB" signal is the conjunction of three guards derived
+    from the child's checkpoint:
+    1. ``rag_queried`` — RAG was attempted (no skipped-RAG + read_file)
+    2. ``not rag_errored`` — RAG succeeded (no spurious updates on outage)
+    3. ``read_file_called`` — agent had to fall back to filesystem
     """
 
     @pytest.mark.asyncio
-    async def test_explore_triggers_kb_update_when_read_file_called(self, kb_server_setup):
-        """read_file in checkpoint → _enqueue_kb_update_job should be scheduled."""
+    async def test_explore_triggers_kb_update_when_rag_succeeded_and_read_file(
+        self, kb_server_setup
+    ):
+        """rag_queried=True, rag_errored=False, read_file=True → enqueue."""
         setup = kb_server_setup
-
-        # Checkpointer reports a read_file call
-        mock_checkpointer = MagicMock()
-        mock_checkpointer.aget = AsyncMock(return_value={
-            "channel_values": {
-                "messages": [
-                    _make_message([_make_tool_call("read_file")]),
-                ]
-            }
-        })
-        setup["manager"]._checkpointer = mock_checkpointer
 
         mock_response = "Knowledge found about the codebase"
 
         with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=(mock_response, "test-child-id")), \
              patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_rag_queried_via_checkpoint", new_callable=AsyncMock, return_value=True), \
+             patch("daemon.mcp.kb_server._check_rag_errored_via_checkpoint", new_callable=AsyncMock, return_value=False), \
              patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=True):
 
             result = await setup["explore_tool"].fn(
@@ -194,11 +190,13 @@ class TestExploreTriggersKbUpdateWhenReadFileCalled:
 
     @pytest.mark.asyncio
     async def test_explore_skips_kb_update_when_no_read_file(self, kb_server_setup):
-        """No read_file in checkpoint → no _enqueue_kb_update_job is scheduled."""
+        """read_file_called=False → no enqueue (other guards don't matter)."""
         setup = kb_server_setup
 
         with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("Some result", "test-child-id")), \
              patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_rag_queried_via_checkpoint", new_callable=AsyncMock, return_value=True), \
+             patch("daemon.mcp.kb_server._check_rag_errored_via_checkpoint", new_callable=AsyncMock, return_value=False), \
              patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=False):
 
             await setup["explore_tool"].fn(
@@ -207,7 +205,56 @@ class TestExploreTriggersKbUpdateWhenReadFileCalled:
                 mode="hybrid",
             )
 
-        # No job should have been enqueued
+        mock_enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_kb_update_when_rag_errored(
+        self, kb_server_setup
+    ):
+        """rag_errored=True + read_file=True → no enqueue (RAG outage guard).
+
+        Regression for the RAG-outage scenario: when RAG times out / 504s
+        / refuses connection, the explorer falls back to read_file, but
+        the KB might already contain the requested knowledge. Without
+        this guard, a transient RAG outage would pollute the KB with
+        a redundant update.
+        """
+        setup = kb_server_setup
+
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("Fallback result", "test-child-id")), \
+             patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_rag_queried_via_checkpoint", new_callable=AsyncMock, return_value=True), \
+             patch("daemon.mcp.kb_server._check_rag_errored_via_checkpoint", new_callable=AsyncMock, return_value=True), \
+             patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=True):
+
+            await setup["explore_tool"].fn(
+                query="test query",
+                project_id="test-project",
+                mode="hybrid",
+            )
+
+        # RAG errored → no enqueue even though read_file was called
+        mock_enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_kb_update_when_rag_not_queried(
+        self, kb_server_setup
+    ):
+        """rag_queried=False + read_file=True → no enqueue (skipped-RAG guard)."""
+        setup = kb_server_setup
+
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("File-only result", "test-child-id")), \
+             patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_rag_queried_via_checkpoint", new_callable=AsyncMock, return_value=False), \
+             patch("daemon.mcp.kb_server._check_rag_errored_via_checkpoint", new_callable=AsyncMock, return_value=False), \
+             patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=True):
+
+            await setup["explore_tool"].fn(
+                query="test query",
+                project_id="test-project",
+                mode="hybrid",
+            )
+
         mock_enqueue.assert_not_called()
 
     @pytest.mark.asyncio
@@ -217,6 +264,8 @@ class TestExploreTriggersKbUpdateWhenReadFileCalled:
 
         with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("## Need Update KB: true\nSome result", "test-child-id")), \
              patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_rag_queried_via_checkpoint", new_callable=AsyncMock, return_value=True), \
+             patch("daemon.mcp.kb_server._check_rag_errored_via_checkpoint", new_callable=AsyncMock, return_value=False), \
              patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=False):
 
             await setup["explore_tool"].fn(

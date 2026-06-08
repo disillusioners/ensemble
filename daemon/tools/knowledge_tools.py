@@ -123,11 +123,116 @@ async def _check_rag_queried_via_checkpoint(
 
     Returns:
         True if any RAG tool was called, False otherwise (including on any
-        error — graceful degradation, never raises).
+        error — graceful degradation, never raises). Note: this returns True
+        whether the RAG call succeeded OR errored — it only confirms RAG was
+        attempted. Use :func:`_check_rag_errored_via_checkpoint` to
+        distinguish the two.
     """
     return await _scan_checkpoint_for_tool_match(
         checkpointer, instance_id, RAG_TOOL_NAMES, "RAG"
     )
+
+
+# Substrings in RAG tool responses that indicate an error. The RAG tools
+# in ``daemon.tools.rag_tools`` return ``f"RAG error: {e}"`` for any
+# exception (timeouts, connection failures, 504s, etc.). A leading
+# ``"Error: "`` also indicates a pre-call validation failure.
+_RAG_ERROR_INDICATORS = ("RAG error", "Error: ")
+
+
+def _message_content_to_text(content) -> str:
+    """Coerce a ToolMessage's content (str | list | dict) into a searchable string."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                # Common shape: {"type": "text", "text": "..."} or plain dict
+                text = part.get("text") or part.get("content")
+                if isinstance(text, str):
+                    parts.append(text)
+                else:
+                    parts.append(str(part))
+            else:
+                parts.append(str(part))
+        return " ".join(parts)
+    if isinstance(content, dict):
+        text = content.get("text") or content.get("content")
+        if isinstance(text, str):
+            return text
+    return str(content)
+
+
+async def _check_rag_errored_via_checkpoint(
+    checkpointer,
+    instance_id: str,
+) -> bool:
+    """Check if any RAG tool call returned an error response.
+
+    Scans the checkpoint for ``ToolMessage`` objects (or test mocks with
+    ``name`` + ``content`` attributes) that correspond to RAG tool calls,
+    and returns True if any of their content contains a known error
+    indicator (``"RAG error"`` or leading ``"Error: "``).
+
+    Used to gate the "Need Update KB" enqueue: if RAG errored, we cannot
+    assess whether the KB genuinely lacks the requested information —
+    the KB may already contain it; we just couldn't reach it. Skipping
+    the enqueue mirrors the original explorer rule "Set
+    ``## Need Update KB: false`` when RAG returned an error" without
+    depending on the LLM self-reporting a flag.
+
+    Args:
+        checkpointer: AsyncSqliteSaver instance from the manager.
+        instance_id: The child agent's instance ID (used as thread_id).
+
+    Returns:
+        True if any RAG tool returned an error response, False otherwise
+        (including on any error during inspection — graceful degradation).
+    """
+    try:
+        config = {"configurable": {"thread_id": instance_id}}
+        # Unwrap CheckpointerAdapter (matches the other helpers' pattern).
+        if isinstance(checkpointer, CheckpointerAdapter):
+            saver = checkpointer.raw_saver
+        else:
+            saver = checkpointer
+        state = await saver.aget(config)
+        if not state:
+            return False
+
+        messages = state.get("channel_values", {}).get("messages", [])
+        for msg in messages:
+            # ToolMessage carries ``name`` (the tool that produced it) and
+            # ``content`` (the tool's response). Real ToolMessage objects
+            # expose both as attributes; mocks do too as long as the test
+            # sets them. Skip AI-side messages (which carry ``tool_calls``)
+            # and any non-tool messages.
+            #
+            # ``getattr`` may return a MagicMock for non-real messages
+            # (test fixtures); explicitly type-check to avoid surprise
+            # matches against the frozenset of str tool names.
+            tool_name = getattr(msg, "name", None)
+            if not isinstance(tool_name, str) or tool_name not in RAG_TOOL_NAMES:
+                continue
+            if not hasattr(msg, "content"):
+                continue
+            text = _message_content_to_text(msg.content)
+            for indicator in _RAG_ERROR_INDICATORS:
+                if indicator in text:
+                    logger.info(
+                        "Checkpoint inspection: RAG tool '%s' returned an error: %s",
+                        tool_name, text[:200],
+                    )
+                    return True
+        return False
+    except Exception:
+        logger.warning(
+            "Failed to check RAG tool errors from checkpoint", exc_info=True
+        )
+        return False
 
 
 async def _check_read_file_called_via_checkpoint(
@@ -503,9 +608,13 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         # the new system-driven "Need Update KB" signal (replaces the agent
         # self-reported ## Need Update KB: heading).
         rag_queried = False
+        rag_errored = False
         read_file_called = False
         if child_instance_id and hasattr(manager, "_checkpointer") and manager._checkpointer:
             rag_queried = await _check_rag_queried_via_checkpoint(
+                manager._checkpointer, child_instance_id
+            )
+            rag_errored = await _check_rag_errored_via_checkpoint(
                 manager._checkpointer, child_instance_id
             )
             read_file_called = await _check_read_file_called_via_checkpoint(
@@ -516,9 +625,29 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         if is_error:
             return result
 
-        # Fire-and-forget: create kb-importer job when the explorer had to
-        # read project files (i.e. KB didn't already have the answer).
-        if read_file_called:
+        # Fire-and-forget: create kb-importer job when the explorer queried
+        # RAG successfully, RAG did not return an error, AND the explorer
+        # still had to read project files. The conjunction encodes three
+        # independent guards:
+        #
+        # 1. ``rag_queried`` prevents enqueuing a spurious update when the
+        #    agent skipped RAG entirely and went straight to files — we
+        #    have no evidence the KB is the problem.
+        # 2. ``not rag_errored`` preserves the original "RAG error → no KB
+        #    update" rule. If RAG timed out / 504'd / connection-refused,
+        #    the KB might already contain the information; we just
+        #    couldn't reach it. Without this guard, a transient RAG outage
+        #    plus a routine file fallback would pollute the KB.
+        # 3. ``read_file_called`` is the actual KB-gap signal — the agent
+        #    had to fall back to filesystem to find something RAG didn't
+        #    provide.
+        #
+        # Heuristic: ``read_file_called`` is a coarse proxy for "the
+        # explorer fell back to filesystem because RAG was insufficient."
+        # It may over-trigger if a future explorer uses ``read_file`` for
+        # non-fallback reasons (confirmation, citation, etc.). A tighter
+        # signal would be ``read_file`` after a RAG miss.
+        if read_file_called and rag_queried and not rag_errored:
             if not pid:
                 logger.warning(
                     "Cannot enqueue kb-importer job: project_id not available. "
