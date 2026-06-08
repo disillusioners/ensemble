@@ -554,10 +554,18 @@ class OpenCodeSessionManager:
         6. Updates state if it changed.
         7. Updates ``isWorkerBusy`` if we detected IDLE from a busy state.
 
+        In addition, this method actively checks the ``/question`` endpoint
+        on every call. Pending questions are authoritative for
+        ``WAITING_FOR_INPUT`` and override the message-derived state, so
+        callers (e.g. ``external_opencode_wait_for_result``) that poll
+        GET_STATUS on a tight cadence see the question as soon as it
+        appears on the OpenCode server — not after the next 30s worker
+        ``_poll_questions`` tick.
+
         Returns:
             A ``get_snapshot()`` dict (potentially with updated state).
         """
-        messages = None
+        messages: list[dict[str, Any]] | None = None
         try:
             messages = await self._client.get_session_messages(self.session_id, limit=1)
         except Exception as exc:
@@ -566,8 +574,37 @@ class OpenCodeSessionManager:
                 exc,
             )
 
+        # Active question probe: GET_STATUS is the path that agent-side
+        # waiters poll, so it must be authoritative for WAITING_FOR_INPUT
+        # rather than waiting for the 30s worker poll.
+        questions_for_session: list[dict[str, Any]] = []
+        try:
+            all_questions = await self._client.get_questions()
+        except Exception as exc:
+            logger.debug("SyncStateWithOpenCode: failed to get questions: %s", exc)
+        else:
+            questions_for_session = [
+                _question_to_dict(q)
+                for q in all_questions
+                if q.session_id == self.session_id
+            ]
+
         if messages is None or len(messages) == 0:
-            # manager.go:170-171: "No messages - keep current state"
+            # manager.go:170-171: "No messages - keep current state".
+            # Still apply the question-based state if we got any.
+            if questions_for_session:
+                async with self._lock:
+                    self._questions = questions_for_session
+                    if self._state != SessionState.WAITING_FOR_INPUT:
+                        self._state = SessionState.WAITING_FOR_INPUT
+                        if self._on_state_change is not None:
+                            state_to_save = self._save_state_locked()
+                        else:
+                            state_to_save = None
+                    else:
+                        state_to_save = None
+                if state_to_save is not None:
+                    await self._persist_state()
             return self.get_snapshot()
 
         last_message: dict[str, Any] = messages[0]
@@ -583,9 +620,20 @@ class OpenCodeSessionManager:
 
         new_state = _derive_state_from_finish(reason, has_error)
 
+        # Pending questions are authoritative for WAITING_FOR_INPUT and
+        # override whatever the message-derived state says. Otherwise the
+        # message-based derivation (often BUSY for an in-flight step)
+        # would clobber the waiting state set by the slower worker poll.
+        if questions_for_session:
+            new_state = SessionState.WAITING_FOR_INPUT
+
         # manager.go:196-206: determine which fields actually changed
         should_update_state = self._state != new_state
-        should_update_worker_busy = self._is_worker_busy and new_state == SessionState.IDLE
+        should_update_worker_busy = (
+            self._is_worker_busy
+            and new_state == SessionState.IDLE
+            and not questions_for_session
+        )
 
         async with self._lock:
             # manager.go:200: always overwrite _latest_response with the latest
@@ -593,6 +641,8 @@ class OpenCodeSessionManager:
             # visibility into in-flight messages during BUSY to detect progress
             # or problems. Matches Go behavior.
             self._latest_response = {"result": strip_message_bloat(last_message)}
+            if questions_for_session:
+                self._questions = questions_for_session
             if should_update_state:
                 self._state = new_state
             if should_update_worker_busy:

@@ -102,6 +102,27 @@ def create_opencode_tools(
             return resp.message or f"[OK] {resp.data or ''}"
         return f"[ERROR] {resp.message}"
 
+    def _format_questions_block(questions: list[Any]) -> str:
+        """Render pending questions as a human-readable block.
+
+        Returns the formatted block (including the leading blank line
+        and ``Questions:`` header) or an empty string when there are
+        no questions. Shared by ``external_opencode_get_status``,
+        ``external_opencode_wait_for_result``, and
+        ``external_opencode_wait_any`` so the caller sees the questions
+        inline and does not have to issue a follow-up status call.
+
+        Question dicts are produced by ``OpenCodeSessionManager`` and are
+        guaranteed to be plain dicts (see ``_question_to_dict`` in
+        ``daemon/opencode/session_manager.py``).
+        """
+        if not questions:
+            return ""
+        lines = ["", "Questions:"]
+        for q in questions:
+            lines.append(f"  [?] {q.get('id', '')}: {q.get('questions', [])}")
+        return "\n".join(lines)
+
     def _format_timeout(
         last_resp: "OpenCodeResponse | None",
         timeout: int,
@@ -442,7 +463,7 @@ Special prompts (bypass BUSY check):
             state = data.get("state", "UNKNOWN")
             response = data.get("latest_response")
             questions = data.get("questions", [])
-            
+
             output = [
                 f"State: {state}",
                 f"Last Activity: {record.get('last_activity', '')}",
@@ -451,10 +472,7 @@ Special prompts (bypass BUSY check):
                 str(response) if response else "(none)",
             ]
             if questions:
-                output.append("")
-                output.append("Questions:")
-                for q in questions:
-                    output.append(f"  [?] {q.get('id', '')}: {q.get('questions', [])}")
+                output.append(_format_questions_block(questions))
             return "\n".join(output)
         return _format_response(resp)
     
@@ -502,7 +520,12 @@ Returns:
                 if state == "IDLE":
                     return f"[COMPLETED] Session completed.\n{_format_response(resp)}"
                 if state == "WAITING_FOR_INPUT":
-                    return f"[WAITING_FOR_INPUT] Session needs input. Use external_opencode_get_status() to see questions."
+                    questions = data.get("questions", [])
+                    return (
+                        "[WAITING_FOR_INPUT] Session needs input. "
+                        "Use external_opencode_answer_question(request_id, answers) to reply."
+                        f"{_format_questions_block(questions)}"
+                    )
             await asyncio.sleep(POLL_INTERVAL_S)
 
         return _format_timeout(last_resp, timeout)
@@ -516,9 +539,10 @@ Args:
     timeout: Max wait in seconds (default 600 = 10 min)
 
 Returns:
-    [COMPLETED] message with response data, [WAITING_FOR_INPUT] with question pointer,
-    or [TIMEOUT] message that includes the last observed state and latest_response so the
-    caller can see in-flight progress without a separate status call.
+    [COMPLETED] message with response data, [WAITING_FOR_INPUT] message that
+    inlines the pending questions so the caller can answer immediately, or
+    [TIMEOUT] message that includes the last observed state and latest_response
+    so the caller can see in-flight progress without a separate status call.
 """
     
     # ── Tool 5: Wait Any ────────────────────────────────────────────
@@ -571,27 +595,52 @@ Returns:
             results = await asyncio.gather(*[_check_status(sd) for sd in session_data])
             
             completed = []
+            waiting = []
             still_running = []
             for sd, resp in results:
                 if resp.status == "ok":
                     state = (resp.data or {}).get("state", "UNKNOWN")
-                    if state in ("IDLE", "WAITING_FOR_INPUT"):
+                    if state == "IDLE":
                         completed.append((sd, resp))
+                    elif state == "WAITING_FOR_INPUT":
+                        waiting.append((sd, resp))
                     else:
                         still_running.append(sd)
-            
-            if completed:
-                lines = [f"[SUMMARY] {len(completed)}/{len(session_data)} sessions completed", ""]
+
+            if completed or waiting:
+                n_done = len(completed)
+                n_waiting = len(waiting)
+                total = len(session_data)
+                lines = [f"[SUMMARY] {n_done}/{total} done, {n_waiting} waiting for input", ""]
                 for sd in session_data:
-                    marker = "✓" if any(c[0] == sd for c in completed) else "..."
+                    if any(c[0] == sd for c in completed):
+                        marker = "✓"
+                    elif any(w[0] == sd for w in waiting):
+                        marker = "?"
+                    else:
+                        marker = "..."
                     lines.append(f"  {marker} {sd['project']}:{sd['session_name']}")
-                lines.append("")
-                lines.append("─" * 60)
-                lines.append("  COMPLETED RESPONSES")
-                lines.append("─" * 60)
-                for sd, resp in completed:
-                    lines.append(f"\n[{sd['project']}:{sd['session_name']}]")
-                    lines.append(_format_response(resp))
+                if completed:
+                    lines.append("")
+                    lines.append("─" * 60)
+                    lines.append("  COMPLETED RESPONSES")
+                    lines.append("─" * 60)
+                    for sd, resp in completed:
+                        lines.append(f"\n[{sd['project']}:{sd['session_name']}]")
+                        lines.append(_format_response(resp))
+                if waiting:
+                    lines.append("")
+                    lines.append("─" * 60)
+                    lines.append("  WAITING FOR INPUT")
+                    lines.append("─" * 60)
+                    for sd, resp in waiting:
+                        lines.append(f"\n[{sd['project']}:{sd['session_name']}]")
+                        questions = (resp.data or {}).get("questions", [])
+                        lines.append(
+                            f"[WAITING_FOR_INPUT] Use "
+                            f"external_opencode_answer_question(request_id, answers) to reply."
+                            f"{_format_questions_block(questions)}"
+                        )
                 return "\n".join(lines)
             
             await asyncio.sleep(POLL_INTERVAL_S)
@@ -606,7 +655,11 @@ Args:
     timeout: Max wait in seconds (default 600 = 10 min)
 
 Returns:
-    Summary with completed sessions and their responses.
+    Summary with two distinct sections: "COMPLETED RESPONSES" for sessions
+    that reached IDLE, and "WAITING FOR INPUT" for sessions that need the
+    caller to answer pending questions. The questions are inlined in the
+    waiting section so the caller can reply with
+    external_opencode_answer_question without a follow-up status call.
 """
     
     # ── Tool 6: Answer Question ─────────────────────────────────────

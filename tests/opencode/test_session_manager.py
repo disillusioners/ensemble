@@ -29,6 +29,8 @@ from daemon.opencode.client import (
     OpenCodeAPIError,
     Part,
     PromptRequest,
+    Question,
+    QuestionItem,
 )
 from daemon.opencode.constants import (
     DEFAULT_MODEL_ID,
@@ -801,6 +803,111 @@ class TestSyncStateWithOpenCode:
         await manager.sync_state_with_open_code()
 
         assert manager._is_worker_busy is False
+
+    @pytest.mark.asyncio
+    async def test_pending_questions_override_message_derived_state(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When /question returns questions for this session, state is forced
+        to WAITING_FOR_INPUT even if the last message derives to BUSY or IDLE.
+
+        This is the contract that makes ``external_opencode_wait_for_result``
+        see the question as soon as it appears on the OpenCode server,
+        without waiting for the 30s worker ``_poll_questions`` tick.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        question = Question(
+            id="req-1",
+            session_id="test-session-1",
+            questions=[QuestionItem(question="Approve?", options=[])],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[question])
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        # The question is exposed in the snapshot
+        assert snap["questions"] == [
+            {
+                "id": "req-1",
+                "sessionID": "test-session-1",
+                "questions": [{"question": "Approve?", "options": []}],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_pending_questions_with_no_messages_set_waiting(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When get_session_messages returns [] but /question has questions
+        for this session, the snapshot reports WAITING_FOR_INPUT.
+        """
+        mock_client.get_session_messages = AsyncMock(return_value=[])
+        question = Question(
+            id="req-2",
+            session_id="test-session-1",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[question])
+        manager._state = SessionState.IDLE
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.WAITING_FOR_INPUT.value
+        assert len(snap["questions"]) == 1
+        assert snap["questions"][0]["id"] == "req-2"
+
+    @pytest.mark.asyncio
+    async def test_questions_for_other_sessions_are_ignored(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """Questions for a *different* session must not flip this manager's
+        state to WAITING_FOR_INPUT.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "tool_calls"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        other_question = Question(
+            id="req-9",
+            session_id="some-other-session",
+            questions=[],
+        )
+        mock_client.get_questions = AsyncMock(return_value=[other_question])
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.BUSY.value
+        assert snap["questions"] == []
+
+    @pytest.mark.asyncio
+    async def test_question_fetch_failure_does_not_crash(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """If /question raises, sync_state_with_open_code still returns a
+        snapshot based on the message-derived state. The questions check is
+        best-effort and must never block the message path.
+        """
+        msg = {
+            "info": {"id": "m1"},
+            "parts": [{"type": "step-finish", "reason": "stop"}],
+        }
+        mock_client.get_session_messages = AsyncMock(return_value=[msg])
+        mock_client.get_questions = AsyncMock(
+            side_effect=OpenCodeAPIError(500, "boom")
+        )
+        manager._state = SessionState.BUSY
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert snap["state"] == SessionState.IDLE.value
 
     @pytest.mark.asyncio
     async def test_sync_updates_latest_response_with_stripped_message(

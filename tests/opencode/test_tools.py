@@ -724,6 +724,57 @@ class TestWaitForResultExecution:
         assert result.startswith("[WAITING_FOR_INPUT]")
 
     @pytest.mark.asyncio
+    async def test_wait_for_result_inlines_questions_when_waiting_for_input(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When the session is WAITING_FOR_INPUT, the response inlines the
+        pending questions and hints at ``answer_question`` so the caller does
+        not have to issue a follow-up ``external_opencode_get_status`` call.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-ask"}
+        )
+        ok_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "WAITING_FOR_INPUT",
+                "questions": [
+                    {"id": "req-1", "questions": ["Option A", "Option B"]},
+                    {"id": "req-2", "questions": ["Yes", "No"]},
+                ],
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[WAITING_FOR_INPUT]")
+        # Pointer to the right next tool
+        assert "external_opencode_answer_question" in result
+        # Questions inlined — caller has everything needed without a 2nd call
+        assert "Questions:" in result
+        assert "[?] req-1: ['Option A', 'Option B']" in result
+        assert "[?] req-2: ['Yes', 'No']" in result
+
+    @pytest.mark.asyncio
     async def test_wait_for_result_returns_timeout_when_never_completes(
         self,
         mock_manager: MagicMock,
@@ -982,6 +1033,118 @@ class TestWaitAnyExecution:
         # The completed session is marked ✓, the running one with ...
         assert "✓" in result
         assert "..." in result
+
+    @pytest.mark.asyncio
+    async def test_wait_any_inlines_questions_for_waiting_session(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When a session is WAITING_FOR_INPUT, its pending questions are
+        inlined in the summary so the caller can answer with
+        ``external_opencode_answer_question`` without a follow-up call.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-ask"}
+        )
+        waiting_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "WAITING_FOR_INPUT",
+                "questions": [
+                    {"id": "req-9", "questions": ["Approve", "Reject"]},
+                ],
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=waiting_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [{"project": "p1", "session_name": "s1"}],
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[SUMMARY]")
+        # The waiting session is reported as a completed target in the
+        # summary, but with the inlined WAITING_FOR_INPUT block.
+        assert "[WAITING_FOR_INPUT]" in result
+        assert "external_opencode_answer_question" in result
+        assert "Questions:" in result
+        assert "[?] req-9: ['Approve', 'Reject']" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_any_separates_completed_and_waiting_sections(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When one session is IDLE and another is WAITING_FOR_INPUT, the
+        summary splits them into distinct sections with distinct markers.
+        IDLE sessions go under ``COMPLETED RESPONSES``; WAITING_FOR_INPUT
+        sessions go under ``WAITING FOR INPUT`` with a ``?`` marker.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-x"}
+        )
+        idle_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "IDLE", "latest_response": "all done"},
+        )
+        waiting_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "WAITING_FOR_INPUT",
+                "questions": [{"id": "req-7", "questions": ["A", "B"]}],
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            side_effect=[idle_response, waiting_response],
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [
+                    {"project": "p1", "session_name": "s1"},
+                    {"project": "p2", "session_name": "s2"},
+                ],
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[SUMMARY]")
+        # New summary header distinguishes done vs waiting
+        assert "1/2 done" in result
+        assert "1 waiting for input" in result
+        # Distinct markers
+        assert "✓" in result
+        assert "?" in result
+        # Distinct sections
+        assert "COMPLETED RESPONSES" in result
+        assert "WAITING FOR INPUT" in result
+        # Completed response is rendered, waiting question is inlined
+        assert "all done" in result
+        assert "[?] req-7: ['A', 'B']" in result
+        # Section ordering: completed first, waiting second
+        assert result.index("COMPLETED RESPONSES") < result.index("WAITING FOR INPUT")
 
     @pytest.mark.asyncio
     async def test_wait_any_returns_error_on_empty_sessions(
