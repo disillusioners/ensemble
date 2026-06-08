@@ -29,52 +29,39 @@ explore() queries the project knowledge base using the Explorer agent.
 experience() records new knowledge using the Experiencer agent.
 """
 
-# Pattern to match ## Need Update KB: true|false heading (with optional bold/italic)
-_SHOULD_UPDATE_KB_PATTERN = re.compile(
-    r"^##\s+Need\s+Update\s+KB:\s*\*{0,2}(true|false)\*{0,2}\s*$",
-    re.MULTILINE | re.IGNORECASE,
-)
-
-
-def _parse_should_update_kb(response: str) -> bool:
-    """Parse the Explorer response for the should_update_kb flag.
-
-    Args:
-        response: The Explorer agent's response text.
-
-    Returns:
-        True if the response indicates knowledge should be updated, False otherwise.
-    """
-    # Search for ## Need Update KB: true|false pattern directly
-    match = _SHOULD_UPDATE_KB_PATTERN.search(response)
-    if match:
-        return match.group(1).lower() == "true"
-    return False
-
-
 # RAG tool names whose invocation indicates the explorer queried the KB.
 # Used for deterministic RAG detection via checkpoint inspection.
 RAG_TOOL_NAMES = frozenset({"rag_query_data", "rag_get_graph"})
 
+# File-browse tool name whose invocation indicates the explorer had to look
+# beyond RAG — used as the deterministic, system-driven signal that the KB
+# lacks the information the caller needs (i.e. "Need Update KB").
+KB_GAP_TOOL_NAME = "read_file"
 
-async def _check_rag_queried_via_checkpoint(
+
+async def _scan_checkpoint_for_tool_match(
     checkpointer,
     instance_id: str,
+    matches,
+    log_label: str,
 ) -> bool:
-    """Check if RAG tools were actually called by inspecting checkpoint messages.
+    """Check if a matching tool was called by inspecting checkpoint messages.
 
-    Queries the LangGraph checkpointer for the agent's message history
-    and looks for rag_query_data or rag_get_graph tool calls. This is the
-    deterministic, source-of-truth signal for whether RAG was queried —
-    it does not depend on the LLM self-reporting a flag.
+    Shared scan logic for deterministic tool-call detection. Used by both
+    RAG detection (matches any of ``RAG_TOOL_NAMES``) and KB-gap detection
+    (matches the single ``read_file`` tool name).
 
     Args:
         checkpointer: AsyncSqliteSaver instance from the manager.
         instance_id: The child agent's instance ID (used as thread_id).
+        matches: Either a single tool name (str) or a collection of names
+            (any container supporting ``in``). The matched name is
+            reported in the log line.
+        log_label: Short label used in log lines (e.g. "RAG", "read_file").
 
     Returns:
-        True if any RAG tool was called, False otherwise (including on any
-        error — graceful degradation, never raises).
+        True if a matching tool was called, False otherwise (including on
+        any error — graceful degradation, never raises).
     """
     try:
         config = {"configurable": {"thread_id": instance_id}}
@@ -100,18 +87,71 @@ async def _check_rag_queried_via_checkpoint(
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
                     name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "")
-                    if name in RAG_TOOL_NAMES:
+                    if name in matches:
                         logger.info(
-                            "Checkpoint inspection: RAG tool '%s' found (scanned %d messages)",
-                            name, scanned,
+                            "Checkpoint inspection: %s tool '%s' found (scanned %d messages)",
+                            log_label, name, scanned,
                         )
                         return True
 
-        logger.info("Checkpoint inspection: no RAG tools found (scanned %d messages)", scanned)
+        logger.info(
+            "Checkpoint inspection: no %s tool found (scanned %d messages)",
+            log_label, scanned,
+        )
         return False
     except Exception:
-        logger.warning("Failed to check RAG tool calls from checkpoint", exc_info=True)
+        logger.warning(
+            "Failed to check %s tool calls from checkpoint", log_label, exc_info=True
+        )
         return False
+
+
+async def _check_rag_queried_via_checkpoint(
+    checkpointer,
+    instance_id: str,
+) -> bool:
+    """Check if RAG tools were actually called by inspecting checkpoint messages.
+
+    Queries the LangGraph checkpointer for the agent's message history
+    and looks for rag_query_data or rag_get_graph tool calls. This is the
+    deterministic, source-of-truth signal for whether RAG was queried —
+    it does not depend on the LLM self-reporting a flag.
+
+    Args:
+        checkpointer: AsyncSqliteSaver instance from the manager.
+        instance_id: The child agent's instance ID (used as thread_id).
+
+    Returns:
+        True if any RAG tool was called, False otherwise (including on any
+        error — graceful degradation, never raises).
+    """
+    return await _scan_checkpoint_for_tool_match(
+        checkpointer, instance_id, RAG_TOOL_NAMES, "RAG"
+    )
+
+
+async def _check_read_file_called_via_checkpoint(
+    checkpointer,
+    instance_id: str,
+) -> bool:
+    """Check if the read_file tool was called by inspecting checkpoint messages.
+
+    Deterministic, source-of-truth signal for the ``Need Update KB`` flag:
+    if the explorer had to read a project file, the KB likely did not have
+    the answer and a kb-importer job should be enqueued to fill the gap.
+    Replaces the previous agent-driven ``## Need Update KB:`` heading parse.
+
+    Args:
+        checkpointer: AsyncSqliteSaver instance from the manager.
+        instance_id: The child agent's instance ID (used as thread_id).
+
+    Returns:
+        True if the read_file tool was called, False otherwise (including on
+        any error — graceful degradation, never raises).
+    """
+    return await _scan_checkpoint_for_tool_match(
+        checkpointer, instance_id, KB_GAP_TOOL_NAME, "read_file"
+    )
 
 
 def _generate_idempotency_key(query: str, project_id: str) -> str:
@@ -458,10 +498,17 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         if result is None:
             result = "Explorer agent timed out or failed. Try a simpler query."
 
-        # Deterministic RAG detection via checkpoint (runs for BOTH success and error paths)
+        # Deterministic tool-call detection via checkpoint (runs for BOTH success
+        # and error paths). rag_queried drives auto-save; read_file_called is
+        # the new system-driven "Need Update KB" signal (replaces the agent
+        # self-reported ## Need Update KB: heading).
         rag_queried = False
+        read_file_called = False
         if child_instance_id and hasattr(manager, "_checkpointer") and manager._checkpointer:
             rag_queried = await _check_rag_queried_via_checkpoint(
+                manager._checkpointer, child_instance_id
+            )
+            read_file_called = await _check_read_file_called_via_checkpoint(
                 manager._checkpointer, child_instance_id
             )
 
@@ -469,12 +516,9 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
         if is_error:
             return result
 
-        # Parse response for should_update_kb flag (use original result, before stripping)
-        should_update_kb = _parse_should_update_kb(result)
-
-        # Fire-and-forget: create job for kb-importer if knowledge update needed
-        # Pass original result so kb-importer has full context including the flag heading
-        if should_update_kb:
+        # Fire-and-forget: create kb-importer job when the explorer had to
+        # read project files (i.e. KB didn't already have the answer).
+        if read_file_called:
             if not pid:
                 logger.warning(
                     "Cannot enqueue kb-importer job: project_id not available. "
@@ -485,7 +529,7 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                     asyncio.ensure_future(_enqueue_kb_update_job(
                         manager=manager,
                         query=query,
-                        explorer_response=result,  # Pass original result with heading
+                        explorer_response=result,
                         project_id=pid,
                         source_instance_id=current_instance_id,
                     ))
@@ -496,9 +540,6 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                     )
                 except Exception as e:
                     logger.warning("Failed to schedule kb-importer job: %s", e)
-
-        # Strip the Need Update KB heading from the response before returning
-        result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
 
         # Auto-save explorer result to shared context directory (fire-and-forget)
         if rag_queried:

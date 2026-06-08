@@ -16,10 +16,9 @@ from mcp.server.fastmcp import FastMCP
 from daemon.rag.config import is_rag_enabled
 from daemon.services.context_tools import list_context_files, read_context_file
 from daemon.tools.knowledge_tools import (
+    _check_read_file_called_via_checkpoint,
     _enqueue_experience_job,
     _enqueue_kb_update_job,
-    _parse_should_update_kb,
-    _SHOULD_UPDATE_KB_PATTERN,
 )
 from daemon.utils import invoke_agent_and_wait
 
@@ -261,7 +260,7 @@ def create_kb_mcp_server() -> FastMCP:
             message = f"Query (mode={mode}): {query}\nProject: {project_id}"
 
             # Spawn explorer agent and wait for result
-            result = await invoke_agent_and_wait(
+            result, child_instance_id = await invoke_agent_and_wait(
                 manager=_manager,
                 agent_id="explorer",
                 message=message,
@@ -269,15 +268,23 @@ def create_kb_mcp_server() -> FastMCP:
                 parent_id=_MCP_SYSTEM_PARENT_ID,
                 instance_name=f"mcp-explore-{project_id[:8]}-{uuid.uuid4().hex[:6]}",
                 timeout=300.0,
+                return_instance_id=True,
             )
 
             if result is None:
                 return "Explorer agent timed out or failed. Try a simpler query."
 
-            # Post-processing — parse KB update flag from explorer response
-            should_update_kb = _parse_should_update_kb(result)
+            # Deterministic KB-gap detection: did the explorer have to read
+            # project files? If so, KB lacked the answer — enqueue a
+            # kb-importer job to fill the gap. Pure system check, no
+            # agent-emitted heading involved.
+            read_file_called = False
+            if child_instance_id and hasattr(_manager, "_checkpointer") and _manager._checkpointer:
+                read_file_called = await _check_read_file_called_via_checkpoint(
+                    _manager._checkpointer, child_instance_id
+                )
 
-            if should_update_kb:
+            if read_file_called:
                 try:
                     # Fire-and-forget: enqueue kb-importer job if explorer found new knowledge
                     asyncio.ensure_future(_enqueue_kb_update_job(
@@ -292,9 +299,6 @@ def create_kb_mcp_server() -> FastMCP:
                     logger.warning("Failed to schedule kb-importer job (no event loop): %s", e)
                 except Exception as e:
                     logger.warning("Failed to schedule kb-importer job: %s", e)
-
-            # Strip the "## Need Update KB: ..." heading from the response
-            result = _SHOULD_UPDATE_KB_PATTERN.sub("", result).strip()
 
             return result
 

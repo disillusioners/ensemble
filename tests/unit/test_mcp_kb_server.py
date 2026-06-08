@@ -6,6 +6,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from contextlib import asynccontextmanager
 
 
+def _make_message(tool_calls):
+    """Build a mock message with a given list of tool calls."""
+    msg = MagicMock()
+    msg.tool_calls = tool_calls
+    return msg
+
+
+def _make_tool_call(name):
+    """Build a tool call dict (as LangGraph stores them)."""
+    return {"name": name, "args": {}, "id": f"call_{name}"}
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -108,54 +120,113 @@ def kb_server_setup(reset_kb_server_module, mock_manager):
 # Test Cases
 # =============================================================================
 
-class TestExploreReturnsResultWithKbHeadingStripped:
-    """Test that explore strips the KB heading from results."""
+class TestExploreReturnsResponseUnchanged:
+    """Test that explore returns the explorer's response without stripping any heading.
+
+    The "Need Update KB" heading is no longer relevant — it's a legacy
+    artifact. The system now derives the flag deterministically from the
+    child's checkpoint tool calls.
+    """
 
     @pytest.mark.asyncio
-    async def test_explore_returns_result_with_kb_heading_stripped(self, kb_server_setup):
-        """Heading '## Need Update KB: false' should be stripped from result."""
+    async def test_explore_returns_response_with_legacy_heading_intact(self, kb_server_setup):
+        """Legacy '## Need Update KB:' heading in response is returned to caller as-is."""
         setup = kb_server_setup
-        
-        # Mock invoke_agent_and_wait to return response with KB heading
+
+        # No checkpointer → read_file_called defaults to False
+        if hasattr(setup["manager"], "_checkpointer"):
+            del setup["manager"]._checkpointer
+
         mock_response = "## Need Update KB: false\nSome result text"
-        
-        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=mock_response):
+
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("Some result text", "test-child-id")):
             result = await setup["explore_tool"].fn(
                 query="test query",
                 project_id="test-project",
                 mode="hybrid",
             )
-        
-        # Verify heading is stripped
+
+        # Response is returned untouched (no stripping).
         assert result == "Some result text"
 
 
-class TestExploreTriggersKbUpdateWhenFlagTrue:
-    """Test that explore triggers KB update when flag is true."""
+class TestExploreTriggersKbUpdateWhenReadFileCalled:
+    """Test that explore triggers KB update when the explorer called read_file.
+
+    The 'Need Update KB' signal is derived from the child's checkpoint: any
+    ``read_file`` tool call implies the KB didn't have the answer.
+    """
 
     @pytest.mark.asyncio
-    async def test_explore_triggers_kb_update_when_flag_true(self, kb_server_setup):
-        """When explorer returns '## Need Update KB: true', _enqueue_kb_update_job should be scheduled."""
+    async def test_explore_triggers_kb_update_when_read_file_called(self, kb_server_setup):
+        """read_file in checkpoint → _enqueue_kb_update_job should be scheduled."""
         setup = kb_server_setup
-        
-        mock_response = "## Need Update KB: true\nKnowledge found about the codebase"
-        
-        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=mock_response), \
-             patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue:
-            
+
+        # Checkpointer reports a read_file call
+        mock_checkpointer = MagicMock()
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("read_file")]),
+                ]
+            }
+        })
+        setup["manager"]._checkpointer = mock_checkpointer
+
+        mock_response = "Knowledge found about the codebase"
+
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=(mock_response, "test-child-id")), \
+             patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=True):
+
             result = await setup["explore_tool"].fn(
                 query="test query",
                 project_id="test-project",
                 mode="hybrid",
             )
-        
+
         # Verify the KB update job was scheduled via asyncio.ensure_future
-        # Note: asyncio.ensure_future schedules but doesn't await, so we check .called
         mock_enqueue.assert_called_once()
         call_kwargs = mock_enqueue.call_args.kwargs
         assert call_kwargs["query"] == "test query"
         assert call_kwargs["project_id"] == "test-project"
         assert "Knowledge found" in call_kwargs["explorer_response"]
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_kb_update_when_no_read_file(self, kb_server_setup):
+        """No read_file in checkpoint → no _enqueue_kb_update_job is scheduled."""
+        setup = kb_server_setup
+
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("Some result", "test-child-id")), \
+             patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=False):
+
+            await setup["explore_tool"].fn(
+                query="test query",
+                project_id="test-project",
+                mode="hybrid",
+            )
+
+        # No job should have been enqueued
+        mock_enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_ignores_legacy_heading_when_no_read_file(self, kb_server_setup):
+        """Legacy '## Need Update KB: true' in response is ignored — checkpoint is source of truth."""
+        setup = kb_server_setup
+
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("## Need Update KB: true\nSome result", "test-child-id")), \
+             patch("daemon.mcp.kb_server._enqueue_kb_update_job", new_callable=AsyncMock) as mock_enqueue, \
+             patch("daemon.mcp.kb_server._check_read_file_called_via_checkpoint", new_callable=AsyncMock, return_value=False):
+
+            await setup["explore_tool"].fn(
+                query="test query",
+                project_id="test-project",
+                mode="hybrid",
+            )
+
+        # No job enqueued — system check wins over the legacy heading.
+        mock_enqueue.assert_not_called()
 
 
 class TestExperienceEnqueuesViaEnqueueExperienceJob:
@@ -293,13 +364,13 @@ class TestExploreNoneResultReturnsTimeoutMessage:
         """When invoke_agent_and_wait returns None, should return timeout message."""
         setup = kb_server_setup
         
-        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=None):
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=(None, "test-child-id")):
             result = await setup["explore_tool"].fn(
                 query="test query",
                 project_id="test-project",
                 mode="hybrid",
             )
-        
+
         assert "timed out" in result.lower() or "failed" in result.lower()
 
 
@@ -384,8 +455,8 @@ class TestExploreWithDifferentModes:
     async def test_explore_accepts_valid_modes(self, kb_server_setup, mode):
         """All valid modes should be accepted without error."""
         setup = kb_server_setup
-        
-        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value="Result"):
+
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("Result", "test-child-id")):
             result = await setup["explore_tool"].fn(
                 query="test query",
                 project_id="test-project",
@@ -980,15 +1051,15 @@ class TestExploreWithAlternativeProjectIdentifiers:
         setup["manager"]._project_repository.get_by_shortname = MagicMock(return_value=None)
         setup["manager"]._project_repository.get_by_directory = MagicMock(return_value=None)
         
-        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value="Result"):
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("Result", "test-child-id")):
             result = await setup["explore_tool"].fn(
                 query="test query",
                 project_name="test-project",
                 mode="hybrid",
             )
-        
+
         assert result == "Result"
-        
+
         # Verify the repository was called with correct name
         setup["manager"]._project_repository.get_by_name.assert_called_once_with("test-project")
 
@@ -1008,7 +1079,7 @@ class TestExploreWithAlternativeProjectIdentifiers:
         setup["manager"]._project_repository.get_by_name = MagicMock(return_value=None)
         setup["manager"]._project_repository.get_by_shortname = MagicMock(return_value=None)
         
-        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value="Path Result"):
+        with patch("daemon.mcp.kb_server.invoke_agent_and_wait", new_callable=AsyncMock, return_value=("Path Result", "test-child-id")):
             result = await setup["explore_tool"].fn(
                 query="test query",
                 project_path="/Users/test/my-project",

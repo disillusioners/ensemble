@@ -13,13 +13,13 @@ import pytest
 
 from daemon.tools.knowledge_tools import (
     _check_rag_queried_via_checkpoint,
+    _check_read_file_called_via_checkpoint,
     _enqueue_experience_job,
     _enqueue_kb_update_job,
     _generate_experience_idempotency_key,
     _generate_idempotency_key,
-    _parse_should_update_kb,
-    _SHOULD_UPDATE_KB_PATTERN,
     create_knowledge_tools,
+    KB_GAP_TOOL_NAME,
     RAG_TOOL_NAMES,
 )
 from daemon.services.context_injection import get_shared_context
@@ -408,102 +408,12 @@ class TestExperienceTool:
         tools = create_knowledge_tools(mock_manager, "parent-instance-id")
         experience_tool = next(t for t in tools if t.name == "experience")
 
-        result = await experience_tool.ainvoke({"text": "Test knowledge"})
+        result =         await experience_tool.ainvoke({"text": "Test knowledge"})
 
         assert "Error" in result
         assert "project_id" in result.lower()
         # No job should be enqueued
         mock_manager._job_queue_service.enqueue.assert_not_called()
-
-
-# =============================================================================
-# Parse Should Update KB Tests
-# =============================================================================
-
-
-class TestParseShouldUpdateKb:
-    """Tests for _parse_should_update_kb() flag parsing function."""
-
-    def test_parse_should_update_kb_true(self):
-        """Heading with Need Update KB: true returns True."""
-        response = "Some response\n## Need Update KB: true\nMore text"
-        assert _parse_should_update_kb(response) is True
-
-    def test_parse_should_update_kb_false(self):
-        """Heading with Need Update KB: false returns False."""
-        response = "Some response\n## Need Update KB: false\nMore text"
-        assert _parse_should_update_kb(response) is False
-
-    def test_parse_should_update_kb_missing(self):
-        """No heading in response returns False (default)."""
-        response = "## Answer\nSome text\n## Confidence: HIGH"
-        assert _parse_should_update_kb(response) is False
-
-    def test_parse_should_update_kb_case_insensitive(self):
-        """Flag parsing is case-insensitive."""
-        assert _parse_should_update_kb("## Need Update KB: TRUE") is True
-        assert _parse_should_update_kb("## Need Update KB: True") is True
-        assert _parse_should_update_kb("## Need Update KB: TRUE") is True
-        assert _parse_should_update_kb("## NEED UPDATE KB: TRUE") is True
-
-    def test_parse_should_update_kb_malformed(self):
-        """Malformed flag values return False."""
-        response = "## Need Update KB: maybe"
-        assert _parse_should_update_kb(response) is False
-
-    def test_parse_should_update_kb_with_extra_whitespace(self):
-        """Heading with extra whitespace/newlines still parses correctly."""
-        response = "## Need Update KB: true  \nMore text"
-        assert _parse_should_update_kb(response) is True
-
-    def test_parse_should_update_kb_bold_true(self):
-        """Bold formatting **true** parses correctly as True."""
-        response = "## Need Update KB: **true**\nMore text"
-        assert _parse_should_update_kb(response) is True
-
-    def test_parse_should_update_kb_bold_false(self):
-        """Bold formatting **false** parses correctly as False."""
-        response = "## Need Update KB: **false**\nMore text"
-        assert _parse_should_update_kb(response) is False
-
-    def test_parse_should_update_kb_italic_true(self):
-        """Italic formatting *true* parses correctly as True."""
-        response = "## Need Update KB: *true*\nMore text"
-        assert _parse_should_update_kb(response) is True
-
-    def test_parse_should_update_kb_italic_false(self):
-        """Italic formatting *false* parses correctly as False."""
-        response = "## Need Update KB: *false*\nMore text"
-        assert _parse_should_update_kb(response) is False
-
-    def test_parse_should_update_kb_heading_stripped_from_response(self):
-        """Heading is properly stripped from response text."""
-        response = "Some response\n## Need Update KB: true\nMore text"
-        stripped = _SHOULD_UPDATE_KB_PATTERN.sub("", response).strip()
-        # Heading including newlines is removed
-        assert "Need Update KB" not in stripped
-        assert "Some response" in stripped
-        assert "More text" in stripped
-
-    def test_parse_should_update_kb_bold_heading_stripped(self):
-        """Bold heading is stripped including bold markers."""
-        response = "Some response\n## Need Update KB: **true**\nMore text"
-        stripped = _SHOULD_UPDATE_KB_PATTERN.sub("", response).strip()
-        assert "Need Update KB" not in stripped
-        assert "**true**" not in stripped
-        assert "Some response" in stripped
-        assert "More text" in stripped
-
-    def test_parse_should_update_kb_response_without_heading_unchanged(self):
-        """Response without heading is returned unchanged."""
-        response = "Some response without Need Update KB"
-        stripped = _SHOULD_UPDATE_KB_PATTERN.sub("", response).strip()
-        assert stripped == response
-
-    def test_parse_should_update_kb_old_meta_format_returns_false(self):
-        """Old META block format returns False (no longer supported)."""
-        response = "Some response\n<META>\nshould_update_kb: true\n</META>\nMore text"
-        assert _parse_should_update_kb(response) is False
 
 
 # =============================================================================
@@ -706,11 +616,34 @@ def mock_manager_with_job_queue(configured_env, mock_manager):
 
 
 class TestExploreJobEnqueue:
-    """Tests for explore() tool job enqueue behavior."""
+    """Tests for explore() tool job enqueue behavior.
+
+    The "Need Update KB" signal is now derived from the child's checkpoint:
+    if the explorer called ``read_file``, the system enqueues a kb-importer
+    job. The agent no longer emits a ``## Need Update KB:`` heading and the
+    system no longer strips it from the response.
+    """
+
+    @pytest.fixture
+    def mock_manager_with_checkpoint(self, mock_manager_with_job_queue):
+        """Augment the job-queue mock with a checkpointer reporting read_file."""
+        mock_checkpointer = MagicMock()
+        # Default: no read_file call → no KB update
+        mock_checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [_make_message([_make_tool_call("bash")])],
+            }
+        })
+        mock_manager_with_job_queue._checkpointer = mock_checkpointer
+        return mock_manager_with_job_queue
+
+    def _make_response_with_heading(self, body: str = "## Answer\nSome content.") -> str:
+        """Build a response that still includes the legacy heading (for backward compat)."""
+        return f"{body}\n\n## Need Update KB: true"
 
     @pytest.mark.asyncio
-    async def test_explore_strips_heading_from_response(self, configured_env, mock_manager_with_job_queue):
-        """Response with Need Update KB heading is stripped before returning to caller."""
+    async def test_explore_returns_response_unchanged(self, configured_env, mock_manager_with_checkpoint):
+        """Response is returned to the caller without stripping any heading."""
         explorer_response = (
             "## Answer\nFound important information.\n\n"
             "## Need Update KB: true"
@@ -718,26 +651,33 @@ class TestExploreJobEnqueue:
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
             result = await explore_tool.ainvoke({"query": "What is X?"})
 
-            # Heading should be stripped from result
-            assert "Need Update KB" not in result
+            # Response text is returned as-is — no more heading-stripping.
             assert "Found important information" in result
+            assert "## Need Update KB: true" in result
 
     @pytest.mark.asyncio
-    async def test_explore_enqueues_job_when_flag_true(self, configured_env, mock_manager_with_job_queue):
-        """Need Update KB: true + project_id causes job to be enqueued."""
-        explorer_response = (
-            "## Answer\nFound info from files.\n\n"
-            "## Need Update KB: true"
-        )
+    async def test_explore_enqueues_job_when_read_file_called(self, configured_env, mock_manager_with_checkpoint):
+        """read_file tool call in checkpoint → kb-importer job is enqueued."""
+        explorer_response = "## Answer\nFound info from files."
+
+        # Checkpoint says read_file was called → KB gap detected
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_message([_make_tool_call("read_file")]),
+                ],
+            }
+        })
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
             await explore_tool.ainvoke({"query": "What is the architecture?"})
@@ -745,16 +685,15 @@ class TestExploreJobEnqueue:
             # Allow fire-and-forget task to complete
             await asyncio.sleep(0.1)
 
-            # Verify job was enqueued
-            mock_manager_with_job_queue._job_queue_service.enqueue.assert_called_once()
-            call_kwargs = mock_manager_with_job_queue._job_queue_service.enqueue.call_args.kwargs
-            # Note: explore tool enqueues kb-importer jobs, not experiencer
+            # Verify kb-importer job was enqueued
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_called_once()
+            call_kwargs = mock_manager_with_checkpoint._job_queue_service.enqueue.call_args.kwargs
             assert call_kwargs["agent_id"] == "kb-importer"
             assert "What is the architecture?" in call_kwargs["message"]
 
     @pytest.mark.asyncio
-    async def test_explore_skips_job_when_flag_false(self, configured_env, mock_manager_with_job_queue):
-        """Need Update KB: false means no job is enqueued."""
+    async def test_explore_skips_job_when_no_read_file(self, configured_env, mock_manager_with_checkpoint):
+        """No read_file in checkpoint → no job is enqueued (system check, not response)."""
         explorer_response = (
             "## Answer\nNo new knowledge found.\n\n"
             "## Need Update KB: false"
@@ -762,35 +701,67 @@ class TestExploreJobEnqueue:
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
             await explore_tool.ainvoke({"query": "What is X?"})
 
             await asyncio.sleep(0.1)
 
-            # No job should have been enqueued
-            mock_manager_with_job_queue._job_queue_service.enqueue.assert_not_called()
+            # No job should have been enqueued (no read_file in checkpoint)
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_explore_skips_job_when_no_project_id(self, configured_env, mock_manager_with_job_queue):
-        """Flag true but no project_id means no job is enqueued."""
-        # Override instance metadata to return no project (empty dict)
-        mock_instance_meta = MagicMock()
-        mock_instance_meta.instance_metadata = {}
-        mock_instance_meta.project_id = None
-        mock_manager_with_job_queue._instance_repository.get = MagicMock(
-            return_value=mock_instance_meta
-        )
-
+    async def test_explore_ignores_legacy_heading_when_no_read_file(
+        self, configured_env, mock_manager_with_checkpoint
+    ):
+        """Legacy `## Need Update KB: true` heading in response is ignored when no read_file."""
         explorer_response = (
-            "## Answer\nNew knowledge discovered.\n\n"
+            "## Answer\nKnowledge claimed as new.\n\n"
             "## Need Update KB: true"
         )
 
+        # Checkpoint has NO read_file call → must NOT enqueue
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [_make_message([_make_tool_call("rag_query_data")])],
+            }
+        })
+
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
+            explore_tool = next(t for t in tools if t.name == "explore")
+
+            await explore_tool.ainvoke({"query": "What is X?"})
+
+            await asyncio.sleep(0.1)
+
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_explore_skips_job_when_no_project_id(self, configured_env, mock_manager_with_checkpoint):
+        """read_file called but no project_id means no job is enqueued."""
+        # Override instance metadata to return no project
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {}
+        mock_instance_meta.project_id = None
+        mock_manager_with_checkpoint._instance_repository.get = MagicMock(
+            return_value=mock_instance_meta
+        )
+
+        # Checkpoint says read_file was called
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [_make_message([_make_tool_call("read_file")])],
+            }
+        })
+
+        explorer_response = "## Answer\nNew knowledge discovered."
+
+        with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
+                   new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
             await explore_tool.ainvoke({"query": "What is X?"})
@@ -798,24 +769,28 @@ class TestExploreJobEnqueue:
             await asyncio.sleep(0.1)
 
             # Job should NOT be enqueued because project_id is None
-            mock_manager_with_job_queue._job_queue_service.enqueue.assert_not_called()
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_explore_job_enqueue_failure_is_silent(self, configured_env, mock_manager_with_job_queue):
+    async def test_explore_job_enqueue_failure_is_silent(self, configured_env, mock_manager_with_checkpoint):
         """Job service raises exception - explore() still returns normally."""
-        explorer_response = (
-            "## Answer\nNew knowledge found.\n\n"
-            "## Need Update KB: true"
-        )
+        explorer_response = "## Answer\nNew knowledge found."
+
+        # Checkpoint says read_file was called
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [_make_message([_make_tool_call("read_file")])],
+            }
+        })
 
         # Make enqueue raise an exception
-        mock_manager_with_job_queue._job_queue_service.enqueue = AsyncMock(
+        mock_manager_with_checkpoint._job_queue_service.enqueue = AsyncMock(
             side_effect=Exception("Database error")
         )
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
             # This should not raise - failure should be silent
@@ -826,24 +801,28 @@ class TestExploreJobEnqueue:
             assert "New knowledge found" in result
 
     @pytest.mark.asyncio
-    async def test_explore_logs_warning_when_no_project_id(self, configured_env, mock_manager_with_job_queue, caplog):
-        """Warning is logged when project_id is missing but should_update_kb is True."""
-        # Override instance metadata to return no project (empty dict)
+    async def test_explore_logs_warning_when_no_project_id(self, configured_env, mock_manager_with_checkpoint, caplog):
+        """Warning is logged when project_id is missing but read_file was called."""
+        # Override instance metadata to return no project
         mock_instance_meta = MagicMock()
         mock_instance_meta.instance_metadata = {}
         mock_instance_meta.project_id = None
-        mock_manager_with_job_queue._instance_repository.get = MagicMock(
+        mock_manager_with_checkpoint._instance_repository.get = MagicMock(
             return_value=mock_instance_meta
         )
 
-        explorer_response = (
-            "## Answer\nNew knowledge discovered.\n\n"
-            "## Need Update KB: true"
-        )
+        # Checkpoint says read_file was called
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [_make_message([_make_tool_call("read_file")])],
+            }
+        })
+
+        explorer_response = "## Answer\nNew knowledge discovered."
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
             with caplog.at_level("WARNING"):
@@ -858,32 +837,32 @@ class TestExploreJobEnqueue:
             ), "Expected warning about missing project_id"
 
     @pytest.mark.asyncio
-    async def test_explore_passes_original_response_to_experiencer(
-        self, configured_env, mock_manager_with_job_queue
+    async def test_explore_passes_response_to_kb_importer_job(
+        self, configured_env, mock_manager_with_checkpoint
     ):
-        """Experiencer job receives original response with Need Update KB heading."""
-        explorer_response = (
-            "## Answer\nFound info from files.\n\n"
-            "## Need Update KB: true"
-        )
+        """kb-importer job receives the explorer's response (no heading stripping)."""
+        explorer_response = "## Answer\nFound info from files."
+
+        # Checkpoint says read_file was called → job enqueued
+        mock_manager_with_checkpoint._checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [_make_message([_make_tool_call("read_file")])],
+            }
+        })
 
         with patch("daemon.tools.knowledge_tools.invoke_agent_and_wait",
                    new_callable=AsyncMock, return_value=(explorer_response, "test-child-id")):
-            tools = create_knowledge_tools(mock_manager_with_job_queue, "parent-instance-id")
+            tools = create_knowledge_tools(mock_manager_with_checkpoint, "parent-instance-id")
             explore_tool = next(t for t in tools if t.name == "explore")
 
             await explore_tool.ainvoke({"query": "What is the architecture?"})
 
             await asyncio.sleep(0.1)
 
-            # Verify job was enqueued with original response (containing heading)
-            mock_manager_with_job_queue._job_queue_service.enqueue.assert_called_once()
-            call_kwargs = mock_manager_with_job_queue._job_queue_service.enqueue.call_args.kwargs
-            # The explorer's full response should be passed (with the heading)
-            assert "## Need Update KB: true" in call_kwargs["message"]
-            # But the returned result should NOT have the heading
-            explore_result = await explore_tool.ainvoke({"query": "Another query?"})
-            assert "Need Update KB" not in explore_result
+            # Verify job was enqueued with the original response
+            mock_manager_with_checkpoint._job_queue_service.enqueue.assert_called_once()
+            call_kwargs = mock_manager_with_checkpoint._job_queue_service.enqueue.call_args.kwargs
+            assert "Found info from files" in call_kwargs["message"]
 
 
 # =============================================================================
@@ -1782,6 +1761,208 @@ class TestCheckRagQueriedViaCheckpoint:
 
 
 # =============================================================================
+# Checkpoint read_file Detection Helper Tests
+# =============================================================================
+
+
+class TestCheckReadFileCalledViaCheckpoint:
+    """Tests for _check_read_file_called_via_checkpoint() helper.
+
+    This is the deterministic, system-driven source of the "Need Update KB"
+    flag: the explorer reading a file implies the KB lacked the information.
+    """
+
+    @pytest.mark.asyncio
+    async def test_read_file_found(self):
+        """Returns True when messages contain a read_file tool call."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("read_file")]),
+                ]
+            }
+        })
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_no_read_file(self):
+        """Returns False when no read_file tool call in messages."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                    _make_message([_make_tool_call("rag_query_data")]),
+                ]
+            }
+        })
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_exception(self):
+        """Returns False when checkpointer raises (graceful degradation)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_none(self):
+        """Returns False when checkpoint state is None."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value=None)
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_empty_messages(self):
+        """Returns False when state is valid but messages list is empty."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": []}
+        })
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_other_filesystem_tools_only(self):
+        """Returns False when other filesystem tools (list_directory, glob_files,
+        grep_files) are called but read_file is not."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("list_directory")]),
+                    _make_message([_make_tool_call("grep_files")]),
+                ]
+            }
+        })
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_mixed_tools_one_read_file(self):
+        """Returns True when many tool calls include one read_file call."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("bash")]),
+                    _make_message([_make_tool_call("rag_query_data")]),
+                    _make_message([_make_tool_call("read_file")]),
+                    _make_message([_make_tool_call("write_file")]),
+                ]
+            }
+        })
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_tool_call_object_with_attr(self):
+        """Returns True when tool_call is an object with .name attribute (not a dict)."""
+        tc_obj = MagicMock()
+        tc_obj.name = "read_file"
+
+        msg = MagicMock()
+        msg.tool_calls = [tc_obj]
+
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [msg]}
+        })
+
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_kb_gap_tool_name_constant(self):
+        """KB_GAP_TOOL_NAME is the literal 'read_file'."""
+        assert KB_GAP_TOOL_NAME == "read_file"
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_state_is_not_dict(self):
+        """Returns False when state is a non-dict object (graceful degradation)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value="unexpected string")
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_channel_values_no_messages_key(self):
+        """Returns False when state has channel_values dict but no messages key."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"other_key": "value"}
+        })
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_empty_tool_calls_list(self):
+        """Returns False when message has tool_calls = [] (empty list, no items)."""
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([]),
+                ]
+            }
+        })
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_message_without_tool_calls_attribute(self):
+        """Returns False when message has no tool_calls attribute at all."""
+        msg = MagicMock(spec=[])
+        checkpointer = MagicMock()
+        checkpointer.aget = AsyncMock(return_value={
+            "channel_values": {"messages": [msg]}
+        })
+        result = await _check_read_file_called_via_checkpoint(checkpointer, "instance-1")
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_unwraps_raw_saver_when_checkpointer_is_checkpointer_adapter(self):
+        """Regression: CheckpointerAdapter wrapper exposes raw_saver; aget is
+        called on the raw saver, not the adapter."""
+        from daemon.checkpoint_adapter import SqliteCheckpointerAdapter
+
+        raw_saver = MagicMock()
+        raw_saver.aget = AsyncMock(return_value={
+            "channel_values": {
+                "messages": [
+                    _make_message([_make_tool_call("read_file")]),
+                ]
+            }
+        })
+        adapter = SqliteCheckpointerAdapter(raw_saver)
+
+        result = await _check_read_file_called_via_checkpoint(adapter, "inst-789")
+
+        assert result is True
+        raw_saver.aget.assert_awaited_once()
+
+
+# =============================================================================
 # Explore() Checkpoint Integration Tests
 # =============================================================================
 
@@ -1919,8 +2100,10 @@ class TestExploreCheckpointIntegration:
                 # The error should be returned to the caller
                 assert "Error" in result
 
-                # Checkpoint was inspected even though the agent errored
-                mock_manager_with_checkpointer._checkpointer.aget.assert_called_once()
+                # Checkpoint was inspected even though the agent errored.
+                # The new code calls aget() once for RAG detection AND once
+                # for read_file detection, so we expect 2 calls.
+                assert mock_manager_with_checkpointer._checkpointer.aget.await_count == 2
 
                 # No save on error path — we return BEFORE the save block
                 mock_save.assert_not_called()

@@ -167,13 +167,12 @@ now     1-2      broadly  broadly
 
 ## Step 6: Combine & Format
 
-**BOTH `## Confidence:` and `## Need Update KB:` headings are MANDATORY in EVERY response. The `## Concise` section is also MANDATORY. Never omit any of these three.**
+**BOTH `## Confidence:` and `## Concise` sections are MANDATORY in EVERY response. Never omit either.**
 
 Merge RAG answer + file browsing results into a structured response:
 
 ```
 ## Confidence: {HIGH|MEDIUM|LOW}
-## Need Update KB: {true|false}
 
 ## Concise
 [1-3 sentences summarizing the key findings. First sentence MUST be a standalone summary usable in a file index — it should make sense without reading the full answer.]
@@ -204,7 +203,6 @@ Format each entry concisely: entity name + key point from description.
 
 ```markdown
 ## Confidence: MEDIUM
-## Need Update KB: false
 
 ## Concise
 The authentication module uses JWT tokens with RS256 signing, located at `src/auth/`. The main entry point is `AuthService.login()` which validates credentials against the user table.
@@ -224,15 +222,8 @@ The main entry point is `AuthService.login()` which validates credentials agains
 - File: src/auth/jwt_handler.py
 ```
 
-### Guidance
-
-- Set `## Need Update KB:` to **true** ONLY if RAG returned successfully (results or empty) AND file browsing found information that RAG did not return. This means the KB genuinely lacks the information.
-- Set `## Need Update KB:` to **false** if:
-  - RAG had good data and confidence is HIGH
-  - RAG returned an error (timeout, 504, connection failure, any exception). You CANNOT assess KB state when RAG is broken — do not trigger a KB update.
-
 ### Response body rules — MUST follow:
-- `## Confidence:` and `## Need Update KB:` headings MUST appear first, before any body content
+- `## Confidence:` heading MUST appear first, before any body content
 - `## Concise` section MUST appear immediately after the metadata headings, before `## Answer`
 - Concise must be 1-3 sentences; first sentence must be standalone (usable as a file summary without context)
 - Your response must contain ONLY factual findings about the codebase
