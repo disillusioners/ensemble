@@ -68,24 +68,18 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
-def _serialize_questions(questions: list[Any]) -> list[dict[str, Any]]:
-    """Convert a list of ``Question`` Pydantic models to plain dicts.
-
-    Both the GET_STATUS response and the SQL persistence path need JSON-safe
-    structures. ``Question`` is not directly JSON serializable, and the
-    tool consumer expects ``.get(...)`` semantics. We ``model_dump`` here
-    so callers can treat the result as plain data.
+def _question_to_dict(q: Any) -> dict[str, Any]:
+    """Convert a ``Question`` Pydantic model to a JSON-safe dict.
 
     Items that are already dicts (e.g. loaded from the DB) are passed
-    through unchanged.
+    through unchanged. Used at the write boundary in
+    ``_poll_questions`` / ``_restore_from_persisted_state`` so that
+    ``self._questions`` is always a list of plain dicts, matching the
+    Go reference's "struct in memory → JSON for storage/wire" boundary.
     """
-    out: list[dict[str, Any]] = []
-    for q in questions:
-        if hasattr(q, "model_dump"):
-            out.append(q.model_dump(by_alias=True))
-        else:
-            out.append(q)
-    return out
+    if hasattr(q, "model_dump"):
+        return q.model_dump(by_alias=True)
+    return q
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -334,15 +328,11 @@ class OpenCodeSessionManager:
         if data.state:
             self._state = SessionState(data.state)
         self._is_agent_locked = data.is_agent_locked
-        # JSON columns: questions may be a list (JSON) or string (Go TEXT)
+        # ``questions`` is a list of dicts — serialized via the SQLAlchemy
+        # ``JSON`` column. Written in the same shape by ``_poll_questions``
+        # and ``_save_state_locked``, so no conversion is needed here.
         if data.questions:
-            if isinstance(data.questions, list):
-                self._questions = data.questions
-            elif isinstance(data.questions, str):
-                try:
-                    self._questions = json.loads(data.questions)
-                except ValueError:
-                    logger.warning("failed to parse persisted questions JSON")
+            self._questions = list(data.questions)
         if data.latest_response is not None:
             self._latest_response = data.latest_response
         if data.last_activity:
@@ -358,7 +348,7 @@ class OpenCodeSessionManager:
             is_agent_locked=self._is_agent_locked,
             state=self._state.value,
             latest_response=self._latest_response,
-            questions=_serialize_questions(self._questions),
+            questions=list(self._questions),
             last_activity=self._last_activity.isoformat(),
         )
 
@@ -422,7 +412,7 @@ class OpenCodeSessionManager:
             "state": self._state.value,
             "session_id": self.session_id,
             "latest_response": self._latest_response,
-            "questions": _serialize_questions(self._questions),
+            "questions": list(self._questions),
         }
 
     def submit_request(self, req: Request) -> None:
@@ -959,7 +949,7 @@ class OpenCodeSessionManager:
         ]
 
         async with self._lock:
-            self._questions = session_questions
+            self._questions = [_question_to_dict(q) for q in session_questions]
 
             # manager.go:565-572: state transitions
             if len(self._questions) > 0:

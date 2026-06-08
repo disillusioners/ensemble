@@ -454,9 +454,7 @@ Special prompts (bypass BUSY check):
                 output.append("")
                 output.append("Questions:")
                 for q in questions:
-                    qid = q.get("id", "") if hasattr(q, "get") else getattr(q, "id", "")
-                    qtext = q.get("questions", []) if hasattr(q, "get") else getattr(q, "questions", [])
-                    output.append(f"  [?] {qid}: {qtext}")
+                    output.append(f"  [?] {q.get('id', '')}: {q.get('questions', [])}")
             return "\n".join(output)
         return _format_response(resp)
     
