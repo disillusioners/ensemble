@@ -69,26 +69,71 @@ _STOP_WORDS = frozenset({
 })
 
 
-def _normalize_keywords(raw: list[str] | str | None) -> list[str]:
-    """Sanitize and dedupe a list (or comma-separated string) of keywords.
+def _strip_surrounding_quotes(s: str) -> str:
+    """Strip a single layer of matching surrounding ``"`` or ``'`` from ``s``.
 
-    Drops empty entries, strips whitespace, removes pure stop-words, drops
-    entries longer than :data:`_MAX_KEYWORD_LEN`, dedupes case-insensitively
-    (preserving first-seen casing), and caps the result at
-    :data:`_MAX_KEYWORDS`. Returns ``[]`` for any falsy / non-iterable input
-    other than a non-empty string.
+    Used by :func:`_normalize_keywords` to clean tokens that came out of a
+    JSON-array-as-string (e.g. ``"git commit"`` → ``git commit``). Returns
+    the input unchanged when it is shorter than 2 chars or the surrounding
+    pair does not match.
+    """
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1].strip()
+    return s
+
+
+def _normalize_keywords(raw: list[str] | str | None) -> list[str]:
+    """Sanitize and dedupe a list (or delimited string) of keywords.
+
+    Accepts any of the following shapes and normalizes to a flat list:
+
+    - A Python list of strings (preferred).
+    - A comma-/semicolon-/newline-separated string (e.g. ``"auth, login"``).
+    - A JSON-array-as-string (e.g. ``'["auth", "login"]'``) — agents commonly
+      serialize a list of keywords as one string. Detected by the surrounding
+      ``[...]`` and parsed via :mod:`json`.
+    - ``None`` — returns ``[]``.
+
+    Drops empty entries, strips whitespace and surrounding quotes, removes
+    pure stop-words, drops entries longer than :data:`_MAX_KEYWORD_LEN`,
+    dedupes case-insensitively (preserving first-seen casing), and caps the
+    result at :data:`_MAX_KEYWORDS`. Returns ``[]`` for any falsy / non-
+    iterable input other than a non-empty string.
 
     Args:
-        raw: A list of keywords, a comma-/semicolon-/newline-separated string,
-            or ``None``.
+        raw: A list, a delimited string, a JSON-array-as-string, or ``None``.
 
     Returns:
         A cleaned, deduped, capped list of keywords.
     """
     if raw is None:
         return []
+
+    # If the string looks like a JSON-encoded list, try to parse it before
+    # falling back to delimiter splitting — agents frequently stringify a
+    # list rather than sending the actual array. A failed parse falls through
+    # to the plain-string path (with surrounding brackets stripped) so that
+    # malformed inputs degrade gracefully instead of yielding "["/"]"-wrapped
+    # garbage tokens.
     if isinstance(raw, str):
-        parts = re.split(r"[,;\n]+", raw)
+        stripped = raw.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                import json
+                parsed = json.loads(stripped)
+            except (ValueError, TypeError):
+                parsed = None
+            if isinstance(parsed, list):
+                raw = parsed
+
+    if isinstance(raw, str):
+        s = raw.strip()
+        if s.startswith("["):
+            s = s[1:]
+        if s.endswith("]"):
+            s = s[:-1]
+        parts = re.split(r"[,;\n]+", s)
     else:
         try:
             parts = list(raw)
@@ -100,7 +145,7 @@ def _normalize_keywords(raw: list[str] | str | None) -> list[str]:
     for part in parts:
         if not isinstance(part, str):
             continue
-        cleaned = part.strip()
+        cleaned = _strip_surrounding_quotes(part.strip())
         if not cleaned:
             continue
         if len(cleaned) > _MAX_KEYWORD_LEN:
