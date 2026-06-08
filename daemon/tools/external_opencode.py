@@ -163,7 +163,7 @@ def create_opencode_tools(
 
     async def _preload_shared_context(
         message: str,
-        related_context_keywords: list[str] | None = None,
+        related_context_keywords: list[str] | str | None = None,
     ) -> str:
         """Auto-match shared context files against the outgoing message.
 
@@ -196,10 +196,12 @@ def create_opencode_tools(
         Args:
             message: The outgoing prompt — used as the fallback extraction
                 source when the agent does not provide keywords.
-            related_context_keywords: Optional list of short topic keywords
-                the calling agent knows are relevant. Preferred path; the
-                heuristic and LLM layers only run when this is ``None`` /
-                empty after normalization.
+            related_context_keywords: Optional keywords the calling agent
+                knows are relevant. Accepts a list of short topic keywords
+                or a single comma-/semicolon-/newline-separated string —
+                both are normalized via :func:`_normalize_keywords`. Preferred
+                path; the heuristic and LLM layers only run when this is
+                ``None`` / empty after normalization.
 
         Returns:
             Injection string to prepend to the message, or ``""`` to skip
@@ -334,7 +336,7 @@ session and deleting its registry entry before creating the new one.
         agent: str = "orchestrator",
         model: str | None = None,
         council: bool = False,
-        related_context_keywords: list[str] | None = None,
+        related_context_keywords: list[str] | str | None = None,
     ) -> str:
         """Send a prompt to an opencode session (fire-and-forget).
 
@@ -401,10 +403,13 @@ Args:
     council: If True, append the COUNCIL_HINT trailer to the prompt so the
         receiving agent delegates critical-path work to the @council
         subagent-tool. Replaces the old Go binary's --council flag.
-    related_context_keywords: Optional list of short topic keywords (3-8)
-        that describe the context files this task is likely to need.
-        Strongly recommended for long, prose-heavy prompts where full-message
-        matching would dilute the score. When omitted (or empty), the daemon
+    related_context_keywords: Optional keywords describing the context files
+        this task is likely to need. Accepts either a list of short topic
+        keywords (3-8 items) or a single comma-/semicolon-/newline-separated
+        string — the daemon normalizes both forms internally, so agents can
+        pass whichever shape is more convenient. Strongly recommended for
+        long, prose-heavy prompts where full-message matching would dilute
+        the score. When omitted (or empty after normalization), the daemon
         falls back to a one-shot LLM extract (uses `model_keywords`, default
         40s timeout) and then a local heuristic. Pass `None` to defer to the
         fallback chain.

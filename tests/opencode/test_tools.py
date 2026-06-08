@@ -1703,6 +1703,52 @@ class TestSendMessageKeywordResolver:
         assert self._captured_query(mock_get) == "AUTH login"
 
     @pytest.mark.asyncio
+    async def test_keywords_accepts_string_form(
+        self,
+        mock_manager_with_repo: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """``related_context_keywords`` accepts a comma-separated string.
+
+        Agents often pass keywords as a single string rather than a list.
+        The tool must accept both shapes and normalize them to the same
+        list passed to ``get_shared_context`` so the caller does not need
+        to know which form is required.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-1", "state": "IDLE"}
+        )
+        ok_response = OpenCodeResponse(status="ok", message="queued")
+        with patch(
+            "daemon.tools.external_opencode.get_shared_context",
+            return_value="",
+        ) as mock_get, patch(
+            "daemon.tools.external_opencode.extract_keywords",
+            new_callable=AsyncMock,
+        ) as mock_extract, patch(
+            "daemon.tools.external_opencode._heuristic_keywords",
+        ) as mock_heur, patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=ok_response,
+        ):
+            tools = create_opencode_tools(mock_manager_with_repo, "test-instance-id")
+            send_tool = next(
+                t for t in tools if t.name == "external_opencode_send_message"
+            )
+
+            await send_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "message": "x",
+                "related_context_keywords": "auth, login, billing",
+            })
+
+        assert self._captured_query(mock_get) == "auth login billing"
+        mock_extract.assert_not_awaited()
+        mock_heur.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_empty_keywords_falls_back_to_llm(
         self,
         mock_manager_with_repo: MagicMock,
