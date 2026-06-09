@@ -124,7 +124,12 @@ def _generate_file_source(
 ) -> str:
     """Generate a file_source path for a text insertion.
 
-    Format: projects/<project-name>/docs/<category>/<simple-hash>.md
+    Format: PROJECT_RAG_KB/<project-name>/docs/<category>/<simple-hash>.md
+
+    Note: PROJECT_RAG_KB is a virtual path prefix signaling the path is a
+    RAG knowledge base identifier (not a real filesystem path). Receivers
+    (other agents/tools) should treat it as a logical KB handle, not a
+    directory on disk.
 
     Args:
         manager: The InstanceManager instance.
@@ -147,7 +152,7 @@ def _generate_file_source(
     project_path = re.sub(r'[^a-z0-9-]', '-', project_name.lower())
     project_path = re.sub(r'-+', '-', project_path).strip('-')
 
-    return f"projects/{project_path}/docs/{category}/{filename}.md"
+    return f"PROJECT_RAG_KB/{project_path}/docs/{category}/{filename}.md"
 
 
 def create_rag_tools(
@@ -180,7 +185,8 @@ def create_rag_tools(
         Args:
             text: The text content to insert.
             file_source: File source path. LLM should generate this explicitly.
-                Format: projects/<project>/docs/<category>/<filename>.md
+                Format: PROJECT_RAG_KB/<project>/docs/<category>/<filename>.md
+                (PROJECT_RAG_KB is a virtual KB prefix, not a real filesystem path.)
                 If not provided, a fallback path will be auto-generated (warning logged).
             category: Content category for organization (e.g., "general", "architecture", "api", "knowledge", "experience").
 
@@ -222,7 +228,8 @@ def create_rag_tools(
     Args:
         text: The text content to insert.
         file_source: File source path. LLM should generate this explicitly.
-            Format: projects/<project>/docs/<category>/<filename>.md
+            Format: PROJECT_RAG_KB/<project>/docs/<category>/<filename>.md
+            (PROJECT_RAG_KB is a virtual KB prefix, not a real filesystem path.)
             If not provided, a fallback path will be auto-generated.
         category: Content category for organization (default: "general").
             Common categories: "general", "architecture", "api", "knowledge", "experience"
