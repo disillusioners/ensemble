@@ -328,8 +328,8 @@ async def _enqueue_kb_update_job(
                 "original_query": query,
             },
         )
-        logger.debug(
-            "Enqueued kb-importer job for project %s on queue %s",
+        logger.info(
+            "Triggered kb-importer job for project %s on queue %s (rag_queried=True, read_file_called=True, rag_errored=False)",
             project_id, queue.queue_id,
         )
 
@@ -654,6 +654,10 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                     "Ensure the agent instance has a project context set."
                 )
             else:
+                logger.info(
+                    "KB gap detected — enqueueing kb-importer job "
+                    "(rag_queried=True, read_file_called=True, rag_errored=False)"
+                )
                 try:
                     asyncio.ensure_future(_enqueue_kb_update_job(
                         manager=manager,
@@ -669,6 +673,11 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
                     )
                 except Exception as e:
                     logger.warning("Failed to schedule kb-importer job: %s", e)
+        else:
+            logger.info(
+                "Skipping kb-importer job (rag_queried=%s, read_file_called=%s, rag_errored=%s)",
+                rag_queried, read_file_called, rag_errored,
+            )
 
         # Auto-save explorer result to shared context directory (fire-and-forget)
         if rag_queried:
