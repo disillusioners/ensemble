@@ -17,7 +17,7 @@ from daemon.mcp.config import (
     validate_mcp_server_config,
 )
 from daemon.mcp.managed_session import ManagedClientSession
-from daemon.mcp.stdio_wrapper import TaskScopedStdioClient
+from daemon.mcp.stdio_wrapper import TaskScopedContextManager, TaskScopedStdioClient
 from daemon.repositories.mcp_server.models import McpServer
 
 logger = logging.getLogger(__name__)
@@ -249,16 +249,17 @@ class McpConnectionManager:
         Returns:
             Initialized MCP ManagedClientSession
         """
-        # TODO(2026-06-05, fix-mcp-anyio-task-scope): wrap with
-        # ``TaskScopedContextManager`` (or a generalised
-        # ``TaskScopedStdioClient``) once the fix is extended to
-        # SSE/HTTP. ``sse_client`` is also anyio-task-group backed, so
-        # closing ``streams_cm`` from a different task will raise
-        # ``RuntimeError: Attempted to exit cancel scope in a different
-        # task`` for pooled SSE MCP servers closed from instance
-        # termination / pool health check / replenish tasks. Same bug
-        # class as the STDIO fix in commit ``c025480``.
-        streams_cm = sse_client(config.url, headers=config.headers or {})
+        # ``sse_client`` is anyio-task-group backed, so closing the raw
+        # ``streams_cm`` from a different task (instance termination /
+        # pool health check / replenish / test-helper disconnect) would
+        # raise ``RuntimeError: Attempted to exit cancel scope in a
+        # different task``. ``TaskScopedContextManager`` owns the inner
+        # CM in a dedicated background task, mirroring the STDIO fix
+        # in commit ``c025480`` and its SSE/streamable-HTTP extension.
+        streams_cm = TaskScopedContextManager(
+            factory=lambda: sse_client(config.url, headers=config.headers or {}),
+            name="mcp-sse-client",
+        )
         try:
             async with asyncio.timeout(timeout):
                 read_stream, write_stream = await streams_cm.__aenter__()
@@ -292,11 +293,16 @@ class McpConnectionManager:
         Returns:
             Initialized MCP ManagedClientSession
         """
-        # TODO(2026-06-05, fix-mcp-anyio-task-scope): see
-        # ``_create_sse_session``. ``streamablehttp_client`` is also
-        # anyio-task-group backed and exhibits the same cross-task
-        # cancel-scope error.
-        streams_cm = streamablehttp_client(config.url, headers=config.headers or {})
+        # ``streamablehttp_client`` is anyio-task-group backed and
+        # exhibits the same cross-task cancel-scope error as
+        # ``sse_client`` / ``stdio_client`` (see ``_create_sse_session``
+        # and commit ``c025480`` for the original STDIO fix). The
+        # wrapper owns the inner CM in a dedicated background task so
+        # ``__aenter__`` and ``__aexit__`` always run in the same task.
+        streams_cm = TaskScopedContextManager(
+            factory=lambda: streamablehttp_client(config.url, headers=config.headers or {}),
+            name="mcp-streamable-http-client",
+        )
         try:
             async with asyncio.timeout(timeout):
                 read_stream, write_stream, _ = await streams_cm.__aenter__()
@@ -440,7 +446,10 @@ class McpConnectionManager:
         timeout: float,
     ) -> tuple[ManagedClientSession, Any]:
         """Create a test session for SSE transport."""
-        streams_cm = sse_client(config.url, headers=config.headers or {})
+        streams_cm = TaskScopedContextManager(
+            factory=lambda: sse_client(config.url, headers=config.headers or {}),
+            name="mcp-sse-client",
+        )
         return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=False)
 
     async def _create_test_streamable_http_session(
@@ -449,7 +458,10 @@ class McpConnectionManager:
         timeout: float,
     ) -> tuple[ManagedClientSession, Any]:
         """Create a test session for Streamable HTTP transport."""
-        streams_cm = streamablehttp_client(config.url, headers=config.headers or {})
+        streams_cm = TaskScopedContextManager(
+            factory=lambda: streamablehttp_client(config.url, headers=config.headers or {}),
+            name="mcp-streamable-http-client",
+        )
         return await self._create_test_session_from_streams(streams_cm, timeout, is_streamable_http=True)
 
     async def _create_test_session_from_streams(
