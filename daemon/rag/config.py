@@ -16,6 +16,28 @@ _rag_enabled: bool = True
 AUTO_TEST_TIMEOUT: float = 15.0
 
 
+class RAGRequiredError(RuntimeError):
+    """Raised when RAG_IS_REQUIRED is set and the RAG auto-test fails.
+
+    The service should exit with a non-zero status when this is raised.
+    """
+
+
+def _is_truthy(value: str | None) -> bool:
+    """Return True if the value represents a truthy env var value."""
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_rag_required() -> bool:
+    """Check if RAG is required via RAG_IS_REQUIRED env var.
+
+    When required, the service will exit with an error if the auto-test fails.
+    """
+    return _is_truthy(os.getenv("RAG_IS_REQUIRED"))
+
+
 @dataclass(frozen=True)
 class RAGConfig:
     """LightRAG connection configuration.
@@ -88,36 +110,18 @@ def _sanitize_workspace(workspace: str) -> str:
     return re.sub(r'[^a-zA-Z0-9_]', '_', workspace)
 
 
-async def auto_test_rag() -> bool:
-    """Run a lightweight auto-test against the RAG backend on startup.
-
-    Tests that RAG is actually reachable and responding correctly by making
-    a simple query. This catches misconfiguration like wrong API keys (401),
-    connection refused, timeouts, etc.
+async def _attempt_auto_test(config: RAGConfig) -> str | None:
+    """Run a single RAG auto-test attempt.
 
     Returns:
-        True if RAG is working correctly and should remain enabled.
-        False if RAG should be disabled (test failed or not configured).
-
-    Side effects:
-        If the test fails, calls disable_rag() and logs a warning.
+        None on success, or a human-readable failure reason string.
     """
-    config = RAGConfig.from_env()
-
-    if not config.is_configured:
-        logger.debug("RAG auto-test skipped: not configured (no LIGHTRAG_HOST)")
-        return False
-
-    logger.info("Running RAG auto-test...")
-
-    # Build headers
     headers: dict[str, str] = {}
     if config.workspace:
         headers["LIGHTRAG-WORKSPACE"] = _sanitize_workspace(config.workspace)
     if config.api_key:
         headers["X-API-Key"] = config.api_key
 
-    # Create request body for a simple test query
     request_body: dict[str, Any] = {
         "query": "test",
         "mode": "mix",
@@ -136,16 +140,10 @@ async def auto_test_rag() -> bool:
             )
             response.raise_for_status()
 
-        logger.info("RAG auto-test passed: LightRAG is reachable")
-        return True
+        return None
 
-    except httpx.TimeoutException as e:
-        logger.warning(
-            "RAG auto-test failed: timeout after %.1fs. Disabling RAG.",
-            AUTO_TEST_TIMEOUT,
-        )
-        disable_rag()
-        return False
+    except httpx.TimeoutException:
+        return f"timeout after {AUTO_TEST_TIMEOUT:.1f}s"
 
     except httpx.HTTPStatusError as e:
         detail = ""
@@ -154,36 +152,66 @@ async def auto_test_rag() -> bool:
             detail = error_data.get("detail", str(error_data))
         except Exception:
             detail = e.response.text or str(e)
-
-        logger.warning(
-            "RAG auto-test failed: LightRAG error %d: %s. Disabling RAG.",
-            e.response.status_code,
-            detail,
-        )
-        disable_rag()
-        return False
+        return f"LightRAG error {e.response.status_code}: {detail}"
 
     except httpx.ConnectError as e:
-        logger.warning(
-            "RAG auto-test failed: connection refused: %s. Disabling RAG.",
-            str(e),
-        )
-        disable_rag()
-        return False
+        return f"connection refused: {e}"
 
     except httpx.RemoteProtocolError as e:
-        logger.warning(
-            "RAG auto-test failed: server disconnected: %s. Disabling RAG.",
-            str(e),
-        )
-        disable_rag()
-        return False
+        return f"server disconnected: {e}"
 
     except Exception as e:
-        logger.warning(
-            "RAG auto-test failed: %s: %s. Disabling RAG.",
-            type(e).__name__,
-            str(e),
-        )
-        disable_rag()
+        return f"{type(e).__name__}: {e}"
+
+
+async def auto_test_rag() -> bool:
+    """Run a lightweight auto-test against the RAG backend on startup.
+
+    Tests that RAG is actually reachable and responding correctly by making
+    a simple query. This catches misconfiguration like wrong API keys (401),
+    connection refused, timeouts, etc.
+
+    When RAG_IS_REQUIRED is set, the test will retry once on failure and
+    raise RAGRequiredError if both attempts fail (the service is expected
+    to exit on this error).
+
+    Returns:
+        True if RAG is working correctly and should remain enabled.
+        False if RAG should be disabled (test failed or not configured).
+
+    Raises:
+        RAGRequiredError: When RAG_IS_REQUIRED is set and the auto-test
+            fails on both attempts.
+    """
+    config = RAGConfig.from_env()
+
+    if not config.is_configured:
+        logger.debug("RAG auto-test skipped: not configured (no LIGHTRAG_HOST)")
         return False
+
+    required = is_rag_required()
+    max_attempts = 2 if required else 1
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt == 1:
+            logger.info("Running RAG auto-test...")
+        else:
+            logger.info("Retrying RAG auto-test (attempt %d/%d)...", attempt, max_attempts)
+
+        reason = await _attempt_auto_test(config)
+        if reason is None:
+            logger.info("RAG auto-test passed: LightRAG is reachable")
+            return True
+
+        logger.warning("RAG auto-test attempt %d/%d failed: %s", attempt, max_attempts, reason)
+
+    # All attempts failed
+    if required:
+        raise RAGRequiredError(
+            f"RAG_IS_REQUIRED is set but RAG auto-test failed after {max_attempts} attempts. "
+            f"Last error: {reason}"
+        )
+
+    logger.warning("Disabling RAG.")
+    disable_rag()
+    return False

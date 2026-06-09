@@ -3,10 +3,12 @@
 from .client import AsyncLightRAGClient
 from .config import (
     RAGConfig,
+    RAGRequiredError,
     auto_test_rag,
     disable_rag,
     enable_rag,
     is_rag_enabled,
+    is_rag_required,
 )
 from .exceptions import (
     RAGConnectionError,
@@ -38,10 +40,12 @@ __all__ = [
     "RAGConnectionError",
     "RAGError",
     "RAGNotConfiguredError",
+    "RAGRequiredError",
     "RAGResponseError",
     "RAGTimeoutError",
     "auto_test_rag",
     "disable_rag",
     "enable_rag",
     "is_rag_enabled",
+    "is_rag_required",
 ]

@@ -26,14 +26,26 @@ def configured_env():
     }
 
     # Cleanup
-    for key in ["LIGHTRAG_HOST", "LIGHTRAG_API_KEY", "LIGHTRAG_WORKSPACE", "LIGHTRAG_TIMEOUT"]:
+    for key in [
+        "LIGHTRAG_HOST",
+        "LIGHTRAG_API_KEY",
+        "LIGHTRAG_WORKSPACE",
+        "LIGHTRAG_TIMEOUT",
+        "RAG_IS_REQUIRED",
+    ]:
         os.environ.pop(key, None)
 
 
 @pytest.fixture
 def unconfigured_env():
     """Ensure no RAG environment variables are set."""
-    for key in ["LIGHTRAG_HOST", "LIGHTRAG_API_KEY", "LIGHTRAG_WORKSPACE", "LIGHTRAG_TIMEOUT"]:
+    for key in [
+        "LIGHTRAG_HOST",
+        "LIGHTRAG_API_KEY",
+        "LIGHTRAG_WORKSPACE",
+        "LIGHTRAG_TIMEOUT",
+        "RAG_IS_REQUIRED",
+    ]:
         os.environ.pop(key, None)
     yield
 

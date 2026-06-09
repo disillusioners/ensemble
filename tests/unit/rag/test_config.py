@@ -12,10 +12,12 @@ import pytest
 
 from daemon.rag import (
     RAGConfig,
+    RAGRequiredError,
     auto_test_rag,
     disable_rag,
     enable_rag,
     is_rag_enabled,
+    is_rag_required,
 )
 
 
@@ -469,3 +471,174 @@ class TestAutoTestRagIntegration:
 
         assert result is True
         assert is_rag_enabled() is True
+
+
+# =============================================================================
+# Tests for is_rag_required
+# =============================================================================
+
+
+class TestIsRagRequired:
+    """Tests for is_rag_required function (RAG_IS_REQUIRED env var)."""
+
+    def test_is_rag_required_false_when_unset(self, configured_env):
+        """Returns False when RAG_IS_REQUIRED is not set."""
+        assert is_rag_required() is False
+
+    def test_is_rag_required_true_for_true_values(self, configured_env):
+        """Returns True for truthy env values (1, true, yes, on)."""
+        for value in ("1", "true", "TRUE", "yes", "YES", "on", "On", " true "):
+            os.environ["RAG_IS_REQUIRED"] = value
+            assert is_rag_required() is True, f"Expected True for {value!r}"
+
+    def test_is_rag_required_false_for_falsy_values(self, configured_env):
+        """Returns False for falsy/empty env values."""
+        for value in ("0", "false", "no", "off", "", "random"):
+            os.environ["RAG_IS_REQUIRED"] = value
+            assert is_rag_required() is False, f"Expected False for {value!r}"
+
+
+# =============================================================================
+# Tests for auto_test_rag with RAG_IS_REQUIRED
+# =============================================================================
+
+
+class TestAutoTestRagRequired:
+    """Tests for auto_test_rag when RAG_IS_REQUIRED is set."""
+
+    @pytest.mark.asyncio
+    async def test_required_succeeds_on_first_attempt(self, configured_env):
+        """When RAG_IS_REQUIRED is set and the first attempt succeeds, returns True."""
+        os.environ["RAG_IS_REQUIRED"] = "true"
+
+        mock_response = AsyncMock()
+        mock_response.raise_for_status = MagicMock()
+
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await auto_test_rag()
+
+        assert result is True
+        assert mock_client.post.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_required_retries_once_on_failure(self, configured_env, caplog):
+        """When first attempt fails and RAG_IS_REQUIRED is set, retries once."""
+        import logging
+
+        os.environ["RAG_IS_REQUIRED"] = "true"
+        caplog.set_level(logging.INFO)
+
+        mock_response_success = AsyncMock()
+        mock_response_success.raise_for_status = MagicMock()
+
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            # First call fails, second succeeds
+            mock_client.post = AsyncMock(
+                side_effect=[
+                    httpx.ConnectError("Connection refused"),
+                    mock_response_success,
+                ]
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await auto_test_rag()
+
+        assert result is True
+        assert mock_client.post.call_count == 2
+        # Verify retry log line
+        assert any("Retrying RAG auto-test" in record.message for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_required_raises_after_two_failures(self, configured_env, caplog):
+        """When both attempts fail and RAG_IS_REQUIRED is set, raises RAGRequiredError."""
+        import logging
+
+        os.environ["RAG_IS_REQUIRED"] = "true"
+        caplog.set_level(logging.INFO)
+
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                side_effect=httpx.ConnectError("Connection refused")
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(RAGRequiredError) as exc_info:
+                await auto_test_rag()
+
+        assert "RAG_IS_REQUIRED" in str(exc_info.value)
+        assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_required_does_not_disable_rag(self, configured_env):
+        """When RAG_IS_REQUIRED causes an error, RAG flag is not silently disabled."""
+        os.environ["RAG_IS_REQUIRED"] = "true"
+
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                side_effect=httpx.ConnectError("Connection refused")
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            with pytest.raises(RAGRequiredError):
+                await auto_test_rag()
+
+        # Internal _rag_enabled flag must remain True (the service is exiting anyway)
+        import daemon.rag.config as rag_config_module
+        assert rag_config_module._rag_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_optional_disables_after_one_failure(self, configured_env):
+        """When RAG_IS_REQUIRED is NOT set, single failure disables RAG (no retry)."""
+        mock_response = MagicMock()
+        mock_response.status_code = 500
+        mock_response.json = MagicMock(return_value={"detail": "Server Error"})
+        mock_response.text = ""
+
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                side_effect=httpx.HTTPStatusError(
+                    "500 Server Error",
+                    request=MagicMock(),
+                    response=mock_response,
+                )
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            result = await auto_test_rag()
+
+        assert result is False
+        assert mock_client.post.call_count == 1
+        assert is_rag_enabled() is False
+
+    @pytest.mark.asyncio
+    async def test_required_retry_succeeds_logs_passed(self, configured_env, caplog):
+        """When retry succeeds, the 'passed' log line is emitted."""
+        import logging
+
+        os.environ["RAG_IS_REQUIRED"] = "true"
+        caplog.set_level(logging.INFO)
+
+        mock_response_success = AsyncMock()
+        mock_response_success.raise_for_status = MagicMock()
+
+        with patch("daemon.rag.config.httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(
+                side_effect=[
+                    httpx.TimeoutException("timeout"),
+                    mock_response_success,
+                ]
+            )
+            mock_client_class.return_value.__aenter__.return_value = mock_client
+
+            await auto_test_rag()
+
+        assert any("RAG auto-test passed" in record.message for record in caplog.records)

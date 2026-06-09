@@ -160,8 +160,13 @@ async def lifespan(app: FastAPI):
 
     # Run RAG auto-test to verify LightRAG connectivity
     # This gracefully disables RAG if it's misconfigured (wrong API key, connection refused, etc.)
-    from daemon.rag import auto_test_rag
-    await auto_test_rag()
+    # If RAG_IS_REQUIRED is set, the service will exit with an error on test failure.
+    from daemon.rag import RAGRequiredError, auto_test_rag
+    try:
+        await auto_test_rag()
+    except RAGRequiredError as e:
+        daemon_logger.error(str(e))
+        raise SystemExit(1)
 
     # Initialize InstanceManager
     manager = InstanceManager(config, ensemble_config)
