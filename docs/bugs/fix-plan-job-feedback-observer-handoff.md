@@ -258,3 +258,102 @@ No changes to `MessageJobHandler`, `InstanceManager`, or repository layer.
 - **Pre-check timing**: `is_instance_busy_with_message()` has a TOCTOU window between the check and `start_job()`. This is the same window the current poller code has (lines 493–505 vs 512). The `MessageJobHandler.handle()` has its own safety-net check (lines 66–97) that back-transitions PROCESSING→PENDING if a race occurs. So the defense-in-depth is maintained.
 - **Architectural note**: after this fix, the observer is no longer purely a "completion notifier" — it also performs dispatch (previously only the poller did). The shared `dispatch_started_job()` keeps the two paths from drifting again. If a third caller is added in the future, it should also go through `dispatch_started_job()`.
 - **Misconfiguration safety**: if `MessageJobHandler` is not configured (e.g., setup_message_job_handler wasn't called), `dispatch_started_job` will now mark MESSAGE jobs FAILED instead of leaving them in PROCESSING. This is a strict improvement over silent loss.
+
+---
+
+## Review: CancelledError propagation (Kilo, 2026-06-10)
+
+### Verdict: Step 3's "No regression" note is incorrect — must fix before implementing
+
+### The problem
+
+`MessageJobHandler.handle()` re-raises `asyncio.CancelledError` at `message_job_handler.py:254` after completing the job as CANCELLED. This is by design — it signals the caller that the operation was interrupted.
+
+**Current poller code** (`job_processor.py:528-535`) catches this explicitly:
+
+```python
+try:
+    await self._message_job_handler.handle(started_job)
+except asyncio.CancelledError:
+    ...
+    return  # Graceful: exits _process_next_job, _process_loop continues
+```
+
+**Proposed plan** replaces lines 523–570 with a bare call:
+
+```python
+await self._queue_service.dispatch_started_job(started_job)
+continue
+```
+
+`CancelledError` is `BaseException`, not `Exception`, so it passes through:
+- `dispatch_started_job` — no handler
+- Poller's `except Exception` at line 571 — doesn't catch it
+- `_process_loop`'s `except asyncio.CancelledError: raise` at line 172 — **kills the entire processing task**
+
+A single message cancellation would stop ALL job processing. This is a regression.
+
+**Observer path** is worse: `CancelledError` passes through `except Exception` at line 388, propagates to `_event_loop`, hits `except asyncio.CancelledError: self._running = False; break` at line 191 — **stops the observer entirely**.
+
+### Required fix: add CancelledError handling in both callers
+
+Do NOT handle it in `dispatch_started_job` — that method should stay a simple router. Different callers need different behavior.
+
+**Poller (Step 3)** — replace the proposed two-liner with:
+
+```python
+                    try:
+                        await self._queue_service.dispatch_started_job(started_job)
+                    except asyncio.CancelledError:
+                        logger.info(
+                            f"CancelledError during dispatch of job {started_job.job_id[:8]}..., "
+                            "returning from cycle"
+                        )
+                        return
+                    continue
+```
+
+**Observer (Step 2)** — add to the handoff block:
+
+```python
+        try:
+            if not job.queue_id:
+                return
+
+            next_job = await self._job_queue_service._get_next_job(queue_id=job.queue_id)
+            if next_job is None:
+                return
+
+            if await self._job_queue_service.is_instance_busy_with_message(next_job):
+                return
+
+            started_job = await self._job_queue_service.start_job(next_job.job_id)
+            if started_job is None:
+                return
+
+            await self._job_queue_service.dispatch_started_job(started_job)
+            logger.info(...)
+        except asyncio.CancelledError:
+            return  # Don't crash the observer — let event loop continue
+        except Exception as e:
+            logger.warning(...)
+```
+
+### Other review items — all confirmed correct
+
+| Item | Status |
+|---|---|
+| Line ranges (335–391 observer, 523–570 poller) match current code | ✓ |
+| `_get_next_job(queue_id=...)` signature exists at `job_queue_service.py:799` | ✓ |
+| `is_instance_busy_with_message` rename (was `should_skip_message_job`) — better name | ✓ |
+| None-guard on `_message_job_handler` now fails job explicitly — strict improvement | ✓ |
+| Queue-scoped lookup is correct for the observer handoff | ✓ |
+| TOCTOU risk analysis correct — defense-in-depth via `MessageJobHandler.handle()` lines 66–97 | ✓ |
+| Orphan recovery logic (lines 238–479) untouched | ✓ |
+| Regression test skeleton is reasonable | ✓ |
+
+### Minor nit: Step 4 wording
+
+Line 187 says "already handled with the `if self._message_job_handler is not None` check" but the updated `dispatch_started_job` uses the inverted pattern (`is None → fail job`). Should read:
+
+> "already handled — `dispatch_started_job` fails MESSAGE jobs if handler is None"
