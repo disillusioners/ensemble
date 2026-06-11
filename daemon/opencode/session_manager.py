@@ -284,6 +284,13 @@ class OpenCodeSessionManager:
             maxsize=WORKER_DONE_QUEUE_SIZE,
         )
         self._stop_event: asyncio.Event = asyncio.Event()
+        self._idle_event: asyncio.Event = asyncio.Event()
+        """Fires whenever the session reaches a terminal state (IDLE or
+        WAITING_FOR_INPUT) from ``wait_for_result``'s perspective. Cleared
+        when the session transitions to BUSY. Allows callers to wake up
+        immediately on state change instead of polling every 30s. Starts
+        SET because a fresh session is IDLE — re-synced below after any
+        persisted state is restored."""
 
         # ── HTTP client ─────────────────────────────────────────────────
         self._client: OpenCodeClient = client or OpenCodeClient(working_dir)
@@ -298,6 +305,11 @@ class OpenCodeSessionManager:
         # ── Restore persisted state ──────────────────────────────────────
         if persisted_state is not None:
             self._restore_from_persisted_state(persisted_state)
+
+        # Sync the idle event with whatever state we ended up in (default
+        # IDLE → SET, or restored BUSY → CLEAR, etc.). Done after restore
+        # so the event accurately reflects the post-restore state.
+        self._sync_idle_event_locked()
 
         # ── Background task ──────────────────────────────────────────────
         self._loop_task: asyncio.Task[None] | None = None
@@ -408,6 +420,13 @@ class OpenCodeSessionManager:
                     parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
                 )
 
+        # Sync the idle event with the restored state. Safe to call before
+        # the lock is ever acquired — this method runs once in __init__
+        # before any other coroutine can touch the manager. If a future
+        # caller invokes it on a live manager, the existing __init__ sync
+        # is idempotent so double-fire is harmless.
+        self._sync_idle_event_locked()
+
     def _save_state_locked(self) -> PersistedState:
         """Build a ``PersistedState`` from current state (lock must be held)."""
         return PersistedState(
@@ -445,6 +464,48 @@ class OpenCodeSessionManager:
         in CPython and we don't need a coherent snapshot here.
         """
         self._last_activity = datetime.now(timezone.utc)
+
+    def _sync_idle_event_locked(self) -> None:
+        """Set or clear ``_idle_event`` to match ``_state``.
+
+        Lock-free event ops are safe in CPython asyncio (the GIL guarantees
+        atomic attribute writes for ``Event.set/clear``), but we still
+        require the caller to hold ``_lock`` so the event is **observed**
+        in the same critical section as the state it mirrors — prevents a
+        waiter from waking up, clearing the event, and then racing with a
+        concurrent transition that re-sets the event before the waiter's
+        state check. Pattern 5 from the opencode knowledge base.
+        """
+        if self._state in (SessionState.IDLE, SessionState.WAITING_FOR_INPUT):
+            self._idle_event.set()
+        else:
+            self._idle_event.clear()
+
+    def _set_state_locked(self, new_state: SessionState) -> None:
+        """Transition ``_state`` and fire/clear ``_idle_event`` in one step.
+
+        Lock must be held by the caller. Replaces every direct
+        ``self._state = SessionState.X`` assignment so the idle event
+        cannot drift out of sync with the state it advertises.
+        """
+        self._state = new_state
+        self._sync_idle_event_locked()
+
+    def get_idle_event(self) -> asyncio.Event:
+        """Return the per-session event that fires on terminal transitions.
+
+        External callers (``external_opencode_wait_for_result``,
+        ``external_opencode_wait_any``) use this to wake up the moment a
+        state change happens, instead of polling every ``POLL_INTERVAL_S``
+        (30s) seconds. The returned event is process-local and lives for
+        the lifetime of this manager — safe to hold a reference.
+
+        Callers MUST ``event.clear()`` before awaiting ``event.wait()``
+        to avoid losing a signal that was set between their previous state
+        check and the wait. They MUST also re-check state after waking
+        (events coalesce — the loop should never trust the event alone).
+        """
+        return self._idle_event
 
     async def _persist_state(self) -> None:
         """Save state and invoke the callback.
@@ -529,7 +590,7 @@ class OpenCodeSessionManager:
                 logger.debug("SubmitRequest: lock acquired for %s", req.type)
                 if req.type in ("PROMPT", "COMMAND"):
                     # manager.go:332-344 — optimistic BUSY update
-                    self._state = SessionState.BUSY
+                    self._set_state_locked(SessionState.BUSY)
                     self._latest_response = None
                     self._is_worker_busy = True
 
@@ -618,7 +679,7 @@ class OpenCodeSessionManager:
         self._touch_activity()
         async with self._lock:
             self._aborted = True
-            self._state = SessionState.IDLE
+            self._set_state_locked(SessionState.IDLE)
             self._latest_response = {"status": "aborted", "message": "Task aborted by user"}
             self._is_worker_busy = False
             self._questions = []
@@ -702,7 +763,7 @@ class OpenCodeSessionManager:
                 async with self._lock:
                     self._questions = questions_for_session
                     if self._state != SessionState.WAITING_FOR_INPUT:
-                        self._state = SessionState.WAITING_FOR_INPUT
+                        self._set_state_locked(SessionState.WAITING_FOR_INPUT)
                         if self._on_state_change is not None:
                             state_to_save = self._save_state_locked()
                         else:
@@ -750,7 +811,7 @@ class OpenCodeSessionManager:
             if questions_for_session:
                 self._questions = questions_for_session
             if should_update_state:
-                self._state = new_state
+                self._set_state_locked(new_state)
             if should_update_worker_busy:
                 self._is_worker_busy = False
 
@@ -918,9 +979,9 @@ class OpenCodeSessionManager:
 
                         if len(self._questions) == 0:
                             if self._is_worker_busy:
-                                self._state = SessionState.BUSY
+                                self._set_state_locked(SessionState.BUSY)
                             else:
-                                self._state = SessionState.IDLE
+                                self._set_state_locked(SessionState.IDLE)
         else:
             # PROMPT, COMMAND, RESUME — single lock scope (existing pattern).
             # State mutations and the fire-and-forget worker task happen under
@@ -936,7 +997,7 @@ class OpenCodeSessionManager:
                         if isinstance(req.payload, CommandRequest):
                             self._last_agent = req.payload.agent
 
-                    self._state = SessionState.BUSY
+                    self._set_state_locked(SessionState.BUSY)
                     self._latest_response = None
                     self._is_worker_busy = True
 
@@ -946,7 +1007,7 @@ class OpenCodeSessionManager:
 
                 elif req.type == "RESUME":
                     # manager.go:439-448: resume + worker
-                    self._state = SessionState.BUSY
+                    self._set_state_locked(SessionState.BUSY)
                     self._latest_response = None
                     self._is_worker_busy = True
 
@@ -1077,9 +1138,9 @@ class OpenCodeSessionManager:
 
             # manager.go:511-515: set state based on questions
             if len(self._questions) > 0:
-                self._state = SessionState.WAITING_FOR_INPUT
+                self._set_state_locked(SessionState.WAITING_FOR_INPUT)
             else:
-                self._state = SessionState.IDLE
+                self._set_state_locked(SessionState.IDLE)
 
             state_to_save = self._save_state_locked() if self._on_state_change else None
 
@@ -1128,13 +1189,13 @@ class OpenCodeSessionManager:
 
             # manager.go:565-572: state transitions
             if len(self._questions) > 0:
-                self._state = SessionState.WAITING_FOR_INPUT
+                self._set_state_locked(SessionState.WAITING_FOR_INPUT)
             elif self._state == SessionState.WAITING_FOR_INPUT:
                 # manager.go:567-572: revert to previous state
                 if self._is_worker_busy:
-                    self._state = SessionState.BUSY
+                    self._set_state_locked(SessionState.BUSY)
                 else:
-                    self._state = SessionState.IDLE
+                    self._set_state_locked(SessionState.IDLE)
 
             if self._on_state_change is not None:
                 state_to_save = self._save_state_locked()
@@ -1196,7 +1257,7 @@ class OpenCodeSessionManager:
                 q for q in self._questions if q.get("id") != request_id
             ]
             if len(self._questions) == 0:
-                self._state = (
+                self._set_state_locked(
                     SessionState.BUSY if self._is_worker_busy else SessionState.IDLE
                 )
         await self._persist_state()

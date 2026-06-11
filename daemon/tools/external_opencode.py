@@ -9,6 +9,7 @@ prefix and category `external_opencode`. The factory function
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -520,10 +521,34 @@ Returns:
         if record is None:
             return f"[ERROR] Session '{session_name}' not found in project '{project}'"
         session_id = record.get("id", "")
-        
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         last_resp: "OpenCodeResponse | None" = None
+        # Try to get the per-session idle event so we can wake up
+        # immediately on state transitions (terminal = IDLE or
+        # WAITING_FOR_INPUT) instead of polling every 30s. Falls back to
+        # the legacy sleep loop if the manager isn't in the in-memory
+        # registry yet (e.g. before the loop's first tick) or if the
+        # accessor is itself mocked async (e.g. unit tests that stub
+        # the registry but not the manager).
+        manager = await registry.get_manager(session_id)
+        idle_event: asyncio.Event | None = None
+        if manager is not None:
+            raw = manager.get_idle_event()
+            if not inspect.isawaitable(raw):
+                idle_event = raw
+            else:
+                # Defensive: get_idle_event() should be sync, but if a
+                # mock/stub returns a coroutine (e.g. unit tests that
+                # override the accessor) we fall back to the sleep
+                # path. Warn so the misconfiguration is visible.
+                logger.warning(
+                    "[OpenCode] get_idle_event() returned an awaitable "
+                    "for session %s; falling back to sleep poll",
+                    session_id,
+                )
+
         while loop.time() < deadline:
             from daemon.opencode.server import OpenCodeRequest
             req = OpenCodeRequest(action="GET_STATUS", session_id=session_id)
@@ -541,7 +566,38 @@ Returns:
                         "Use external_opencode_answer_question(request_id, answers) to reply."
                         f"{_format_questions_block(questions)}"
                     )
-            await asyncio.sleep(POLL_INTERVAL_S)
+
+            if idle_event is not None:
+                # Event-based wait: clear BEFORE awaiting so we don't miss
+                # a signal that fires between our state check and the
+                # wait. Cap at POLL_INTERVAL_S as a safety net in case the
+                # event isn't fired (e.g. dispatcher crashed mid-worker).
+                #
+                # Implementation note: ``asyncio.wait_for`` does NOT
+                # accept a raw coroutine in 3.12+ (deprecated in 3.11,
+                # removal scheduled for 3.14). Wrap the coroutine in a
+                # Task and explicitly cancel it on the way out — a
+                # timed-out coroutine would otherwise leak with
+                # ``RuntimeWarning: coroutine was never awaited`` and
+                # could keep the event loop alive past shutdown.
+                idle_event.clear()
+                wait_task = asyncio.ensure_future(idle_event.wait())
+                try:
+                    await asyncio.wait_for(wait_task, timeout=POLL_INTERVAL_S)
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    if not wait_task.done():
+                        wait_task.cancel()
+                        # Drain the cancelled coroutine so the
+                        # CancelledError propagates and the GC can
+                        # collect the task frame.
+                        try:
+                            await wait_task
+                        except BaseException:
+                            pass
+            else:
+                await asyncio.sleep(POLL_INTERVAL_S)
 
         return _format_timeout(last_resp, timeout)
     
@@ -597,7 +653,32 @@ Returns:
         
         if not session_data:
             return "[ERROR] No valid sessions found"
-        
+
+        # Pull idle events for all known managers up-front. Missing
+        # managers (e.g. before the loop's first tick) or mocked-async
+        # accessors (e.g. unit tests that stub the registry but not the
+        # manager) silently fall back to the legacy sleep loop below —
+        # event-based wait + legacy sleep are mixed freely per session.
+        idle_events: list[asyncio.Event] = []
+        for sd in session_data:
+            mgr = await registry.get_manager(sd["session_id"])
+            if mgr is None:
+                continue
+            raw = mgr.get_idle_event()
+            if not inspect.isawaitable(raw):
+                idle_events.append(raw)
+            else:
+                # Defensive: get_idle_event() should be sync, but if a
+                # mock/stub returns a coroutine (e.g. unit tests that
+                # override the accessor) we skip this session's event
+                # and rely on the legacy sleep path. Warn so the
+                # misconfiguration is visible.
+                logger.warning(
+                    "[OpenCode] get_idle_event() returned an awaitable "
+                    "for session %s; falling back to sleep poll",
+                    sd["session_id"],
+                )
+
         while loop.time() < deadline:
             from daemon.opencode.server import OpenCodeRequest
             
@@ -657,8 +738,42 @@ Returns:
                             f"{_format_questions_block(questions)}"
                         )
                 return "\n".join(lines)
-            
-            await asyncio.sleep(POLL_INTERVAL_S)
+
+            if idle_events:
+                # Event-based multi-wait: clear all events BEFORE awaiting
+                # so we don't miss a signal that fires between the poll
+                # above and the wait. Wakes as soon as ANY event fires
+                # (or all fire / timeout). Cap at POLL_INTERVAL_S as a
+                # safety net.
+                #
+                # Implementation note: ``asyncio.wait`` does NOT accept
+                # raw coroutines in 3.12+ (deprecated in 3.11, removal
+                # scheduled for 3.14). Wrap each ``ev.wait()`` in a Task
+                # and explicitly cancel any unfinished tasks on the way
+                # out — otherwise the coroutines leaked on timeout would
+                # surface as ``RuntimeWarning: coroutine was never
+                # awaited`` and could keep the event loop alive past
+                # shutdown.
+                for ev in idle_events:
+                    ev.clear()
+                wait_tasks = [
+                    asyncio.ensure_future(ev.wait()) for ev in idle_events
+                ]
+                try:
+                    await asyncio.wait(wait_tasks, timeout=POLL_INTERVAL_S)
+                finally:
+                    for t in wait_tasks:
+                        if not t.done():
+                            t.cancel()
+                            # Drain the cancelled coroutine so the
+                            # CancelledError propagates and the GC can
+                            # collect the task frame.
+                            try:
+                                await t
+                            except BaseException:
+                                pass
+            else:
+                await asyncio.sleep(POLL_INTERVAL_S)
 
         return f"[TIMEOUT] No session completed within {timeout}s. Use external_opencode_get_status() to check each."
     

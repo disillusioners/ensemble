@@ -14,6 +14,8 @@ Coverage:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -53,11 +55,15 @@ EXPECTED_TOOL_NAMES = {
 def mock_registry() -> AsyncMock:
     """Return an AsyncMock that mimics ``OpenCodeSessionRegistry``.
 
-    The factory only calls ``get_session_record`` on the registry, so we
-    only need to stub that one method for most tests.
+    The factory calls ``get_session_record`` and ``get_manager`` on the
+    registry, so we stub both. ``get_manager`` defaults to ``None`` so
+    the wait loop falls back to the legacy 30s sleep path — the
+    event-based path is exercised in dedicated tests (e.g. tests that
+    patch a real ``OpenCodeSessionManager``).
     """
     registry = AsyncMock()
     registry.get_session_record = AsyncMock(return_value=None)
+    registry.get_manager = AsyncMock(return_value=None)
     return registry
 
 
@@ -927,6 +933,102 @@ class TestWaitForResultExecution:
         assert isinstance(result, str)
         assert result.startswith("[ERROR]")
         assert "ghost" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_wakes_on_idle_via_event(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Manager's idle_event fires mid-wait → immediate wake, next poll sees IDLE."""
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-ev"}
+        )
+        idle_event = asyncio.Event()
+
+        # Mock manager with real asyncio.Event
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=idle_event)
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        # First poll: BUSY. Second poll: IDLE (after event fires).
+        busy_resp = OpenCodeResponse(
+            status="ok",
+            data={"state": "BUSY", "latest_response": "working..."},
+        )
+        idle_resp = OpenCodeResponse(
+            status="ok",
+            data={"state": "IDLE", "latest_response": "done!"},
+        )
+
+        async def _fire_event_soon():
+            await asyncio.sleep(0.01)
+            idle_event.set()
+
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            side_effect=[busy_resp, idle_resp],
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            async with asyncio.TaskGroup() as tg:
+                event_task = tg.create_task(_fire_event_soon())
+                result_task = tg.create_task(wait_tool.ainvoke({
+                    "project": "myapp",
+                    "session_name": "feature-1",
+                    "timeout": 60,
+                }))
+
+        result = result_task.result()
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
+
+    @pytest.mark.asyncio
+    async def test_event_already_set_before_wait(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """If the idle_event is already set when wait_for_result starts, the first
+        poll returns immediately on IDLE (no background setter needed).
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-pre"}
+        )
+
+        idle_event = asyncio.Event()
+        idle_event.set()  # Pre-set
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=idle_event)
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        idle_resp = OpenCodeResponse(
+            status="ok",
+            data={"state": "IDLE", "latest_response": "fast done"},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=idle_resp,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+                "timeout": 60,
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[COMPLETED]")
 
 
 # =============================================================================
@@ -2040,3 +2142,152 @@ class TestSendMessageKeywordResolver:
             })
 
         assert self._captured_query(mock_get) == "heur"
+
+
+# =============================================================================
+# wait_any event-based wake tests
+# =============================================================================
+
+
+class TestWaitAnyEventWake:
+    """Tests for event-based wake in ``external_opencode_wait_any``."""
+
+    @pytest.mark.asyncio
+    async def test_wait_any_wakes_on_any_session_idle(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """When one session's idle_event fires, wait_any wakes immediately
+        and returns the completed session.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-ev"}
+        )
+
+        idle_event_a = asyncio.Event()
+        idle_event_b = asyncio.Event()
+
+        # Two managers, each with its own event
+        mock_mgr_a = MagicMock()
+        mock_mgr_a.get_idle_event = MagicMock(return_value=idle_event_a)
+        mock_mgr_b = MagicMock()
+        mock_mgr_b.get_idle_event = MagicMock(return_value=idle_event_b)
+
+        # Return different managers for different session IDs
+        async def _get_manager(session_id: str):
+            if "a" in session_id or session_id == "session-ev":
+                return mock_mgr_a
+            return mock_mgr_b
+
+        mock_registry.get_manager = AsyncMock(side_effect=_get_manager)
+
+        # First poll: both BUSY. Second poll: first IDLE, second BUSY.
+        busy_resp = OpenCodeResponse(
+            status="ok",
+            data={"state": "BUSY", "latest_response": "working..."},
+        )
+        idle_resp = OpenCodeResponse(
+            status="ok",
+            data={"state": "IDLE", "latest_response": "done!"},
+        )
+
+        async def _fire_event_a_soon():
+            await asyncio.sleep(0.01)
+            idle_event_a.set()
+
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            side_effect=[busy_resp, busy_resp, idle_resp, busy_resp],
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            async with asyncio.TaskGroup() as tg:
+                event_task = tg.create_task(_fire_event_a_soon())
+                result_task = tg.create_task(wait_any_tool.ainvoke({
+                    "sessions": [
+                        {"project": "p1", "session_name": "s1"},
+                        {"project": "p2", "session_name": "s2"},
+                    ],
+                    "timeout": 60,
+                }))
+
+        result = result_task.result()
+        assert isinstance(result, str)
+        assert result.startswith("[SUMMARY]")
+
+    @pytest.mark.asyncio
+    async def test_wait_any_does_not_spin_when_event_pre_set(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """Regression: pre-set idle_event must not cause a tight loop.
+
+        If the previous iteration left the event SET (e.g. it fired but the
+        poll this iteration still reports BUSY for all sessions), the next
+        ``ev.wait()`` would return immediately — burning CPU until the next
+        poll completes. The fix is to ``event.clear()`` before awaiting.
+
+        Symptom: ~10k+ poll calls per second instead of ~5 (one per
+        POLL_INTERVAL_S). We count poll invocations via a side-effect
+        mock; if the count exceeds a sane ceiling, the fix regressed.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-ev"}
+        )
+
+        idle_event = asyncio.Event()
+        idle_event.set()  # pre-set: simulates "fired in prior iteration"
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=idle_event)
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        # All polls return BUSY. Loop will keep polling, but the
+        # event-wait between polls must respect POLL_INTERVAL_S.
+        busy_resp = OpenCodeResponse(
+            status="ok",
+            data={"state": "BUSY", "latest_response": "working..."},
+        )
+
+        # Use a fixture patch for POLL_INTERVAL_S to keep the test fast.
+        from daemon.opencode import constants as oc_const
+
+        poll_count = 0
+
+        async def _counting_poll(req, _reg):
+            nonlocal poll_count
+            poll_count += 1
+            return busy_resp
+
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new=_counting_poll,
+        ), patch.object(oc_const, "POLL_INTERVAL_S", 0.2):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_any_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_any"
+            )
+
+            result = await wait_any_tool.ainvoke({
+                "sessions": [
+                    {"project": "p1", "session_name": "s1"},
+                ],
+                "timeout": 1,
+            })
+
+        # Sanity: the loop should hit TIMEOUT (no completion).
+        assert "[TIMEOUT]" in result
+        # With clear-before-wait: ~5 polls in 1s (one per POLL_INTERVAL_S).
+        # Without it: ~10k+ polls. Pick a ceiling that catches the bug
+        # but tolerates CI scheduling jitter.
+        assert poll_count <= 20, (
+            f"wait_any spun (polls={poll_count} in 1s) — "
+            "event.clear() before asyncio.wait() regressed"
+        )
+
