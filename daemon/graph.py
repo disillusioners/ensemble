@@ -699,7 +699,7 @@ def build_instance_graph(
         retry_config=retry_config,
         llm_standard=llm_standard,
     ))
-    graph.add_node("tools", ToolNode(tools))
+    graph.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     graph.add_node("nudge", nudge_node)
     
     # Add edges

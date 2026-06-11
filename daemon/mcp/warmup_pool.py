@@ -49,8 +49,14 @@ class McpWarmupPool:
 
     DEFAULT_POOL_SIZE = 1
 
-    def __init__(self) -> None:
-        """Initialize the warmup pool with empty state."""
+    def __init__(self, tool_call_timeout: int = 120) -> None:
+        """Initialize the warmup pool with empty state.
+
+        Args:
+            tool_call_timeout: Default timeout (seconds) applied to MCP tool calls
+                when adapting discovered tools. Defaults to 120 for backward
+                compatibility.
+        """
         self._pools: dict[str, asyncio.Queue[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._configs: dict[str, McpStdioConfig] = {}
@@ -60,6 +66,7 @@ class McpWarmupPool:
         self._health_task: asyncio.Task | None = None
         self._replenish_tasks: set[asyncio.Task] = set()
         self._replenish_semaphore: asyncio.Semaphore = asyncio.Semaphore(2)
+        self._tool_call_timeout: int = tool_call_timeout
 
     def register_server(self, server_name: str, config: McpStdioConfig, pool_size: int = DEFAULT_POOL_SIZE) -> None:
         """
@@ -222,7 +229,7 @@ class McpWarmupPool:
                     tools = self._tool_discovery_cache[server_name]
                 else:
                     tools = await load_mcp_tools(session)
-                    tools = adapt_mcp_tools(server_name, tools)
+                    tools = adapt_mcp_tools(server_name, tools, tool_call_timeout=self._tool_call_timeout)
                     self._tool_discovery_cache[server_name] = tools
 
             return PooledConnection(

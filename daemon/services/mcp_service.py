@@ -208,7 +208,8 @@ class McpService:
         mcp_tools = await load_mcp_tools(session)
 
         # Namespace tool names using adapt_mcp_tools from tool_adapter
-        return adapt_mcp_tools(server.name, mcp_tools)
+        timeout = self._manager.config.mcp_pool.tool_call_timeout
+        return adapt_mcp_tools(server.name, mcp_tools, tool_call_timeout=timeout)
 
     async def close_connections(self, instance_id: str) -> None:
         """Close all MCP connections for an instance.

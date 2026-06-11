@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+
+from langchain_core.tools import ToolException
 
 if TYPE_CHECKING:
     from langchain_core.tools import BaseTool
@@ -69,7 +72,37 @@ def is_mcp_tool(tool_name: str) -> bool:
     return "_" in tool_name[4:]
 
 
-def adapt_mcp_tools(server_name: str, tools: list[BaseTool]) -> list[BaseTool]:
+def _wrap_with_timeout(tool: BaseTool, timeout_seconds: float) -> BaseTool:
+    """Wrap a tool's coroutine with an asyncio timeout.
+
+    Returns a new tool whose coroutine is the original coroutine
+    guarded by asyncio.timeout(). On TimeoutError, raises
+    ToolException so LangGraph's ToolNode can handle it gracefully.
+    """
+    original_coroutine = tool.coroutine
+
+    async def _timed_coroutine(**kwargs):
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                return await original_coroutine(**kwargs)
+        except asyncio.TimeoutError:
+            tool_name = getattr(tool, "name", "<unknown>")
+            logger.warning(
+                f"MCP tool '{tool_name}' exceeded timeout of {timeout_seconds}s"
+            )
+            raise ToolException(
+                f"Tool '{tool_name}' timed out after {timeout_seconds}s. "
+                f"The MCP server may be unresponsive."
+            )
+
+    return tool.model_copy(update={"coroutine": _timed_coroutine})
+
+
+def adapt_mcp_tools(
+    server_name: str,
+    tools: list[BaseTool],
+    tool_call_timeout: int = 120,
+) -> list[BaseTool]:
     """
     Adapt MCP tools by prefixing their names and updating descriptions.
 
@@ -79,9 +112,12 @@ def adapt_mcp_tools(server_name: str, tools: list[BaseTool]) -> list[BaseTool]:
     Args:
         server_name: Name of the MCP server
         tools: List of MCP tools to adapt
+        tool_call_timeout: Per-tool call timeout in seconds. Set to 0
+            to disable timeout wrapping. Defaults to 120s.
 
     Returns:
-        List of adapted tools with prefixed names and updated descriptions
+        List of adapted tools with prefixed names, updated descriptions,
+        and timeout-wrapped coroutines.
     """
     if not tools:
         return tools
@@ -93,16 +129,21 @@ def adapt_mcp_tools(server_name: str, tools: list[BaseTool]) -> list[BaseTool]:
     adapted_tools: list[BaseTool] = []
 
     for tool in tools:
-        # Create a copy of the tool with adapted name
+        # Create a copy of the tool with adapted name, description, and coroutine
         new_name = f"{prefix}{tool.name}"
         new_description = f"{tool.description} {description_suffix}"
 
-        # Clone the tool with new attributes
-        adapted_tool = tool.copy()
-        adapted_tool.name = new_name
-        adapted_tool.description = new_description
+        adapted_tool = tool.model_copy(
+            update={"name": new_name, "description": new_description}
+        )
 
         adapted_tools.append(adapted_tool)
         logger.debug(f"Adapted MCP tool: {tool.name} -> {new_name}")
+
+    # Wrap with timeout (applies to all adapted tools)
+    if tool_call_timeout > 0:
+        adapted_tools = [
+            _wrap_with_timeout(t, tool_call_timeout) for t in adapted_tools
+        ]
 
     return adapted_tools

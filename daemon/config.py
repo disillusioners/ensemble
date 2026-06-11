@@ -291,6 +291,13 @@ class McpPoolConfig(BaseSettings):
     )
     health_check_interval: int = Field(default=60, ge=10, description="Health check interval in seconds")
     health_check_timeout: int = Field(default=5, ge=1, description="Health check timeout per connection in seconds")
+    tool_call_timeout: int = Field(
+        default=120,
+        ge=0,
+        description="Timeout in seconds for individual MCP tool call executions. "
+        "Applies to all transport types (STDIO, SSE, Streamable HTTP). "
+        "Set to 0 to disable timeout.",
+    )
 
 
 class Config(BaseSettings):

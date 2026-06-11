@@ -40,7 +40,8 @@ from .repositories import (
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
 from .mcp.builtin_servers import get_registry as get_mcp_registry, is_builtin_disabled
-from .mcp.warmup_pool import get_mcp_warmup_pool
+from .mcp.warmup_pool import McpWarmupPool, get_mcp_warmup_pool
+from .mcp import warmup_pool as _warmup_pool_module
 from .mcp.config import McpStdioConfig
 from .opencode import OpenCodeSessionRegistry, create_opencode_session_repository
 
@@ -829,7 +830,12 @@ class InstanceManager:
             logger.info("MCP warm-up pool disabled by config")
             return
 
-        pool = get_mcp_warmup_pool()
+        # Build pool with config-injected tool_call_timeout, then register it as
+        # the module-level singleton so other call sites (e.g. _warmup_and_report,
+        # _drain_warmup_pool) observe the same instance.
+        pool = McpWarmupPool(tool_call_timeout=self.config.mcp_pool.tool_call_timeout)
+        _warmup_pool_module._mcp_warmup_pool = pool
+
         registry = get_mcp_registry()
 
         for definition in registry.get_all():
