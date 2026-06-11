@@ -103,19 +103,6 @@ def _build_timed_coroutine(
     return _timed_coroutine
 
 
-def _wrap_with_timeout(tool: BaseTool, timeout_seconds: float) -> BaseTool:
-    """Wrap a tool's coroutine with an asyncio timeout.
-
-    Returns a new tool whose coroutine is the original coroutine
-    guarded by asyncio.timeout(). On TimeoutError, raises
-    ToolException so LangGraph's ToolNode can handle it gracefully.
-    """
-    timed_coroutine = _build_timed_coroutine(tool, timeout_seconds)
-    if timed_coroutine is None:
-        return tool
-    return tool.model_copy(update={"coroutine": timed_coroutine})
-
-
 def adapt_mcp_tools(
     server_name: str,
     tools: list[BaseTool],

@@ -1,7 +1,7 @@
 """Tests for MCP tool call timeout feature.
 
 Covers:
-- _wrap_with_timeout: timeout fires, success under timeout
+- _build_timed_coroutine: timeout fires, success under timeout
 - adapt_mcp_tools: timeout passthrough (wrapped) and disabled (not wrapped)
 - McpPoolConfig.tool_call_timeout: validation (ge=0, default=120)
 - ToolNode integration: timeout ToolException handled gracefully
@@ -16,10 +16,10 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 # ---------------------------------------------------------------------------
 # Unmock daemon.mcp.tool_adapter so we import the REAL module (the conftest
-# mock lacks _wrap_with_timeout and the timeout-aware adapt_mcp_tools).
+# mock lacks _build_timed_coroutine and the timeout-aware adapt_mcp_tools).
 # ---------------------------------------------------------------------------
 _mock_tool_adapter = sys.modules.pop("daemon.mcp.tool_adapter", None)
-from daemon.mcp.tool_adapter import adapt_mcp_tools, _wrap_with_timeout  # noqa: E402
+from daemon.mcp.tool_adapter import adapt_mcp_tools, _build_timed_coroutine  # noqa: E402
 if _mock_tool_adapter is not None:
     sys.modules["daemon.mcp.tool_adapter"] = _mock_tool_adapter
 
@@ -55,7 +55,7 @@ def _make_tool(name: str, coro, description: str = "test tool") -> StructuredToo
     The empty schema satisfies ``StructuredTool.__init__`` validation while
     keeping the tool callable with empty ``args={}`` (as produced by LLMs
     that invoke no-argument MCP tools). The returned tool still supports
-    ``model_copy(update={...})`` used by ``_wrap_with_timeout`` and
+    ``model_copy(update={...})`` used by ``_build_timed_coroutine`` and
     ``adapt_mcp_tools``.
     """
     return StructuredTool(
@@ -67,8 +67,8 @@ def _make_tool(name: str, coro, description: str = "test tool") -> StructuredToo
     )
 
 
-class TestWrapWithTimeout:
-    """Tests for _wrap_with_timeout."""
+class TestBuildTimedCoroutine:
+    """Tests for _build_timed_coroutine."""
 
     @pytest.mark.asyncio
     async def test_timeout_fires(self):
@@ -78,10 +78,11 @@ class TestWrapWithTimeout:
             return "done"
 
         tool = _make_tool("slow_tool", slow)
-        wrapped = _wrap_with_timeout(tool, 0.1)
+        timed_coro = _build_timed_coroutine(tool, 0.1)
+        assert timed_coro is not None
 
         with pytest.raises(ToolException, match="timed out"):
-            await wrapped.coroutine()
+            await timed_coro()
 
     @pytest.mark.asyncio
     async def test_success_under_timeout(self):
@@ -90,9 +91,10 @@ class TestWrapWithTimeout:
             return "fast_result"
 
         tool = _make_tool("fast_tool", fast)
-        wrapped = _wrap_with_timeout(tool, 5.0)
+        timed_coro = _build_timed_coroutine(tool, 5.0)
+        assert timed_coro is not None
 
-        result = await wrapped.coroutine()
+        result = await timed_coro()
         assert result == "fast_result"
 
 
