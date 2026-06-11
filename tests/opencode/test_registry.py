@@ -918,3 +918,225 @@ class TestLoadSessionIntoMemory:
         # the second load from overwriting it.
         stored = await registry.get_manager("id-1")
         assert stored is manager_first
+
+
+# =============================================================================
+# Resource-leak fix: abort_session evicts in-memory manager but keeps DB row
+# =============================================================================
+
+
+class TestAbortSessionResourceLeak:
+    """Resource-leak fixes for ``abort_session``.
+
+    The fix splits the responsibility cleanly:
+    - The in-memory manager is **popped** from ``_managers`` and ``stop()`` is
+      awaited (so the background loop and any in-flight HTTP client are torn
+      down). This prevents the "ghost manager" leak where a stopped manager
+      lingers in the dict indefinitely.
+    - The repository row is **left intact** so the session can be reloaded
+      on demand via ``load_session_into_memory``. Abort is "reset to IDLE,
+      ready for new input", not "destroy completely".
+    """
+
+    @pytest.mark.asyncio
+    async def test_abort_session_removes_manager_from_memory(
+        self,
+        registry: OpenCodeSessionRegistry,
+        mock_repository: MagicMock,
+        patched_client: AsyncMock,
+    ) -> None:
+        """After ``abort_session``, the manager is no longer in ``_managers``."""
+        mock_repository.get.return_value = {
+            "id": "sess-1",
+            "working_dir": "/dir",
+        }
+        mock_manager = AsyncMock()
+        registry._managers["sess-1"] = mock_manager
+
+        with patch("daemon.opencode.registry.asyncio.sleep", new_callable=AsyncMock):
+            await registry.abort_session("myapp", "feature-1")
+
+        assert "sess-1" not in registry._managers
+        # get_manager must now return None for the evicted session.
+        assert await registry.get_manager("sess-1") is None
+
+    @pytest.mark.asyncio
+    async def test_abort_session_keeps_db_row(
+        self,
+        registry: OpenCodeSessionRegistry,
+        mock_repository: MagicMock,
+        patched_client: AsyncMock,
+    ) -> None:
+        """After ``abort_session``, the repository row is NOT deleted.
+
+        This is the contract that lets the session be reloaded on demand
+        via ``load_session_into_memory`` once the caller references it
+        again. The DB row is the source of truth for "session exists";
+        the in-memory manager is just a hot cache.
+        """
+        mock_repository.get.return_value = {
+            "id": "sess-1",
+            "working_dir": "/dir",
+        }
+
+        with patch("daemon.opencode.registry.asyncio.sleep", new_callable=AsyncMock):
+            await registry.abort_session("myapp", "feature-1")
+
+        # Abort must NOT touch the repository — the row survives.
+        mock_repository.delete.assert_not_called()
+
+
+# =============================================================================
+# Resource-leak fix: create_new stops the old in-memory manager
+# =============================================================================
+
+
+class TestCreateNewStopsOldManager:
+    """Resource-leak fix for ``create_new``.
+
+    When a session is being replaced (same ``(project, session_name)`` already
+    exists), the registry now pops and ``stop()``s the old in-memory manager
+    BEFORE aborting the remote session. This prevents concurrent PROMPT
+    handlers from picking up a half-torn-down manager reference.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_new_stops_old_manager(
+        self,
+        registry: OpenCodeSessionRegistry,
+        mock_repository: MagicMock,
+        patched_client: AsyncMock,
+    ) -> None:
+        """``create_new`` awaits ``old_manager.stop()`` when replacing a session."""
+        mock_repository.get.return_value = {
+            "id": "old-id",
+            "working_dir": "/old/dir",
+        }
+        old_manager = AsyncMock()
+        registry._managers["old-id"] = old_manager
+        # Default _load_manager_into_memory is the AsyncMock registered on
+        # the test fixture; override it for this test to keep things simple.
+        registry._load_manager_into_memory = AsyncMock()
+
+        await registry.create_new("myapp", "feature-1", "/new/dir")
+
+        old_manager.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_create_new_pops_old_manager_from_memory(
+        self,
+        registry: OpenCodeSessionRegistry,
+        mock_repository: MagicMock,
+        patched_client: AsyncMock,
+    ) -> None:
+        """The old manager is removed from ``_managers`` after ``stop()``."""
+        mock_repository.get.return_value = {
+            "id": "old-id",
+            "working_dir": "/old/dir",
+        }
+        old_manager = AsyncMock()
+        registry._managers["old-id"] = old_manager
+        registry._load_manager_into_memory = AsyncMock()
+
+        await registry.create_new("myapp", "feature-1", "/new/dir")
+
+        # The old manager must be gone from the in-memory map (popped under
+        # the lock so concurrent callers can't grab the dying reference).
+        assert "old-id" not in registry._managers
+
+    @pytest.mark.asyncio
+    async def test_create_new_tolerates_old_manager_stop_failure(
+        self,
+        registry: OpenCodeSessionRegistry,
+        mock_repository: MagicMock,
+        patched_client: AsyncMock,
+    ) -> None:
+        """A failing ``old_manager.stop()`` is logged but does NOT block creation."""
+        mock_repository.get.return_value = {
+            "id": "old-id",
+            "working_dir": "/old/dir",
+        }
+        old_manager = AsyncMock()
+        old_manager.stop.side_effect = RuntimeError("loop wedged")
+        registry._managers["old-id"] = old_manager
+        registry._load_manager_into_memory = AsyncMock()
+
+        # Must not raise — the new session is created successfully.
+        result = await registry.create_new("myapp", "feature-1", "/new/dir")
+
+        assert result == "new-session-id"
+        mock_repository.create.assert_called_once()
+
+
+# =============================================================================
+# Resource-leak fix: evict_idle_sessions — TTL eviction
+# =============================================================================
+
+
+class TestEvictIdleSessions:
+    """``evict_idle_sessions(ttl_seconds)`` — TTL-based cleanup.
+
+    The fix: ``evict_idle_sessions`` now uses the public ``last_activity``
+    property and properly calls ``manager.stop()`` BEFORE popping the entry
+    from ``_managers``. Tests below verify both branches of the
+    ``(now - last).total_seconds() > ttl_seconds`` decision.
+    """
+
+    @pytest.mark.asyncio
+    async def test_evict_idle_sessions_removes_expired(
+        self, registry: OpenCodeSessionRegistry,
+    ) -> None:
+        """Managers idle > TTL are evicted from ``_managers`` and ``stop()``-ed."""
+        from datetime import datetime, timedelta, timezone
+
+        mock_manager = AsyncMock()
+        # last_activity 2 hours ago — well past the default 1h TTL.
+        mock_manager.last_activity = datetime.now(timezone.utc) - timedelta(hours=2)
+        registry._managers["sess-1"] = mock_manager
+
+        evicted = await registry.evict_idle_sessions(ttl_seconds=3600)
+
+        assert evicted == 1
+        assert "sess-1" not in registry._managers
+        mock_manager.stop.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_evict_idle_sessions_keeps_active(
+        self, registry: OpenCodeSessionRegistry,
+    ) -> None:
+        """Managers with recent activity are NOT evicted."""
+        from datetime import datetime, timezone
+
+        mock_manager = AsyncMock()
+        # last_activity "now" — far below the 1h TTL threshold.
+        mock_manager.last_activity = datetime.now(timezone.utc)
+        registry._managers["sess-1"] = mock_manager
+
+        evicted = await registry.evict_idle_sessions(ttl_seconds=3600)
+
+        assert evicted == 0
+        assert "sess-1" in registry._managers
+        mock_manager.stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_evict_idle_sessions_tolerates_stop_failure(
+        self, registry: OpenCodeSessionRegistry,
+    ) -> None:
+        """A failing ``manager.stop()`` is logged but the manager is still evicted.
+
+        The eviction is best-effort: one bad manager must not block cleanup
+        of the rest. The manager is removed from ``_managers`` even when
+        ``stop()`` raises.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        mock_manager = AsyncMock()
+        mock_manager.last_activity = datetime.now(timezone.utc) - timedelta(hours=2)
+        mock_manager.stop.side_effect = RuntimeError("loop wedged")
+        registry._managers["sess-1"] = mock_manager
+
+        # Must NOT raise — the stop() error is logged and eviction proceeds.
+        evicted = await registry.evict_idle_sessions(ttl_seconds=3600)
+
+        assert evicted == 1
+        assert "sess-1" not in registry._managers

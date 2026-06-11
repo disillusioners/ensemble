@@ -19,7 +19,7 @@ The OpenCodeClient is always mocked via AsyncMock — no real HTTP calls.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -1396,3 +1396,191 @@ class TestAnswerDeadlockFix:
 
         # Question was removed.
         assert manager._questions == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 12. Resource-leak fix: _poll_questions does NOT refresh _last_activity
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPollDoesNotTouchActivity:
+    """Resource-leak fix: ``_poll_questions`` must not refresh ``_last_activity``.
+
+    Background: the 30s question-poll fires from the background loop on
+    **every** session, busy or not. If the poll refreshed the activity
+    timestamp, every session would look perpetually active and the
+    registry's TTL-based ``evict_idle_sessions`` would never be able to
+    evict anything. Activity must be touched only on **meaningful** agent
+    interactions (submit, abort, get_status).
+    """
+
+    @pytest.mark.asyncio
+    async def test_touch_activity_not_called_in_poll(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """``_poll_questions`` must not modify ``_last_activity``."""
+        from datetime import datetime, timedelta, timezone
+
+        # Pin _last_activity to a known reference timestamp.
+        reference = datetime.now(timezone.utc) - timedelta(minutes=15)
+        manager._last_activity = reference
+
+        # No questions → manager stays IDLE, no state change.
+        await manager._poll_questions()
+
+        # The activity timestamp must be exactly the reference we set —
+        # the poll is not a "meaningful interaction" and must not refresh it.
+        assert manager._last_activity == reference
+
+    @pytest.mark.asyncio
+    async def test_poll_questions_does_not_call_touch_activity(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """Spy on ``_touch_activity`` and confirm ``_poll_questions`` does not invoke it.
+
+        This is the structural guarantee: the only way the timestamp could
+        move is if the poll path called ``_touch_activity``. A spy
+        catches both the function and any future refactor that adds the
+        call back in by accident.
+        """
+        manager._touch_activity = lambda: None  # type: ignore[assignment]
+        spy_calls: list[None] = []
+
+        def spy_touch() -> None:
+            spy_calls.append(None)
+
+        manager._touch_activity = spy_touch  # type: ignore[assignment]
+
+        await manager._poll_questions()
+
+        assert spy_calls == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 13. Resource-leak fix: IDLE heartbeat uses IDLE_HEARTBEAT_S, not POLL_INTERVAL_S
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestIdleHeartbeat:
+    """Resource-leak fix: idle sessions sleep for ``IDLE_HEARTBEAT_S`` (5 min)
+    instead of the 30s ``POLL_INTERVAL_S``.
+
+    The fix: ``_run_loop`` now reads ``is_idle`` under the lock (so the
+    signal is coherent with concurrent state mutations) and chooses the
+    appropriate sleep duration. Idle sessions have no work to do; polling
+    them every 30s is wasted CPU/IO.
+    """
+
+    @pytest.mark.asyncio
+    async def test_idle_heartbeat_uses_longer_interval(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When the session is IDLE+not busy, ``_run_loop`` sleeps for
+        ``IDLE_HEARTBEAT_S`` (300s), not ``POLL_INTERVAL_S`` (30s)."""
+        from daemon.opencode.constants import IDLE_HEARTBEAT_S, POLL_INTERVAL_S
+
+        manager._state = SessionState.IDLE
+        manager._is_worker_busy = False
+
+        # The first loop iteration must process *something* so that the
+        # wait() at the top completes; otherwise the loop blocks forever
+        # before reaching the sleep. We push a no-error / no-questions
+        # worker result, which leaves the manager in IDLE — the very
+        # state we want to test — when the sleep block runs.
+        sleep_calls: list[float] = []
+
+        async def sleep_capture(duration: float) -> None:
+            sleep_calls.append(duration)
+            # Break the next iteration's wait by setting the stop event
+            # (which also mirrors production shutdown).
+            manager._stop_event.set()
+
+        await manager._worker_done_queue.put(_WorkerResult(result={"ok": True}))
+
+        with patch(
+            "daemon.opencode.session_manager.asyncio.sleep",
+            side_effect=sleep_capture,
+        ):
+            await manager._run_loop()
+
+        # The first sleep the loop performs is the heartbeat — verify
+        # it's the IDLE heartbeat value, NOT the active POLL_INTERVAL_S.
+        assert len(sleep_calls) >= 1
+        assert sleep_calls[0] == IDLE_HEARTBEAT_S
+        assert sleep_calls[0] != POLL_INTERVAL_S
+        assert IDLE_HEARTBEAT_S > POLL_INTERVAL_S
+
+    @pytest.mark.asyncio
+    async def test_active_session_uses_poll_interval(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When the session is BUSY, ``_run_loop`` sleeps for ``POLL_INTERVAL_S``."""
+        from daemon.opencode.constants import IDLE_HEARTBEAT_S, POLL_INTERVAL_S
+
+        manager._state = SessionState.BUSY
+        manager._is_worker_busy = True
+        # Pre-seed a question so that when the worker done handler runs,
+        # the state is set to WAITING_FOR_INPUT (not IDLE). Otherwise the
+        # state would flip to IDLE and the sleep block would use the idle
+        # heartbeat interval instead of POLL_INTERVAL_S.
+        manager._questions = [{"id": "q1"}]
+
+        sleep_calls: list[float] = []
+
+        async def sleep_capture(duration: float) -> None:
+            sleep_calls.append(duration)
+            manager._stop_event.set()
+
+        await manager._worker_done_queue.put(_WorkerResult(result={"ok": True}))
+
+        with patch(
+            "daemon.opencode.session_manager.asyncio.sleep",
+            side_effect=sleep_capture,
+        ):
+            await manager._run_loop()
+
+        # Active sessions use the shorter poll interval.
+        assert len(sleep_calls) >= 1
+        assert sleep_calls[0] == POLL_INTERVAL_S
+        assert sleep_calls[0] != IDLE_HEARTBEAT_S
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 14. Resource-leak fix: double stop() is safe
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestStopSafety:
+    """Resource-leak fix: ``stop()`` is idempotent.
+
+    The registry now calls ``stop()`` on every evict/abort path, so a
+    double-stop (e.g. abort + later idle-eviction racing) must not crash.
+    """
+
+    @pytest.mark.asyncio
+    async def test_double_stop_is_safe(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """Calling ``stop()`` twice on a manager must not raise."""
+        manager.start()
+        # First stop: awaits the (idle) loop task to finish.
+        await manager.stop()
+        # Second stop: must be a no-op — the loop_task is None, the
+        # stop_event is already set. Should NOT raise.
+        await manager.stop()
+
+        # And a third call for good measure — the contract is "any
+        # number of stop() calls is safe".
+        await manager.stop()
+
+        # _loop_task must be reset to None after each stop.
+        assert manager._loop_task is None
+
+    @pytest.mark.asyncio
+    async def test_stop_without_start_is_safe(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """``stop()`` on a manager that was never started must not raise."""
+        # _loop_task is None — the body of stop() must short-circuit.
+        await manager.stop()
+        assert manager._loop_task is None

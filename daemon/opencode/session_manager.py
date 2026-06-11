@@ -305,6 +305,21 @@ class OpenCodeSessionManager:
         """Set by ``start()``; cleared by ``stop()``."""
 
     # ─────────────────────────────────────────────────────────────────
+    # Public properties
+    # ─────────────────────────────────────────────────────────────────
+
+    @property
+    def last_activity(self) -> datetime:
+        """Last meaningful agent interaction timestamp.
+
+        Public read-only accessor for the internal ``_last_activity`` field.
+        Callers (e.g. ``evict_idle_sessions`` in the registry) should use
+        this property instead of poking at the private attribute, so a
+        future rename or storage change doesn't silently break eviction.
+        """
+        return self._last_activity
+
+    # ─────────────────────────────────────────────────────────────────
     # Lifecycle
     # ─────────────────────────────────────────────────────────────────
 
@@ -382,9 +397,17 @@ class OpenCodeSessionManager:
             self._latest_response = data.latest_response
         if data.last_activity:
             try:
-                self._last_activity = datetime.fromisoformat(data.last_activity)
+                parsed = datetime.fromisoformat(data.last_activity)
             except ValueError:
                 logger.warning("failed to parse persisted last_activity")
+            else:
+                # Safety net: a manual edit or older migration may have
+                # produced a naive datetime. ``evict_idle_sessions`` does
+                # ``(aware - naive).total_seconds()`` and would crash.
+                # Treat naive timestamps as UTC so subtraction stays valid.
+                self._last_activity = (
+                    parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+                )
 
     def _save_state_locked(self) -> PersistedState:
         """Build a ``PersistedState`` from current state (lock must be held)."""
@@ -823,10 +846,16 @@ class OpenCodeSessionManager:
             # short enough to detect unexpected state changes (e.g. a
             # child subagent asking a question).
             try:
-                if (
-                    self._state == SessionState.IDLE
-                    and not self._is_worker_busy
-                ):
+                # Read idle state under the lock so the signal is coherent
+                # with concurrent state mutations. The sleep itself stays
+                # OUTSIDE the lock — never hold the lock while sleeping.
+                async with self._lock:
+                    is_idle = (
+                        self._state == SessionState.IDLE
+                        and not self._is_worker_busy
+                    )
+
+                if is_idle:
                     await asyncio.sleep(IDLE_HEARTBEAT_S)
                 else:
                     await asyncio.sleep(POLL_INTERVAL_S)

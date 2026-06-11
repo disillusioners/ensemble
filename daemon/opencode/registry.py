@@ -286,15 +286,15 @@ class OpenCodeSessionRegistry:
         if abort_err is None:
             await asyncio.sleep(ABORT_REMOTE_SETTLE_S)
 
-        # server.go:362-367: reset local manager state
-        manager = await self.get_manager(session_id)
+        # server.go:362-367: reset local manager state. Pop the manager
+        # from the in-memory map FIRST (under the lock) so a concurrent
+        # caller can't grab a dying reference, then abort and stop. The
+        # session row is intentionally left in the repository — abort is
+        # "reset to IDLE, ready for new input", not "destroy completely".
+        async with self._managers_lock:
+            manager = self._managers.pop(session_id, None)
         if manager is not None:
             await manager.abort_task()
-            # Fix 1: cancel the background loop and evict the in-memory
-            # manager. ``stop()`` is called BEFORE the dict pop so a
-            # concurrent caller can't grab a half-stopped reference.
-            # ``stop()`` failures are logged but do not block the rest
-            # of the cleanup.
             try:
                 await manager.stop()
             except Exception as exc:
@@ -302,19 +302,6 @@ class OpenCodeSessionRegistry:
                     "Failed to stop manager for %s during abort: %s",
                     session_id, exc,
                 )
-            async with self._managers_lock:
-                self._managers.pop(session_id, None)
-
-        # Fix 1: delete the DB row so the session is fully gone after
-        # abort. A missing row is acceptable (the row may have been
-        # removed out-of-band); we log and continue.
-        try:
-            self._repository.delete(project, session_name)
-        except KeyError:
-            logger.debug(
-                "Session row %s/%s already gone during abort",
-                project, session_name,
-            )
 
         logger.info("Aborted tasks for session %s/%s", project, session_name)
 
@@ -563,7 +550,7 @@ class OpenCodeSessionRegistry:
                 manager = self._managers.get(session_id)
             if manager is None:
                 continue
-            last = getattr(manager, "_last_activity", None)
+            last = manager.last_activity
             if last is not None and (now - last).total_seconds() > ttl_seconds:
                 try:
                     await manager.stop()
