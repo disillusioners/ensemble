@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from .client import OpenCodeClient
@@ -156,6 +157,22 @@ class OpenCodeSessionRegistry:
                 session_name,
                 old_session_id,
             )
+            # Fix 2: stop and evict the in-memory manager for the old
+            # session BEFORE we tear down the remote session, so any
+            # concurrent prompt doesn't get a torn-down manager reference.
+            # Old manager cleanup is best-effort: failure here must not
+            # block creation of the new session.
+            if old_session_id:
+                async with self._managers_lock:
+                    old_manager = self._managers.pop(old_session_id, None)
+                if old_manager is not None:
+                    try:
+                        await old_manager.stop()
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to stop old manager %s: %s",
+                            old_session_id, exc,
+                        )
             if old_session_id and old_working_dir:
                 try:
                     # server.go:314: best-effort abort; failure is logged
@@ -273,6 +290,31 @@ class OpenCodeSessionRegistry:
         manager = await self.get_manager(session_id)
         if manager is not None:
             await manager.abort_task()
+            # Fix 1: cancel the background loop and evict the in-memory
+            # manager. ``stop()`` is called BEFORE the dict pop so a
+            # concurrent caller can't grab a half-stopped reference.
+            # ``stop()`` failures are logged but do not block the rest
+            # of the cleanup.
+            try:
+                await manager.stop()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to stop manager for %s during abort: %s",
+                    session_id, exc,
+                )
+            async with self._managers_lock:
+                self._managers.pop(session_id, None)
+
+        # Fix 1: delete the DB row so the session is fully gone after
+        # abort. A missing row is acceptable (the row may have been
+        # removed out-of-band); we log and continue.
+        try:
+            self._repository.delete(project, session_name)
+        except KeyError:
+            logger.debug(
+                "Session row %s/%s already gone during abort",
+                project, session_name,
+            )
 
         logger.info("Aborted tasks for session %s/%s", project, session_name)
 
@@ -492,6 +534,48 @@ class OpenCodeSessionRegistry:
         return on_state_change
 
     # ── Cleanup ───────────────────────────────────────────────────────────
+
+    async def evict_idle_sessions(self, ttl_seconds: int = 3600) -> int:
+        """Remove managers that haven't been accessed in ``ttl_seconds``.
+
+        Iterates over ``_managers`` and stops + drops any manager whose
+        ``_last_activity`` timestamp is older than the threshold. The
+        session row is **not** deleted from the repository — it can be
+        reloaded into memory on demand via ``load_session_into_memory``
+        if the caller references it again.
+
+        Best-effort: errors from individual ``stop()`` calls are
+        swallowed so one bad manager does not block eviction of the
+        rest. The manager is still removed from the dict afterwards.
+
+        Args:
+            ttl_seconds: Idle threshold in seconds. Defaults to 1 hour.
+
+        Returns:
+            Number of managers evicted on this call.
+        """
+        now = datetime.now(timezone.utc)
+        evicted = 0
+        # Snapshot keys first so we don't mutate the dict during iteration.
+        session_ids = list(self._managers.keys())
+        for session_id in session_ids:
+            async with self._managers_lock:
+                manager = self._managers.get(session_id)
+            if manager is None:
+                continue
+            last = getattr(manager, "_last_activity", None)
+            if last is not None and (now - last).total_seconds() > ttl_seconds:
+                try:
+                    await manager.stop()
+                except Exception as exc:
+                    logger.warning(
+                        "Error stopping idle manager %s during eviction: %s",
+                        session_id, exc,
+                    )
+                async with self._managers_lock:
+                    self._managers.pop(session_id, None)
+                evicted += 1
+        return evicted
 
     async def shutdown(self) -> None:
         """Stop all running managers. Used at daemon shutdown."""

@@ -1194,6 +1194,15 @@ class InstanceManager:
                         f"Released {released_count} cached instance(s) exceeding "
                         f"{INSTANCE_CACHE_TTL_HOURS}h TTL"
                     )
+
+                # Evict idle opencode session managers (1h TTL)
+                if self._opencode_registry is not None:
+                    try:
+                        evicted = await self._opencode_registry.evict_idle_sessions(ttl_seconds=3600)
+                        if evicted > 0:
+                            logger.info(f"Evicted {evicted} idle opencode session managers")
+                    except Exception as e:
+                        logger.warning(f"Failed to evict idle opencode sessions: {e}")
             except asyncio.CancelledError:
                 break
             except Exception as e:

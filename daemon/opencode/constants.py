@@ -39,6 +39,13 @@ POLL_INTERVAL_S: int = 30  # Go: config.PollInterval = 30 * time.Second
 """Interval for the question-polling background task. Detects interactive
 prompts that are not surfaced through the worker completion path."""
 
+IDLE_HEARTBEAT_S: int = 300  # 5 minutes — used when session is IDLE+not busy
+"""Long heartbeat interval for idle sessions. Idle sessions don't need
+aggressive 30s polling; this longer interval detects unexpected state
+changes (e.g. external session activity) without burning CPU/IO. Matches
+the spirit of the Go binary's ticker but skips the wake-up cost when the
+session has no work to do. See ``session_manager._run_loop``."""
+
 # ── Session manager queues ─────────────────────────────────────────────────────
 INPUT_QUEUE_SIZE: int = 10  # Go: make(chan Request, 10)
 """Buffered size of the manager's input request queue. Mirrors the Go binary

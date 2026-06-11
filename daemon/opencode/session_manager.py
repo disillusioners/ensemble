@@ -47,6 +47,7 @@ from .client import (
 )
 from .constants import (
     INPUT_QUEUE_SIZE,
+    IDLE_HEARTBEAT_S,
     POLL_INTERVAL_S,
     RESUME_AGENT,
     RESUME_TEXT,
@@ -408,11 +409,30 @@ class OpenCodeSessionManager:
         # from writes) but is safe and avoids a second lock type.
         return self._save_state_locked()
 
+    def _touch_activity(self) -> None:
+        """Update the last-activity timestamp.
+
+        Called only on **meaningful agent interactions** (submit_prompt,
+        submit_command, submit_answer, get_status, abort). Background
+        polling paths (``_poll_questions``, ``_persist_state``) MUST NOT
+        call this — otherwise TTL-based eviction cannot distinguish an
+        idle session from an active one (every 30s poll would refresh
+        the timestamp, making the session appear perpetually active).
+
+        Synchronous, no lock required: a single attribute write is atomic
+        in CPython and we don't need a coherent snapshot here.
+        """
+        self._last_activity = datetime.now(timezone.utc)
+
     async def _persist_state(self) -> None:
-        """Save state and invoke the callback, then update last_activity.
+        """Save state and invoke the callback.
 
         Called whenever state changes. The callback is awaited if it is
         async; called synchronously if not.
+
+        Note: this method does NOT touch ``_last_activity``. Activity is
+        only updated by ``_touch_activity()`` on meaningful agent
+        interactions — see the docstring there.
         """
         state_to_save = self._save_state_locked()
         if self._on_state_change is not None:
@@ -423,7 +443,6 @@ class OpenCodeSessionManager:
                 await cb(state_to_save)
             else:
                 cb(state_to_save)
-        self._last_activity = datetime.now(timezone.utc)
 
     # ─────────────────────────────────────────────────────────────────
     # Public API
@@ -484,6 +503,8 @@ class OpenCodeSessionManager:
         logger.debug("SubmitRequest: acquiring lock for %s", req.type)
 
         async def do_submit() -> None:
+            # Meaningful agent interaction — refresh activity timestamp.
+            self._touch_activity()
             async with self._lock:
                 logger.debug("SubmitRequest: lock acquired for %s", req.type)
                 if req.type in ("PROMPT", "COMMAND"):
@@ -573,6 +594,8 @@ class OpenCodeSessionManager:
         The Go version is a simple sync method; we make it async to allow
         proper state persistence without spawning a task for every abort.
         """
+        # Meaningful agent interaction (ABORT_SESSION) — refresh activity.
+        self._touch_activity()
         async with self._lock:
             self._aborted = True
             self._state = SessionState.IDLE
@@ -609,6 +632,11 @@ class OpenCodeSessionManager:
         Returns:
             A ``get_snapshot()`` dict (potentially with updated state).
         """
+        # Meaningful agent interaction (GET_STATUS) — refresh activity.
+        # Polling for status is "active waiting" from the caller's
+        # perspective and should keep the session's TTL alive.
+        self._touch_activity()
+
         messages: list[dict[str, Any]] | None = None
         try:
             messages = await self._client.get_session_messages(self.session_id, limit=1)
@@ -781,14 +809,27 @@ class OpenCodeSessionManager:
             except Exception as exc:
                 logger.exception("unhandled error in session loop for %s: %s", self.session_id, exc)
 
-            # ── Poll timer (30s interval) ──────────────────────────────
+            # ── Poll timer (30s active, 5min idle) ─────────────────────
             # In the Go code, the ticker fires *in addition to* the select
             # branches above. We implement this as a sleep that runs after
             # each iteration. Using a separate task for the timer would
             # require a more complex select multiplexer, so we do a simple
             # "after processing, sleep then poll" approach.
+            #
+            # Idle sessions don't need the full 30s heartbeat — they have
+            # no work to do and won't generate a question out of thin air.
+            # We use ``IDLE_HEARTBEAT_S`` (5 min) instead, which is long
+            # enough that idle sessions consume negligible CPU/IO but
+            # short enough to detect unexpected state changes (e.g. a
+            # child subagent asking a question).
             try:
-                await asyncio.sleep(POLL_INTERVAL_S)
+                if (
+                    self._state == SessionState.IDLE
+                    and not self._is_worker_busy
+                ):
+                    await asyncio.sleep(IDLE_HEARTBEAT_S)
+                else:
+                    await asyncio.sleep(POLL_INTERVAL_S)
                 await self._poll_questions()
             except asyncio.CancelledError:
                 raise  # propagate to outer loop
