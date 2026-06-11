@@ -8,7 +8,7 @@
 
 | Pack | Location | Scope | Timeout | Last Run | Status |
 |------|----------|-------|---------|----------|--------|
-| opencode_native_tools_unit_test | tests/opencode/ | OpenCode native tools: state derivation, repository CRUD, table creation, HTTP client (_request patching), session manager (state machine + deadlock), registry, dispatch functions, tool factory + 3 ANSWER deadlock tests + 3 engine disposal tests | 2 min | 2026-06-07 | ✅ PASS (409/409, 4 integration deselected, feature/opencode-native-tools, commit 1f3a3b7) |
+| opencode_native_tools_unit_test | tests/opencode/ | OpenCode native tools: state derivation, repository CRUD, table creation, HTTP client (_request patching), session manager (state machine + deadlock), registry, dispatch functions, tool factory + 3 ANSWER deadlock tests + 3 engine disposal tests | 2 min | 2026-06-11 | ✅ PASS (465/465, 0 failures, fix/opencode-wait-latency, commit 547035e) |
 | core_unit_test | test/packs/core_unit_test.sh | Core daemon (agents, config, loader, manager, models, tools, persistence, queue, registry, telegram) + tool filter | 2 min | 2026-06-05 | ✅ PASS (665/665, fix/windows-encoding-paths, 0 regressions) |
 | write_pause_guard_unit_test | tests/unit/test_write_pause_guard.py | WritePauseGuard: state machine, drain event, pause/resume, RuntimeError, sync/async interop, WriteGuardSession | 2 min | 2026-06-04 | ✅ PASS (27/27, Phase 3, 0 failures) |
 | data_migrator_unit_test | tests/unit/test_data_migrator.py | TableMigrator: FK-safe ordering, ON CONFLICT idempotent, batch processing, cancel, validate, _table_exists | 2 min | 2026-06-04 | ✅ PASS (30/30, Phase 3, 0 failures) |
