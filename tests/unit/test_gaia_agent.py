@@ -189,7 +189,7 @@ class TestGaiaRegistryDiscovery:
         assert gaia is not None
         assert gaia.tools is not None
         assert isinstance(gaia.tools, ToolFilter)
-        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp"]
+        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp", "context"]
         assert gaia.tools.deny is None
 
     def test_gaia_tags_and_capabilities(self) -> None:
@@ -362,7 +362,7 @@ class TestGaiaToolFiltering:
         gaia = registry.get("gaia")
         assert gaia is not None
         assert gaia.tools is not None
-        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp"]
+        assert gaia.tools.allow == ["bash", "filesystem", "help", "mcp", "context"]
 
     def test_gaia_tools_doc_loads(self) -> None:
         """load_tools_doc_for_agent should return docs for Gaia's allowed tools."""
