@@ -123,7 +123,6 @@ async def _is_descendant_of(
     return False
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Public types
 # ─────────────────────────────────────────────────────────────────────────────
@@ -459,8 +458,6 @@ class OpenCodeSessionManager:
         """
         state_to_save = self._save_state_locked()
         if self._on_state_change is not None:
-            import asyncio as a
-
             cb = self._on_state_change
             if asyncio.iscoroutinefunction(cb):
                 await cb(state_to_save)
@@ -491,9 +488,9 @@ class OpenCodeSessionManager:
             Dict with keys: ``state``, ``session_id``, ``latest_response``,
             ``questions``.
         """
-        # We use sync_lock for the read, matching the Go RLock semantics.
-        # Using `self._lock` is slightly more conservative (excludes concurrent
-        # writes) but is correct.
+        # NOTE: No lock is held here. The Go version uses RLock, but Python's
+        # asyncio.Lock has no RLock equivalent. Attribute reads are atomic
+        # in CPython, and callers tolerate slightly stale snapshots.
         return {
             "state": self._state.value,
             "session_id": self.session_id,

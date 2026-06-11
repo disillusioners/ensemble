@@ -239,26 +239,15 @@ class OpenCodeSessionRegistry:
     async def abort_session(self, project: str, session_name: str) -> dict[str, Any]:
         """Abort a session: remote + local.
 
-        Ports the ``ABORT_SESSION`` block in ``server.go`` lines 338-374:
-
         1. Look up the session in the repository.
         2. Best-effort ``AbortSession`` HTTP call.
-        3. If remote abort succeeded, wait 3 seconds for the server to
-           settle (server.go:359).
-        4. Reset the in-memory manager's state via ``AbortTask``.
-        5. Return a status message.
-
-        Args:
-            project: Project identifier.
-            session_name: Session name.
-
-        Returns:
-            Dict with ``status`` and ``message`` keys (matches the
-            envelope used by the Go server).
-
-        Raises:
-            KeyError: When the session is not in the repository. Mirrors
-                the Go version's ``"Session not found"`` error response.
+        3. If remote abort succeeded, wait 3 seconds for settle.
+        4. Pop the in-memory manager from ``_managers``, reset its state
+           via ``abort_task()``, and ``stop()`` the background loop.
+        5. **The repository row is intentionally left intact** — abort is
+           "reset to IDLE, ready for new input", not "destroy completely".
+           The session can be reloaded on demand via ``load_session_into_memory``.
+        6. Return a status message.
         """
         # server.go:347-351
         session = self._repository.get(project, session_name)
@@ -526,7 +515,7 @@ class OpenCodeSessionRegistry:
         """Remove managers that haven't been accessed in ``ttl_seconds``.
 
         Iterates over ``_managers`` and stops + drops any manager whose
-        ``_last_activity`` timestamp is older than the threshold. The
+        ``last_activity`` timestamp is older than the threshold. The
         session row is **not** deleted from the repository — it can be
         reloaded into memory on demand via ``load_session_into_memory``
         if the caller references it again.
