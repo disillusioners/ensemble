@@ -72,13 +72,18 @@ def is_mcp_tool(tool_name: str) -> bool:
     return "_" in tool_name[4:]
 
 
-def _wrap_with_timeout(tool: BaseTool, timeout_seconds: float) -> BaseTool:
-    """Wrap a tool's coroutine with an asyncio timeout.
+def _build_timed_coroutine(
+    tool: BaseTool, timeout_seconds: float
+):
+    """Build a timeout-wrapped coroutine for a tool.
 
-    Returns a new tool whose coroutine is the original coroutine
-    guarded by asyncio.timeout(). On TimeoutError, raises
-    ToolException so LangGraph's ToolNode can handle it gracefully.
+    Returns None if the tool has no coroutine (caller should skip wrapping).
+    On TimeoutError, the wrapped coroutine raises ToolException so
+    LangGraph's ToolNode can handle it gracefully.
     """
+    if tool.coroutine is None:
+        return None
+
     original_coroutine = tool.coroutine
 
     async def _timed_coroutine(**kwargs):
@@ -95,7 +100,20 @@ def _wrap_with_timeout(tool: BaseTool, timeout_seconds: float) -> BaseTool:
                 f"The MCP server may be unresponsive."
             )
 
-    return tool.model_copy(update={"coroutine": _timed_coroutine})
+    return _timed_coroutine
+
+
+def _wrap_with_timeout(tool: BaseTool, timeout_seconds: float) -> BaseTool:
+    """Wrap a tool's coroutine with an asyncio timeout.
+
+    Returns a new tool whose coroutine is the original coroutine
+    guarded by asyncio.timeout(). On TimeoutError, raises
+    ToolException so LangGraph's ToolNode can handle it gracefully.
+    """
+    timed_coroutine = _build_timed_coroutine(tool, timeout_seconds)
+    if timed_coroutine is None:
+        return tool
+    return tool.model_copy(update={"coroutine": timed_coroutine})
 
 
 def adapt_mcp_tools(
@@ -129,21 +147,22 @@ def adapt_mcp_tools(
     adapted_tools: list[BaseTool] = []
 
     for tool in tools:
-        # Create a copy of the tool with adapted name, description, and coroutine
+        # Build adapted name and description
         new_name = f"{prefix}{tool.name}"
         new_description = f"{tool.description} {description_suffix}"
 
-        adapted_tool = tool.model_copy(
-            update={"name": new_name, "description": new_description}
-        )
+        # When timeout is enabled and the tool has a coroutine, build the
+        # wrapped coroutine so we can set name, description, and coroutine
+        # in a single model_copy call. Otherwise, just set name and
+        # description in one copy.
+        update: dict = {"name": new_name, "description": new_description}
+        if tool_call_timeout > 0:
+            timed_coroutine = _build_timed_coroutine(tool, tool_call_timeout)
+            if timed_coroutine is not None:
+                update["coroutine"] = timed_coroutine
 
+        adapted_tool = tool.model_copy(update=update)
         adapted_tools.append(adapted_tool)
         logger.debug(f"Adapted MCP tool: {tool.name} -> {new_name}")
-
-    # Wrap with timeout (applies to all adapted tools)
-    if tool_call_timeout > 0:
-        adapted_tools = [
-            _wrap_with_timeout(t, tool_call_timeout) for t in adapted_tools
-        ]
 
     return adapted_tools

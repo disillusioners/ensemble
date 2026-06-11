@@ -540,6 +540,7 @@ class TestWebFetchBootstrapIntegration:
         config.mcp_pool.servers = {}
         config.mcp_pool.health_check_interval = 60
         config.mcp_pool.health_check_timeout = 5
+        config.mcp_pool.tool_call_timeout = 120
 
         config.job_system = MagicMock(spec=JobSystemConfig)
         config.job_system.default_max_retries = 3

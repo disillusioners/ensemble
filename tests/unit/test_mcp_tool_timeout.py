@@ -147,6 +147,22 @@ class TestMcpPoolConfigValidation:
         config = McpPoolConfig()
         assert config.tool_call_timeout == 120
 
+    def test_env_var_override(self, monkeypatch):
+        """MCP_POOL_TOOL_CALL_TIMEOUT env var should override default."""
+        monkeypatch.setenv("MCP_POOL_TOOL_CALL_TIMEOUT", "300")
+        config = McpPoolConfig()
+        assert config.tool_call_timeout == 300
+
+    def test_upper_bound_raises(self):
+        """tool_call_timeout > 3600 should raise ValidationError."""
+        with pytest.raises(ValidationError):
+            McpPoolConfig(tool_call_timeout=3601)
+
+    def test_max_value_valid(self):
+        """tool_call_timeout == 3600 is the inclusive upper bound and is valid."""
+        config = McpPoolConfig(tool_call_timeout=3600)
+        assert config.tool_call_timeout == 3600
+
 
 class TestToolNodeIntegration:
     """Integration test: ToolNode gracefully handles MCP tool timeout."""

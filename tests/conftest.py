@@ -51,7 +51,7 @@ mock_langgraph_checkpoint_sqlite_aio = create_mock_module("langgraph.checkpoint.
 mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
     "mcp_tool_name": lambda server_name, tool_name: f"mcp_{server_name}_{tool_name}",
     "is_mcp_tool": lambda name: name.startswith("mcp_") and "_" in name[4:] if name else False,
-    "adapt_mcp_tools": lambda server_name, tools: tools,
+    "adapt_mcp_tools": lambda server_name, tools, tool_call_timeout=120: tools,
     "_slugify": lambda name: name.lower().replace("-", "_").replace(" ", "_"),
 })
 

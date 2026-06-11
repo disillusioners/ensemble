@@ -81,7 +81,7 @@ class TestFullFlowMcpToolsInjected:
             return_value=[tool1, tool2]
         ), patch(
             "daemon.services.mcp_service.adapt_mcp_tools",
-                side_effect=lambda name, tools: [
+                side_effect=lambda name, tools, tool_call_timeout=120: [
                     _make_adapted_tool(name=f"mcp_{name.replace('-', '_').replace(' ', '_')}_{t.name}", description=t.description)
                     for t in tools
                 ]
@@ -116,7 +116,7 @@ class TestFullFlowMcpToolsInjected:
 
         mock_conn_mgr.get_session.side_effect = get_session
 
-        def adapt_tools(name, tools):
+        def adapt_tools(name, tools, tool_call_timeout=120):
             slugified_name = name.replace('-', '_').replace(' ', '_')
             prefix = f"mcp_{slugified_name}_"
             return [_make_adapted_tool(name=f"{prefix}{t.name}", description=t.description) for t in tools]
@@ -377,7 +377,7 @@ class TestEdgeCases:
         mock_conn_mgr.get_session.return_value = MagicMock()
         mock_conn_mgr.connect_instance = AsyncMock()
 
-        def adapt_tools(name, tools):
+        def adapt_tools(name, tools, tool_call_timeout=120):
             if name == "filter-test":
                 return [_make_adapted_tool(name=f"mcp_filter_test_{t.name}", description=t.description) for t in tools]
             return tools
@@ -523,7 +523,7 @@ class TestLifecycleCleanup:
 
         mock_conn_mgr.get_session.side_effect = get_session
 
-        def adapt_tools(name, tools):
+        def adapt_tools(name, tools, tool_call_timeout=120):
             slugified_name = name.replace('-', '_').replace(' ', '_')
             return [_make_adapted_tool(name=f"mcp_{slugified_name}_{t.name}", description=t.description) for t in tools]
 

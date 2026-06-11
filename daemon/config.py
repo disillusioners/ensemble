@@ -294,6 +294,7 @@ class McpPoolConfig(BaseSettings):
     tool_call_timeout: int = Field(
         default=120,
         ge=0,
+        le=3600,
         description="Timeout in seconds for individual MCP tool call executions. "
         "Applies to all transport types (STDIO, SSE, Streamable HTTP). "
         "Set to 0 to disable timeout.",

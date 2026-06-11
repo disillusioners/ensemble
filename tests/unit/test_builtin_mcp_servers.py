@@ -304,6 +304,7 @@ def mock_config():
     config.mcp_pool.servers = {}
     config.mcp_pool.health_check_interval = 60
     config.mcp_pool.health_check_timeout = 5
+    config.mcp_pool.tool_call_timeout = 120
 
     return config
 
