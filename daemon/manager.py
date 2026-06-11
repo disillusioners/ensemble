@@ -1071,11 +1071,15 @@ class InstanceManager:
         # Loads all persisted sessions from the dedicated opencode DB and
         # starts their background state-machine loops. Must happen after
         # the engine is ready but before agents can use the tools.
-        try:
-            recovered = await self._opencode_registry.recover_from_registry()
-            logger.info(f"Recovered {recovered} opencode session(s) from registry")
-        except Exception as exc:
-            logger.warning(f"Failed to recover opencode sessions: {exc}")
+        #
+        # DISABLED: loading all sessions on startup causes memory bloat.
+        # Sessions are now loaded lazily on-demand via load_session_into_memory().
+        # Uncomment below to re-enable recovery on startup.
+        # try:
+        #     recovered = await self._opencode_registry.recover_from_registry()
+        #     logger.info(f"Recovered {recovered} opencode session(s) from registry")
+        # except Exception as exc:
+        #     logger.warning(f"Failed to recover opencode sessions: {exc}")
 
         if self._ensemble_config is not None and self._ensemble_config.is_postgres:
             pg = self._ensemble_config.postgres
