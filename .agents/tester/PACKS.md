@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 103 packs
-- Unit: 88 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 104 packs
+- Unit: 89 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -48,6 +48,7 @@
 | mcp_warmup_pool_unit_test | tests/unit/test_mcp_warmup_pool.py | MCP warm-up pool: lifecycle, acquire, replenish, health check, drain, liveness probe, exception logging, CancelledError handling, BaseException propagation, **retry logic** (3 attempts, backoff, timeout, log levels) | 2 min | 2026-05-20 | ✅ PASS (40 tests, fix/mcp-stdio-connection-init, ManagedClientSession verified) |
 | mcp_connection_manager_unit_test | tests/unit/test_mcp_connection_manager.py | MCP connection manager: transfer_session(), pool integration | 2 min | 2026-05-20 | ✅ PASS (19 tests, fix/mcp-stdio-connection-init, ManagedClientSession verified) |
 | mcp_service_pool_unit_test | tests/unit/test_mcp_service.py | MCP service pool-aware: preload, liveness probe, graceful degradation | 2 min | 2026-05-20 | ✅ PASS (25 tests, fix/mcp-stdio-connection-init) |
+| mcp_tool_timeout_unit_test | tests/unit/test_mcp_tool_timeout.py | MCP tool call timeout: _build_timed_coroutine, adapt_mcp_tools wrapping, McpPoolConfig validation (0/negative/default/env/max), ToolNode integration | 2 min | 2026-06-11 | ✅ PASS (12/12, feature/mcp-tool-call-timeout, 0 regressions) |
 | gaia_agent_unit_test | tests/unit/test_gaia_agent.py | Gaia agent: meta.json validation, registry discovery, agent loading, tool filtering, script accessibility, full pipeline | 2 min | 2026-05-20 | ✅ PASS (44/44, fix/mcp-tools-not-available-to-llm FIXED 2 pre-existing failures) |
 | memory_redirect_unit_test | tests/unit/tools/test_inner_soul_redirect.py | Phase 1 bug fixes: target="memories", honest error messages, classification fallback, RAG redirect | 2 min | 2026-05-19 | ✅ PASS (85 tests, feature/unified-memory-architecture) |
 | memory_compound_unit_test | tests/unit/tools/test_inner_soul_compound.py | Phase 2 compound requests: AND splitting, semicolons, sentence boundaries, per-part classification | 2 min | 2026-05-19 | ✅ PASS (48 tests, feature/unified-memory-architecture) |
