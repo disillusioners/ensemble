@@ -331,6 +331,56 @@ class McpService:
         else:
             self._schema_cache.clear()
 
+    async def eager_warm_schemas(self) -> int:
+        """Prime the in-memory schema cache for every active MCP server.
+
+        Called once from ``InstanceManager._warmup_and_report`` after the
+        pool warmup task completes. The point is to absorb the per-server
+        cost of ``_discover_schemas_cold`` (subprocess spawn + JSON-RPC
+        ``list_tools``) into the background warmup window so the **first**
+        ``preload_mcp_tools`` call from a user-initiated spawn is a
+        in-memory dict lookup instead of a blocking cold discovery.
+
+        Pooled servers hit the warmup pool's discovery cache (free).
+        Non-pooled servers fall through to ``_discover_schemas_cold``
+        (slow but only once per server, and now off the user path).
+
+        Returns:
+            Number of servers successfully primed (logged for visibility).
+        """
+        try:
+            servers = self._manager._mcp_server_repository.list_mcp_servers(
+                is_active=True
+            )
+        except Exception as e:
+            logger.warning(f"eager_warm_schemas: failed to list servers: {e}")
+            return 0
+
+        if not servers:
+            return 0
+
+        primed = 0
+        # Serialize with the per-instance preload lock semantics: ``asyncio.gather``
+        # is safe here because ``get_schemas_for_server`` is itself guarded by
+        # ``_schema_cache_lock`` — concurrent first-time calls for the same
+        # server will only open one discovery connection.
+        results = await asyncio.gather(
+            *(self.get_schemas_for_server(s) for s in servers),
+            return_exceptions=True,
+        )
+        for server, res in zip(servers, results, strict=False):
+            if isinstance(res, Exception):
+                logger.debug(
+                    f"eager_warm_schemas: {server.name} failed: {res}"
+                )
+                continue
+            primed += 1
+
+        logger.info(
+            f"eager_warm_schemas: primed {primed}/{len(servers)} MCP server schema(s)"
+        )
+        return primed
+
     async def preload_mcp_tools(self, instance_id: str) -> None:
         """Build lazy MCP tool wrappers for an instance — no connections.
 

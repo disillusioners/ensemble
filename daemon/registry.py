@@ -10,8 +10,17 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
-# Directories to skip during agent discovery
-SKIP_DIRS: frozenset[str] = frozenset({"_trash", "_baby_template", "_prompt_system"})
+# Directories to skip during agent discovery.
+# Underscore-prefixed directories are shared scaffolding / templates and are
+# not standalone agents (no meta.json). Adding them here silences the
+# "No meta.json found for agent directory" warning at startup and avoids
+# pointless work in ``discover()``.
+SKIP_DIRS: frozenset[str] = frozenset({
+    "_trash",
+    "_baby_template",
+    "_prompt_system",
+    "_inner_soul",
+})
 
 
 class ToolFilter(BaseModel):

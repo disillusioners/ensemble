@@ -888,7 +888,15 @@ class InstanceManager:
             logger.debug("Deferring MCP warm-up pool to initialize()")
 
     async def _warmup_and_report(self) -> None:
-        """Background task to warm up pool and start health checks."""
+        """Background task to warm up pool and start health checks.
+
+        After the pool itself is warm, eagerly prime the MCP service's
+        in-memory schema cache for every active server. This moves the
+        per-server cold-discovery cost (npx/uvx subprocess + list_tools
+        RPC) out of the first user-initiated ``spawn_instance`` path so
+        the very first instance after startup is fast, not just the
+        second and later ones.
+        """
         pool = get_mcp_warmup_pool()
         try:
             await pool.warmup()
@@ -897,6 +905,15 @@ class InstanceManager:
             pool.start_health_check(self.config.mcp_pool.health_check_interval)
         except Exception as e:
             logger.warning(f"MCP warm-up pool warmup failed: {e}")
+            return
+
+        # Eagerly prime the schema cache so the first instance spawn is
+        # an in-memory hit. Best-effort; failures are logged and don't
+        # block startup.
+        try:
+            await self._mcp_service.eager_warm_schemas()
+        except Exception as e:
+            logger.warning(f"MCP schema eager warm failed: {e}")
 
     async def _drain_warmup_pool(self) -> None:
         """Drain the MCP warm-up pool during shutdown."""
@@ -1059,6 +1076,16 @@ class InstanceManager:
             self._warmup_task = asyncio.create_task(self._warmup_and_report())
             logger.debug("MCP warmup task started from initialize()")
 
+        # Eagerly warm tool metadata + tiktoken encoder in the background
+        # so the first ``spawn_instance`` after startup doesn't pay the
+        # one-time cost of importing ~10 tool modules, instantiating dummy
+        # tool closures, scanning their docstrings, and importing tiktoken.
+        # These are CPU-only and safe to defer; ``_ensure_tool_metadata_populated``
+        # and the encoder itself are idempotent.
+        self._background_tasks.append(
+            asyncio.create_task(self._eager_warm_loader_caches())
+        )
+
         # Initialize maintenance service with checkpoint cleanup
         self._maintenance_service = MaintenanceService(
             check_interval_minutes=self.config.persistence.maintenance_check_interval_minutes
@@ -1104,6 +1131,37 @@ class InstanceManager:
             logger.info(
                 "SessionManager initialized with async checkpointer"
             )
+
+    async def _eager_warm_loader_caches(self) -> None:
+        """Pre-populate one-time loader state at startup.
+
+        On the first ``load_and_cache_prompt`` call, ``loader.py``:
+
+        1. Calls ``_ensure_tool_metadata_populated`` (loader.py:27) which
+           imports ~10 tool modules, instantiates dummy tool closures,
+           and runs ``scan_tools_for_full_docs`` on them.
+        2. Calls ``estimate_tokens`` (loader.py:436) which imports
+           ``tiktoken`` and resolves the ``cl100k_base`` encoder.
+
+        Both are pure CPU work with no network or DB I/O. Doing them in
+        a background task at startup moves ~hundreds of ms of
+        first-instance latency off the user-facing spawn path.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._warm_loader_caches_sync)
+        except Exception as e:
+            logger.warning(f"eager_warm_loader_caches failed: {e}")
+
+    @staticmethod
+    def _warm_loader_caches_sync() -> None:
+        from .loader import _ensure_tool_metadata_populated, estimate_tokens
+
+        _ensure_tool_metadata_populated()
+        # Touch the encoder so ``import tiktoken`` and
+        # ``tiktoken.get_encoding('cl100k_base')`` complete at startup.
+        estimate_tokens("warmup")
+        logger.debug("Eager-warmed tool metadata + tiktoken encoder")
 
     async def _cleanup_stale_completions(self) -> None:
         """Background task to periodically clean stale CompletionRegistry entries."""
