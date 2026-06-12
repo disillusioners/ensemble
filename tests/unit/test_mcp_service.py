@@ -245,13 +245,18 @@ class TestPreloadMcpTools:
         with patch(
             "daemon.services.mcp_service.create_lazy_mcp_tools",
             return_value=lazy_tools,
-        ):
+        ) as mock_create:
             await service.preload_mcp_tools("inst-1")
             # Second call with same instance_id — idempotency check
             await service.preload_mcp_tools("inst-1")
 
-        # create_lazy_mcp_tools should have been called exactly once (not twice)
-        # We can verify via the cache
+        # W5 (single-execution invariant): the second preload must
+        # short-circuit BEFORE the per-server tool-building loop runs,
+        # so ``create_lazy_mcp_tools`` is invoked exactly once. Without
+        # this guard, the second call would re-discover schemas and
+        # rebuild all tool wrappers for the same instance.
+        assert mock_create.call_count == 1
+        # Sanity: the cache is populated with the result of that one call.
         assert len(service.get_mcp_tools("inst-1")) == 1
 
     @pytest.mark.asyncio
@@ -630,10 +635,11 @@ class TestMcpSessionProvider:
     async def test_transfer_session_fails_falls_back_to_cold(self, service):
         """transfer_session raising falls back to cold start.
 
-        Also verifies the m1 fix: the pooled connection is closed
+        Also verifies the W1 fix: the pooled connection is closed
         (no leak) before falling through to cold start. The
-        implementation delegates to ``pool._close_connection`` so the
-        subprocess + stream cleanup stays in one place.
+        implementation delegates to ``pool.release_connection`` so the
+        subprocess + stream cleanup stays in one place and the pool's
+        encapsulation boundary is respected.
         """
         provider = _McpSessionProviderImpl(service, "inst-1")
 
@@ -644,7 +650,7 @@ class TestMcpSessionProvider:
         mock_pool = MagicMock()
         mock_pool.is_pooled_server = MagicMock(return_value=True)
         mock_pool.acquire = AsyncMock(return_value=pooled_conn)
-        mock_pool._close_connection = AsyncMock()
+        mock_pool.release_connection = AsyncMock()
         service._warmup_pool = mock_pool
 
         server = _make_server(name="test-server")
@@ -664,11 +670,13 @@ class TestMcpSessionProvider:
 
         assert result is cold_session
         mock_conn_mgr.connect_instance.assert_awaited_once()
-        # m1 fix: the pooled connection was closed (no leak) because
+        # W1 fix: the pooled connection was closed (no leak) because
         # transfer_session raised before the connection manager
-        # adopted it. We delegate to ``pool._close_connection`` so the
-        # subprocess + stream cleanup stays in one place.
-        mock_pool._close_connection.assert_awaited_once_with(pooled_conn)
+        # adopted it. We delegate to ``pool.release_connection`` so the
+        # subprocess + stream cleanup stays in one place AND the pool's
+        # encapsulation boundary is respected (no reaching into
+        # ``_close_connection`` from outside the class).
+        mock_pool.release_connection.assert_awaited_once_with(pooled_conn)
 
     @pytest.mark.asyncio
     async def test_cold_start_path(self, service):

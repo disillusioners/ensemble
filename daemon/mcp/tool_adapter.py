@@ -42,18 +42,47 @@ except ImportError:  # pragma: no cover - defensive
         Covers text-only results. If the library path moved, update the
         import above; this fallback exists to avoid hard import failures
         at startup.
+
+        W2 (error handling): check ``isError`` BEFORE iterating
+        ``content``. The pre-fix code happily iterated and stringified
+        non-text content (``image``, ``audio``, ``resource_link``,
+        ``embedded_resource``) into something like ``"<ImageContent
+        object at 0x...>"`` which loses the error payload entirely.
+        Now we collect the message faithfully — text items go in
+        verbatim, non-text items get a type-tagged placeholder — and
+        raise ``ToolException`` with the full message.
         """
-        if hasattr(result, 'content'):
-            content = []
+        if not hasattr(result, 'content'):
+            return [str(result)], None
+
+        # W2: short-circuit on ``isError`` so the error path doesn't
+        # walk past the first text item. We still need to extract
+        # whatever message the server put in ``content`` — a single
+        # text item is the common case but multi-part errors exist.
+        if getattr(result, 'isError', False):
+            parts: list[str] = []
             for item in result.content:
                 if hasattr(item, 'text'):
-                    content.append({"type": "text", "text": item.text})
+                    parts.append(item.text)
                 else:
-                    content.append(str(item))
-            if getattr(result, 'isError', False):
-                raise ToolException(str(content))
-            return content, None
-        return [str(result)], None
+                    # Tag the unknown content type so the error
+                    # message retains a hint of the original payload
+                    # shape (e.g. ``<ImageContent>``) rather than the
+                    # default ``str(item)`` which would render the
+                    # object repr.
+                    type_name = type(item).__name__
+                    parts.append(f"<{type_name}>")
+            message = "\n".join(parts) if parts else "MCP tool returned an error"
+            raise ToolException(message)
+
+        # Non-error path: normal text extraction.
+        content = []
+        for item in result.content:
+            if hasattr(item, 'text'):
+                content.append({"type": "text", "text": item.text})
+            else:
+                content.append(str(item))
+        return content, None
 
 
 def _slugify(name: str) -> str:

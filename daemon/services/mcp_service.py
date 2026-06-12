@@ -116,7 +116,7 @@ class _McpSessionProviderImpl:
                         # leaking the pooled connection or
                         # duplicating pool internals here).
                         try:
-                            await pool._close_connection(conn)
+                            await pool.release_connection(conn)
                         except Exception:
                             pass
                     else:
@@ -258,6 +258,14 @@ class McpService:
         # in the connection manager's tracking dict. The connection
         # manager creates and tears down the session in this method's
         # finally clause.
+        # S4 (collision safety): the ``_schema_discovery:`` prefix is
+        # reserved synthetic namespace — real instance IDs are UUID4
+        # strings (``xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx``) which
+        # cannot contain a colon, so a real instance id will never
+        # look like ``_schema_discovery:foo``. MCP server names are
+        # user-provided; the leading underscore + colon prefix
+        # guarantees we stay in our own namespace even if a user names
+        # a server after a UUID.
         discovery_id = f"_schema_discovery:{server.name}"
         try:
             await conn_mgr.connect_instance(
@@ -275,7 +283,13 @@ class McpService:
                 McpToolSchema(
                     name=t.name,
                     description=t.description or "",
-                    input_schema=t.inputSchema,
+                    # W3 (None guard): some MCP servers omit
+                    # inputSchema entirely, which the spec permits.
+                    # ``or {}`` substitutes an empty JSON Schema so the
+                    # downstream StructuredTool still gets a valid
+                    # dict — a None would crash Pydantic validation
+                    # and the entire discovery would fail.
+                    input_schema=t.inputSchema or {},
                     server_name=server.name,
                 )
                 for t in mcp_tools.tools

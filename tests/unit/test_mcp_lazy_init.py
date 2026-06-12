@@ -507,3 +507,158 @@ class TestMcpSessionProviderProtocol:
         # content+artifact tuple — we only care that no exception leaked.
         assert result is not None
         assert cache.get("custom") is session
+
+
+class TestLazySessionLifecycle:
+    """W4 — end-to-end lifecycle test for lazy sessions.
+
+    Verifies the full flow on a real ``McpService``:
+        1. ``preload_mcp_tools`` builds lazy tool wrappers (no connection).
+        2. Calling a tool coroutine triggers session resolution via the
+           ``McpSessionProvider``.
+        3. ``close_connections`` tears down the underlying connection
+           via ``connection_manager.close_instance(instance_id)``.
+
+    Without this test the "lazy" path was only ever exercised
+    bottom-up; we never proved that ``McpService.close_connections``
+    actually reaches the connection manager once a session has been
+    opened through the lazy provider.
+    """
+
+    @pytest.mark.asyncio
+    async def test_close_connections_after_first_call_terminates_session(self):
+        """Preload → call coroutine → close: ``close_instance`` is awaited."""
+        from daemon.services.mcp_service import McpService
+        from daemon.mcp.models import McpToolSchema
+
+        # Manager with one active server.
+        manager = MagicMock()
+        manager._mcp_server_repository = MagicMock()
+        manager.config = MagicMock(mcp_pool=MagicMock(tool_call_timeout=120))
+
+        server = MagicMock()
+        server.name = "lazy-srv"
+        server.is_active = True
+        server.is_builtin = False
+        manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+
+        service = McpService(manager=manager)
+
+        # Real schema so ``create_lazy_mcp_tools`` builds a real tool.
+        schemas = [
+            McpToolSchema(
+                name="echo",
+                description="Echo",
+                input_schema={"type": "object", "properties": {}},
+                server_name="lazy-srv",
+            )
+        ]
+        service.get_schemas_for_server = AsyncMock(return_value=schemas)
+
+        # Connection manager: fast-path returns None to force cold
+        # start; the post-connect call returns a fake session.
+        cold_session = MagicMock()
+        cold_session.call_tool = AsyncMock(
+            return_value=SimpleNamespace(
+                content=[SimpleNamespace(text="ok")],
+                isError=False,
+            )
+        )
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.get_session = MagicMock(side_effect=[None, cold_session])
+        mock_conn_mgr.connect_instance = AsyncMock()
+        mock_conn_mgr.close_instance = AsyncMock()
+        mock_conn_mgr.transfer_session = AsyncMock()
+
+        # Use the REAL ``create_lazy_mcp_tools`` factory (imported at
+        # the top of this file) so the lazy coroutine is the production
+        # implementation, not a mock. We patch the name bound on
+        # ``daemon.services.mcp_service`` because that module imported
+        # the conftest's mock at import time.
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr,
+        ), patch(
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            side_effect=create_lazy_mcp_tools,
+        ):
+            # 1. Preload — lazy, no connection should be opened yet.
+            await service.preload_mcp_tools("inst-1")
+            tools = service.get_mcp_tools("inst-1")
+            assert len(tools) == 1
+            mock_conn_mgr.connect_instance.assert_not_awaited()
+
+            # 2. Call the tool coroutine — triggers session resolution
+            #    via ``_McpSessionProviderImpl.get_session``.
+            result = await tools[0].coroutine()
+            assert result is not None
+            mock_conn_mgr.connect_instance.assert_awaited_once()
+
+            # 3. Close connections — this is what we actually want to
+            #    verify reaches the connection manager.
+            await service.close_connections("inst-1")
+
+        # 4. ``close_instance`` was awaited with the instance_id.
+        mock_conn_mgr.close_instance.assert_awaited_once_with("inst-1")
+        # And the per-instance caches were popped BEFORE the close
+        # (so a close failure can't leave orphan cache entries).
+        assert "inst-1" not in service._tools_cache
+        assert "inst-1" not in service._session_caches
+
+    @pytest.mark.asyncio
+    async def test_close_connections_idempotent_without_first_call(self):
+        """Closing a never-called instance still goes through ``close_instance``."""
+        from daemon.services.mcp_service import McpService
+
+        manager = MagicMock()
+        manager._mcp_server_repository = MagicMock()
+        manager.config = MagicMock(mcp_pool=MagicMock(tool_call_timeout=120))
+        manager._mcp_server_repository.list_mcp_servers.return_value = []
+
+        service = McpService(manager=manager)
+        mock_conn_mgr = MagicMock()
+        mock_conn_mgr.close_instance = AsyncMock()
+
+        with patch(
+            "daemon.services.mcp_service.get_mcp_connection_manager",
+            return_value=mock_conn_mgr,
+        ):
+            await service.close_connections("inst-never-called")
+
+        mock_conn_mgr.close_instance.assert_awaited_once_with("inst-never-called")
+
+
+class TestIsErrorPropagation:
+    """S1 — ``isError=True`` from the session must raise ``ToolException``.
+
+    Covers both the success and error paths of the lazy coroutine
+    end-to-end. The earlier converter tests in
+    ``TestLazyCoroutine.test_coroutine_returns_converted_result`` only
+    exercise the happy path; this class explicitly drives a
+    ``CallToolResult`` with ``isError=True`` to confirm the error
+    propagates as a ``ToolException`` (so LangGraph's ``ToolNode`` can
+    surface it as a tool error rather than swallowing it as content).
+    """
+
+    async def test_coroutine_raises_tool_exception_when_is_error(self):
+        """isError=True with a text content item → ToolException with that text."""
+        session = _make_session(
+            content=[SimpleNamespace(text="something went wrong")],
+            is_error=True,
+        )
+        coro, _provider, _session, _cache, _lock = _build_coroutine(
+            session=session,
+        )
+
+        with pytest.raises(ToolException, match="something went wrong"):
+            await coro()
+
+    async def test_coroutine_raises_tool_exception_with_empty_content(self):
+        """isError=True with empty content still raises ToolException (never returns None)."""
+        session = _make_session(content=[], is_error=True)
+        coro, _provider, _session, _cache, _lock = _build_coroutine(
+            session=session,
+        )
+
+        with pytest.raises(ToolException):
+            await coro()

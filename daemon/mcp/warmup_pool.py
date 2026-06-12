@@ -495,6 +495,22 @@ class McpWarmupPool:
 
         logger.info("MCP warm-up pool drained")
 
+    async def release_connection(self, conn: PooledConnection) -> None:
+        """Public API: release a ``PooledConnection`` back to the pool's lifecycle.
+
+        Delegates to ``_close_connection`` so subprocess teardown + stream
+        CM aexit live in exactly one place. Callers that acquired a
+        connection outside the normal ``acquire`` / transfer flow
+        (e.g. ``_McpSessionProviderImpl`` after a failed
+        ``transfer_session``) MUST go through this method instead of
+        touching ``_close_connection`` directly — that's the
+        encapsulation boundary the pool exposes.
+
+        Args:
+            conn: The ``PooledConnection`` to release.
+        """
+        await self._close_connection(conn)
+
     async def _close_connection(self, conn: PooledConnection) -> None:
         """
         Close a PooledConnection cleanly.
