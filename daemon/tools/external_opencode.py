@@ -663,11 +663,7 @@ Returns:
                 recent_messages = await manager._client.get_session_messages(
                     manager.session_id, limit=3,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "[OpenCode] wait_for_result: failed to fetch last 3 messages: %s",
-                    exc,
-                )
+            except Exception:
                 recent_messages = []
         return _format_timeout(last_resp, recent_messages=recent_messages)
     
