@@ -148,7 +148,8 @@ def create_opencode_tools(
 
         On timeout the session may still be BUSY. When ``recent_messages``
         is provided and contains 3+ entries, we render the last few
-        messages (newest first) so the calling agent can see in-flight
+        messages (stored newest-first, rendered chronologically i.e.
+        oldest → newest) so the calling agent can see in-flight
         progress without issuing a separate ``external_opencode_get_status``
         call. When fewer than 3 messages are available we render whatever
         is present (no padding, no error).
