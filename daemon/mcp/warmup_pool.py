@@ -325,13 +325,50 @@ class McpWarmupPool:
                 McpToolSchema(
                     name=original_name,
                     description=tool.description or "",
-                    input_schema=tool.args_schema.schema()
-                    if tool.args_schema is not None
-                    else {},
+                    input_schema=self._extract_input_schema(tool.args_schema),
                     server_name=server_name,
                 )
             )
         return schemas
+
+    @staticmethod
+    def _extract_input_schema(args_schema: Any) -> dict[str, Any]:
+        """Normalize ``tool.args_schema`` into a JSON Schema dict.
+
+        ``langchain_core.tools.BaseTool.args_schema`` can be one of:
+        - A Pydantic ``BaseModel`` class — exposes ``.schema()``.
+        - A plain ``dict`` — already a JSON Schema (some MCP servers
+          advertise schemas this way through ``langchain_mcp_adapters``).
+        - ``None`` — no schema advertised.
+
+        The previous implementation called ``.schema()`` unconditionally,
+        which raised ``AttributeError: 'dict' object has no attribute
+        'schema'`` whenever a server returned a dict-shaped schema, making
+        the entire server's tools invisible to agents.
+
+        Args:
+            args_schema: The ``args_schema`` attribute of an adapted
+                ``BaseTool`` instance.
+
+        Returns:
+            A JSON Schema dict. Falls back to ``{}`` for ``None`` or
+            unexpected types so a single bad tool never breaks the rest
+            of the discovery batch.
+        """
+        if args_schema is None:
+            return {}
+        if isinstance(args_schema, dict):
+            return args_schema
+        # Pydantic v1 / v2 BaseModel classes expose ``.schema()`` /
+        # ``.model_json_schema()``; prefer the v1 method for backward
+        # compatibility with the existing test fixtures.
+        schema_method = getattr(args_schema, "schema", None)
+        if callable(schema_method):
+            try:
+                return schema_method()
+            except Exception:
+                return {}
+        return {}
 
     def _start_tracked_replenish(self, server_name: str) -> None:
         """

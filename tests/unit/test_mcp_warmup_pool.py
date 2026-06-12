@@ -1088,3 +1088,125 @@ class TestGetCachedToolSchemas:
         assert schemas is not None
         assert len(schemas) == 1
         assert schemas[0].input_schema == {}
+
+    def test_handles_dict_args_schema(self, pool):
+        """Tools with a dict-shaped ``args_schema`` use it verbatim.
+
+        Regression test: ``langchain_mcp_adapters`` can produce
+        ``BaseTool`` instances whose ``args_schema`` is already a JSON
+        Schema dict (not a Pydantic model). The previous implementation
+        called ``.schema()`` unconditionally, which raised
+        ``AttributeError: 'dict' object has no attribute 'schema'`` and
+        made the entire server's tools invisible to agents.
+        """
+        dict_schema = {
+            "type": "object",
+            "properties": {
+                "libraryName": {"type": "string"},
+                "query": {"type": "string"},
+            },
+            "required": ["libraryName"],
+        }
+        cached_tools = MagicMock()
+        cached_tools.name = "mcp_context7_resolve_library_id"
+        cached_tools.description = "Resolve a library name"
+        # Pydantic model would expose .schema(); dict does NOT.
+        cached_tools.args_schema = dict_schema
+        pool._tool_discovery_cache["context7"] = [cached_tools]
+
+        schemas = pool.get_cached_tool_schemas("context7")
+
+        assert schemas is not None
+        assert len(schemas) == 1
+        # The dict is forwarded verbatim — no .schema() call attempted.
+        assert schemas[0].input_schema == dict_schema
+
+    def test_handles_pydantic_args_schema(self, pool):
+        """Tools whose ``args_schema`` is a Pydantic-like model still work.
+
+        Backward-compatibility check: the previous implementation called
+        ``tool.args_schema.schema()`` and the existing test fixtures
+        encode that shape. The fix must continue to support it.
+        """
+        expected_schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+        pydantic_like = MagicMock()
+        pydantic_like.schema = MagicMock(return_value=expected_schema)
+        cached_tools = MagicMock()
+        cached_tools.name = "mcp_demo_run"
+        cached_tools.description = "Demo"
+        cached_tools.args_schema = pydantic_like
+        pool._tool_discovery_cache["demo"] = [cached_tools]
+
+        schemas = pool.get_cached_tool_schemas("demo")
+
+        assert schemas is not None
+        assert schemas[0].input_schema == expected_schema
+        pydantic_like.schema.assert_called_once()
+
+    def test_dict_args_schema_does_not_break_others(self, pool):
+        """A dict-schema tool mixed with Pydantic-schema tools succeeds.
+
+        Regression: a single bad-shape tool should not poison the
+        whole server's discovery batch.
+        """
+        dict_schema = {"type": "object"}
+        pydantic_like = MagicMock()
+        pydantic_like.schema = MagicMock(return_value={"type": "object", "x": 1})
+        pool._tool_discovery_cache["mixed"] = [
+            MagicMock(name="mcp_mixed_a", description="a", args_schema=dict_schema),
+            MagicMock(name="mcp_mixed_b", description="b", args_schema=pydantic_like),
+        ]
+
+        schemas = pool.get_cached_tool_schemas("mixed")
+
+        assert schemas is not None
+        assert len(schemas) == 2
+        assert schemas[0].input_schema == dict_schema
+        assert schemas[1].input_schema == {"type": "object", "x": 1}
+
+
+class TestExtractInputSchema:
+    """Direct unit tests for ``McpWarmupPool._extract_input_schema``.
+
+    Covers the three shapes ``BaseTool.args_schema`` can take in
+    practice (None / dict / Pydantic-like) and the unexpected-type
+    fallback.
+    """
+
+    def test_none_returns_empty_dict(self):
+        """``None`` → ``{}`` (valid empty JSON Schema)."""
+        from daemon.mcp.warmup_pool import McpWarmupPool
+
+        assert McpWarmupPool._extract_input_schema(None) == {}
+
+    def test_dict_returned_verbatim(self):
+        """A dict is returned without modification."""
+        from daemon.mcp.warmup_pool import McpWarmupPool
+
+        schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+        assert McpWarmupPool._extract_input_schema(schema) is schema
+
+    def test_pydantic_model_schema_called(self):
+        """A Pydantic-like object with ``.schema()`` is invoked."""
+        from daemon.mcp.warmup_pool import McpWarmupPool
+
+        pydantic_like = MagicMock()
+        pydantic_like.schema = MagicMock(return_value={"type": "object"})
+        result = McpWarmupPool._extract_input_schema(pydantic_like)
+        assert result == {"type": "object"}
+        pydantic_like.schema.assert_called_once()
+
+    def test_schema_method_raising_returns_empty(self):
+        """If ``.schema()`` raises, return ``{}`` instead of propagating."""
+        from daemon.mcp.warmup_pool import McpWarmupPool
+
+        pydantic_like = MagicMock()
+        pydantic_like.schema = MagicMock(side_effect=ValueError("bad"))
+        assert McpWarmupPool._extract_input_schema(pydantic_like) == {}
+
+    def test_unexpected_type_returns_empty(self):
+        """Unrecognized types fall back to ``{}`` (defensive)."""
+        from daemon.mcp.warmup_pool import McpWarmupPool
+
+        assert McpWarmupPool._extract_input_schema(42) == {}
+        assert McpWarmupPool._extract_input_schema("not-a-schema") == {}

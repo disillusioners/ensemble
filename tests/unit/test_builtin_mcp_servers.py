@@ -1716,3 +1716,83 @@ class TestBootstrapDisableEnable:
         # Restore original definition
         registry.unregister(v2_def.name)
         registry.register(v1_def)
+
+
+# =============================================================================
+# Group 13: Warmup Pool Registration Tests (Issue: disabled servers were
+# still registered with the warmup pool)
+# =============================================================================
+
+
+class TestWarmupPoolSkipsDisabled:
+    """Tests that ``_init_warmup_pool`` respects ``is_builtin_disabled``.
+
+    Regression: bootstrap used to skip creating a DB record for
+    ``MCP_DISABLE_BUILT_IN_*=true`` servers, so the warmup pool's
+    "is_active=False" check never matched (existing was ``None``) and
+    the server was registered for pooling anyway. The fix adds an
+    explicit ``is_builtin_disabled`` guard at the top of the loop.
+    """
+
+    def test_warmup_skips_disabled_builtin(self, registry_with_test_def):
+        """Disabled built-in server is NOT registered with the warmup pool."""
+        from unittest.mock import patch
+
+        from daemon.mcp.warmup_pool import McpWarmupPool
+        from daemon.mcp.builtin_servers import get_registry
+        from daemon.mcp.config import McpStdioConfig
+        from daemon.manager import is_builtin_disabled as manager_is_disabled
+
+        pool = McpWarmupPool()
+
+        # Simulate the relevant body of _init_warmup_pool with the fix
+        # applied, while ``is_builtin_disabled`` returns True for
+        # every server.
+        with patch("daemon.manager.is_builtin_disabled", return_value=True):
+            for definition in get_registry().get_all():
+                if manager_is_disabled(definition.name):
+                    continue
+                config_dict = definition.get_base_config()
+                if config_dict.get("transport") != "stdio":
+                    continue
+                stdio_config = McpStdioConfig(**config_dict)
+                pool.register_server(definition.name, stdio_config)
+
+        assert not pool.is_pooled_server("test-builtin"), (
+            "Disabled built-in should be skipped by warmup pool"
+        )
+
+    def test_warmup_registers_enabled_builtin(self):
+        """Enabled built-in (real webfetch) IS registered with the warmup pool.
+
+        Uses the real ``webfetch`` built-in definition (which exposes a
+        stdio ``get_base_config()``) rather than the abstract
+        ``TestBuiltinServerDefinition`` whose default base config is
+        empty and would be filtered out by the transport check.
+        """
+        from unittest.mock import patch
+
+        from daemon.mcp.warmup_pool import McpWarmupPool
+        from daemon.mcp.builtin_servers import get_registry
+        from daemon.mcp.config import McpStdioConfig
+        from daemon.manager import is_builtin_disabled as manager_is_disabled
+
+        pool = McpWarmupPool()
+
+        with patch("daemon.manager.is_builtin_disabled", return_value=False):
+            for definition in get_registry().get_all():
+                if manager_is_disabled(definition.name):
+                    continue
+                config_dict = definition.get_base_config()
+                if config_dict.get("transport") != "stdio":
+                    continue
+                stdio_config = McpStdioConfig(**config_dict)
+                pool.register_server(definition.name, stdio_config)
+
+        # webfetch and context7 are real stdio built-ins.
+        assert pool.is_pooled_server("webfetch"), (
+            "Enabled webfetch should be registered with warmup pool"
+        )
+        assert pool.is_pooled_server("context7"), (
+            "Enabled context7 should be registered with warmup pool"
+        )

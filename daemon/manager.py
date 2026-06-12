@@ -840,6 +840,19 @@ class InstanceManager:
 
         for definition in registry.get_all():
             name = definition.name
+
+            # Skip servers disabled via env var (e.g.
+            # ``MCP_DISABLE_BUILT_IN_WEBFETCH=true``). When disabled,
+            # ``_bootstrap_builtin_servers`` does NOT create a DB record,
+            # so the existing "is_active=False" check below would not
+            # catch it — we have to consult ``is_builtin_disabled`` first.
+            if is_builtin_disabled(name):
+                logger.info(
+                    f"MCP server '{name}' disabled (env var), "
+                    f"skipping warmup pool registration"
+                )
+                continue
+
             config_dict = definition.get_base_config()
             if config_dict.get("transport") != "stdio":
                 continue
