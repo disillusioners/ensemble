@@ -324,7 +324,7 @@ external_opencode_init_session(project="<project>", session_name="plan-explore",
 external_opencode_send_message(project="<project>", session_name="plan-explore",
     message="Explore the auth module structure",
     related_context_keywords=["auth", "module structure"])
-external_opencode_wait_for_result(project="<project>", session_name="plan-explore", timeout=600)
+external_opencode_wait_for_result(project="<project>", session_name="plan-explore")
 ```
 
 ### Drafting Instance
@@ -333,7 +333,7 @@ external_opencode_init_session(project="<project>", session_name="plan-draft", w
 external_opencode_send_message(project="<project>", session_name="plan-draft",
     message="Draft a plan for feature X based on exploration findings",
     related_context_keywords=["feature X", "exploration findings", "plan"])
-external_opencode_wait_for_result(project="<project>", session_name="plan-draft", timeout=600)
+external_opencode_wait_for_result(project="<project>", session_name="plan-draft")
 ```
 
 ### Tracking Instance
@@ -342,7 +342,7 @@ external_opencode_init_session(project="<project>", session_name="plan-track", w
 external_opencode_send_message(project="<project>", session_name="plan-track",
     message="Check progress on task list and update status",
     related_context_keywords=["task list", "progress", "status"])
-external_opencode_wait_for_result(project="<project>", session_name="plan-track", timeout=600)
+external_opencode_wait_for_result(project="<project>", session_name="plan-track")
 ```
 
 ---

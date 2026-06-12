@@ -33,6 +33,12 @@ logger = logging.getLogger(__name__)
 # Control messages that bypass auto-preload (dispatch signals, not tasks).
 _OPENCODE_CONTROL_MESSAGES = frozenset({"continue", "retry", "abort", "start-work"})
 
+# Fixed max wait for ``external_opencode_wait_for_result`` and
+# ``external_opencode_wait_any``. Previously exposed as a ``timeout`` parameter
+# (default 600s); now centralized here so callers can't accidentally truncate
+# long-running opencode sessions.
+WAIT_TIMEOUT_S = 660
+
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
     from daemon.opencode.server import OpenCodeRequest, OpenCodeResponse
@@ -136,7 +142,6 @@ def create_opencode_tools(
 
     def _format_timeout(
         last_resp: "OpenCodeResponse | None",
-        timeout: int,
     ) -> str:
         """Build a TIMEOUT message that includes the last observed snapshot.
 
@@ -146,7 +151,7 @@ def create_opencode_tools(
         to issue a separate ``external_opencode_get_status`` call.
         """
         fallback = (
-            f"[TIMEOUT] Session did not complete within {timeout}s. "
+            f"[TIMEOUT] Session did not complete within {WAIT_TIMEOUT_S}s. "
             "Use external_opencode_resume_session() to continue."
         )
         if last_resp is None or last_resp.status != "ok":
@@ -155,7 +160,7 @@ def create_opencode_tools(
         state = data.get("state", "UNKNOWN")
         latest = data.get("latest_response")
         parts: list[str] = [
-            f"[TIMEOUT] Session did not complete within {timeout}s.",
+            f"[TIMEOUT] Session did not complete within {WAIT_TIMEOUT_S}s.",
             f"[STATE] {state}",
         ]
         if latest:
@@ -510,10 +515,9 @@ Returns:
     async def external_opencode_wait_for_result(
         project: str,
         session_name: str,
-        timeout: int = 600,
     ) -> str:
         """Block until an opencode session completes.
-        
+
         Use tool_help("external_opencode_wait_for_result") for details.
         """
         registry = _get_registry()
@@ -523,7 +527,7 @@ Returns:
         session_id = record.get("id", "")
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+        deadline = loop.time() + WAIT_TIMEOUT_S
         last_resp: "OpenCodeResponse | None" = None
         # Try to get the per-session idle event so we can wake up
         # immediately on state transitions (terminal = IDLE or
@@ -599,15 +603,14 @@ Returns:
             else:
                 await asyncio.sleep(POLL_INTERVAL_S)
 
-        return _format_timeout(last_resp, timeout)
+        return _format_timeout(last_resp)
     
     external_opencode_wait_for_result._full_doc_ = """\
-Block until an opencode session completes (polls every 30s, default max 10min).
+Block until an opencode session completes (polls every 30s, fixed 660s max wait).
 
 Args:
     project: Project identifier
     session_name: Session name
-    timeout: Max wait in seconds (default 600 = 10 min)
 
 Returns:
     [COMPLETED] message with response data, [WAITING_FOR_INPUT] message that
@@ -622,17 +625,16 @@ Returns:
     @tool
     async def external_opencode_wait_any(
         sessions: list[dict[str, str]],
-        timeout: int = 600,
     ) -> str:
         """Block until ANY of multiple opencode sessions completes.
-        
+
         Use tool_help("external_opencode_wait_any") for details.
         """
         if not sessions:
             return "[ERROR] sessions list is empty"
-        
+
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+        deadline = loop.time() + WAIT_TIMEOUT_S
         registry = _get_registry()
         
         # Resolve session_id for each — in parallel via asyncio.gather (Issue 5)
@@ -775,14 +777,13 @@ Returns:
             else:
                 await asyncio.sleep(POLL_INTERVAL_S)
 
-        return f"[TIMEOUT] No session completed within {timeout}s. Use external_opencode_get_status() to check each."
+        return f"[TIMEOUT] No session completed within {WAIT_TIMEOUT_S}s. Use external_opencode_get_status() to check each."
     
     external_opencode_wait_any._full_doc_ = """\
-Block until ANY of multiple opencode sessions completes (polls every 30s).
+Block until ANY of multiple opencode sessions completes (polls every 30s, fixed 660s max wait).
 
 Args:
     sessions: List of {"project": "...", "session_name": "..."} objects (max 3 recommended)
-    timeout: Max wait in seconds (default 600 = 10 min)
 
 Returns:
     Summary with two distinct sections: "COMPLETED RESPONSES" for sessions

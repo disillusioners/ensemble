@@ -36,7 +36,7 @@ When you are about to call `external_opencode_send_message`, look at the `messag
 | `external_opencode_init_session` | No | Create/replace a named session |
 | `external_opencode_send_message` | No | Send prompt (fire-and-forget) |
 | `external_opencode_get_status` | No | Check state + response + questions |
-| `external_opencode_wait_for_result` | Yes | Block until session completes (30s poll, max 10min) |
+| `external_opencode_wait_for_result` | Yes | Block until session completes (30s poll, max 11min) |
 | `external_opencode_wait_any` | Yes | Block until ANY session completes |
 | `external_opencode_answer_question` | No | Answer interactive questions |
 | `external_opencode_resume_session` | No | Resume a timed-out session |
@@ -65,14 +65,14 @@ external_opencode_send_message(
 # Non-blocking status check
 external_opencode_get_status(project="<PROJECT>", session_name="<SESSION_NAME>")
 
-# Block until one session completes (30s poll, max 10min)
-external_opencode_wait_for_result(project="<PROJECT>", session_name="<SESSION_NAME>", timeout=600)
+# Block until one session completes (30s poll, max 11min)
+external_opencode_wait_for_result(project="<PROJECT>", session_name="<SESSION_NAME>")
 
 # Block until ANY of the given sessions completes
 external_opencode_wait_any(sessions=[
     {"project": "<PROJECT>", "session_name": "<SESSION_NAME>"},
     ...
-], timeout=600)
+])
 
 # Answer an interactive question (see "Interactive Questions" below)
 external_opencode_answer_question(
@@ -121,7 +121,6 @@ external_opencode_get_status(project="myapp", session_name="feature-login")
 external_opencode_wait_for_result(
     project="myapp",
     session_name="feature-login",
-    timeout=600,
 )
 ```
 
@@ -164,7 +163,7 @@ external_opencode_wait_any(sessions=[
     {"project": "myapp", "session_name": "task-1"},
     {"project": "myapp", "session_name": "task-2"},
     {"project": "myapp", "session_name": "task-3"},
-], timeout=600)
+])
 # Suppose task-1 finished. Review it, then start task-4 in its slot.
 
 # 4. Slot in a new task on the freed session slot
@@ -182,7 +181,7 @@ external_opencode_wait_any(sessions=[
     {"project": "myapp", "session_name": "task-2"},
     {"project": "myapp", "session_name": "task-3"},
     {"project": "myapp", "session_name": "task-4"},
-], timeout=600)
+])
 
 # 6. Repeat step 4-5 until all sessions have reported a result.
 ```

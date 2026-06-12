@@ -268,13 +268,12 @@ class TestFullLifecycle:
             )
             assert send_result.startswith("[SUBMITTED]"), send_result
 
-            # ── wait (short timeout; the prompt is tiny) ────────────────
+            # ── wait (fixed 660s timeout; the prompt is tiny) ────────────
             wait = _find_tool(tools, "external_opencode_wait_for_result")
             wait_result = await _ainvoke(
                 wait,
                 project=project,
                 session_name=session_name,
-                timeout=90,  # 90s is enough for a minimal prompt
             )
             # Either it completed, needs input, or the wait timed out —
             # all are valid outcomes for a live integration run.  We only
@@ -389,7 +388,6 @@ class TestParallelSessions:
             wait_result = await _ainvoke(
                 wait_any,
                 sessions=[{"project": project, "session_name": n} for n in session_names],
-                timeout=120,
             )
 
             # wait_any returns a summary block.  Either it found at

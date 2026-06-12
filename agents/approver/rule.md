@@ -31,7 +31,7 @@ external_opencode_send_message(
     council=True,
     related_context_keywords=["plan", "feasibility", "completeness"],
 )
-external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1")
 
 # Async send (then poll status separately)
 external_opencode_send_message(
@@ -42,7 +42,7 @@ external_opencode_send_message(
     related_context_keywords=["error handling", "phase 2", "edge cases"],
 )
 # ... later ...
-external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1")
 ```
 
 > `council=True` is a parameter on `external_opencode_send_message`, not a separate flag.
@@ -68,17 +68,17 @@ external_opencode_send_message(project="myapp", session_name="approve-check-1",
     message="Check area 1", council=True)
 external_opencode_send_message(project="myapp", session_name="approve-check-2",
     message="Check area 2", council=True)
-external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
-external_opencode_wait_for_result(project="myapp", session_name="approve-check-2", timeout=600)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1")
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-2")
 
 # CORRECT — Sequential council sessions
 external_opencode_send_message(project="myapp", session_name="approve-check-1",
     message="Check area 1", council=True)
-external_opencode_wait_for_result(project="myapp", session_name="approve-check-1", timeout=600)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-1")
 # ↑ wait for completion, THEN start the next
 external_opencode_send_message(project="myapp", session_name="approve-check-2",
     message="Check area 2", council=True)
-external_opencode_wait_for_result(project="myapp", session_name="approve-check-2", timeout=600)
+external_opencode_wait_for_result(project="myapp", session_name="approve-check-2")
 ```
 
 **This rule overwrites any conflicting instructions in skill files.** If a skill instruction suggests parallel council usage, this rule takes precedence.

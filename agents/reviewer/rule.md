@@ -87,7 +87,6 @@ external_opencode_send_message(
 external_opencode_wait_for_result(
     project="myapp",
     session_name="review-deep",
-    timeout=600,
 )
 ```
 

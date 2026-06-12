@@ -687,7 +687,6 @@ class TestWaitForResultExecution:
             result = await wait_tool.ainvoke({
                 "project": "myapp",
                 "session_name": "feature-1",
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -723,7 +722,6 @@ class TestWaitForResultExecution:
             result = await wait_tool.ainvoke({
                 "project": "myapp",
                 "session_name": "feature-1",
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -768,7 +766,6 @@ class TestWaitForResultExecution:
             result = await wait_tool.ainvoke({
                 "project": "myapp",
                 "session_name": "feature-1",
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -791,6 +788,7 @@ class TestWaitForResultExecution:
         We patch ``asyncio.sleep`` to a no-op so the loop spins through all
         its iterations without real delays. The session state stays ``BUSY``
         every poll, so the loop exhausts the deadline and returns ``[TIMEOUT]``.
+        ``WAIT_TIMEOUT_S`` is patched down to keep the test fast.
         """
         mock_registry.get_session_record = AsyncMock(
             return_value={"id": "session-busy"}
@@ -806,6 +804,8 @@ class TestWaitForResultExecution:
         ) as mock_send, patch(
             "daemon.tools.external_opencode.asyncio.sleep",
             new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
         ):
             tools = create_opencode_tools(mock_manager, "test-id")
             wait_tool = next(
@@ -815,7 +815,6 @@ class TestWaitForResultExecution:
             result = await wait_tool.ainvoke({
                 "project": "myapp",
                 "session_name": "feature-1",
-                "timeout": 1,
             })
 
         assert isinstance(result, str)
@@ -852,6 +851,8 @@ class TestWaitForResultExecution:
         ), patch(
             "daemon.tools.external_opencode.asyncio.sleep",
             new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
         ):
             tools = create_opencode_tools(mock_manager, "test-id")
             wait_tool = next(
@@ -861,7 +862,6 @@ class TestWaitForResultExecution:
             result = await wait_tool.ainvoke({
                 "project": "myapp",
                 "session_name": "feature-1",
-                "timeout": 1,
             })
 
         assert isinstance(result, str)
@@ -894,6 +894,8 @@ class TestWaitForResultExecution:
         ), patch(
             "daemon.tools.external_opencode.asyncio.sleep",
             new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
         ):
             tools = create_opencode_tools(mock_manager, "test-id")
             wait_tool = next(
@@ -903,7 +905,6 @@ class TestWaitForResultExecution:
             result = await wait_tool.ainvoke({
                 "project": "myapp",
                 "session_name": "feature-1",
-                "timeout": 1,
             })
 
         assert isinstance(result, str)
@@ -927,7 +928,6 @@ class TestWaitForResultExecution:
         result = await wait_tool.ainvoke({
             "project": "myapp",
             "session_name": "ghost",
-            "timeout": 60,
         })
 
         assert isinstance(result, str)
@@ -980,7 +980,6 @@ class TestWaitForResultExecution:
                 result_task = tg.create_task(wait_tool.ainvoke({
                     "project": "myapp",
                     "session_name": "feature-1",
-                    "timeout": 60,
                 }))
 
         result = result_task.result()
@@ -1024,7 +1023,6 @@ class TestWaitForResultExecution:
             result = await wait_tool.ainvoke({
                 "project": "myapp",
                 "session_name": "feature-1",
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -1078,7 +1076,6 @@ class TestWaitAnyExecution:
                     {"project": "p1", "session_name": "s1"},
                     {"project": "p2", "session_name": "s2"},
                 ],
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -1125,7 +1122,6 @@ class TestWaitAnyExecution:
                     {"project": "p1", "session_name": "s1"},
                     {"project": "p2", "session_name": "s2"},
                 ],
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -1173,7 +1169,6 @@ class TestWaitAnyExecution:
 
             result = await wait_any_tool.ainvoke({
                 "sessions": [{"project": "p1", "session_name": "s1"}],
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -1228,7 +1223,6 @@ class TestWaitAnyExecution:
                     {"project": "p1", "session_name": "s1"},
                     {"project": "p2", "session_name": "s2"},
                 ],
-                "timeout": 60,
             })
 
         assert isinstance(result, str)
@@ -1261,7 +1255,6 @@ class TestWaitAnyExecution:
 
         result = await wait_any_tool.ainvoke({
             "sessions": [],
-            "timeout": 60,
         })
 
         assert isinstance(result, str)
@@ -1286,7 +1279,6 @@ class TestWaitAnyExecution:
                 {"project": "p1", "session_name": "ghost1"},
                 {"project": "p2", "session_name": "ghost2"},
             ],
-            "timeout": 60,
         })
 
         assert isinstance(result, str)
@@ -1314,6 +1306,8 @@ class TestWaitAnyExecution:
         ), patch(
             "daemon.tools.external_opencode.asyncio.sleep",
             new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
         ):
             tools = create_opencode_tools(mock_manager, "test-id")
             wait_any_tool = next(
@@ -1325,7 +1319,6 @@ class TestWaitAnyExecution:
                     {"project": "p1", "session_name": "s1"},
                     {"project": "p2", "session_name": "s2"},
                 ],
-                "timeout": 1,
             })
 
         assert isinstance(result, str)
@@ -2213,7 +2206,6 @@ class TestWaitAnyEventWake:
                         {"project": "p1", "session_name": "s1"},
                         {"project": "p2", "session_name": "s2"},
                     ],
-                    "timeout": 60,
                 }))
 
         result = result_task.result()
@@ -2268,7 +2260,9 @@ class TestWaitAnyEventWake:
         with patch(
             "daemon.tools.external_opencode._server_send_message",
             new=_counting_poll,
-        ), patch.object(oc_const, "POLL_INTERVAL_S", 0.2):
+        ), patch.object(oc_const, "POLL_INTERVAL_S", 0.2), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.5,
+        ):
             tools = create_opencode_tools(mock_manager, "test-id")
             wait_any_tool = next(
                 t for t in tools if t.name == "external_opencode_wait_any"
@@ -2278,16 +2272,15 @@ class TestWaitAnyEventWake:
                 "sessions": [
                     {"project": "p1", "session_name": "s1"},
                 ],
-                "timeout": 1,
             })
 
         # Sanity: the loop should hit TIMEOUT (no completion).
         assert "[TIMEOUT]" in result
-        # With clear-before-wait: ~5 polls in 1s (one per POLL_INTERVAL_S).
+        # With clear-before-wait: ~2-3 polls in 0.5s (one per POLL_INTERVAL_S=0.2).
         # Without it: ~10k+ polls. Pick a ceiling that catches the bug
         # but tolerates CI scheduling jitter.
-        assert poll_count <= 20, (
-            f"wait_any spun (polls={poll_count} in 1s) — "
+        assert poll_count <= 10, (
+            f"wait_any spun (polls={poll_count} in 0.5s) — "
             "event.clear() before asyncio.wait() regressed"
         )
 

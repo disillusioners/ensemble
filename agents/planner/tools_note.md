@@ -23,12 +23,11 @@ external_opencode_send_message(
 )
 ```
 
-**Wait for one session to complete (default 10 min, native timeout):**
+**Wait for one session to complete (fixed 11-min timeout):**
 ```python
 external_opencode_wait_for_result(
     project="<project>",
     session_name="<session_name>",
-    timeout=600,
 )
 ```
 
@@ -39,7 +38,6 @@ external_opencode_wait_any(
         {"project": "<project>", "session_name": "explore-auth"},
         {"project": "<project>", "session_name": "explore-api"},
     ],
-    timeout=600,
 )
 ```
 
