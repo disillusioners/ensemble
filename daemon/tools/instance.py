@@ -18,6 +18,26 @@ Spawn, communicate with, and manage agent instances.
 """
 
 
+_FIRE_AND_FORGET_NOTE = """\
+[SYSTEM REMINDER — Fire-and-Forget Workflow]
+
+`get_instance_info` returns instance METADATA (status, config, project) — it does NOT return the instance's report/result. The system will deliver the instance's final report to you automatically when it finishes. Instances never get stuck silently: you are guaranteed to receive the result.
+
+DO NOT poll `get_instance_info` or `list_instances` to wait for a delegated task. That wastes resources and tokens.
+
+Correct workflow:
+```mermaid
+flowchart LR
+    A[Delegate task via send_message] --> B[STOP polling]
+    B --> C{Receive system<br/>report automatically}
+    C -->|Report arrives| D[Continue work]
+    C -->|Need to cancel| E[terminate_instance]
+```
+
+After delegating, just wait. The system will report back.
+"""
+
+
 # Innate-skill → required tool categories mapping.
 #
 # When an agent declares an innate skill, the matching tool categories are
@@ -618,8 +638,11 @@ Returns:
             await _resolve_instance_id(manager, instance_id)
         except ValueError as e:
             return {"error": str(e)}
-        return manager.get_instance_info(instance_id)
-    
+        result = manager.get_instance_info(instance_id)
+        if isinstance(result, dict) and "error" not in result:
+            result["_system_note"] = _FIRE_AND_FORGET_NOTE
+        return result
+
     get_instance_info._full_doc_ = """Get information about a specific instance.
 
 Args:
