@@ -68,14 +68,6 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-#: How many recent messages to keep in the in-memory message history.
-#: Used by ``sync_state_with_open_code`` to size the OpenCode
-#: ``GET /session/{id}/message?limit=N`` fetch and by the public
-#: ``get_recent_messages`` accessor. Tuned for the wait_for_result
-#: timeout path which surfaces up to 3 messages; keeping a small
-#: ring above that (10) gives safety margin without unbounded growth.
-_MAX_MESSAGES_HISTORY = 10
-
 
 def _question_to_dict(q: Any) -> dict[str, Any]:
     """Convert a ``Question`` Pydantic model to a JSON-safe dict.
@@ -276,14 +268,6 @@ class OpenCodeSessionManager:
         self._state: SessionState = SessionState.IDLE
         self._latest_response: Any = None
         self._questions: list[Any] = []
-        self._messages: list[dict[str, Any]] = []
-        """In-memory ring of the most recent session messages (newest
-        first), populated by ``sync_state_with_open_code`` and capped
-        at ``_MAX_MESSAGES_HISTORY``. Exposed via ``get_recent_messages``
-        so the wait_for_result timeout path can show the last few
-        messages without a fresh ``GET /session/{id}/message`` call.
-        Each entry is a bloat-stripped message dict (same shape as
-        ``_latest_response['result']``)."""
         self._is_worker_busy: bool = False
         self._aborted: bool = False
         self._is_agent_locked: bool = False
@@ -561,14 +545,9 @@ class OpenCodeSessionManager:
                 }
             }
 
-        Extended for the wait_for_result timeout path: the snapshot
-        also carries the ``messages`` ring (newest first) so the
-        timeout formatter can render the last few messages without a
-        fresh ``GET /session/{id}/message`` call.
-
         Returns:
             Dict with keys: ``state``, ``session_id``, ``latest_response``,
-            ``questions``, ``messages``.
+            ``questions``.
         """
         # NOTE: No lock is held here. The Go version uses RLock, but Python's
         # asyncio.Lock has no RLock equivalent. Attribute reads are atomic
@@ -578,35 +557,7 @@ class OpenCodeSessionManager:
             "session_id": self.session_id,
             "latest_response": self._latest_response,
             "questions": list(self._questions),
-            "messages": list(self._messages),
         }
-
-    def get_recent_messages(self, n: int = 3) -> list[dict[str, Any]]:
-        """Return up to ``n`` most recent messages, newest first.
-
-        Convenience accessor over the in-memory ``_messages`` ring
-        maintained by ``sync_state_with_open_code``. The wait_for_result
-        timeout path uses this to render the last few messages in the
-        TIMEOUT response so the caller can see in-flight progress
-        without making a separate status call.
-
-        Args:
-            n: Maximum number of messages to return. Defaults to 3
-                (matches the "last 3 messages on timeout" contract).
-                Negative or zero returns an empty list.
-
-        Returns:
-            List of bloat-stripped message dicts (newest first). May be
-            shorter than ``n`` if the session has fewer messages.
-        """
-        if n <= 0:
-            return []
-        # Attribute reads are atomic in CPython; the list itself is
-        # never mutated after assignment under the lock in
-        # ``sync_state_with_open_code`` (we always replace the whole
-        # list rather than append-in-place), so a returned slice is
-        # safe to keep.
-        return list(self._messages[:n])
 
     def submit_request(self, req: Request) -> None:
         """Enqueue a request with optimistic BUSY state.
@@ -743,11 +694,8 @@ class OpenCodeSessionManager:
 
         This replaces the removed session status API. It:
 
-        1. Calls ``GetSessionMessages(limit=_MAX_MESSAGES_HISTORY)`` — newest
-           first. The cap matches the in-memory ring in ``self._messages``
-           so the session manager always carries the last N messages for
-           ``get_recent_messages`` callers (e.g. ``wait_for_result``'s
-           timeout path renders up to 3).
+        1. Calls ``GetSessionMessages(limit=1)`` — newest first, just the
+           newest message is enough to derive the state.
         2. Extracts the ``step-finish.reason`` field.
         3. Checks ``info.error`` presence.
         4. Calls ``_derive_state_from_finish(reason, has_error)``.
@@ -773,14 +721,8 @@ class OpenCodeSessionManager:
 
         messages: list[dict[str, Any]] | None = None
         try:
-            # Pull up to _MAX_MESSAGES_HISTORY newest-first. The session
-            # manager keeps a ring of these so the wait_for_result timeout
-            # path can render the last few messages without re-querying
-            # the OpenCode HTTP server. Cost is bounded: one HTTP call
-            # per poll, payload size is tiny (stripped bloat), and the
-            # in-memory list is capped.
             messages = await self._client.get_session_messages(
-                self.session_id, limit=_MAX_MESSAGES_HISTORY,
+                self.session_id, limit=1,
             )
         except Exception as exc:
             logger.warning(
@@ -869,11 +811,6 @@ class OpenCodeSessionManager:
             # visibility into in-flight messages during BUSY to detect progress
             # or problems. Matches Go behavior.
             self._latest_response = {"result": strip_message_bloat(last_message)}
-            # Refresh the in-memory message history ring. Newest-first;
-            # bloat-stripped for the same reason as ``_latest_response``
-            # (tokens/snapshots/extra fields are noisy and would bloat
-            # the wait_for_result timeout payload).
-            self._messages = [strip_message_bloat(m) for m in messages[:_MAX_MESSAGES_HISTORY]]
             if questions_for_session:
                 self._questions = questions_for_session
             if should_update_state:

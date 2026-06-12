@@ -147,21 +147,23 @@ def create_opencode_tools(
         """Build a TIMEOUT message that includes the last observed snapshot.
 
         On timeout the session may still be BUSY. When ``recent_messages``
-        is provided and contains 3+ entries, we render the last few
-        messages (stored newest-first, rendered chronologically i.e.
-        oldest → newest) so the calling agent can see in-flight
-        progress without issuing a separate ``external_opencode_get_status``
-        call. When fewer than 3 messages are available we render whatever
-        is present (no padding, no error).
+        is provided and contains 1-3 entries, we render them in
+        chronological order (oldest → newest) so the calling agent can see
+        in-flight progress without issuing a separate
+        ``external_opencode_get_status`` call. ``recent_messages`` is the
+        newest-first result of a direct ``GET /session/{id}/message?limit=3``
+        call made at timeout time by the caller (``wait_for_result``).
 
         Resolution order for the message body:
 
-        1. ``recent_messages`` — the in-memory ring from
-           ``OpenCodeSessionManager.get_recent_messages(n=3)``. Preferred.
+        1. ``recent_messages`` — newest-first list from the OpenCode
+           ``GET /session/{id}/message?limit=3`` call at timeout. We
+           reverse it for chronological display.
         2. ``last_resp.data["latest_response"]`` — the stripped latest
            message from the most recent successful GET_STATUS poll.
-           Used as a fallback when the manager is unavailable
-           (e.g. before the loop's first tick in unit tests).
+           Used as a fallback when the API call returned an empty list
+           or failed (e.g. tests that stub the dispatcher without a real
+           manager / HTTP server).
         3. No messages at all — the original short fallback string.
         """
         fallback = (
@@ -177,11 +179,12 @@ def create_opencode_tools(
             f"[STATE] {state}",
         ]
 
-        # Prefer the manager-supplied history ring (up to 3 newest-first)
-        # so the caller can see the last few messages and reason about
+        # Prefer the freshly-fetched recent messages (newest-first, from
+        # the on-timeout ``GET /session/{id}/message?limit=3`` call) so
+        # the caller can see the last few messages and reason about
         # progression. Fall back to the single latest_response from the
-        # most recent poll when the ring is empty (e.g. tests that stub
-        # the dispatcher without a real manager).
+        # most recent poll when the fetch returned nothing (e.g. tests
+        # that stub the dispatcher without a real manager / HTTP server).
         rendered_messages: list[str] = []
         if recent_messages:
             for msg in recent_messages[:3]:
@@ -205,14 +208,14 @@ def create_opencode_tools(
 
         if rendered_messages:
             # Header reflects how many messages we're showing so the
-            # caller can tell apart "1 of 3+" from "3 of 3+" without
+            # caller can tell apart "1 of 3" from "3 of 3" without
             # counting blocks.
             parts.append(
                 f"[LAST {len(rendered_messages)} MESSAGE"
                 f"{'S' if len(rendered_messages) != 1 else ''}]"
             )
             # Render in chronological order (oldest → newest) so the
-            # progression reads top-to-bottom. The manager returns
+            # progression reads top-to-bottom. The API returns
             # newest-first, so reverse.
             for rendered in reversed(rendered_messages):
                 parts.append(rendered)
@@ -648,23 +651,20 @@ Returns:
             else:
                 await asyncio.sleep(POLL_INTERVAL_S)
 
-        # On timeout, surface the last 3 messages from the in-memory
-        # session manager ring (preferred) or the single latest from
-        # the last poll as a fallback. The manager accumulates the
-        # ring in ``sync_state_with_open_code`` so by the time we hit
-        # the deadline, the caller can see the last few messages and
-        # reason about progression without an extra status call.
+        # On timeout, fetch the last 3 messages directly from the
+        # OpenCode API. One HTTP call, no caching, no ring buffer —
+        # the wait_for_result path is the only consumer, and it's only
+        # invoked once on timeout. Wrapped in try/except so a flaky
+        # network or missing manager degrades gracefully into the
+        # ``latest_response`` fallback inside ``_format_timeout``.
         recent_messages: list[Any] = []
         if manager is not None:
-            getter = getattr(manager, "get_recent_messages", None)
-            if callable(getter):
-                try:
-                    recent_messages = getter(3) or []
-                except Exception:
-                    # Defensive: a stubbed/mocked manager might raise
-                    # on the accessor; fall through to the empty list
-                    # and let the formatter use last_resp as fallback.
-                    recent_messages = []
+            try:
+                recent_messages = await manager._client.get_session_messages(
+                    manager.session_id, limit=3,
+                )
+            except Exception:
+                recent_messages = []
         return _format_timeout(last_resp, recent_messages=recent_messages)
     
     external_opencode_wait_for_result._full_doc_ = """\
@@ -678,10 +678,12 @@ Returns:
     [COMPLETED] message with response data, [WAITING_FOR_INPUT] message that
     inlines the pending questions so the caller can answer immediately, or
     [TIMEOUT] message that includes the last observed state and the most
-    recent messages (up to 3) from the in-memory message ring so the caller
-    can see in-flight progress without a separate status call. When fewer
-    than 3 messages are available, whatever is present is rendered (no
-    padding, no error).
+    recent messages (up to 3, fetched on the spot from the OpenCode
+    ``GET /session/{id}/message?limit=3`` endpoint) so the caller can see
+    in-flight progress without a separate status call. When the fetch
+    returns fewer than 3 messages (or fails), whatever is present is
+    rendered and the formatter falls back to ``latest_response`` if the
+    on-timeout call returned an empty list.
 """
     
     # ── Tool 5: Wait Any ────────────────────────────────────────────
