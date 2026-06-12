@@ -1,18 +1,59 @@
-"""Tool naming and adaptation utilities for MCP tools."""
+"""Tool naming and adaptation utilities for MCP tools.
+
+Also defines the lazy-init building blocks:
+- ``McpSessionProvider`` protocol (the single dependency the lazy
+  coroutine needs for session resolution).
+- ``create_lazy_mcp_tools`` factory that returns ``StructuredTool``
+  instances whose coroutine defers session acquisition until first
+  call.
+- Imported ``_convert_call_tool_result`` (with ImportError fallback)
+  for translating MCP ``CallToolResult`` into LangChain's
+  ``(content, artifact)`` shape.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
-from langchain_core.tools import ToolException
+from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
 if TYPE_CHECKING:
-    from langchain_core.tools import BaseTool
+    pass
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Result conversion — imported from langchain_mcp_adapters with a safe
+# fallback. The library version handles AudioContent, ResourceLink,
+# EmbeddedResource, and structuredContent; the fallback only covers
+# text. If the import path changes the fallback keeps things working
+# but logs a clear signal in the import site.
+# ---------------------------------------------------------------------------
+try:
+    from langchain_mcp_adapters.tools import _convert_call_tool_result
+except ImportError:  # pragma: no cover - defensive
+    def _convert_call_tool_result(result):  # type: ignore[no-redef]
+        """Minimal fallback for MCP result conversion.
+
+        Covers text-only results. If the library path moved, update the
+        import above; this fallback exists to avoid hard import failures
+        at startup.
+        """
+        if hasattr(result, 'content'):
+            content = []
+            for item in result.content:
+                if hasattr(item, 'text'):
+                    content.append({"type": "text", "text": item.text})
+                else:
+                    content.append(str(item))
+            if getattr(result, 'isError', False):
+                raise ToolException(str(content))
+            return content, None
+        return [str(result)], None
 
 
 def _slugify(name: str) -> str:
@@ -153,3 +194,215 @@ def adapt_mcp_tools(
         logger.debug(f"Adapted MCP tool: {tool.name} -> {new_name}")
 
     return adapted_tools
+
+
+# =============================================================================
+# Lazy tool factory — defers MCP session establishment until the tool is
+# actually called by the LLM. Used by the lazy init path in
+# ``McpService.preload_mcp_tools`` (Task 5).
+# =============================================================================
+
+
+@runtime_checkable
+class McpSessionProvider(Protocol):
+    """Protocol for lazy MCP session resolution.
+
+    The lazy coroutine in ``_build_lazy_coroutine`` only depends on this
+    single interface. The concrete implementation
+    (``_McpSessionProviderImpl`` on ``McpService``) is injected by the
+    caller, keeping the coroutine testable and decoupled from
+    ``McpService`` itself.
+
+    Implementations must be safe to call concurrently from multiple
+    coroutines. The lazy coroutine already double-check-locks around
+    the provider, so the provider doesn't need its own lock.
+    """
+
+    async def get_session(self, server_name: str) -> Any:
+        """Get or create a session for ``server_name``.
+
+        Args:
+            server_name: Name of the MCP server to resolve a session for.
+
+        Returns:
+            A live MCP client session (e.g. ``ClientSession`` subclass).
+
+        Raises:
+            ToolException: If the server is unknown or unreachable.
+        """
+        ...
+
+
+def create_lazy_mcp_tools(
+    server_name: str,
+    schemas: list[dict],
+    session_provider: McpSessionProvider,
+    shared_session_cache: dict[str, Any],
+    shared_session_lock: asyncio.Lock,
+    tool_call_timeout: int = 120,
+) -> list[BaseTool]:
+    """Create lazy MCP tools that defer connection until first call.
+
+    For each schema, returns a ``StructuredTool`` whose coroutine
+    resolves the MCP session on first invocation (and caches it for
+    the rest of the instance's life). ``shared_session_cache`` and
+    ``shared_session_lock`` are passed in by the caller and **shared
+    across all tools for the same instance+server** — so N tools
+    produce N lazy wrappers but only one underlying session.
+
+    Args:
+        server_name: MCP server name (used to build the tool name
+            prefix and the description suffix).
+        schemas: List of tool schemas. Each dict must have
+            ``name`` (str), ``description`` (str), and
+            ``input_schema`` (dict).
+        session_provider: Provider used to lazily resolve the MCP
+            session.
+        shared_session_cache: Dict shared across ALL tools for this
+            instance+server; stores the resolved session so the
+            second+ call short-circuits.
+        shared_session_lock: Lock shared across ALL tools for this
+            instance+server; used for double-check locking.
+        tool_call_timeout: Per-call timeout in seconds. ``0`` disables
+            timeout wrapping. Default ``120``.
+
+    Returns:
+        List of ``StructuredTool`` instances. Empty list if
+        ``schemas`` is empty.
+    """
+    if not schemas:
+        return []
+
+    slugified_server = _slugify(server_name)
+    prefix = f"mcp_{slugified_server}_"
+    description_suffix = f"[MCP:{server_name}]"
+
+    lazy_tools: list[BaseTool] = []
+
+    for schema in schemas:
+        tool_name = schema["name"]
+        adapted_name = f"{prefix}{tool_name}"
+        description = f"{schema['description']} {description_suffix}"
+
+        coroutine = _build_lazy_coroutine(
+            server_name=server_name,
+            original_tool_name=tool_name,
+            session_provider=session_provider,
+            shared_session_cache=shared_session_cache,
+            shared_session_lock=shared_session_lock,
+            timeout_seconds=tool_call_timeout if tool_call_timeout > 0 else None,
+        )
+
+        tool = StructuredTool(
+            name=adapted_name,
+            description=description,
+            args_schema=schema.get("input_schema", {}),
+            coroutine=coroutine,
+            response_format="content_and_artifact",
+        )
+        lazy_tools.append(tool)
+
+    return lazy_tools
+
+
+def _build_lazy_coroutine(
+    server_name: str,
+    original_tool_name: str,
+    session_provider: McpSessionProvider,
+    shared_session_cache: dict[str, Any],
+    shared_session_lock: asyncio.Lock,
+    timeout_seconds: float | None,
+) -> Callable:
+    """Build a coroutine that lazily creates an MCP session on first call.
+
+    Concurrency guard (double-check locking):
+        * Fast path: read ``shared_session_cache`` without a lock —
+          once a session is cached, subsequent calls never contend.
+        * Slow path: take the lock, re-check the cache, then call
+          ``session_provider.get_session``. The second arrival on the
+          lock finds the session already cached and skips the
+          provider call.
+
+    ``shared_session_cache`` and ``shared_session_lock`` are owned by
+    the caller (``McpService.preload_mcp_tools``) and shared across
+    all tools for the same instance+server, which is what guarantees
+    N tools → 1 session.
+
+    Args:
+        server_name: MCP server name (used by the provider).
+        original_tool_name: Un-prefixed tool name as the MCP server
+            knows it.
+        session_provider: ``McpSessionProvider`` for resolution.
+        shared_session_cache: See above.
+        shared_session_lock: See above.
+        timeout_seconds: Per-call timeout in seconds, or ``None`` to
+            disable.
+
+    Returns:
+        Async coroutine suitable for ``StructuredTool(coroutine=...)``.
+    """
+
+    async def _get_session() -> Any:
+        """Get or create the session using double-check locking.
+
+        W7 (concurrency guard): this function is the **sole**
+        concurrency guard for first-time session resolution per
+        instance+server. Two concurrent tool calls for the same server
+        serialize on ``shared_session_lock``; the second arrival finds
+        the session already cached on the re-check and short-circuits,
+        so the underlying ``session_provider.get_session`` is called
+        at most once per instance+server.
+
+        The pattern is:
+            1. Fast path: read ``shared_session_cache`` without a lock
+               — once a session is cached, subsequent calls never
+               contend.
+            2. Slow path: acquire ``shared_session_lock``, re-check the
+               cache, then call ``session_provider.get_session`` only
+               if the cache is still empty.
+        """
+        # Fast path — no lock needed for already-cached sessions.
+        if server_name in shared_session_cache:
+            return shared_session_cache[server_name]
+
+        async with shared_session_lock:
+            # Double-check after acquiring the lock.
+            if server_name in shared_session_cache:
+                return shared_session_cache[server_name]
+
+            session = await session_provider.get_session(server_name)
+            shared_session_cache[server_name] = session
+            return session
+
+    async def _lazy_coroutine(**kwargs):
+        """Lazy MCP tool coroutine — connects on first call."""
+        try:
+            session = await _get_session()
+
+            # LangGraph may inject a `runtime` kwarg via InjectedToolArg;
+            # the MCP server doesn't know about it, so strip it.
+            kwargs.pop("runtime", None)
+
+            if timeout_seconds is not None:
+                async with asyncio.timeout(timeout_seconds):
+                    result = await session.call_tool(original_tool_name, kwargs)
+            else:
+                result = await session.call_tool(original_tool_name, kwargs)
+
+            return _convert_call_tool_result(result)
+
+        except asyncio.TimeoutError:
+            raise ToolException(
+                f"Tool '{original_tool_name}' on server '{server_name}' "
+                f"timed out after {timeout_seconds}s. The MCP server may "
+                f"be unresponsive."
+            )
+        except ToolException:
+            raise  # Re-raise our own ToolExceptions unchanged.
+        except Exception as e:
+            raise ToolException(
+                f"MCP tool call failed for '{original_tool_name}' on "
+                f"'{server_name}': {e}"
+            )
+
+    return _lazy_coroutine

@@ -39,6 +39,19 @@ def _get_manager(request: Request) -> Any:
     return request.app.state.manager
 
 
+def _invalidate_mcp_schema_cache(manager: Any, server_name: str) -> None:
+    """Invalidate the MCP service's schema cache for ``server_name``.
+
+    Called from CRUD endpoints so a server create/update/delete forces
+    a re-discovery of tool schemas on the next instance preload. No-op
+    if the manager has no MCP service attached (e.g. legacy test
+    fixtures that mock the manager without a service).
+    """
+    mcp_service = getattr(manager, "_mcp_service", None)
+    if mcp_service is not None and hasattr(mcp_service, "invalidate_schema_cache"):
+        mcp_service.invalidate_schema_cache(server_name)
+
+
 def _mcp_server_to_info(mcp_server) -> McpServerInfo:
     """Convert McpServer model to McpServerInfo response model."""
     # Parse config_schema from DB (stored as list[dict]) to list[ConfigSchemaField]
@@ -231,6 +244,11 @@ async def create_mcp_server(mcp_server_create: McpServerCreate, request: Request
         is_active=mcp_server_create.is_active,
     )
 
+    # New server → its schema isn't cached yet, but invalidate to
+    # be safe in case of a re-used name and to drop any pool-side
+    # tool discovery cache that mentions the same name.
+    _invalidate_mcp_schema_cache(manager, mcp_server.name)
+
     return _mcp_server_to_info(mcp_server)
 
 
@@ -300,6 +318,8 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
             existing.id,
             config=generated_config
         )
+        # Config changed → drop the schema cache entry.
+        _invalidate_mcp_schema_cache(manager, updated.name)
         return _mcp_server_to_info(updated)
     else:
         # Create new built-in server (handle race condition)
@@ -313,6 +333,9 @@ async def configure_builtin_server(request: Request, config_request: BuiltinServ
                 config_schema=schema_as_dicts,
                 config_schema_version=definition.schema_version,
             )
+            # First-time build of this built-in server — make sure
+            # the schema cache doesn't carry a stale empty entry.
+            _invalidate_mcp_schema_cache(manager, created.name)
             return _mcp_server_to_info(created)
         except Exception as e:
             # Handle race condition: concurrent create attempt
@@ -427,6 +450,12 @@ async def update_mcp_server(
         is_active=mcp_server_update.is_active,
     )
 
+    # Invalidate the schema cache for the server's name. When the
+    # name changed, drop BOTH the old and the new entries.
+    _invalidate_mcp_schema_cache(manager, updated.name)
+    if existing.name != updated.name:
+        _invalidate_mcp_schema_cache(manager, existing.name)
+
     return _mcp_server_to_info(updated)
 
 
@@ -466,6 +495,10 @@ async def delete_mcp_server(server_id: str, request: Request):
         manager._mcp_server_repository.delete_mcp_server,
         server_id
     )
+
+    # Drop the deleted server's schema cache entry so the next
+    # preload doesn't try to look it up.
+    _invalidate_mcp_schema_cache(manager, existing.name)
 
     return McpServerDeleteResponse(deleted=result["deleted"], id=server_id)
 
@@ -518,4 +551,6 @@ async def reset_builtin_server(server_id: str, request: Request):
         server_id,
         config=defaults_config
     )
+    # Defaults changed → drop the schema cache entry.
+    _invalidate_mcp_schema_cache(manager, updated.name)
     return _mcp_server_to_info(updated)

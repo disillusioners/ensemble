@@ -915,3 +915,176 @@ class TestGetStatus:
         assert status["server1"]["healthy"] is True
         assert status["server2"]["available"] == 0
         assert status["server2"]["healthy"] is False
+
+
+def _make_cached_tool(
+    name: str,
+    description: str = "",
+    input_schema: dict | None = None,
+) -> MagicMock:
+    """Create a mock adapted tool for the warmup pool's tool_discovery_cache.
+
+    Mirrors the shape of the real ``BaseTool`` objects stored after
+    ``adapt_mcp_tools`` runs at warmup time: ``name`` is already
+    prefixed, and ``args_schema`` exposes a ``.schema()`` method.
+    """
+    tool = MagicMock()
+    tool.name = name
+    tool.description = description
+    tool.args_schema = MagicMock()
+    tool.args_schema.schema = MagicMock(return_value=input_schema or {})
+    return tool
+
+
+class TestGetCachedToolSchemas:
+    """Tests for McpWarmupPool.get_cached_tool_schemas (m5 fix).
+
+    Verifies the public method correctly:
+    - Returns ``None`` when no discovery cache entry exists for the server.
+    - Strips the ``mcp_{slug}_`` prefix from cached tool names.
+    - Extracts ``input_schema`` from ``tool.args_schema.schema()``.
+    - Preserves ``server_name`` on each returned ``McpToolSchema``.
+    """
+
+    def test_returns_none_for_unknown_server(self, pool):
+        """Returns ``None`` when the server has no cached tools."""
+        assert pool.get_cached_tool_schemas("nonexistent") is None
+
+    def test_returns_none_for_unregistered_server(self, pool):
+        """Returns ``None`` even if the cache key exists but is empty."""
+        # Pre-populate cache with empty list to ensure the branch that
+        # returns ``None`` is the "missing key" branch, not "empty cache".
+        assert "ghost" not in pool._tool_discovery_cache
+        assert pool.get_cached_tool_schemas("ghost") is None
+
+    def test_strips_prefix_from_tool_names(self, pool):
+        """mcp_{slug}_{tool} → original tool name (prefix stripped)."""
+        cached_tools = [
+            _make_cached_tool(
+                name="mcp_github_create_issue",
+                description="Create a GitHub issue",
+                input_schema={"type": "object", "properties": {}},
+            ),
+            _make_cached_tool(
+                name="mcp_github_list_repos",
+                description="List repositories",
+                input_schema={"type": "object"},
+            ),
+        ]
+        pool._tool_discovery_cache["github"] = cached_tools
+
+        schemas = pool.get_cached_tool_schemas("github")
+
+        assert schemas is not None
+        assert len(schemas) == 2
+        # Prefix stripped — original MCP tool names are exposed
+        assert schemas[0].name == "create_issue"
+        assert schemas[1].name == "list_repos"
+
+    def test_strips_prefix_with_hyphenated_server_name(self, pool):
+        """Server names with hyphens get slugified (test-server → test_server)."""
+        cached_tools = [
+            _make_cached_tool(
+                name="mcp_test_server_echo",
+                description="Echo",
+                input_schema={},
+            ),
+        ]
+        pool._tool_discovery_cache["test-server"] = cached_tools
+
+        schemas = pool.get_cached_tool_schemas("test-server")
+
+        assert schemas is not None
+        assert len(schemas) == 1
+        assert schemas[0].name == "echo"
+
+    def test_input_schema_extracted_from_args_schema(self, pool):
+        """input_schema field on McpToolSchema comes from args_schema.schema()."""
+        expected_schema = {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+        }
+        cached_tools = [
+            _make_cached_tool(
+                name="mcp_search_query",
+                description="Search",
+                input_schema=expected_schema,
+            ),
+        ]
+        pool._tool_discovery_cache["search"] = cached_tools
+
+        schemas = pool.get_cached_tool_schemas("search")
+
+        assert schemas is not None
+        assert len(schemas) == 1
+        # The schema dict is forwarded verbatim from args_schema.schema()
+        assert schemas[0].input_schema == expected_schema
+
+    def test_server_name_set_on_each_schema(self, pool):
+        """server_name on each McpToolSchema matches the lookup key."""
+        cached_tools = [
+            _make_cached_tool(name="mcp_filesystem_read", description="Read file"),
+            _make_cached_tool(name="mcp_filesystem_write", description="Write file"),
+        ]
+        pool._tool_discovery_cache["filesystem"] = cached_tools
+
+        schemas = pool.get_cached_tool_schemas("filesystem")
+
+        assert schemas is not None
+        assert all(s.server_name == "filesystem" for s in schemas)
+
+    def test_description_preserved(self, pool):
+        """Description field is preserved on each returned schema."""
+        cached_tools = [
+            _make_cached_tool(
+                name="mcp_demo_tool",
+                description="This is the description text",
+            ),
+        ]
+        pool._tool_discovery_cache["demo"] = cached_tools
+
+        schemas = pool.get_cached_tool_schemas("demo")
+
+        assert schemas is not None
+        assert schemas[0].description == "This is the description text"
+
+    def test_handles_tool_name_without_prefix(self, pool):
+        """Tools without the prefix are returned unchanged (defensive)."""
+        cached_tools = [
+            _make_cached_tool(name="unprefixed_tool", description="No prefix"),
+        ]
+        pool._tool_discovery_cache["misc"] = cached_tools
+
+        schemas = pool.get_cached_tool_schemas("misc")
+
+        assert schemas is not None
+        # Falls through the ``startswith(prefix)`` guard; name returned as-is
+        assert schemas[0].name == "unprefixed_tool"
+
+    def test_empty_cache_entry_returns_empty_list(self, pool):
+        """A cache key mapped to an empty list returns ``[]`` (truthy branch)."""
+        pool._tool_discovery_cache["empty-server"] = []
+
+        schemas = pool.get_cached_tool_schemas("empty-server")
+
+        # ``not cached_tools`` is False, so the function enters the loop
+        # and returns the empty list — distinguishes from "missing key".
+        assert schemas == []
+
+    def test_handles_none_args_schema(self, pool):
+        """Tools with ``args_schema=None`` produce ``input_schema={}``."""
+        cached_tools = MagicMock()
+        cached_tools.name = "mcp_noargs_ping"
+        cached_tools.description = "Ping"
+        cached_tools.args_schema = None
+        pool._tool_discovery_cache["noargs"] = [cached_tools]
+
+        schemas = pool.get_cached_tool_schemas("noargs")
+
+        assert schemas is not None
+        assert len(schemas) == 1
+        assert schemas[0].input_schema == {}

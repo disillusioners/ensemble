@@ -53,6 +53,16 @@ mock_mcp_tool_adapter = create_mock_module("daemon.mcp.tool_adapter", {
     "is_mcp_tool": lambda name: name.startswith("mcp_") and "_" in name[4:] if name else False,
     "adapt_mcp_tools": lambda server_name, tools, tool_call_timeout=120: tools,
     "_slugify": lambda name: name.lower().replace("-", "_").replace(" ", "_"),
+    # Lazy-init exports used by McpService — the test mocks
+    # ``create_lazy_mcp_tools`` per-test when it cares about behavior;
+    # the default here just passes schemas through as a list of
+    # MagicMock "tools" (one per schema) so imports never fail.
+    "McpSessionProvider": MagicMock(),
+    "create_lazy_mcp_tools": lambda server_name, schemas, session_provider,
+        shared_session_cache, shared_session_lock,
+        tool_call_timeout=120: [MagicMock(name=f"mcp_{server_name}_{s.get('name', '?')}") for s in (schemas or [])],
+    "_build_lazy_coroutine": MagicMock(),
+    "_build_timed_coroutine": MagicMock(),
 })
 
 # Create mock MCP SDK module (mcp package)

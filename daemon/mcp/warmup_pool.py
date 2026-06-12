@@ -18,8 +18,9 @@ from langchain_mcp_adapters.tools import load_mcp_tools
 
 from daemon.mcp.config import McpStdioConfig
 from daemon.mcp.managed_session import ManagedClientSession
+from daemon.mcp.models import McpToolSchema
 from daemon.mcp.stdio_wrapper import TaskScopedStdioClient
-from daemon.mcp.tool_adapter import adapt_mcp_tools
+from daemon.mcp.tool_adapter import _slugify, adapt_mcp_tools
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +277,61 @@ class McpWarmupPool:
 
         self._start_tracked_replenish(server_name)
         return conn
+
+    def is_pooled_server(self, server_name: str) -> bool:
+        """Return True if this server is registered with the warmup pool.
+
+        Public accessor for the pool's known-server set. Use this rather
+        than poking at ``self._configs`` from outside the class.
+
+        Args:
+            server_name: Name of the server to check.
+
+        Returns:
+            True iff ``server_name`` was passed to ``register_server()``.
+        """
+        return server_name in self._configs
+
+    def get_cached_tool_schemas(
+        self, server_name: str
+    ) -> list[McpToolSchema] | None:
+        """Extract tool schemas from the discovery cache for a pooled server.
+
+        Called by ``McpService.get_schemas_for_server`` so the schema cache
+        can be populated without opening a new connection. Schemas are
+        returned with the original (un-prefixed) MCP tool names — the
+        ``mcp_{slug}_`` prefix that ``adapt_mcp_tools`` adds is stripped
+        here.
+
+        Args:
+            server_name: Name of the pooled server.
+
+        Returns:
+            List of ``McpToolSchema`` instances, or ``None`` if the server
+            has no cached tools (e.g. warmup hasn't completed yet).
+        """
+        if server_name not in self._tool_discovery_cache:
+            return None
+
+        cached_tools = self._tool_discovery_cache[server_name]
+        prefix = f"mcp_{_slugify(server_name)}_"
+
+        schemas: list[McpToolSchema] = []
+        for tool in cached_tools:
+            original_name = tool.name
+            if original_name.startswith(prefix):
+                original_name = original_name[len(prefix):]
+            schemas.append(
+                McpToolSchema(
+                    name=original_name,
+                    description=tool.description or "",
+                    input_schema=tool.args_schema.schema()
+                    if tool.args_schema is not None
+                    else {},
+                    server_name=server_name,
+                )
+            )
+        return schemas
 
     def _start_tracked_replenish(self, server_name: str) -> None:
         """

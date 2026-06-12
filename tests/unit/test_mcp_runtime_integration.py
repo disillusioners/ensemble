@@ -5,18 +5,27 @@ These tests validate the end-to-end MCP integration including:
 - MCP tools preloading and retrieval
 - Graceful handling of failures
 - Lifecycle cleanup
+
+Note: The lazy preload path (Phase 1) means ``preload_mcp_tools``
+no longer opens connections itself. These tests mock the new
+``get_schemas_for_server`` + ``create_lazy_mcp_tools`` path.
 """
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def _make_mock_server(name: str = "test-server", is_active: bool = True):
+def _make_mock_server(
+    name: str = "test-server",
+    is_active: bool = True,
+    is_builtin: bool = False,
+):
     """Create a mock MCP server."""
     server = MagicMock()
     server.name = name
     server.config = {"transport": "stdio", "command": "python", "args": ["-m", "server"]}
     server.is_active = is_active
+    server.is_builtin = is_builtin
     return server
 
 
@@ -30,12 +39,23 @@ def _make_mock_tool(name: str = "echo", description: str = "Echo tool"):
 
 
 def _make_adapted_tool(name: str, description: str = "Test tool"):
-    """Create a mock tool with proper name attribute for adapt_mcp_tools results."""
+    """Create a mock tool with proper name attribute for lazy results."""
     tool = MagicMock()
     tool.name = name  # Set as attribute, not constructor arg
     tool.description = description
     tool.copy = MagicMock(side_effect=lambda: tool)
     return tool
+
+
+def _make_schema(name: str, server_name: str = "test-server", description: str = ""):
+    """Create a McpToolSchema for tests."""
+    from daemon.mcp.models import McpToolSchema
+    return McpToolSchema(
+        name=name,
+        description=description,
+        input_schema={"type": "object", "properties": {}},
+        server_name=server_name,
+    )
 
 
 @pytest.fixture
@@ -44,6 +64,7 @@ def mock_manager():
     manager = MagicMock()
     manager._mcp_server_repository = MagicMock()
     manager.instances = {}  # Track loaded instances
+    manager.config = MagicMock(mcp_pool=MagicMock(tool_call_timeout=120))
     return manager
 
 
@@ -60,31 +81,20 @@ class TestFullFlowMcpToolsInjected:
     @pytest.mark.asyncio
     async def test_preload_discovers_and_caches_tools(self, mcp_service, mock_manager):
         """Preload MCP tools and verify they are cached."""
-        # Setup: One server with two tools
+        # Setup: One server with two tools (schemas)
         server = _make_mock_server(name="my-server")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
-
-        tool1 = _make_mock_tool(name="search", description="Search the web")
-        tool2 = _make_mock_tool(name="read", description="Read a file")
-
-        mock_conn_mgr = MagicMock()
-        mock_session = MagicMock()
-        mock_conn_mgr.get_session.return_value = mock_session
-        mock_conn_mgr.connect_instance = AsyncMock()
+        mcp_service.get_schemas_for_server = AsyncMock(return_value=[
+            _make_schema("search", "my-server"),
+            _make_schema("read", "my-server"),
+        ])
 
         with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[tool1, tool2]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-                side_effect=lambda name, tools, tool_call_timeout=120: [
-                    _make_adapted_tool(name=f"mcp_{name.replace('-', '_').replace(' ', '_')}_{t.name}", description=t.description)
-                    for t in tools
-                ]
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[
+                _make_adapted_tool(name="mcp_my_server_search"),
+                _make_adapted_tool(name="mcp_my_server_read"),
+            ],
         ):
             await mcp_service.preload_mcp_tools("test-instance-1")
 
@@ -101,47 +111,19 @@ class TestFullFlowMcpToolsInjected:
         server2 = _make_mock_server(name="server-b")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server1, server2]
 
-        tool_a = _make_mock_tool(name="tool1", description="From server A")
-        tool_b = _make_mock_tool(name="tool2", description="From server B")
+        async def lookup(srv):
+            if srv.name == "server-a":
+                return [_make_schema("tool1", "server-a")]
+            return [_make_schema("tool2", "server-b")]
 
-        mock_conn_mgr = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
-
-        def get_session(inst_id, server_name):
-            if server_name == "server-a":
-                return MagicMock()
-            elif server_name == "server-b":
-                return MagicMock()
-            return None
-
-        mock_conn_mgr.get_session.side_effect = get_session
-
-        def adapt_tools(name, tools, tool_call_timeout=120):
-            slugified_name = name.replace('-', '_').replace(' ', '_')
-            prefix = f"mcp_{slugified_name}_"
-            return [_make_adapted_tool(name=f"{prefix}{t.name}", description=t.description) for t in tools]
-
-        # Track which server's tools are loaded
-        load_calls = []
-
-        async def mock_load_tools(session):
-            # The session has metadata about which server
-            load_calls.append(session)
-            # Return appropriate tool based on call order
-            if len(load_calls) == 1:
-                return [tool_a]
-            return [tool_b]
+        mcp_service.get_schemas_for_server = AsyncMock(side_effect=lookup)
 
         with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            side_effect=mock_load_tools
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            side_effect=adapt_tools
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            side_effect=lambda server_name, schemas, **kwargs: [
+                _make_adapted_tool(name=f"mcp_{server_name.replace('-', '_')}_{s['name']}")
+                for s in schemas
+            ],
         ):
             await mcp_service.preload_mcp_tools("multi-server-instance")
 
@@ -157,23 +139,19 @@ class TestFullFlowMcpToolsInjected:
         # Preload tools first
         server = _make_mock_server(name="cleanup-test")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+        mcp_service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("test", "cleanup-test")]
+        )
 
-        tool = _make_mock_tool(name="test")
         mock_conn_mgr = MagicMock()
-        mock_conn_mgr.get_session.return_value = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
         mock_conn_mgr.close_instance = AsyncMock()  # Must be async
 
         with patch(
             "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
+            return_value=mock_conn_mgr,
         ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[tool]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            return_value=[_make_adapted_tool(name="mcp_cleanup_test_test")]
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_cleanup_test_test")],
         ):
             await mcp_service.preload_mcp_tools("cleanup-instance")
 
@@ -200,28 +178,16 @@ class TestResilienceValidInvalidServers:
             good_server, bad_server
         ]
 
-        good_tool = _make_mock_tool(name="good_tool", description="Good tool")
+        async def lookup(srv):
+            if srv.name == "good-server":
+                return [_make_schema("good_tool", "good-server")]
+            return []  # bad-server has no tools / schema discovery failed
 
-        mock_conn_mgr = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
-
-        def get_session(inst_id, server_name):
-            if server_name == "good-server":
-                return MagicMock()
-            return None  # bad-server returns no session
-
-        mock_conn_mgr.get_session.side_effect = get_session
+        mcp_service.get_schemas_for_server = AsyncMock(side_effect=lookup)
 
         with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[good_tool]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            return_value=[_make_adapted_tool(name="mcp_good_server_good_tool")]
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_good_server_good_tool")],
         ):
             await mcp_service.preload_mcp_tools("resilient-instance")
 
@@ -250,91 +216,52 @@ class TestResilienceValidInvalidServers:
         assert mcp_service.get_mcp_tools("all-fail-instance") == []
 
     @pytest.mark.asyncio
-    async def test_load_mcp_tools_exception_handled(self, mcp_service, mock_manager):
-        """Exception in load_mcp_tools is handled gracefully."""
+    async def test_discover_schemas_cold_exception_handled(self, mcp_service, mock_manager):
+        """M2 fix: Exercise ``_discover_schemas_cold`` exception handling.
+
+        The previous test (``test_load_mcp_tools_exception_handled``)
+        patched ``langchain_mcp_adapters.tools.load_mcp_tools`` — but
+        the lazy preload path never calls that function. The cold
+        discovery now happens in ``_discover_schemas_cold`` (which
+        calls ``session.list_tools()``); this test exercises that
+        exception path so the service still caches an empty list
+        instead of propagating.
+        """
         server = _make_mock_server(name="exception-server")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
 
+        # No warmup pool → forces the cold discovery path inside
+        # ``get_schemas_for_server``.
+        mcp_service._warmup_pool = None
+
+        # Mock the connection manager so ``_discover_schemas_cold`` opens
+        # a session whose ``list_tools()`` raises.
+        mock_session = MagicMock()
+        mock_session.list_tools = AsyncMock(
+            side_effect=RuntimeError("Tool discovery failed")
+        )
+
         mock_conn_mgr = MagicMock()
         mock_conn_mgr.connect_instance = AsyncMock()
-        mock_conn_mgr.get_session.return_value = MagicMock()
-
-        async def raise_error(session):
-            raise RuntimeError("Tool discovery failed")
+        mock_conn_mgr.get_session = MagicMock(return_value=mock_session)
+        mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
             "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            side_effect=raise_error
+            return_value=mock_conn_mgr,
         ):
+            # Should not raise — _discover_schemas_cold swallows errors
+            # and returns [].
             await mcp_service.preload_mcp_tools("exception-instance")
 
-        # Should cache empty, no exception propagated
+        # Service cached an empty tool list and the per-instance state
+        # has no entry for the failing server.
         assert mcp_service.get_mcp_tools("exception-instance") == []
-
-
-class TestRestorePathMcpPreloaded:
-    """Test 3: Restore path — MCP preloaded during restore."""
-
-    @pytest.mark.asyncio
-    async def test_preload_skipped_if_instance_in_memory(self, mcp_service, mock_manager):
-        """Preload is skipped if instance already in memory."""
-        # Simulate instance already loaded
-        mock_manager.instances["restored-instance"] = (MagicMock(), "agents/coder")
-
-        # Server exists but should NOT be loaded since instance is in memory
-        server = _make_mock_server(name="should-not-load")
-        mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
-
-        mock_conn_mgr = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
-
-        with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ):
-            # In the actual manager, ensure_mcp_preloaded checks instances dict
-            # For this test, we verify the service behavior when called directly
-            await mcp_service.preload_mcp_tools("restored-instance")
-
-        # The service still preloads (that's the current behavior)
-        # In real usage, manager.ensure_mcp_preloaded skips this if in memory
-        mock_conn_mgr.connect_instance.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_preload_on_restored_instance(self, mcp_service, mock_manager):
-        """Preload works correctly for a restored instance."""
-        server = _make_mock_server(name="restored-server")
-        mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
-
-        tool = _make_mock_tool(name="restored_tool")
-        mock_conn_mgr = MagicMock()
-        mock_conn_mgr.get_session.return_value = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
-
-        with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[tool]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            return_value=[_make_adapted_tool(name="mcp_restored_server_restored_tool")]
-        ):
-            await mcp_service.preload_mcp_tools("restored-instance")
-
-        cached = mcp_service.get_mcp_tools("restored-instance")
-        assert len(cached) == 1
-        assert "restored_tool" in cached[0].name
-
-
-class TestEdgeCases:
-    """Test 4: Edge cases."""
+        assert "exception-server" not in mcp_service._session_caches.get(
+            "exception-instance", {}
+        )
+        # The throwaway discovery session was torn down even on failure.
+        mock_conn_mgr.close_instance.assert_awaited()
 
     @pytest.mark.asyncio
     async def test_zero_mcp_servers_returns_empty_list(self, mcp_service, mock_manager):
@@ -369,29 +296,18 @@ class TestEdgeCases:
         # This tests the tool filter integration
         server = _make_mock_server(name="filter-test")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
-
-        mcp_tool = _make_mock_tool(name="mcp_tool", description="Should be filtered")
-        regular_tool = _make_mock_tool(name="regular_tool", description="Should pass")
-
-        mock_conn_mgr = MagicMock()
-        mock_conn_mgr.get_session.return_value = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
-
-        def adapt_tools(name, tools, tool_call_timeout=120):
-            if name == "filter-test":
-                return [_make_adapted_tool(name=f"mcp_filter_test_{t.name}", description=t.description) for t in tools]
-            return tools
+        mcp_service.get_schemas_for_server = AsyncMock(
+            return_value=[
+                _make_schema("mcp_tool", "filter-test"),
+                _make_schema("regular_tool", "filter-test"),
+            ]
+        )
 
         with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[mcp_tool, regular_tool]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            side_effect=adapt_tools
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            side_effect=lambda server_name, schemas, **kwargs: [
+                _make_adapted_tool(name=f"mcp_filter_test_{s['name']}") for s in schemas
+            ],
         ):
             await mcp_service.preload_mcp_tools("filter-instance")
 
@@ -407,27 +323,20 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_concurrent_preload_same_instance(self, mcp_service, mock_manager):
         """Concurrent preload calls for same instance are handled safely."""
+        import asyncio as _asyncio
+
         server = _make_mock_server(name="concurrent-server")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
-
-        tool = _make_mock_tool(name="concurrent_tool")
-        mock_conn_mgr = MagicMock()
-        mock_conn_mgr.get_session.return_value = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
+        mcp_service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("concurrent_tool", "concurrent-server")]
+        )
 
         with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[tool]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            return_value=[_make_adapted_tool(name="mcp_concurrent_server_concurrent_tool")]
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_concurrent_server_concurrent_tool")],
         ):
             # Launch concurrent preloads
-            await asyncio.gather(
+            await _asyncio.gather(
                 mcp_service.preload_mcp_tools("concurrent-instance"),
                 mcp_service.preload_mcp_tools("concurrent-instance"),
             )
@@ -443,26 +352,22 @@ class TestLifecycleCleanup:
     @pytest.mark.asyncio
     async def test_close_connections_idempotent(self, mcp_service, mock_manager):
         """close_connections can be called multiple times safely."""
-        # Preload first
+        # Preload first (lazy path: no connections opened during preload)
         server = _make_mock_server(name="idempotent-server")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
+        mcp_service.get_schemas_for_server = AsyncMock(
+            return_value=[_make_schema("test", "idempotent-server")]
+        )
 
-        tool = _make_mock_tool(name="test")
         mock_conn_mgr = MagicMock()
-        mock_conn_mgr.get_session.return_value = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
         mock_conn_mgr.close_instance = AsyncMock()
 
         with patch(
             "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
+            return_value=mock_conn_mgr,
         ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[tool]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            return_value=[_make_adapted_tool(name="mcp_idempotent_server_test")]
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            return_value=[_make_adapted_tool(name="mcp_idempotent_server_test")],
         ):
             await mcp_service.preload_mcp_tools("idempotent-instance")
 
@@ -472,6 +377,7 @@ class TestLifecycleCleanup:
 
         # Cache should be empty
         assert mcp_service.get_mcp_tools("idempotent-instance") == []
+        mock_conn_mgr.close_instance.assert_awaited_with("idempotent-instance")
 
     @pytest.mark.asyncio
     async def test_close_all_connections_clears_everything(self, mcp_service, mock_manager):
@@ -479,22 +385,23 @@ class TestLifecycleCleanup:
         servers = [_make_mock_server(name="server1"), _make_mock_server(name="server2")]
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = servers
 
-        tool = _make_mock_tool(name="test")
+        async def lookup(srv):
+            return [_make_schema("test", srv.name)]
+
+        mcp_service.get_schemas_for_server = AsyncMock(side_effect=lookup)
+
         mock_conn_mgr = MagicMock()
-        mock_conn_mgr.get_session.return_value = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
         mock_conn_mgr.close_all = AsyncMock()  # Must be async
 
         with patch(
             "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
+            return_value=mock_conn_mgr,
         ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            return_value=[tool]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            return_value=[_make_adapted_tool(name="mcp_server_test")]
+            "daemon.services.mcp_service.create_lazy_mcp_tools",
+            side_effect=lambda server_name, schemas, **kwargs: [
+                _make_adapted_tool(name=f"mcp_{server_name.replace('-', '_')}_{s['name']}")
+                for s in schemas
+            ],
         ):
             await mcp_service.preload_mcp_tools("instance1")
             await mcp_service.preload_mcp_tools("instance2")
@@ -513,39 +420,15 @@ class TestLifecycleCleanup:
         server = _make_mock_server(name="shared-server")
         mock_manager._mcp_server_repository.list_mcp_servers.return_value = [server]
 
-        tool1 = _make_mock_tool(name="tool1")
-        tool2 = _make_mock_tool(name="tool2")
-        mock_conn_mgr = MagicMock()
-        mock_conn_mgr.connect_instance = AsyncMock()
-
-        def get_session(inst_id, server_name):
-            return MagicMock()
-
-        mock_conn_mgr.get_session.side_effect = get_session
-
-        def adapt_tools(name, tools, tool_call_timeout=120):
-            slugified_name = name.replace('-', '_').replace(' ', '_')
-            return [_make_adapted_tool(name=f"mcp_{slugified_name}_{t.name}", description=t.description) for t in tools]
-
-        with patch(
-            "daemon.services.mcp_service.get_mcp_connection_manager",
-            return_value=mock_conn_mgr
-        ), patch(
-            "langchain_mcp_adapters.tools.load_mcp_tools",
-            new_callable=AsyncMock,
-            side_effect=lambda s: [tool1] if "instance-a" in str(s.metadata) else [tool2]
-        ), patch(
-            "daemon.services.mcp_service.adapt_mcp_tools",
-            side_effect=adapt_tools
-        ):
-            # Load for instance A
-            mcp_service._tools_cache["instance-a"] = [
-                _make_adapted_tool(name="mcp_shared_server_tool1", description="A's tool")
-            ]
-            # Load for instance B
-            mcp_service._tools_cache["instance-b"] = [
-                _make_adapted_tool(name="mcp_shared_server_tool2", description="B's tool")
-            ]
+        # Lazy path: just seed the cache directly to verify isolation —
+        # the per-instance dict keyed on instance_id is what guarantees
+        # that two instances never see each other's tools.
+        mcp_service._tools_cache["instance-a"] = [
+            _make_adapted_tool(name="mcp_shared_server_tool1", description="A's tool")
+        ]
+        mcp_service._tools_cache["instance-b"] = [
+            _make_adapted_tool(name="mcp_shared_server_tool2", description="B's tool")
+        ]
 
         # Verify isolation
         tools_a = mcp_service.get_mcp_tools("instance-a")
