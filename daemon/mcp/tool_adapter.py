@@ -20,9 +20,6 @@ from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 
-if TYPE_CHECKING:
-    pass
-
 logger = logging.getLogger(__name__)
 
 

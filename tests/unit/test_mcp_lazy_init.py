@@ -195,14 +195,7 @@ class TestLazyCoroutine:
 
         await coro(foo="bar", count=3)
 
-        session.call_tool.assert_awaited_once()
-        args, kwargs = session.call_tool.call_args
-        # Either positional or keyword — accept both shapes.
-        if args:
-            assert args[0] == "my_tool"
-            assert args[1] == {"foo": "bar", "count": 3}
-        else:
-            assert kwargs["name"] == "my_tool" or kwargs.get("original_tool_name") == "my_tool"
+        session.call_tool.assert_awaited_once_with("my_tool", {"foo": "bar", "count": 3})
 
     async def test_coroutine_strips_runtime_injected_arg(self):
         """LangGraph's ``runtime`` InjectedToolArg is removed before ``call_tool``."""
@@ -299,7 +292,6 @@ class TestConcurrencyGuard:
         """A slow ``get_session`` is invoked exactly once even with concurrent calls."""
         session = _make_session()
         call_count = 0
-        original_get_session = provider_get_session = AsyncMock()
 
         async def slow_get_session(server_name: str):
             nonlocal call_count
