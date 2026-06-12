@@ -19,6 +19,7 @@ The OpenCodeClient is always mocked via AsyncMock — no real HTTP calls.
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -42,6 +43,7 @@ from daemon.opencode.session_manager import (
     OpenCodeSessionManager,
     PersistedState,
     Request,
+    _MAX_MESSAGES_HISTORY,
     _WorkerResult,
 )
 from daemon.opencode.state import SessionState
@@ -708,7 +710,13 @@ class TestSyncStateWithOpenCode:
         snap = await manager.sync_state_with_open_code()
 
         assert snap["state"] == SessionState.BUSY.value
-        mock_client.get_session_messages.assert_awaited_once_with("test-session-1", limit=1)
+        # sync_state_with_open_code now fetches up to _MAX_MESSAGES_HISTORY
+        # newest messages so the in-memory ring can feed the
+        # wait_for_result timeout path. Empty response still doesn't
+        # touch state, just like the limit=1 path did.
+        mock_client.get_session_messages.assert_awaited_once_with(
+            "test-session-1", limit=_MAX_MESSAGES_HISTORY,
+        )
 
     @pytest.mark.asyncio
     async def test_last_message_with_error_returns_idle(
@@ -1060,6 +1068,157 @@ class TestSyncStateWithOpenCode:
         assert result["parts"][0].get("type") == "text"
         assert result["parts"][0].get("text") == "hello"
         assert "extra_field" not in result["parts"][0]
+
+    @pytest.mark.asyncio
+    async def test_sync_populates_message_ring_newest_first(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """After sync, _messages holds up to _MAX_MESSAGES_HISTORY bloat-stripped
+        messages, newest first.
+
+        The ring is what ``get_recent_messages`` reads. ``wait_for_result``'s
+        timeout path uses that accessor to render the last few messages
+        without re-querying OpenCode.
+        """
+        def _msg(i: int) -> dict[str, Any]:
+            return {
+                "info": {
+                    "id": f"m{i}",
+                    "finish": "stop",
+                    "tokens": i,   # bloat
+                },
+                "parts": [{"type": "text", "text": f"text-{i}"}],
+            }
+
+        # Newest first, per the OpenCode API contract.
+        msgs = [_msg(i) for i in range(5)]
+        mock_client.get_session_messages = AsyncMock(return_value=msgs)
+
+        await manager.sync_state_with_open_code()
+
+        ring = manager._messages
+        assert len(ring) == 5
+        # Newest first.
+        assert [m["info"]["id"] for m in ring] == ["m0", "m1", "m2", "m3", "m4"]
+        # Bloat stripped on every entry (tokens removed).
+        for m in ring:
+            assert "tokens" not in m.get("info", {})
+
+    @pytest.mark.asyncio
+    async def test_sync_caps_message_ring_at_max(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """When the API returns more than _MAX_MESSAGES_HISTORY messages,
+        the in-memory ring keeps only the newest _MAX_MESSAGES_HISTORY.
+
+        Prevents unbounded growth on long-running sessions. The cap is
+        a small ring above the 3 the timeout path renders so the
+        formatter always has data to work with even if the newest
+        poll fetched fewer than 3.
+        """
+        def _msg(i: int) -> dict[str, Any]:
+            return {
+                "info": {"id": f"m{i}", "finish": "stop"},
+                "parts": [{"type": "text", "text": f"text-{i}"}],
+            }
+
+        msgs = [_msg(i) for i in range(_MAX_MESSAGES_HISTORY + 5)]
+        mock_client.get_session_messages = AsyncMock(return_value=msgs)
+
+        await manager.sync_state_with_open_code()
+
+        assert len(manager._messages) == _MAX_MESSAGES_HISTORY
+        # Newest first, so the cap drops the OLDEST messages.
+        assert manager._messages[0]["info"]["id"] == "m0"
+        assert manager._messages[-1]["info"]["id"] == f"m{_MAX_MESSAGES_HISTORY - 1}"
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_default_returns_three(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """``get_recent_messages(n=3)`` returns the 3 newest messages, newest first.
+
+        Drives the wait_for_result TIMEOUT response — the formatter
+        uses this accessor to render the last 3 messages chronologically.
+        """
+        def _msg(i: int) -> dict[str, Any]:
+            return {
+                "info": {"id": f"m{i}", "finish": "stop"},
+                "parts": [{"type": "text", "text": f"text-{i}"}],
+            }
+
+        msgs = [_msg(i) for i in range(5)]
+        mock_client.get_session_messages = AsyncMock(return_value=msgs)
+
+        await manager.sync_state_with_open_code()
+
+        recent = manager.get_recent_messages()
+        assert len(recent) == 3
+        assert [m["info"]["id"] for m in recent] == ["m0", "m1", "m2"]
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_respects_custom_n(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """``get_recent_messages(n=1)`` returns just the newest; n=10 returns all."""
+        def _msg(i: int) -> dict[str, Any]:
+            return {
+                "info": {"id": f"m{i}", "finish": "stop"},
+                "parts": [{"type": "text", "text": f"text-{i}"}],
+            }
+
+        mock_client.get_session_messages = AsyncMock(return_value=[_msg(i) for i in range(5)])
+
+        await manager.sync_state_with_open_code()
+
+        # n=1 → just the newest
+        only_newest = manager.get_recent_messages(1)
+        assert len(only_newest) == 1
+        assert only_newest[0]["info"]["id"] == "m0"
+
+        # n larger than ring size → all of them
+        all_msgs = manager.get_recent_messages(100)
+        assert len(all_msgs) == 5
+
+        # n <= 0 → empty list
+        assert manager.get_recent_messages(0) == []
+        assert manager.get_recent_messages(-1) == []
+
+    @pytest.mark.asyncio
+    async def test_get_recent_messages_empty_when_no_sync(
+        self, manager: OpenCodeSessionManager
+    ) -> None:
+        """A fresh manager (no sync yet) returns an empty list from
+        ``get_recent_messages`` — caller must fall back to whatever
+        data source is available.
+        """
+        assert manager.get_recent_messages() == []
+
+    @pytest.mark.asyncio
+    async def test_snapshot_includes_messages_field(
+        self, manager: OpenCodeSessionManager, mock_client: AsyncMock
+    ) -> None:
+        """``get_snapshot`` now includes a ``messages`` field for the
+        wait_for_result timeout formatter. The list is a defensive copy
+        so callers cannot mutate the internal ring.
+        """
+        def _msg(i: int) -> dict[str, Any]:
+            return {
+                "info": {"id": f"m{i}", "finish": "stop"},
+                "parts": [{"type": "text", "text": f"text-{i}"}],
+            }
+
+        mock_client.get_session_messages = AsyncMock(return_value=[_msg(i) for i in range(3)])
+
+        snap = await manager.sync_state_with_open_code()
+
+        assert "messages" in snap
+        assert isinstance(snap["messages"], list)
+        assert [m["info"]["id"] for m in snap["messages"]] == ["m0", "m1", "m2"]
+
+        # Defensive copy: mutating the snapshot list must not corrupt the ring.
+        snap["messages"].clear()
+        assert len(manager._messages) == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────

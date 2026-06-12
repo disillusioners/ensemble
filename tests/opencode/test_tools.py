@@ -830,9 +830,11 @@ class TestWaitForResultExecution:
     ) -> None:
         """On timeout while still BUSY, the response embeds the last snapshot.
 
-        The agent should see ``[STATE]`` and ``[LAST MESSAGE]`` from the most
-        recent GET_STATUS poll so it can decide whether to resume, abort, or
-        keep waiting — without making a separate status call.
+        The agent should see ``[STATE]`` and the last observed message
+        (here just one because no in-memory manager ring is populated) so
+        it can decide whether to resume, abort, or keep waiting — without
+        making a separate status call. Header reads ``[LAST 1 MESSAGE]``
+        in this single-message case (``[LAST N MESSAGES]`` for N>1).
         """
         mock_registry.get_session_record = AsyncMock(
             return_value={"id": "session-busy"}
@@ -867,9 +869,138 @@ class TestWaitForResultExecution:
         assert isinstance(result, str)
         assert result.startswith("[TIMEOUT]")
         assert "[STATE] BUSY" in result
-        assert "[LAST MESSAGE]" in result
+        # Single-message case: header is "[LAST 1 MESSAGE]" (singular).
+        assert "[LAST 1 MESSAGE]" in result
         assert "mid-stream progress..." in result
         assert "external_opencode_resume_session" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_timeout_includes_last_3_messages(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """On timeout the response shows the last 3 messages from the manager ring.
+
+        When the in-memory session manager carries 3+ messages (newest
+        first), the timeout response embeds all of them in chronological
+        order under a ``[LAST 3 MESSAGES]`` header. This is the primary
+        new behavior: the agent can see recent progression without a
+        follow-up status call.
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-busy"}
+        )
+        # Manager's recent ring: 3 bloat-stripped messages, newest first.
+        recent = [
+            {"result": "step 3 — almost there"},
+            {"result": "step 2 — making progress"},
+            {"result": "step 1 — starting"},
+        ]
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=None)
+        mock_mgr.get_recent_messages = MagicMock(return_value=list(recent))
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        busy_response = OpenCodeResponse(
+            status="ok",
+            data={
+                "state": "BUSY",
+                "latest_response": {"result": "step 3 — almost there"},
+            },
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=busy_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[TIMEOUT]")
+        assert "[STATE] BUSY" in result
+        # The plural header indicates we have 3 messages.
+        assert "[LAST 3 MESSAGES]" in result
+        # All three messages appear, and in chronological order
+        # (oldest → newest) so progression reads top-to-bottom.
+        assert "step 1 — starting" in result
+        assert "step 2 — making progress" in result
+        assert "step 3 — almost there" in result
+        # Chronological order assertion: step 1 comes before step 2
+        # comes before step 3 in the rendered output.
+        assert result.index("step 1") < result.index("step 2") < result.index("step 3")
+        assert "external_opencode_resume_session" in result
+
+    @pytest.mark.asyncio
+    async def test_wait_for_result_timeout_includes_partial_messages(
+        self,
+        mock_manager: MagicMock,
+        mock_registry: AsyncMock,
+    ) -> None:
+        """If the manager ring has fewer than 3 messages, render what's available.
+
+        Guards against the no-padding requirement: the response must not
+        fabricate extra entries when the ring is short, and must not
+        error. The header reflects the actual count (e.g. ``[LAST 2
+        MESSAGES]``).
+        """
+        mock_registry.get_session_record = AsyncMock(
+            return_value={"id": "session-busy"}
+        )
+        recent = [
+            {"result": "msg-b"},
+            {"result": "msg-a"},
+        ]
+        mock_mgr = MagicMock()
+        mock_mgr.get_idle_event = MagicMock(return_value=None)
+        mock_mgr.get_recent_messages = MagicMock(return_value=list(recent))
+        mock_registry.get_manager = AsyncMock(return_value=mock_mgr)
+
+        busy_response = OpenCodeResponse(
+            status="ok",
+            data={"state": "BUSY", "latest_response": {"result": "msg-b"}},
+        )
+        with patch(
+            "daemon.tools.external_opencode._server_send_message",
+            new_callable=AsyncMock,
+            return_value=busy_response,
+        ), patch(
+            "daemon.tools.external_opencode.asyncio.sleep",
+            new_callable=AsyncMock,
+        ), patch(
+            "daemon.tools.external_opencode.WAIT_TIMEOUT_S", 0.05,
+        ):
+            tools = create_opencode_tools(mock_manager, "test-id")
+            wait_tool = next(
+                t for t in tools if t.name == "external_opencode_wait_for_result"
+            )
+
+            result = await wait_tool.ainvoke({
+                "project": "myapp",
+                "session_name": "feature-1",
+            })
+
+        assert isinstance(result, str)
+        assert result.startswith("[TIMEOUT]")
+        # Header reflects actual count: 2 messages → plural form.
+        assert "[LAST 2 MESSAGES]" in result
+        assert "msg-a" in result
+        assert "msg-b" in result
+        # No fabricated third entry.
+        assert "msg-c" not in result
 
     @pytest.mark.asyncio
     async def test_wait_for_result_timeout_without_any_poll(

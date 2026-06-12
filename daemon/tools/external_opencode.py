@@ -142,13 +142,26 @@ def create_opencode_tools(
 
     def _format_timeout(
         last_resp: "OpenCodeResponse | None",
+        recent_messages: list[Any] | None = None,
     ) -> str:
         """Build a TIMEOUT message that includes the last observed snapshot.
 
-        On timeout the session may still be BUSY. The snapshot contains
-        ``latest_response`` (the most recent opencode message), which gives
-        the calling agent visibility into in-flight progress without having
-        to issue a separate ``external_opencode_get_status`` call.
+        On timeout the session may still be BUSY. When ``recent_messages``
+        is provided and contains 3+ entries, we render the last few
+        messages (newest first) so the calling agent can see in-flight
+        progress without issuing a separate ``external_opencode_get_status``
+        call. When fewer than 3 messages are available we render whatever
+        is present (no padding, no error).
+
+        Resolution order for the message body:
+
+        1. ``recent_messages`` — the in-memory ring from
+           ``OpenCodeSessionManager.get_recent_messages(n=3)``. Preferred.
+        2. ``last_resp.data["latest_response"]`` — the stripped latest
+           message from the most recent successful GET_STATUS poll.
+           Used as a fallback when the manager is unavailable
+           (e.g. before the loop's first tick in unit tests).
+        3. No messages at all — the original short fallback string.
         """
         fallback = (
             f"[TIMEOUT] Session did not complete within {WAIT_TIMEOUT_S}s. "
@@ -158,19 +171,50 @@ def create_opencode_tools(
             return fallback
         data = last_resp.data or {}
         state = data.get("state", "UNKNOWN")
-        latest = data.get("latest_response")
         parts: list[str] = [
             f"[TIMEOUT] Session did not complete within {WAIT_TIMEOUT_S}s.",
             f"[STATE] {state}",
         ]
-        if latest:
-            rendered = (
-                latest.get("result", latest)
-                if isinstance(latest, dict)
-                else latest
+
+        # Prefer the manager-supplied history ring (up to 3 newest-first)
+        # so the caller can see the last few messages and reason about
+        # progression. Fall back to the single latest_response from the
+        # most recent poll when the ring is empty (e.g. tests that stub
+        # the dispatcher without a real manager).
+        rendered_messages: list[str] = []
+        if recent_messages:
+            for msg in recent_messages[:3]:
+                if msg is None:
+                    continue
+                rendered = (
+                    msg.get("result", msg)
+                    if isinstance(msg, dict)
+                    else msg
+                )
+                rendered_messages.append(str(rendered))
+        if not rendered_messages:
+            latest = data.get("latest_response")
+            if latest:
+                rendered = (
+                    latest.get("result", latest)
+                    if isinstance(latest, dict)
+                    else latest
+                )
+                rendered_messages.append(str(rendered))
+
+        if rendered_messages:
+            # Header reflects how many messages we're showing so the
+            # caller can tell apart "1 of 3+" from "3 of 3+" without
+            # counting blocks.
+            parts.append(
+                f"[LAST {len(rendered_messages)} MESSAGE"
+                f"{'S' if len(rendered_messages) != 1 else ''}]"
             )
-            parts.append("[LAST MESSAGE]")
-            parts.append(str(rendered))
+            # Render in chronological order (oldest → newest) so the
+            # progression reads top-to-bottom. The manager returns
+            # newest-first, so reverse.
+            for rendered in reversed(rendered_messages):
+                parts.append(rendered)
         parts.append(
             "Use external_opencode_resume_session() to continue or "
             "external_opencode_get_status() for more details."
@@ -603,7 +647,24 @@ Returns:
             else:
                 await asyncio.sleep(POLL_INTERVAL_S)
 
-        return _format_timeout(last_resp)
+        # On timeout, surface the last 3 messages from the in-memory
+        # session manager ring (preferred) or the single latest from
+        # the last poll as a fallback. The manager accumulates the
+        # ring in ``sync_state_with_open_code`` so by the time we hit
+        # the deadline, the caller can see the last few messages and
+        # reason about progression without an extra status call.
+        recent_messages: list[Any] = []
+        if manager is not None:
+            getter = getattr(manager, "get_recent_messages", None)
+            if callable(getter):
+                try:
+                    recent_messages = getter(3) or []
+                except Exception:
+                    # Defensive: a stubbed/mocked manager might raise
+                    # on the accessor; fall through to the empty list
+                    # and let the formatter use last_resp as fallback.
+                    recent_messages = []
+        return _format_timeout(last_resp, recent_messages=recent_messages)
     
     external_opencode_wait_for_result._full_doc_ = """\
 Block until an opencode session completes (polls every 30s, fixed 660s max wait).
@@ -615,8 +676,11 @@ Args:
 Returns:
     [COMPLETED] message with response data, [WAITING_FOR_INPUT] message that
     inlines the pending questions so the caller can answer immediately, or
-    [TIMEOUT] message that includes the last observed state and latest_response
-    so the caller can see in-flight progress without a separate status call.
+    [TIMEOUT] message that includes the last observed state and the most
+    recent messages (up to 3) from the in-memory message ring so the caller
+    can see in-flight progress without a separate status call. When fewer
+    than 3 messages are available, whatever is present is rendered (no
+    padding, no error).
 """
     
     # ── Tool 5: Wait Any ────────────────────────────────────────────
