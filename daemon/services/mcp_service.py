@@ -225,7 +225,14 @@ class McpService:
                 return self._schema_cache[cache_key]
 
             # For built-in (pooled) servers, ask the warmup pool first.
-            if self._warmup_pool and server.is_builtin:
+            # Use pool.is_pooled_server() as the authoritative membership
+            # check — server.is_builtin is a DB column that can drift
+            # to False (e.g. before bootstrap completes), and the session
+            # provider already uses pool.is_pooled_server() for the same
+            # routing decision. Aligning the schema lookup with the
+            # session provider avoids builtin STDIO tools becoming
+            # invisible to agents when the DB column drifts.
+            if self._warmup_pool and self._warmup_pool.is_pooled_server(server.name):
                 cached_schemas = self._warmup_pool.get_cached_tool_schemas(
                     server.name
                 )
