@@ -1294,6 +1294,7 @@ class TestSlackAdapterNewCommand:
         assert msg.external_user_id == "T111111:C123456"
         assert msg.metadata.get("force_new_instance") is True
         assert msg.metadata.get("command") == "/new"
+        assert msg.metadata.get("agent") == "leader"
         assert msg.metadata["slack"]["channel_id"] == "C123456"
         assert msg.metadata["slack"]["workspace_id"] == "T111111"
         assert msg.metadata["slack"]["user_id"] == "U654321"

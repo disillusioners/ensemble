@@ -776,6 +776,7 @@ class SlackAdapter(MessageSourceAdapter):
                     "user_id": user_id,
                     "user_name": body.get("user_name", ""),
                 },
+                "agent": self._default_agent,
                 "force_new_instance": True,
                 "command": "/new",
             },

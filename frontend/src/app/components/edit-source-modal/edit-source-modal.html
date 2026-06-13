@@ -118,7 +118,7 @@
                         >
                           <option value="" disabled>{{ field.placeholder }}</option>
                           @for (option of field.options; track option.value) {
-                            <option [value]="option.value">{{ option.label }}</option>
+                            <option [value]="option.value" [selected]="option.value === getFieldValue(field.key)">{{ option.label }}</option>
                           }
                         </select>
                       } @else if (field.type === 'password') {
@@ -183,7 +183,7 @@
                         >
                           <option value="" disabled>{{ field.placeholder }}</option>
                           @for (option of field.options; track option.value) {
-                            <option [value]="option.value">{{ option.label }}</option>
+                            <option [value]="option.value" [selected]="option.value === getFieldValue(field.key)">{{ option.label }}</option>
                           }
                         </select>
                       } @else {
