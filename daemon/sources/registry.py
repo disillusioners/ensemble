@@ -105,6 +105,12 @@ class SourceRegistry:
                 task.cancel()
                 logger.debug(f"Cancelled supervisor task for: {source_id}")
         
+        # Cancel any pending delayed autostart task
+        autostart_task = self._autostart_tasks.pop(source_id, None)
+        if autostart_task and not autostart_task.done():
+            autostart_task.cancel()
+            logger.debug(f"Cancelled pending autostart task for: {source_id}")
+        
         del self._adapters[source_id]
         self._running.pop(source_id, None)
         logger.info(f"Unregistered adapter: source_id={source_id}")
@@ -170,6 +176,12 @@ class SourceRegistry:
             # Only auto-start sources with the autostart flag enabled
             if not getattr(config, "autostart", True):
                 logger.debug(f"Skipping non-autostart source: {config.source_id}")
+                continue
+            
+            # Skip sources that were explicitly stopped (manual stop persists
+            # across reboots regardless of the autostart flag)
+            if config.status == SourceStatus.STOPPED.value:
+                logger.debug(f"Skipping stopped source: {config.source_id}")
                 continue
             
             source_id = config.source_id
@@ -270,7 +282,6 @@ class SourceRegistry:
                 "config": config.config,
                 "credentials": config.credentials,
                 "enabled": config.enabled,
-                "autostart": getattr(config, "autostart", True),
             }
         else:
             config_dict = config
@@ -312,9 +323,8 @@ class SourceRegistry:
             config=config_data,
             credentials=credentials,
             enabled=config_dict.get("enabled", True),
-            autostart=config_dict.get("autostart", True),
         )
-        
+
         logger.info(f"Creating adapter for {source_id}: config={config.config}")
         
         # Create callback wrapper that includes source_id
@@ -491,6 +501,16 @@ class SourceRegistry:
         # Mark as not running to signal supervisor to stop
         self._running[source_id] = False
         
+        # Cancel any pending delayed autostart so a manual stop within the
+        # boot autostart window does not resurrect the source later
+        autostart_task = self._autostart_tasks.pop(source_id, None)
+        if autostart_task and not autostart_task.done():
+            autostart_task.cancel()
+            try:
+                await autostart_task
+            except asyncio.CancelledError:
+                pass
+        
         # Cancel supervisor task if exists
         task = self._supervisor_tasks.pop(source_id, None)
         if task and not task.done():
@@ -544,7 +564,6 @@ class SourceRegistry:
             config=config_dict.get("config", {}),
             credentials=config_dict.get("credentials", {}),
             enabled=config_dict.get("enabled", True),
-            autostart=config_dict.get("autostart", True),
         )
         
         # Update adapter config

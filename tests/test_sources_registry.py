@@ -539,7 +539,7 @@ def test_get_with_empty_registry(conn, mock_manager):
 # ==================== Autostart Delay Tests ====================
 
 
-def _make_db_config(source_id, enabled=True, autostart=True, status="stopped"):
+def _make_db_config(source_id, enabled=True, autostart=True, status="error"):
     """Build a mock SourceConfig row resembling the SQLModel object."""
     cfg = MagicMock()
     cfg.source_id = source_id
@@ -621,6 +621,23 @@ async def test_start_all_skips_disabled_source(mock_manager):
 
 
 @pytest.mark.asyncio
+async def test_start_all_skips_stopped_source(mock_manager):
+    """Manually-stopped sources are not scheduled even if autostart=True."""
+    repo = mock_manager._source_repo
+    repo.list_source_configs = MagicMock(
+        return_value=[_make_db_config("src-1", enabled=True, autostart=True, status="stopped")]
+    )
+
+    registry = SourceRegistry(repo, mock_manager)
+    registry._create_adapter_from_config = AsyncMock(return_value=MagicMock())
+
+    await registry.start_all()
+
+    assert "src-1" not in registry._autostart_tasks
+    registry._create_adapter_from_config.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_delayed_start_starts_adapter_after_delay(mock_manager):
     """After the delay elapses, the adapter is started."""
     repo = mock_manager._source_repo
@@ -680,3 +697,38 @@ async def test_delayed_start_skipped_during_shutdown(mock_manager):
     await registry._delayed_start("test-source")
 
     registry.start_adapter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_adapter_cancels_pending_autostart(mock_manager):
+    """Manually stopping a source cancels its pending autostart task."""
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
+    registry.AUTOSTART_DELAY_SECONDS = 60.0
+
+    config = SourceConfig("src-1", "telegram", "Test", {}, {})
+    adapter = MockMessageAdapter(config, lambda msg: None)
+    registry.register(adapter)
+    registry._schedule_autostart("src-1")
+    assert "src-1" in registry._autostart_tasks
+
+    await registry.stop_adapter("src-1")
+
+    assert "src-1" not in registry._autostart_tasks
+    assert registry._autostart_tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_unregister_cancels_pending_autostart(mock_manager):
+    """Unregistering (delete) a source cancels its pending autostart task."""
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
+    registry.AUTOSTART_DELAY_SECONDS = 60.0
+
+    config = SourceConfig("src-1", "telegram", "Test", {}, {})
+    adapter = MockMessageAdapter(config, lambda msg: None)
+    registry.register(adapter)
+    registry._schedule_autostart("src-1")
+    assert "src-1" in registry._autostart_tasks
+
+    registry.unregister("src-1")
+
+    assert "src-1" not in registry._autostart_tasks

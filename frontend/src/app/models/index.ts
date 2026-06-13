@@ -144,7 +144,7 @@ export interface Source {
   name: string;
   config: Record<string, unknown>;
   enabled: boolean;
-  autostart: boolean;
+  autostart?: boolean;
   status: SourceStatus;
   error_message?: string;
   created_at: string;
