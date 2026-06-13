@@ -923,6 +923,169 @@ class TestProgressiveMessageDelivery:
             mock_source_dispatcher.dispatch_message.assert_not_called()
 
 
+class TestToolResultStreaming:
+    """Tests for real-time tool_result SSE emission from the streaming loop."""
+
+    @pytest.fixture
+    def mock_live_hub(self):
+        """Create a mock live hub whose stream_* methods are AsyncMocks."""
+        hub = MagicMock()
+        hub.stream_message = AsyncMock()
+        hub.stream_tool_result = AsyncMock()
+        hub.stream_status_change = AsyncMock()
+        hub.stream_error = AsyncMock()
+        return hub
+
+    @pytest.fixture
+    def streaming_graph_with_tool_message(self):
+        """Graph yields: agent (AIMessage w/ tool_calls) then tools (ToolMessage)."""
+        from langchain_core.messages import AIMessage, ToolMessage
+
+        ai_msg = AIMessage(
+            content="",
+            id="ai-1",
+            tool_calls=[{"id": "call_abc", "name": "echo", "args": {"x": 1}}],
+        )
+        tool_msg = ToolMessage(
+            content="the tool output",
+            tool_call_id="call_abc",
+            id="tm-1",
+        )
+
+        graph = Mock()
+
+        async def mock_astream(*args, **kwargs):
+            yield ("updates", {"agent": {"messages": [ai_msg]}})
+            yield ("updates", {"tools": {"messages": [tool_msg]}})
+            yield ("updates", {"agent": {"messages": []}})
+
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [ai_msg, tool_msg]})
+        return graph
+
+    @pytest.fixture
+    def streaming_graph_with_two_tool_messages(self):
+        """Graph yields: tools (two ToolMessages) — two tool_result events expected."""
+        from langchain_core.messages import ToolMessage
+
+        tm1 = ToolMessage(content="first", tool_call_id="call_a", id="tm-1")
+        tm2 = ToolMessage(content="second", tool_call_id="call_b", id="tm-2")
+
+        graph = Mock()
+
+        async def mock_astream(*args, **kwargs):
+            yield ("updates", {"tools": {"messages": [tm1, tm2]}})
+            yield ("updates", {"agent": {"messages": []}})
+
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [tm1, tm2]})
+        return graph
+
+    @pytest.mark.asyncio
+    async def test_streaming_loop_emits_tool_result_for_tool_message(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_tool_message, mock_instance_repository, mock_live_hub
+    ):
+        """A ToolMessage in the `tools` node update must emit a tool_result event."""
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_tool_message), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager._live_hub = mock_live_hub
+            manager.source_dispatcher = None
+
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+            await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source=None,
+            )
+
+        assert mock_live_hub.stream_tool_result.await_count >= 1
+        call = mock_live_hub.stream_tool_result.call_args
+        assert call.kwargs["instance_id"] == instance_id
+        assert call.kwargs["tool_call_id"] == "call_abc"
+        assert call.kwargs["content"] == "the tool output"
+        assert call.kwargs["message_id"] == "tm-1"
+
+    @pytest.mark.asyncio
+    async def test_streaming_loop_dedupes_tool_result_across_updates(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_tool_message, mock_instance_repository, mock_live_hub
+    ):
+        """The same ToolMessage appearing in multiple updates iterations must emit only once."""
+        # Yield the tools node update twice with the same ToolMessage id to
+        # simulate LangGraph re-delivering cumulative state.
+        from langchain_core.messages import ToolMessage
+
+        tool_msg = ToolMessage(content="the tool output", tool_call_id="call_abc", id="tm-dup")
+
+        graph = Mock()
+
+        async def mock_astream(*args, **kwargs):
+            yield ("updates", {"tools": {"messages": [tool_msg]}})
+            yield ("updates", {"tools": {"messages": [tool_msg]}})
+
+        graph.astream = mock_astream
+        graph.invoke = Mock(return_value={"messages": [tool_msg]})
+
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=graph), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager._live_hub = mock_live_hub
+            manager.source_dispatcher = None
+
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+            await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source=None,
+            )
+
+        assert mock_live_hub.stream_tool_result.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_streaming_loop_emits_tool_result_for_each_tool(
+        self, mock_config, mock_checkpointer, mock_prompt_cache,
+        streaming_graph_with_two_tool_messages, mock_instance_repository, mock_live_hub
+    ):
+        """Each ToolMessage in a single tools node update must emit its own tool_result event."""
+        with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
+             patch('daemon.manager.build_instance_graph', return_value=streaming_graph_with_two_tool_messages), \
+             patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
+             patch('daemon.manager.create_instance_tools', return_value=[]):
+
+            manager = InstanceManager(mock_config)
+            manager._instance_repository = mock_instance_repository
+            manager._live_hub = mock_live_hub
+            manager.source_dispatcher = None
+
+            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+
+            await manager._process_message_with_tracking(
+                instance_id=instance_id,
+                message="Hello!",
+                message_id="test-msg-001",
+                message_source=None,
+            )
+
+        assert mock_live_hub.stream_tool_result.await_count == 2
+        call_kwarg_pairs = [c.kwargs for c in mock_live_hub.stream_tool_result.call_args_list]
+        assert {c["tool_call_id"] for c in call_kwarg_pairs} == {"call_a", "call_b"}
+        assert {c["content"] for c in call_kwarg_pairs} == {"first", "second"}
+
+
 class TestListContentHandling:
     """Tests for Fix W2: List content handling (content as list of blocks)."""
 

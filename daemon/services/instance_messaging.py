@@ -63,10 +63,13 @@ def _get_message_event_type(msg: dict) -> str:
         msg: Serialized message dict
 
     Returns:
-        Event type string: "user_message" | "assistant_message" | "thinking" | "tool_call"
+        Event type string: "user_message" | "assistant_message" | "thinking"
+            | "tool_call" | "tool_result"
     """
     if msg.get("role") == "user":
         return "user_message"
+    if msg.get("role") == "tool":
+        return "tool_result"
     if msg.get("tool_calls"):
         return "tool_call"
     if msg.get("thinking") or msg.get("thinking_extracted"):
@@ -1014,8 +1017,37 @@ class InstanceMessagingService:
                         
                         # Emit individual messages, preserving original created_at
                         for m in all_state_messages:
-                            # Skip ToolMessages — they get baked into tool_calls
+                            # Emit ToolMessage as a real-time tool_result event
+                            # (also still baked into the next AIMessage's tool_calls
+                            # for clients that don't yet handle tool_result).
                             if isinstance(m, ToolMessage):
+                                tc_id = getattr(m, "tool_call_id", "") or ""
+                                if not tc_id:
+                                    continue
+                                msg_id = getattr(m, "id", None) or str(uuid.uuid4())
+                                ts_key = f"{instance_id}:{msg_id}" if msg_id else None
+                                # Dedup across multiple updates iterations of the same ToolMessage
+                                if ts_key and ts_key in self._manager._original_timestamps:
+                                    continue
+                                if ts_key:
+                                    self._manager._original_timestamps[ts_key] = (
+                                        m.additional_kwargs.get("timestamp")
+                                        if hasattr(m, "additional_kwargs")
+                                        and m.additional_kwargs
+                                        else ""
+                                    )
+                                raw_content = getattr(m, "content", "") or ""
+                                content_str = (
+                                    raw_content
+                                    if isinstance(raw_content, str)
+                                    else str(raw_content)
+                                )
+                                await self._manager._live_hub.stream_tool_result(
+                                    instance_id=instance_id,
+                                    tool_call_id=tc_id,
+                                    content=content_str,
+                                    message_id=msg_id,
+                                )
                                 continue
                             # Skip HumanMessages — already emitted before graph started
                             if hasattr(m, 'type') and m.type == 'human':

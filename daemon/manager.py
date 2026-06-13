@@ -380,10 +380,13 @@ def _get_message_event_type(msg: dict) -> str:
         msg: Serialized message dict
 
     Returns:
-        Event type string: "user_message" | "assistant_message" | "thinking" | "tool_call"
+        Event type string: "user_message" | "assistant_message" | "thinking"
+            | "tool_call" | "tool_result"
     """
     if msg.get("role") == "user":
         return "user_message"
+    if msg.get("role") == "tool":
+        return "tool_result"
     if msg.get("tool_calls"):
         return "tool_call"
     if msg.get("thinking") or msg.get("thinking_extracted"):

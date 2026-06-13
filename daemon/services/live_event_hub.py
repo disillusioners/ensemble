@@ -114,6 +114,39 @@ class LiveEventHub:
         
         await self._stream_to_connections(instance_id, event)
     
+    async def stream_tool_result(
+        self,
+        instance_id: str,
+        tool_call_id: str,
+        content: str,
+        message_id: str,
+    ) -> None:
+        """Stream a real-time tool result event to all active connections.
+
+        Emitted in real time as the graph's `tools` node finishes a tool call,
+        independent of the next assistant message. The payload is intentionally
+        minimal so the frontend can patch the matching tool_calls[i].output
+        in place.
+
+        Args:
+            instance_id: The instance the tool result belongs to.
+            tool_call_id: The id of the tool call this result answers.
+            content: The tool's output content (stringified).
+            message_id: The ToolMessage's id, used as event_id for dedup.
+        """
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "tool_result",
+            "event_id": message_id,
+            "message": {
+                "message_id": message_id,
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": content,
+            },
+        }
+        await self._stream_to_connections(instance_id, event)
+
     async def stream_message(
         self,
         instance_id: str,

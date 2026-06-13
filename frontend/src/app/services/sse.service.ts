@@ -47,6 +47,30 @@ export class SseService {
   }
 
   /**
+   * Patch the output of a tool call in place across the message list.
+   * Looks for the first assistant message containing a tool_calls entry with
+   * the given id and updates its `output` field. No-op if not found (e.g. the
+   * tool_call event hasn't arrived yet — the baked-in output on the next
+   * assistant message will still surface it).
+   */
+  private patchToolCallOutput(toolCallId: string, output: string): void {
+    this.messages.update(msgs => {
+      let patched = false;
+      const result = msgs.map(m => {
+        if (!m.tool_calls) return m;
+        const idx = m.tool_calls.findIndex(tc => tc.id === toolCallId);
+        if (idx < 0) return m;
+        const toolCalls = m.tool_calls.map((tc, i) =>
+          i === idx ? { ...tc, output } : tc
+        );
+        patched = true;
+        return { ...m, tool_calls: toolCalls };
+      });
+      return patched ? result : msgs;
+    });
+  }
+
+  /**
    * Map raw SSE message data to Message type.
    */
   private mapToMessage(data: Record<string, unknown>): Message {
@@ -156,6 +180,26 @@ export class SseService {
           this.events.update(evts => [...evts, { type: 'tool_call', data }]);
         } catch (err) {
           console.error('[SSE] Failed to parse tool_call:', err);
+        }
+      });
+    });
+
+    // Real-time tool result — patches the matching tool_calls[i].output in place
+    eventSource.addEventListener('tool_result', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          const msg = data.message as {
+            tool_call_id?: string;
+            content?: string;
+            message_id?: string;
+          };
+          if (msg.tool_call_id && typeof msg.content === 'string') {
+            this.patchToolCallOutput(msg.tool_call_id, msg.content);
+          }
+          this.events.update(evts => [...evts, { type: 'tool_result', data }]);
+        } catch (err) {
+          console.error('[SSE] Failed to parse tool_result:', err);
         }
       });
     });

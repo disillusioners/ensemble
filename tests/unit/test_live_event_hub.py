@@ -130,6 +130,62 @@ class TestEventStreaming:
     """Tests for event streaming to connections."""
 
     @pytest.mark.asyncio
+    async def test_stream_tool_result_delivered(self):
+        """Tool result events are delivered to registered connections with the right payload."""
+        hub = LiveEventHub()
+        queue = asyncio.Queue()
+
+        await hub.add_connection("instance-1", queue)
+        await hub.stream_tool_result(
+            instance_id="instance-1",
+            tool_call_id="call_abc",
+            content="the tool output",
+            message_id="tm-1",
+        )
+
+        event = await asyncio.wait_for(queue.get(), timeout=1.0)
+        assert event["instance_id"] == "instance-1"
+        assert event["event_type"] == "tool_result"
+        assert event["event_id"] == "tm-1"
+        assert event["message"] == {
+            "message_id": "tm-1",
+            "role": "tool",
+            "tool_call_id": "call_abc",
+            "content": "the tool output",
+        }
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_result_dropped_without_connections(self):
+        """Tool result events are silently dropped when no connections exist."""
+        hub = LiveEventHub()
+        # Should not raise
+        await hub.stream_tool_result(
+            instance_id="instance-1",
+            tool_call_id="call_abc",
+            content="x",
+            message_id="tm-1",
+        )
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_result_routes_to_correct_instance(self):
+        """Tool result events are only sent to connections of the matching instance."""
+        hub = LiveEventHub()
+        q1 = asyncio.Queue()
+        q2 = asyncio.Queue()
+
+        await hub.add_connection("instance-1", q1)
+        await hub.add_connection("instance-2", q2)
+        await hub.stream_tool_result(
+            instance_id="instance-1",
+            tool_call_id="call_abc",
+            content="x",
+            message_id="tm-1",
+        )
+
+        assert q1.qsize() == 1
+        assert q2.empty()
+
+    @pytest.mark.asyncio
     async def test_stream_message_delivered(self):
         """Message events are delivered to registered connections."""
         hub = LiveEventHub()

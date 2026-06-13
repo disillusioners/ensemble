@@ -39,11 +39,12 @@ export interface Message {
 }
 
 // SSE event types
-export type MessageEventType = 
-  | 'user_message' 
-  | 'assistant_message' 
-  | 'thinking' 
+export type MessageEventType =
+  | 'user_message'
+  | 'assistant_message'
+  | 'thinking'
   | 'tool_call'
+  | 'tool_result'
   | 'checkpoint'     // Keep for initial load / reconnect
   | 'connected'
   | 'error'
@@ -124,6 +125,7 @@ export type SseEventType =
   | 'assistant_message'
   | 'thinking'
   | 'tool_call'
+  | 'tool_result'
   | 'status_change'
   | 'instance_created';
 
