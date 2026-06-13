@@ -44,12 +44,6 @@ export class ChatComponent implements OnInit, OnDestroy {
   protected readonly instanceService = inject(InstanceService);
   private readonly projectService = inject(ProjectService);
   private routeSubscription: Subscription | null = null;
-  // Tracks message_ids that have already been merged from SSE at least once.
-  // Used as a deduplication safety net: SSE may deliver the same message_id
-  // more than once (e.g. replay on reconnect), and the merge is idempotent,
-  // but we still avoid touching the signal on no-op duplicates to keep
-  // change-detection cheap.
-  private processedSseMessageIds = new Set<string>();
 
   readonly agents = signal<Agent[]>([]);
   readonly currentInstanceId = signal<string | null>(null);
@@ -96,32 +90,21 @@ export class ChatComponent implements OnInit, OnDestroy {
     // SSE messages drive the message list. Re-merge on every signal change
     // so in-place mutations (e.g. tool_result patching a tool_calls[i].output)
     // are reflected in the UI. The merge is idempotent (upsert by message_id),
-    // so duplicate SSE deliveries collapse naturally.
+    // so duplicate SSE deliveries (e.g. replay on reconnect) collapse naturally.
     effect(() => {
       const sseMessages = this.sseService.messages();
       if (sseMessages.length === 0) return;
 
-      // Track which message_ids are seeing their first merge (for logging) and
-      // keep the processedSseMessageIds set in sync as a dedup safety net
-      // (e.g. for future "is this id new?" checks elsewhere).
-      const newIds: string[] = [];
-      for (const msg of sseMessages) {
-        if (!this.processedSseMessageIds.has(msg.message_id)) {
-          this.processedSseMessageIds.add(msg.message_id);
-          newIds.push(msg.message_id);
-        }
-      }
-      if (newIds.length > 0) {
-        console.log('[Chat] New SSE messages:', newIds.length);
-      }
-
-      // Merge: upsert SSE messages into existing list
+      // Merge: upsert SSE messages into existing list.
       this.messages.update(existing => {
         const result = [...existing];
         for (const msg of sseMessages) {
           const idx = result.findIndex(m => m.message_id === msg.message_id);
           if (idx >= 0) {
-            // Preserve any local fields (e.g. optimistic state) not in the SSE payload.
+            // Shallow merge: top-level fields from SSE win, but any local-only
+            // top-level fields are preserved. Note this REPLACES reference
+            // fields (e.g. tool_calls) wholesale with SSE's copy — that is
+            // intentional so patched tool_call outputs flow through.
             result[idx] = { ...result[idx], ...msg };
           } else {
             result.push(msg);
@@ -278,16 +261,11 @@ export class ChatComponent implements OnInit, OnDestroy {
    * Load initial messages via REST API, then connect SSE for real-time updates.
    */
   private loadInstanceMessages(instanceId: string): void {
-    // Clear processed IDs when loading new instance
-    this.processedSseMessageIds.clear();
-
     this.api.getMessages(instanceId).subscribe({
       next: (messages) => {
         console.log('[Chat] Loaded', messages.length, 'messages from API');
         const viewModels = messages.map(m => this.toViewModel(m));
         this.messages.set(viewModels);
-        // Track these so SSE doesn't duplicate them
-        messages.forEach(m => this.processedSseMessageIds.add(m.message_id));
       },
       error: (err) => {
         console.warn('[Chat] Failed to load messages:', err);
@@ -325,7 +303,6 @@ export class ChatComponent implements OnInit, OnDestroy {
     this.sendError.set(null);
     this.currentInstanceId.set(null);
     this.messages.set([]);
-    this.processedSseMessageIds.clear();
     this.sseService.disconnect();
     this.sseService.clearEvents();
 
