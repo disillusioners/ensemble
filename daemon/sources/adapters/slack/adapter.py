@@ -96,6 +96,13 @@ class SlackAdapter(MessageSourceAdapter):
 
         # Configuration
         self._default_agent = config.config.get("default_agent", "leader")
+        # In channels/group DMs, only respond when the bot is @-mentioned.
+        # DMs and threads with an explicit mention are always allowed.
+        # Default: True (matches Slack's app_mention semantics; defensive in case
+        # message.channels/message.groups is subscribed on the Slack app side).
+        self._channel_require_mention: bool = bool(
+            config.config.get("channel_require_mention", True)
+        )
 
         # State
         self._app: AsyncApp | None = None
@@ -618,6 +625,18 @@ class SlackAdapter(MessageSourceAdapter):
             if not self._is_valid_message(event):
                 return
 
+            # Defensive: in channels/private channels, only respond when the
+            # bot is @-mentioned. DMs and threaded replies (which always
+            # include the mention) are unaffected. Safe to early-return: the
+            # bolt framework auto-acks the envelope on Socket Mode before
+            # invoking this handler, so discarding does not cause stackup.
+            if self._channel_require_mention and not self._is_bot_mentioned(event):
+                logger.debug(
+                    f"Skipping channel message without bot mention: "
+                    f"channel={event.get('channel')}, user={event.get('user')}"
+                )
+                return
+
             # Process the event
             incoming = await self._process_event(event)
 
@@ -626,6 +645,42 @@ class SlackAdapter(MessageSourceAdapter):
 
         except Exception as e:
             logger.error(f"Error handling message event: {e}", exc_info=True)
+
+    def _is_bot_mentioned(self, event: dict) -> bool:
+        """Check whether the message is directed at the bot.
+
+        Returns True for:
+        - DMs (channel_type 'im' or 'mpim') — no mention syntax needed
+        - Messages whose text contains <@BOT_USER_ID>
+        - app_mention events (always contain the mention by definition)
+        - Thread broadcasts inside DMs
+
+        Returns False for:
+        - Channel/group messages that do not @-mention the bot
+
+        Args:
+            event: Slack message event.
+
+        Returns:
+            True if the bot should respond, False to filter out.
+        """
+        channel_type = event.get("channel_type", "channel")
+        # DMs and multi-party DMs: always respond
+        if channel_type in ("im", "mpim"):
+            return True
+
+        if not self._bot_user_id:
+            # No bot ID resolved yet (auth not complete) — fail open to
+            # preserve prior behavior rather than silently dropping messages.
+            return True
+
+        text = event.get("text", "") or ""
+        mention_token = f"<@{self._bot_user_id}>"
+        if mention_token in text:
+            return True
+
+        # Also accept the event type as a signal — app_mention is always a mention
+        return event.get("type") == "app_mention"
 
     async def _process_event(self, event: dict) -> IncomingMessage | None:
         """Process Slack event and create IncomingMessage.

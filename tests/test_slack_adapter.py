@@ -1148,6 +1148,176 @@ class TestSlackAdapterIsValidMessage:
         assert result is True
 
 
+# ==================== Channel Mention Filter Tests ====================
+
+
+class TestChannelMentionFilter:
+    """Tests for channel_require_mention config option."""
+
+    def test_default_require_mention_is_true(self, slack_config, mock_on_message):
+        """Default behavior requires mention in channels."""
+        adapter = SlackAdapter(slack_config, mock_on_message)
+        assert adapter._channel_require_mention is True
+
+    def test_config_disables_mention_requirement(
+        self, slack_config, mock_on_message
+    ):
+        """channel_require_mention=False disables the filter."""
+        config = make_slack_config(channel_require_mention=False)
+        adapter = SlackAdapter(config, mock_on_message)
+        assert adapter._channel_require_mention is False
+
+    def test_dm_message_always_passes(self, mock_slack_adapter):
+        """DMs (channel_type=im) pass regardless of mention."""
+        event = {
+            "user": "U654321",
+            "channel": "D999",
+            "channel_type": "im",
+            "text": "no mention here",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is True
+
+    def test_mpim_message_always_passes(self, mock_slack_adapter):
+        """Multi-party DMs always pass."""
+        event = {
+            "user": "U654321",
+            "channel": "G999",
+            "channel_type": "mpim",
+            "text": "no mention here",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is True
+
+    def test_channel_message_with_mention_passes(self, mock_slack_adapter):
+        """Channel message containing <@BOTID> mention passes."""
+        event = {
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "<@U123456> hello there",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is True
+
+    def test_channel_message_without_mention_blocked(self, mock_slack_adapter):
+        """Channel message without mention is filtered out."""
+        event = {
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "just chatting, no mention",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is False
+
+    def test_private_channel_without_mention_blocked(self, mock_slack_adapter):
+        """Private channel message without mention is filtered out."""
+        event = {
+            "user": "U654321",
+            "channel": "G123",
+            "channel_type": "group",
+            "text": "secret discussion",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is False
+
+    def test_app_mention_event_always_passes(self, mock_slack_adapter):
+        """app_mention events always pass the filter (by event type)."""
+        event = {
+            "type": "app_mention",
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "no token in text somehow",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is True
+
+    def test_fails_open_when_bot_user_id_unknown(self, mock_slack_adapter):
+        """If bot_user_id is not yet known, fail open (don't drop messages)."""
+        mock_slack_adapter._bot_user_id = None
+        event = {
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "some text",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is True
+
+    def test_message_without_channel_type_treated_as_channel(
+        self, mock_slack_adapter
+    ):
+        """Default channel_type is 'channel' — missing mention is blocked."""
+        event = {
+            "user": "U654321",
+            "channel": "C123",
+            "text": "no mention here",
+        }
+        assert mock_slack_adapter._is_bot_mentioned(event) is False
+
+    @pytest.mark.asyncio
+    async def test_handle_message_event_skips_unmentioned_channel(
+        self, mock_slack_adapter, mock_on_message
+    ):
+        """End-to-end: channel message without mention is dropped before emit."""
+        mock_slack_adapter._emit_message = AsyncMock()
+        event = {
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "no mention here",
+        }
+        await mock_slack_adapter._handle_message_event(event, client=MagicMock())
+        mock_slack_adapter._emit_message.assert_not_called()
+        mock_on_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_event_emits_mentioned_channel(
+        self, mock_slack_adapter, mock_on_message
+    ):
+        """End-to-end: channel message with mention flows through to emit."""
+        mock_slack_adapter._emit_message = AsyncMock()
+        event = {
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "<@U123456> hello",
+        }
+        await mock_slack_adapter._handle_message_event(event, client=MagicMock())
+        mock_slack_adapter._emit_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_event_emits_dm(
+        self, mock_slack_adapter, mock_on_message
+    ):
+        """End-to-end: DM (no mention) still flows through."""
+        mock_slack_adapter._emit_message = AsyncMock()
+        event = {
+            "user": "U654321",
+            "channel": "D999",
+            "channel_type": "im",
+            "text": "no mention here",
+        }
+        await mock_slack_adapter._handle_message_event(event, client=MagicMock())
+        mock_slack_adapter._emit_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_event_skips_when_filter_disabled_for_others(
+        self, slack_config, mock_on_message, mock_source_repo
+    ):
+        """With channel_require_mention=False, channel messages still emit."""
+        config = make_slack_config(channel_require_mention=False)
+        adapter = SlackAdapter(config, mock_on_message)
+        adapter._source_repo = mock_source_repo
+        adapter._workspace_id = "T123456"
+        adapter._bot_user_id = "U123456"
+        adapter._emit_message = AsyncMock()
+
+        event = {
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "no mention here",
+        }
+        await adapter._handle_message_event(event, client=MagicMock())
+        adapter._emit_message.assert_called_once()
+
+
 # ==================== Rate Limiter Tests ====================
 
 
