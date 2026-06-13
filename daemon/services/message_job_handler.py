@@ -149,6 +149,7 @@ class MessageJobHandler:
             is_internal_report = (
                 message_source.startswith("internal_report:")
                 or message_source.startswith("internal_error_report:")
+                or message_source.startswith("internal_agent:job_event:")
             )
             if is_internal_report:
                 # Retrieve original external source from instance metadata

@@ -993,3 +993,52 @@ class TestOriginalSourcePreservation:
         call_kwargs = mock_dispatcher.dispatch_completed.call_args.kwargs
         assert call_kwargs["source"] == "telegram:67890"
 
+    def test_process_message_processor_dispatches_job_event_with_original_source(self):
+        """ProcessMessageProcessor resolves internal_agent:job_event:* to original_source.
+
+        Regression: JobFeedbackObserver notifications use
+        `internal_agent:job_event:<job_id>:<status>`. The processor must
+        resolve this to the original external source so the report reaches
+        Slack/Telegram.
+        """
+        from daemon.services.task_processor import ProcessMessageProcessor
+        from unittest.mock import AsyncMock, Mock
+        import asyncio
+
+        mock_manager = Mock()
+        mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Result"))
+        mock_manager._instance_repository = Mock()
+
+        mock_instance_meta = Mock()
+        mock_instance_meta.instance_metadata = {"original_source": "slack-bot:TWS:U1"}
+        mock_manager._instance_repository.get.return_value = mock_instance_meta
+
+        mock_task_repo = Mock()
+        mock_message_repo = Mock()
+        mock_message = Mock()
+        mock_message.content = "test"
+        mock_message.source = "internal_agent:job_event:abc-123:completed"
+        mock_message_repo.get = Mock(return_value=mock_message)
+
+        mock_dispatcher = AsyncMock()
+
+        processor = ProcessMessageProcessor(
+            instance_manager=mock_manager,
+            task_repo=mock_task_repo,
+            event_repo=None,
+            message_repository=mock_message_repo,
+            source_dispatcher=mock_dispatcher,
+        )
+
+        task = Mock()
+        task.id = 1
+        task.instance_id = "test-instance"
+        task.message_id = "test-message"
+        task.retry_count = 0
+
+        asyncio.run(processor.process(task))
+
+        mock_dispatcher.dispatch_completed.assert_called_once()
+        call_kwargs = mock_dispatcher.dispatch_completed.call_args.kwargs
+        assert call_kwargs["source"] == "slack-bot:TWS:U1"
+

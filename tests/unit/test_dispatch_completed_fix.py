@@ -315,6 +315,69 @@ class TestInternalReportResolution:
         # Verify dispatch was NOT called
         mock_source_dispatcher.dispatch_completed.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_internal_agent_job_event_resolves_to_original_source(
+        self, mock_manager, mock_job_service, mock_job_repo, mock_source_dispatcher
+    ):
+        """internal_agent:job_event:* notifications resolve to original_source.
+
+        Regression test: JobFeedbackObserver sends watcher notifications with
+        source `internal_agent:job_event:<job_id>:<status>`. The handler must
+        resolve these to the instance's original_source so external sources
+        (Slack, Telegram) receive the final report.
+        """
+        mock_instance = create_mock_instance("test-instance-id", original_source="slack-bot:TWS:U1")
+        mock_manager._instance_repository.get.return_value = mock_instance
+
+        handler = MessageJobHandler(
+            manager=mock_manager,
+            job_queue_service=mock_job_service,
+            job_repository=mock_job_repo,
+            source_dispatcher=mock_source_dispatcher,
+        )
+        job = create_message_job(
+            source="internal_agent:job_event:abc-123:completed",
+        )
+
+        await handler.handle(job)
+
+        # Verify dispatch uses original_source, not the internal_agent job_event source
+        mock_source_dispatcher.dispatch_completed.assert_called_once_with(
+            instance_id="test-instance-id",
+            message_id="msg-123",
+            source="slack-bot:TWS:U1",
+            content="Processed message response",
+            message_type="final",
+        )
+
+    @pytest.mark.asyncio
+    async def test_internal_agent_job_event_skipped_when_no_original_source(
+        self, mock_manager, mock_job_service, mock_job_repo, mock_source_dispatcher
+    ):
+        """internal_agent:job_event:* with no original_source is skipped (no infinite loop)."""
+        mock_instance = MagicMock()
+        mock_instance.instance_metadata = {}  # No original_source
+        mock_instance.status = "running"
+        mock_instance.waiting_for = 0
+        mock_manager._instance_repository.get.return_value = mock_instance
+
+        handler = MessageJobHandler(
+            manager=mock_manager,
+            job_queue_service=mock_job_service,
+            job_repository=mock_job_repo,
+            source_dispatcher=mock_source_dispatcher,
+        )
+        job = create_message_job(
+            source="internal_agent:job_event:abc-123:completed",
+        )
+
+        await handler.handle(job)
+
+        # Verify dispatch was NOT called (no original_source to dispatch to)
+        mock_source_dispatcher.dispatch_completed.assert_not_called()
+        # But job should still complete
+        mock_job_service.complete_job.assert_called_once()
+
 
 # ── Test Class 3: TestRegularSourceDispatch ──────────────────────────────────────
 

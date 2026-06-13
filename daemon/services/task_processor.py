@@ -238,9 +238,12 @@ class ProcessMessageProcessor(BaseProcessor):
             # Note: internal_agent:* is agent-to-agent communication, NOT a completion report
             logger.debug(f"[DISPATCH] task completed: instance={task.instance_id}, message_source={message_source}, result={'truthy' if result else 'falsy'}")
             dispatch_source = message_source
+            # job_event notifications are completion reports from the watcher system —
+            # they must be routed back to the original external source (e.g. Slack/Telegram)
             is_internal_report = (
                 message_source.startswith("internal_report:")
                 or message_source.startswith("internal_error_report:")
+                or message_source.startswith("internal_agent:job_event:")
             )
             logger.debug(f"[DISPATCH] is_internal_report={is_internal_report}, dispatch_source={dispatch_source}")
             if is_internal_report:
