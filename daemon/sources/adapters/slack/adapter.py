@@ -699,6 +699,58 @@ class SlackAdapter(MessageSourceAdapter):
         # Also accept the event type as a signal — app_mention is always a mention
         return event.get("type") == "app_mention"
 
+    def _clean_message_text(self, text: str) -> str:
+        """Strip Slack mention tokens and leaked IDE prompt tags.
+
+        Slack formats mentions as <@U12345>, <@U12345|display name>,
+        <!subteam^ID> for user groups, <!channel>, <!here>, etc. These
+        are noise for the LLM and should be removed before the message
+        is forwarded to the agent.
+
+        Also strips <environment_details>...</environment_details>
+        blocks which are leaked Cursor/VSCode prompt scaffolding that
+        users sometimes paste into chat by accident.
+
+        Args:
+            text: Raw Slack message text.
+
+        Returns:
+            Cleaned text with mention tokens and IDE tags removed.
+        """
+        if not text:
+            return text
+
+        import re
+
+        # Remove leaked IDE prompt blocks (Cursor/VSCode, sometimes Cline/Roo)
+        # Match either a self-closing tag or a paired block, case-insensitive,
+        # multi-line, non-greedy.
+        text = re.sub(
+            r"<environment_details>.*?</environment_details>",
+            "",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        text = re.sub(
+            r"<environment_details\s*/>",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # Remove Slack user mentions: <@U12345> or <@U12345|name>
+        text = re.sub(r"<@[UW][A-Z0-9]+(?:\|[^>]+)?>", "", text)
+
+        # Remove Slack user-group / broadcast mentions: <!subteam^ID>, <!channel>, <!here>
+        text = re.sub(r"<![^>]+>", "", text)
+
+        # Collapse extra whitespace and trim
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = text.strip()
+
+        return text
+
     async def _process_event(self, event: dict) -> IncomingMessage | None:
         """Process Slack event and create IncomingMessage.
 
@@ -732,6 +784,10 @@ class SlackAdapter(MessageSourceAdapter):
                 text = "[Message with attachments]"
             else:
                 return None
+
+        # Strip Slack mention tokens (<@U12345>, <@U12345|name>, <!subteam^ID>)
+        # and leaked IDE/agent prompt tags so the LLM sees clean user intent.
+        text = self._clean_message_text(text)
 
         # Check if this is a command
         message_type = "text"

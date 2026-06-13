@@ -1394,6 +1394,117 @@ class TestChannelMentionFilter:
         adapter._emit_message.assert_called_once()
 
 
+# ==================== Text Cleaning Tests ====================
+
+
+class TestSlackAdapterTextCleaning:
+    """Tests for stripping Slack mention tokens and IDE prompt tags."""
+
+    def test_strips_bot_mention_token(self, mock_slack_adapter):
+        """Strips <@BOTID> from the start of the message."""
+        text = "<@U123456> hi"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "hi"
+
+    def test_strips_bot_mention_with_display_name(self, mock_slack_adapter):
+        """Strips <@BOTID|display name> form."""
+        text = "<@U123456|ensemble_bot> please help"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "please help"
+
+    def test_strips_user_mention_mid_text(self, mock_slack_adapter):
+        """Strips other user mentions anywhere in the text."""
+        text = "hey <@U999> can you ask <@U123456> about this"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "hey can you ask about this"
+
+    def test_strips_usergroup_mention(self, mock_slack_adapter):
+        """Strips <!subteam^ID> mentions."""
+        text = "<!subteam^S12345> heads up <@U123456> review this"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "heads up review this"
+
+    def test_strips_here_and_channel_mentions(self, mock_slack_adapter):
+        """Strips <!here> and <!channel> broadcast mentions."""
+        text = "<!here> standup time"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "standup time"
+
+    def test_strips_environment_details_block(self, mock_slack_adapter):
+        """Strips leaked <environment_details>...</environment_details>."""
+        text = "hi\n<environment_details>\nfoo\nbar\n</environment_details>"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "hi"
+
+    def test_strips_environment_details_multiline(self, mock_slack_adapter):
+        """Strips environment_details with multi-line content."""
+        text = (
+            "hello\n<environment_details>\n"
+            "Current time: 2026-06-13T23:21:25+07:00\n"
+            "Working directory: /foo\n"
+            "</environment_details>"
+        )
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "hello"
+
+    def test_preserves_plain_text(self, mock_slack_adapter):
+        """Plain text without any tags is unchanged."""
+        text = "just a normal message"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "just a normal message"
+
+    def test_preserves_text_with_angle_brackets_not_mention(
+        self, mock_slack_adapter
+    ):
+        """Angle brackets that aren't mention tokens are preserved."""
+        text = "use 1 < 2 and 3 > 1"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "use 1 < 2 and 3 > 1"
+
+    def test_empty_text_returns_empty(self, mock_slack_adapter):
+        """Empty input returns empty."""
+        assert mock_slack_adapter._clean_message_text("") == ""
+
+    def test_handles_whitespace_collapse(self, mock_slack_adapter):
+        """Collapses multiple spaces from removed tokens."""
+        text = "<@U123456>    hello"
+        result = mock_slack_adapter._clean_message_text(text)
+        assert result == "hello"
+
+    def test_process_event_uses_cleaned_text(self, mock_slack_adapter):
+        """End-to-end: the emitted IncomingMessage has cleaned content."""
+        import asyncio
+
+        # Build a fully valid event that will pass _is_valid_message
+        event = {
+            "type": "app_mention",
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "<@U123456> hello",
+            "ts": "1234567890.123456",
+        }
+        incoming = asyncio.run(mock_slack_adapter._process_event(event))
+        assert incoming is not None
+        assert incoming.content == "hello"
+
+    def test_process_event_preserves_plain_text(self, mock_slack_adapter):
+        """End-to-end: plain text is preserved unchanged."""
+        import asyncio
+
+        event = {
+            "type": "message",
+            "user": "U654321",
+            "channel": "D999",
+            "channel_type": "im",
+            "text": "what time is it?",
+            "ts": "1234567890.123456",
+        }
+        incoming = asyncio.run(mock_slack_adapter._process_event(event))
+        assert incoming is not None
+        assert incoming.content == "what time is it?"
+
+
 # ==================== Rate Limiter Tests ====================
 
 
