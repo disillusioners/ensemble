@@ -193,6 +193,7 @@ class SlackAdapter(MessageSourceAdapter):
 
             # Register event handlers
             self._app.event("message")(self._handle_message_event)
+            self._app.event("app_mention")(self._handle_message_event)
             self._app.command("/new")(self._handle_new_command)
 
             # Authenticate and get workspace info

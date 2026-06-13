@@ -235,7 +235,7 @@ class TestSlackAdapterStart:
     async def test_start_registers_event_handlers(
         self, slack_config, mock_on_message
     ):
-        """Should register message and /new command handlers."""
+        """Should register message, app_mention, and /new command handlers."""
         adapter = SlackAdapter(slack_config, mock_on_message)
         adapter._authenticate = AsyncMock()
 
@@ -246,7 +246,7 @@ class TestSlackAdapterStart:
         def capture_event_handler(*args, **kwargs):
             """Capture the event handler registration."""
             def decorator(func):
-                registered_events.append(func)
+                registered_events.append((args, func))
                 return func
             return decorator
 
@@ -274,8 +274,10 @@ class TestSlackAdapterStart:
             ):
                 await adapter.start()
 
-        # Verify event and command handlers were registered
-        mock_app.event.assert_called()
+        # Verify message and app_mention events are both registered
+        registered_event_types = [args[0] for args, _ in registered_events]
+        assert "message" in registered_event_types
+        assert "app_mention" in registered_event_types
         mock_app.command.assert_called_with("/new")
 
     @pytest.mark.asyncio
