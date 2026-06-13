@@ -1270,9 +1270,10 @@ class TestChannelMentionFilter:
     async def test_handle_message_event_emits_mentioned_channel(
         self, mock_slack_adapter, mock_on_message
     ):
-        """End-to-end: channel message with mention flows through to emit."""
+        """End-to-end: app_mention event for a channel flows through to emit."""
         mock_slack_adapter._emit_message = AsyncMock()
         event = {
+            "type": "app_mention",  # Canonical event type for @-mentions
             "user": "U654321",
             "channel": "C123",
             "channel_type": "channel",
@@ -1280,6 +1281,81 @@ class TestChannelMentionFilter:
         }
         await mock_slack_adapter._handle_message_event(event, client=MagicMock())
         mock_slack_adapter._emit_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_event_dedupes_app_mention(
+        self, mock_slack_adapter, mock_on_message
+    ):
+        """When Slack fires BOTH 'message' and 'app_mention' for a mention,
+        only the app_mention variant should be processed to avoid duplicate
+        responses."""
+        mock_slack_adapter._emit_message = AsyncMock()
+
+        # The 'message' variant — should be deduplicated
+        message_event = {
+            "type": "message",
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "<@U123456> hi",
+        }
+        await mock_slack_adapter._handle_message_event(
+            message_event, client=MagicMock()
+        )
+        mock_slack_adapter._emit_message.assert_not_called()
+
+        # The 'app_mention' variant — should be processed
+        mention_event = {
+            "type": "app_mention",
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "<@U123456> hi",
+        }
+        await mock_slack_adapter._handle_message_event(
+            mention_event, client=MagicMock()
+        )
+        mock_slack_adapter._emit_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_event_no_dedup_in_dm(
+        self, mock_slack_adapter, mock_on_message
+    ):
+        """In DMs, only the 'message' event fires (not app_mention),
+        so we process it normally without dedup logic."""
+        mock_slack_adapter._emit_message = AsyncMock()
+        event = {
+            "type": "message",
+            "user": "U654321",
+            "channel": "D999",
+            "channel_type": "im",
+            "text": "no mention here",
+        }
+        await mock_slack_adapter._handle_message_event(event, client=MagicMock())
+        mock_slack_adapter._emit_message.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_handle_message_event_no_dedup_when_filter_off(
+        self, slack_config, mock_on_message, mock_source_repo
+    ):
+        """With channel_require_mention=False, unmentioned 'message' events
+        in channels should still pass through (no dedup triggered)."""
+        config = make_slack_config(channel_require_mention=False)
+        adapter = SlackAdapter(config, mock_on_message)
+        adapter._source_repo = mock_source_repo
+        adapter._workspace_id = "T123456"
+        adapter._bot_user_id = "U123456"
+        adapter._emit_message = AsyncMock()
+
+        event = {
+            "type": "message",  # Not an app_mention, but no mention either
+            "user": "U654321",
+            "channel": "C123",
+            "channel_type": "channel",
+            "text": "just chatting",
+        }
+        await adapter._handle_message_event(event, client=MagicMock())
+        adapter._emit_message.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_handle_message_event_emits_dm(

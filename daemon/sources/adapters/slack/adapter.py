@@ -625,10 +625,27 @@ class SlackAdapter(MessageSourceAdapter):
             if not self._is_valid_message(event):
                 return
 
+            # Deduplicate: Slack fires BOTH 'message' and 'app_mention' events
+            # for the same @-mention in a channel (when both message.channels
+            # and app_mention are subscribed). Process only the app_mention
+            # variant in channels/groups to avoid duplicate responses.
+            # In DMs (channel_type=im/mpim), only 'message' events fire, so
+            # we process those normally.
+            event_type = event.get("type", "message")
+            channel_type = event.get("channel_type", "channel")
+            is_dm = channel_type in ("im", "mpim")
+            if event_type == "message" and not is_dm and self._is_bot_mentioned(event):
+                logger.debug(
+                    f"Skipping duplicate 'message' event for bot mention; "
+                    f"the 'app_mention' variant will be processed: "
+                    f"channel={event.get('channel')}, user={event.get('user')}"
+                )
+                return
+
             # Defensive: in channels/private channels, only respond when the
             # bot is @-mentioned. DMs and threaded replies (which always
             # include the mention) are unaffected. Safe to early-return: the
-            # bolt framework auto-acks the envelope on Socket Mode before
+            # bolt framework auto-acks the Socket Mode envelope before
             # invoking this handler, so discarding does not cause stackup.
             if self._channel_require_mention and not self._is_bot_mentioned(event):
                 logger.debug(
