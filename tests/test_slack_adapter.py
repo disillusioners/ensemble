@@ -1325,6 +1325,64 @@ class TestSlackAdapterNewCommand:
         assert len(emit_called) == 1
         assert emit_called[0].content == "/new"
 
+    @pytest.mark.asyncio
+    async def test_new_command_in_dm_uses_user_id_in_external_id(self, mock_slack_adapter):
+        """In a DM (channel_id starts with 'D'), external_user_id must be
+        {team}:{user_id} so it matches the chat path's {team}:{user_id}
+        and /new actually resets the conversation the next chat message uses.
+        Regression test for the stale-mapping bug where /new and chat
+        lived in different mapping namespaces in a DM.
+        """
+        ack_mock = AsyncMock()
+
+        body = {
+            "user_id": "U0B82KVQC1W",
+            "channel_id": "D0B78CA4LHY",  # DM channel (D prefix)
+            "team_id": "T0B74VCARKP",
+            "text": "/new",
+            "user_name": "alice",
+        }
+
+        emit_called = []
+
+        async def capture_emit(msg):
+            emit_called.append(msg)
+
+        mock_slack_adapter._emit_message = capture_emit
+
+        await mock_slack_adapter._handle_new_command(ack_mock, body, None)
+
+        assert len(emit_called) == 1
+        # Must use user_id, NOT channel_id, so it matches the chat path.
+        assert emit_called[0].external_user_id == "T0B74VCARKP:U0B82KVQC1W"
+
+    @pytest.mark.asyncio
+    async def test_new_command_in_channel_uses_channel_id(self, mock_slack_adapter):
+        """In a regular channel (C/G prefix), external_user_id stays
+        {team}:{channel_id} (no change from prior behavior).
+        """
+        ack_mock = AsyncMock()
+
+        body = {
+            "user_id": "U654321",
+            "channel_id": "C123456",
+            "team_id": "T111111",
+            "text": "/new",
+            "user_name": "alice",
+        }
+
+        emit_called = []
+
+        async def capture_emit(msg):
+            emit_called.append(msg)
+
+        mock_slack_adapter._emit_message = capture_emit
+
+        await mock_slack_adapter._handle_new_command(ack_mock, body, None)
+
+        assert len(emit_called) == 1
+        assert emit_called[0].external_user_id == "T111111:C123456"
+
 
 # ==================== DM Cache Tests ====================
 

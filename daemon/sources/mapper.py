@@ -108,12 +108,14 @@ def validate_external_user_id(source_type: str, user_id: str) -> str:
 
 class InstanceMapper:
     """Maps external user identities to agent instances.
-    
+
     This class handles:
     - Looking up existing instance mappings
     - Creating new instances when needed
     - Deduplicating incoming messages
     - Tracking last message activity
+    - Detecting and recovering from stale mappings whose target instance
+      was removed out-of-band (DB reset, manual cleanup, restore, etc.)
     """
     
     def __init__(self, source_repo: "SQLModelSourceRepository", manager: "InstanceManager"):
@@ -126,9 +128,57 @@ class InstanceMapper:
         self.source_repo = source_repo
         self.manager = manager
     
+    def _mapping_instance_exists(self, mapping: dict) -> bool:
+        """Check whether the instance referenced by a mapping still exists.
+
+        A mapping can outlive its target instance if the instance row was
+        removed out-of-band (DB restore, manual cleanup, schema reset, etc.).
+        Returning a dead instance_id causes the downstream worker to fail with
+        ``Instance not found`` and the user message is lost.
+
+        Fast path: in-memory ``manager.instances`` dict (covers the common
+        warm-process case with zero DB cost).
+        Slow path: ``instance_repository.get`` DB lookup (cold start, restart,
+        or instance only persisted to DB).
+
+        Args:
+            mapping: Mapping dict from :meth:`get_mapping`.
+
+        Returns:
+            True if the instance is live (in memory) or present in the DB.
+        """
+        instance_id = mapping.get("agent_instance_id")
+        if not instance_id:
+            return False
+
+        # Fast path: instance is loaded in this process.
+        in_memory = getattr(self.manager, "instances", None)
+        if isinstance(in_memory, dict) and instance_id in in_memory:
+            return True
+
+        # Slow path: check the instance repository.
+        instance_repo = getattr(self.manager, "_instance_repository", None)
+        if instance_repo is None:
+            # No way to verify — assume it exists to preserve prior behavior.
+            return True
+
+        try:
+            return instance_repo.get(instance_id) is not None
+        except Exception as e:
+            # If the verification query itself fails, log and fall back to
+            # trusting the mapping (matches the legacy behavior so a transient
+            # DB hiccup doesn't accidentally cascade into a forced re-spawn).
+            logger.warning(
+                "Failed to verify instance %s for mapping %s: %s",
+                instance_id[:8] if instance_id else "<empty>",
+                mapping.get("mapping_id", "<unknown>"),
+                e,
+            )
+            return True
+
     def get_mapping(
-        self, 
-        source_id: str, 
+        self,
+        source_id: str,
         external_user_id: str
     ) -> dict | None:
         """Get instance mapping for a source and external user.
@@ -241,14 +291,28 @@ class InstanceMapper:
                 )
                 self.source_repo.delete_instance_mapping(mapping["mapping_id"])
             else:
-                logger.debug(
-                    f"Found existing instance: source_id={source_id}, "
-                    f"external_user_id={external_user_id}, "
-                    f"agent_instance_id={mapping['agent_instance_id']}"
-                )
-                return mapping["agent_instance_id"]
+                # Verify the mapped instance still exists. Mappings can outlive
+                # their target instance (DB reset, manual cleanup, out-of-band
+                # deletion). Returning a dead id would make the worker fail
+                # with ``Instance not found`` and drop the user message.
+                if not self._mapping_instance_exists(mapping):
+                    logger.warning(
+                        f"Stale instance mapping detected: source_id={source_id}, "
+                        f"external_user_id={external_user_id}, "
+                        f"dead_agent_instance_id={mapping['agent_instance_id']}. "
+                        f"Deleting orphan mapping and creating a fresh instance."
+                    )
+                    self.source_repo.delete_instance_mapping(mapping["mapping_id"])
+                    # Fall through to create-new path below.
+                else:
+                    logger.debug(
+                        f"Found existing instance: source_id={source_id}, "
+                        f"external_user_id={external_user_id}, "
+                        f"agent_instance_id={mapping['agent_instance_id']}"
+                    )
+                    return mapping["agent_instance_id"]
         
-        # No mapping exists - create new instance
+        # No valid mapping exists - create new instance
         logger.info(
             f"Creating new instance: source_id={source_id}, "
             f"external_user_id={external_user_id}, agent_id={effective_agent_id}"

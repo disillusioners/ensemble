@@ -334,9 +334,159 @@ class TestInstanceMapper:
         
         # Get updated mapping
         updated_mapping = instance_mapper.get_mapping(source_id, external_user_id)
-        
+
         # The timestamp should have been updated
         assert updated_mapping["last_message_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_stale_mapping_in_db_recovers_by_creating_new_instance(
+        self, mock_source_repo, mock_manager, mock_registry
+    ):
+        """Mapping pointing to a DB-deleted instance should be replaced.
+
+        Reproduces the production bug where a mapping outlives its instance
+        (e.g. dev DB was reset between runs). The mapper must detect the
+        dead id, drop the orphan mapping, and spawn a fresh instance so the
+        worker's ``get_instance`` call succeeds.
+        """
+        source_id = "test_source"
+        external_user_id = "12345"
+        dead_instance_id = "00000000-0000-0000-0000-000000000000"
+
+        # Pre-seed a stale mapping that points to a non-existent instance.
+        mock_source_repo.create_instance_mapping(
+            source_id=source_id,
+            external_user_id=external_user_id,
+            agent_instance_id=dead_instance_id,
+            agent_id="test",
+            agent_dir="/agents/test",
+            metadata={},
+            mapping_id="stale-mapping-id",
+        )
+
+        # Configure the manager so the in-memory dict has the dead id
+        # missing AND the DB lookup returns None.
+        mock_manager.instances = {}
+        mock_instance_repo = MagicMock()
+        mock_instance_repo.get.return_value = None
+        mock_manager._instance_repository = mock_instance_repo
+        # Force a fresh, deterministic spawn id for the new instance.
+        mock_manager.spawn_instance_with_mcp = AsyncMock(
+            return_value="11111111-1111-1111-1111-111111111111"
+        )
+        mock_manager.spawn_instance_with_mcp.reset_mock()
+
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+
+            returned = await mapper.get_or_create_instance(
+                source_id=source_id,
+                external_user_id=external_user_id,
+                agent_id="test",
+            )
+
+        # A new instance was spawned (not the dead id).
+        assert returned == "11111111-1111-1111-1111-111111111111"
+        assert returned != dead_instance_id
+        mock_manager.spawn_instance_with_mcp.assert_called_once()
+
+        # The stale mapping was deleted and a new one created.
+        assert mock_source_repo.get_instance_mapping(
+            source_id, external_user_id
+        ).agent_instance_id == returned
+
+    @pytest.mark.asyncio
+    async def test_existing_mapping_with_live_instance_in_memory_is_returned(
+        self, mock_source_repo, mock_manager, mock_registry
+    ):
+        """If the instance is loaded in memory, return the mapping without a DB hit.
+
+        Guards the fast path: the warm-process case must not pay for a DB
+        lookup on every message.
+        """
+        source_id = "test_source"
+        external_user_id = "12345"
+        live_instance_id = "22222222-2222-2222-2222-222222222222"
+
+        mock_source_repo.create_instance_mapping(
+            source_id=source_id,
+            external_user_id=external_user_id,
+            agent_instance_id=live_instance_id,
+            agent_id="test",
+            agent_dir="/agents/test",
+            metadata={},
+            mapping_id="live-mapping-id",
+        )
+
+        # Instance is live in memory. _instance_repository should NOT be
+        # touched (we assert that below).
+        mock_manager.instances = {live_instance_id: ("graph-stub", "/agents/test")}
+        mock_instance_repo = MagicMock()
+        mock_instance_repo.get = MagicMock(side_effect=AssertionError(
+            "DB lookup should be skipped when instance is in memory"
+        ))
+        mock_manager._instance_repository = mock_instance_repo
+        mock_manager.spawn_instance_with_mcp = AsyncMock(
+            side_effect=AssertionError("Should not spawn when mapping is live")
+        )
+
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+
+            returned = await mapper.get_or_create_instance(
+                source_id=source_id,
+                external_user_id=external_user_id,
+                agent_id="test",
+            )
+
+        assert returned == live_instance_id
+        mock_manager.spawn_instance_with_mcp.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_existing_mapping_with_db_only_instance_is_returned(
+        self, mock_source_repo, mock_manager, mock_registry
+    ):
+        """If the instance is only in DB (cold start), verify via DB and return.
+
+        Covers the slow path: after a restart, the in-memory dict is empty
+        but the instance row is still in the DB. The mapper should confirm
+        existence via a DB lookup and return the mapping without spawning.
+        """
+        source_id = "test_source"
+        external_user_id = "12345"
+        db_instance_id = "33333333-3333-3333-3333-333333333333"
+
+        mock_source_repo.create_instance_mapping(
+            source_id=source_id,
+            external_user_id=external_user_id,
+            agent_instance_id=db_instance_id,
+            agent_id="test",
+            agent_dir="/agents/test",
+            metadata={},
+            mapping_id="db-only-mapping-id",
+        )
+
+        mock_manager.instances = {}  # not in memory (post-restart)
+        mock_instance_meta = MagicMock()
+        mock_instance_repo = MagicMock()
+        mock_instance_repo.get.return_value = mock_instance_meta
+        mock_manager._instance_repository = mock_instance_repo
+        mock_manager.spawn_instance_with_mcp = AsyncMock(
+            side_effect=AssertionError("Should not spawn when DB lookup confirms existence")
+        )
+
+        with patch("daemon.sources.mapper.get_registry", return_value=mock_registry):
+            mapper = InstanceMapper(source_repo=mock_source_repo, manager=mock_manager)
+
+            returned = await mapper.get_or_create_instance(
+                source_id=source_id,
+                external_user_id=external_user_id,
+                agent_id="test",
+            )
+
+        assert returned == db_instance_id
+        mock_instance_repo.get.assert_called_once_with(db_instance_id)
+        mock_manager.spawn_instance_with_mcp.assert_not_called()
 
 
 # ==================== Deduplication Tests ====================

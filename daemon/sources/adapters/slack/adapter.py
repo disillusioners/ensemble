@@ -761,7 +761,17 @@ class SlackAdapter(MessageSourceAdapter):
             logger.warning("Slash command missing user_id or channel_id")
             return
 
-        external_user_id = f"{team_id}:{channel_id}"
+        # Match the external_user_id format used by incoming chat events so
+        # `/new` actually resets the conversation the user is about to send
+        # their next message in. The chat path uses:
+        #   - DM (channel_id starts with "D"): {workspace}:{user_id}
+        #   - Channel/thread: {workspace}:{channel_id}
+        # The slash command body doesn't carry channel_type, but Slack DM
+        # channel IDs always start with "D" by convention.
+        if channel_id.startswith("D"):
+            external_user_id = f"{team_id}:{user_id}"
+        else:
+            external_user_id = f"{team_id}:{channel_id}"
 
         incoming = IncomingMessage(
             source_id=self.source_id,
