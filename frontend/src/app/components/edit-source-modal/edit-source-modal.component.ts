@@ -107,6 +107,7 @@ export class EditSourceModalComponent implements OnInit {
         { key: 'bot_token', label: 'Bot Token', type: 'password', placeholder: 'Enter bot token (leave empty to keep current)', hint: 'Slack Bot User OAuth Token', required: false, section: 'credentials' },
         { key: 'app_token', label: 'App Token', type: 'password', placeholder: 'Enter app token (leave empty to keep current)', hint: 'Slack App-Level Token (for Socket Mode)', required: false, section: 'credentials' },
         { key: 'default_agent', label: 'Default Agent', type: 'select', placeholder: 'Select an agent...', hint: 'Agent to handle incoming messages', section: 'config', options: [] },
+        { key: 'channel_require_mention', label: 'Require @-mention in channels', type: 'checkbox', placeholder: '', hint: 'Only respond when the bot is @-mentioned in channels and private groups. DMs are unaffected.', section: 'config', defaultValue: true },
       ]
     },
     scheduler: {
