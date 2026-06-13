@@ -447,11 +447,13 @@ def create_agent_node(
             When provided, vision model is used when images are present.
     """
     
-    async def agent_node(state):
+    async def agent_node(state, config=None):
         messages = state['messages']
         full_messages = [SystemMessage(content=system_prompt)] + list(messages)
         transient = retry_config.get('transient_attempts', 8) if retry_config else 8
         timeout = retry_config.get('timeout_attempts', 3) if retry_config else 3
+        instance_id = (config or {}).get('configurable', {}).get('thread_id', 'unknown')
+        instance_short = instance_id.split('-')[0] if '-' in instance_id else instance_id
         
         # Check if vision model is being used (images present in user message)
         model_vision = llm_config.get("model_vision") if llm_config else None
@@ -475,7 +477,7 @@ def create_agent_node(
         model_name = model_vision if use_vision_model else llm_config.get("model", "unknown") if llm_config else "unknown"
         vision_log = f", vision={model_vision}" if model_vision and has_images else ""
         call_type = "VISION" if use_vision_model else "STANDARD"
-        logger.info(f'[LLM] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
+        logger.info(f'[LLM][{instance_short}] Invoking LLM ({call_type}) with {len(full_messages)} messages (model={model_name}, transient_attempts={transient}, timeout_attempts={timeout}{vision_log})')
         
         try:
             # Use run_in_executor to avoid blocking the event loop.
