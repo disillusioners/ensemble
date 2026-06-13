@@ -144,6 +144,7 @@ export interface Source {
   name: string;
   config: Record<string, unknown>;
   enabled: boolean;
+  autostart: boolean;
   status: SourceStatus;
   error_message?: string;
   created_at: string;
@@ -158,6 +159,7 @@ export interface SourceCreate {
   config?: Record<string, unknown>;
   credentials?: Record<string, unknown>;
   enabled?: boolean;
+  autostart?: boolean;
 }
 
 export interface SourceUpdate {
@@ -165,6 +167,7 @@ export interface SourceUpdate {
   config?: Record<string, unknown>;
   credentials?: Record<string, unknown>;
   enabled?: boolean;
+  autostart?: boolean;
 }
 
 export interface SourceListResponse {

@@ -288,6 +288,21 @@
         </label>
       </div>
 
+      <!-- Autostart Toggle -->
+      <div class="form-group">
+        <label class="toggle-label">
+          <span>Auto-start on service startup</span>
+          <input
+            type="checkbox"
+            [checked]="autostart()"
+            (change)="onAutostartChange($event)"
+            class="toggle-input"
+          />
+          <span class="toggle-switch"></span>
+        </label>
+        <p class="form-hint">When enabled, this source starts automatically one minute after the service boots.</p>
+      </div>
+
       <!-- Actions -->
       <div class="form-actions">
         <button type="button" (click)="handleClose()" class="cancel-btn">

@@ -34,6 +34,7 @@ class SQLModelSourceRepository:
         config: dict[str, Any],
         credentials: str | None = None,
         enabled: bool = True,
+        autostart: bool = True,
         source_id: str | None = None,
     ) -> SourceConfig:
         """Create a new source configuration."""
@@ -48,6 +49,7 @@ class SQLModelSourceRepository:
                 config=config,
                 credentials=credentials,
                 enabled=enabled,
+                autostart=autostart,
                 status=SourceStatus.STOPPED.value,
                 error_message=None,
                 created_at=now,
@@ -69,6 +71,7 @@ class SQLModelSourceRepository:
         config: dict[str, Any | None] = None,
         credentials: str | None = None,
         enabled: bool | None = None,
+        autostart: bool | None = None,
     ) -> SourceConfig | None:
         """Update a source configuration."""
         with Session(self.engine) as session:
@@ -86,6 +89,8 @@ class SQLModelSourceRepository:
                 source_config.credentials = credentials
             if enabled is not None:
                 source_config.enabled = enabled
+            if autostart is not None:
+                source_config.autostart = autostart
             
             source_config.updated_at = datetime.now(timezone.utc).isoformat()
             session.commit()

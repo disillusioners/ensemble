@@ -40,6 +40,7 @@ class SourceCreate(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict, description="Source-specific configuration")
     credentials: dict[str, Any] = Field(default_factory=dict, description="Credentials (bot tokens, API keys)")
     enabled: bool = Field(default=True, description="Whether the source is enabled")
+    autostart: bool = Field(default=True, description="Whether to auto-start the source when the service starts (delayed by 1 minute)")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -55,7 +56,8 @@ class SourceCreate(BaseModel):
                 "credentials": {
                     "bot_token": "123456:ABC-DEF"
                 },
-                "enabled": True
+                "enabled": True,
+                "autostart": True
             }
         }
     )
@@ -68,6 +70,7 @@ class SourceUpdate(BaseModel):
     config: dict[str, Any] | None = Field(default=None, description="Source-specific configuration")
     credentials: dict[str, Any] | None = Field(default=None, description="Credentials (bot tokens, API keys)")
     enabled: bool | None = Field(default=None, description="Whether the source is enabled")
+    autostart: bool | None = Field(default=None, description="Whether to auto-start the source when the service starts (delayed by 1 minute)")
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -88,6 +91,7 @@ class SourceInfo(BaseModel):
     name: str = Field(..., description="Display name for the source")
     config: dict[str, Any] = Field(..., description="Source-specific configuration")
     enabled: bool = Field(..., description="Whether the source is enabled")
+    autostart: bool = Field(..., description="Whether to auto-start the source when the service starts (delayed by 1 minute)")
     status: SourceStatus = Field(..., description="Current adapter status")
     error_message: str | None = Field(default=None, description="Error message if status is 'error'")
     created_at: datetime = Field(..., description="Source creation timestamp")
@@ -102,6 +106,7 @@ class SourceInfo(BaseModel):
                 "name": "Customer Support Bot",
                 "config": {"polling_enabled": True, "default_agent": "coder"},
                 "enabled": True,
+                "autostart": True,
                 "status": "running",
                 "error_message": None,
                 "created_at": "2024-01-01T00:00:00Z",

@@ -312,6 +312,7 @@ class TestCrossModuleReferences:
             "name": "Customer Support Bot",
             "config": {"polling_enabled": True},
             "enabled": True,
+            "autostart": True,
             "status": SourceStatus.running,
             "created_at": datetime.now(),
         }

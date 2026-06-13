@@ -1397,6 +1397,8 @@ class InstanceManager:
                 "CREATE INDEX IF NOT EXISTS idx_task_running_heartbeat "
                 "ON task(last_heartbeat_at) WHERE status = 'running'"
             ),
+            # source_configs.autostart: whether a source auto-starts on boot
+            "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:

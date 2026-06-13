@@ -48,6 +48,7 @@ class SourceConfig:
     config: dict
     credentials: dict
     enabled: bool = True
+    autostart: bool = True
 
 
 class MessageSourceAdapter(ABC):

@@ -73,6 +73,7 @@ def _source_to_info(source) -> SourceInfo:
         name=source.name,
         config=source.config,
         enabled=source.enabled,
+        autostart=getattr(source, "autostart", True),
         status=SourceStatus(source.status),
         error_message=source.error_message,
         created_at=parse_utc_datetime(source.created_at),
@@ -161,6 +162,7 @@ async def create_source(source_create: SourceCreate, request: Request):
         config=final_config,
         credentials=credentials_json,
         enabled=source_create.enabled,
+        autostart=source_create.autostart,
         source_id=source_create.source_id,
     )
     
@@ -267,6 +269,7 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
     updated_name = source_update.name if source_update.name is not None else existing.name
     updated_config = source_update.config if source_update.config is not None else existing.config
     updated_enabled = source_update.enabled if source_update.enabled is not None else existing.enabled
+    updated_autostart = source_update.autostart if source_update.autostart is not None else getattr(existing, "autostart", True)
     
     # Handle credentials separately (dict from request vs encrypted string from DB)
     credentials_json = None
@@ -297,6 +300,7 @@ async def update_source(source_id: str, source_update: SourceUpdate, request: Re
         config=updated_config,
         credentials=credentials_json,
         enabled=updated_enabled,
+        autostart=updated_autostart,
     )
     
     return _source_to_info(updated)

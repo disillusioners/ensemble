@@ -64,6 +64,7 @@ export class AddSourceModalComponent implements OnInit {
   protected readonly configJson = signal('');
   protected readonly credentialsJson = signal('');
   protected readonly enabled = signal(true);
+  protected readonly autostart = signal(true);
   protected readonly isLoading = signal(false);
   protected readonly error = signal<string | null>(null);
   
@@ -450,7 +451,8 @@ export class AddSourceModalComponent implements OnInit {
       name: nameValue.trim(),
       config: Object.keys(config).length > 0 ? config : undefined,
       credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-      enabled: this.enabled()
+      enabled: this.enabled(),
+      autostart: this.autostart()
     };
     
     console.log('Closing dialog with source:', source);
@@ -534,6 +536,11 @@ export class AddSourceModalComponent implements OnInit {
   protected onEnabledChange(event: Event): void {
     const target = event.target as HTMLInputElement;
     this.enabled.set(target.checked);
+  }
+
+  protected onAutostartChange(event: Event): void {
+    const target = event.target as HTMLInputElement;
+    this.autostart.set(target.checked);
   }
 
   protected isSubmitDisabled(): boolean {

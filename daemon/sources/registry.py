@@ -37,6 +37,7 @@ class SourceRegistry:
     """
     
     ADAPTER_START_TIMEOUT = 60.0  # seconds to wait for adapter.start()
+    AUTOSTART_DELAY_SECONDS = 60.0  # delay before auto-starting sources on service boot
     
     def __init__(self, source_repo, manager, job_queue_service: "JobQueueService" | None = None, instance_repo=None):
         """Initialize the source registry.
@@ -54,6 +55,8 @@ class SourceRegistry:
         self._adapters: dict[str, MessageSourceAdapter] = {}
         self._supervisor_tasks: dict[str, asyncio.Task] = {}
         self._running: dict[str, bool] = {}  # Track running state for each adapter
+        self._autostart_tasks: dict[str, asyncio.Task] = {}  # Pending delayed autostart tasks
+        self._stopping: bool = False
     
     def register(self, adapter: MessageSourceAdapter) -> None:
         """Register an adapter with the registry.
@@ -148,22 +151,25 @@ class SourceRegistry:
         """Load all enabled adapters from database and start them.
         
         Loads source configurations from the database, creates adapters
-        if not registered, and starts all enabled adapters.
+        if not registered, and schedules auto-start for all enabled,
+        autostart sources. Auto-started sources are delayed by
+        AUTOSTART_DELAY_SECONDS to let the service settle on boot.
         """
-        logger.info("Loading and starting all enabled adapters...")
+        logger.info("Loading and scheduling auto-start for enabled adapters...")
+        self._stopping = False
         
         # Load configs from database
         configs = await asyncio.to_thread(self._source_repo.list_source_configs)
         
-        started_count = 0
+        scheduled_count = 0
         for config in configs:
             if not config.enabled:
                 logger.debug(f"Skipping disabled source: {config.source_id}")
                 continue
             
-            # Skip sources that were stopped (status = stopped)
-            if config.status == SourceStatus.STOPPED.value:
-                logger.debug(f"Skipping stopped source: {config.source_id}")
+            # Only auto-start sources with the autostart flag enabled
+            if not getattr(config, "autostart", True):
+                logger.debug(f"Skipping non-autostart source: {config.source_id}")
                 continue
             
             source_id = config.source_id
@@ -185,14 +191,63 @@ class SourceRegistry:
                     logger.error(f"Failed to create adapter {source_id}: {e}")
                     continue
             
-            # Start the adapter
-            try:
-                await self.start_adapter(source_id)
-                started_count += 1
-            except Exception as e:
-                logger.error(f"Failed to start adapter {source_id}: {e}")
+            # Schedule a delayed auto-start (1 minute after service boot)
+            self._schedule_autostart(source_id)
+            scheduled_count += 1
         
-        logger.info(f"Started {started_count} adapters from database")
+        logger.info(
+            f"Scheduled auto-start for {scheduled_count} adapters "
+            f"(delayed {self.AUTOSTART_DELAY_SECONDS}s)"
+        )
+
+    def _schedule_autostart(self, source_id: str) -> None:
+        """Schedule a delayed auto-start for a source.
+        
+        Args:
+            source_id: The source_id to auto-start after the delay.
+        """
+        # Cancel any previously pending autostart for this source
+        existing = self._autostart_tasks.pop(source_id, None)
+        if existing and not existing.done():
+            existing.cancel()
+        
+        task = asyncio.create_task(self._delayed_start(source_id))
+        self._autostart_tasks[source_id] = task
+        logger.info(
+            f"Scheduled auto-start for {source_id} in {self.AUTOSTART_DELAY_SECONDS}s"
+        )
+
+    async def _delayed_start(self, source_id: str) -> None:
+        """Auto-start a source after the configured delay.
+        
+        Guarded against shutdown: if the registry is stopping or the
+        source was already started/removed, this is a no-op.
+        """
+        try:
+            await asyncio.sleep(self.AUTOSTART_DELAY_SECONDS)
+        except asyncio.CancelledError:
+            self._autostart_tasks.pop(source_id, None)
+            raise
+        
+        self._autostart_tasks.pop(source_id, None)
+        
+        if self._stopping:
+            logger.info(f"Skipping auto-start during shutdown: {source_id}")
+            return
+        
+        adapter = self.get(source_id)
+        if adapter is None:
+            logger.warning(f"Skipping auto-start, adapter no longer registered: {source_id}")
+            return
+        
+        if self._running.get(source_id, False):
+            logger.debug(f"Skipping auto-start, already running: {source_id}")
+            return
+        
+        try:
+            await self.start_adapter(source_id)
+        except Exception as e:
+            logger.error(f"Failed to auto-start adapter {source_id}: {e}")
     
     async def _create_adapter_from_config(self, config):
         """Create an adapter instance from a config.
@@ -215,6 +270,7 @@ class SourceRegistry:
                 "config": config.config,
                 "credentials": config.credentials,
                 "enabled": config.enabled,
+                "autostart": getattr(config, "autostart", True),
             }
         else:
             config_dict = config
@@ -256,6 +312,7 @@ class SourceRegistry:
             config=config_data,
             credentials=credentials,
             enabled=config_dict.get("enabled", True),
+            autostart=config_dict.get("autostart", True),
         )
         
         logger.info(f"Creating adapter for {source_id}: config={config.config}")
@@ -359,9 +416,24 @@ class SourceRegistry:
     async def stop_all(self) -> None:
         """Stop all running adapters gracefully.
         
-        Cancels all supervisor tasks and stops all adapters.
+        Cancels all pending autostart tasks, supervisor tasks, and stops
+        all adapters.
         """
         logger.info("Stopping all adapters...")
+        self._stopping = True
+        
+        # Cancel any pending delayed autostart tasks
+        autostart_ids = list(self._autostart_tasks.keys())
+        for source_id in autostart_ids:
+            task = self._autostart_tasks.pop(source_id, None)
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        if autostart_ids:
+            logger.info(f"Cancelled {len(autostart_ids)} pending autostart tasks")
         
         # Copy keys since we may modify during iteration
         source_ids = list(self._supervisor_tasks.keys())
@@ -472,6 +544,7 @@ class SourceRegistry:
             config=config_dict.get("config", {}),
             credentials=config_dict.get("credentials", {}),
             enabled=config_dict.get("enabled", True),
+            autostart=config_dict.get("autostart", True),
         )
         
         # Update adapter config

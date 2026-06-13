@@ -57,6 +57,7 @@ class SourceConfig(SQLModel, table=True):
     
     credentials: str | None = None
     enabled: bool = Field(default=True)
+    autostart: bool = Field(default=True)
     status: str = Field(default=SourceStatus.STOPPED.value)
     error_message: str | None = None
     
@@ -72,6 +73,7 @@ class SourceConfig(SQLModel, table=True):
             "config": dict(self.config),
             "credentials": self.credentials,
             "enabled": self.enabled,
+            "autostart": self.autostart,
             "status": self.status,
             "error_message": self.error_message,
             "created_at": self.created_at,
