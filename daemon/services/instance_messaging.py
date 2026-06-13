@@ -56,6 +56,24 @@ def _build_message_content(message: str, images: list[str] | None) -> str | list
     return message
 
 
+def _stringify_tool_message_content(m) -> tuple[str, str]:
+    """Extract `(tool_call_id, content_str)` from a ToolMessage.
+
+    Centralized so the bake-in path (into the next AIMessage's tool_calls)
+    and the real-time tool_result SSE path cannot drift.
+
+    Args:
+        m: A LangChain ToolMessage.
+
+    Returns:
+        Tuple of `(tool_call_id, content_str)`. Either may be empty.
+    """
+    tc_id = getattr(m, "tool_call_id", "") or ""
+    raw_content = getattr(m, "content", "") or ""
+    content_str = raw_content if isinstance(raw_content, str) else str(raw_content)
+    return tc_id, content_str
+
+
 def _get_message_event_type(msg: dict) -> str:
     """Determine event type based on message content.
 
@@ -924,6 +942,10 @@ class InstanceMessagingService:
         tool_outputs: dict = {}
         event_index = 0  # Sequence counter for checkpoint_id
         _dispatched_msg_ids: set[str] = set()  # Track dispatched message IDs for dedup
+        # Per-invocation dedup of emitted tool_result events. Scoped here so the
+        # set is reclaimed when this processing call returns — avoids the
+        # per-process _original_timestamps map growing without bound.
+        _emitted_tool_result_ids: set[str] = set()
 
         # Stream through graph execution
         # Register task for cancellation tracking INSIDE try block to prevent leaks
@@ -1005,11 +1027,10 @@ class InstanceMessagingService:
                         # Build tool_outputs from ALL messages (including ToolMessages)
                         tool_outputs = {}
                         for m in all_state_messages:
-                            if hasattr(m, 'tool_call_id'):
-                                tc_id = getattr(m, 'tool_call_id', '')
+                            if isinstance(m, ToolMessage):
+                                tc_id, content_str = _stringify_tool_message_content(m)
                                 if tc_id:
-                                    content = getattr(m, 'content', '') or ''
-                                    tool_outputs[tc_id] = str(content) if not isinstance(content, str) else content
+                                    tool_outputs[tc_id] = content_str
                         
                         # Build sequence ID for checkpoint_id
                         sequence_id = f"seq_{event_index}"
@@ -1021,32 +1042,26 @@ class InstanceMessagingService:
                             # (also still baked into the next AIMessage's tool_calls
                             # for clients that don't yet handle tool_result).
                             if isinstance(m, ToolMessage):
-                                tc_id = getattr(m, "tool_call_id", "") or ""
+                                tc_id, content_str = _stringify_tool_message_content(m)
                                 if not tc_id:
                                     continue
-                                msg_id = getattr(m, "id", None) or str(uuid.uuid4())
-                                ts_key = f"{instance_id}:{msg_id}" if msg_id else None
-                                # Dedup across multiple updates iterations of the same ToolMessage
-                                if ts_key and ts_key in self._manager._original_timestamps:
+                                # Dedup via a stable per-invocation key. ToolMessages
+                                # lacking an `id` fall back to (tool_call_id, content)
+                                # so the same tool call is never emitted twice across
+                                # updates iterations of cumulative state.
+                                original_id = getattr(m, "id", None)
+                                if original_id:
+                                    dedup_key = f"id:{original_id}"
+                                else:
+                                    dedup_key = f"tc:{tc_id}:{content_str}"
+                                if dedup_key in _emitted_tool_result_ids:
                                     continue
-                                if ts_key:
-                                    self._manager._original_timestamps[ts_key] = (
-                                        m.additional_kwargs.get("timestamp")
-                                        if hasattr(m, "additional_kwargs")
-                                        and m.additional_kwargs
-                                        else ""
-                                    )
-                                raw_content = getattr(m, "content", "") or ""
-                                content_str = (
-                                    raw_content
-                                    if isinstance(raw_content, str)
-                                    else str(raw_content)
-                                )
+                                _emitted_tool_result_ids.add(dedup_key)
                                 await self._manager._live_hub.stream_tool_result(
                                     instance_id=instance_id,
                                     tool_call_id=tc_id,
                                     content=content_str,
-                                    message_id=msg_id,
+                                    message_id=original_id or dedup_key,
                                 )
                                 continue
                             # Skip HumanMessages — already emitted before graph started

@@ -24,13 +24,28 @@ export class SseService {
   // Instance created events for tree updates (queue to handle rapid spawning)
   instanceCreatedQueue = signal<InstanceInfo[]>([]);
 
+  // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
+  // matching tool_call or assistant_message arrives, so a tool_result that
+  // races ahead of its tool_call is not lost. Cleared on disconnect.
+  private pendingToolOutputs = new Map<string, string>();
+
   constructor(private ngZone: NgZone) {}
 
   /**
    * Append or update a message in the list with deduplication by message_id.
    * Messages are sorted by created_at to maintain correct chronological order.
+   * Also flushes any pending tool_result outputs that match tool_calls in the
+   * upserted message, then clears the buffer for the consumed tool_call_ids.
    */
   private upsertMessage(message: Message): void {
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      for (const tc of message.tool_calls) {
+        if (this.pendingToolOutputs.has(tc.id)) {
+          tc.output = this.pendingToolOutputs.get(tc.id);
+          this.pendingToolOutputs.delete(tc.id);
+        }
+      }
+    }
     this.messages.update(msgs => {
       const existsIndex = msgs.findIndex(m => m.message_id === message.message_id);
       let result: Message[];
@@ -49,25 +64,30 @@ export class SseService {
   /**
    * Patch the output of a tool call in place across the message list.
    * Looks for the first assistant message containing a tool_calls entry with
-   * the given id and updates its `output` field. No-op if not found (e.g. the
-   * tool_call event hasn't arrived yet — the baked-in output on the next
-   * assistant message will still surface it).
+   * the given id and updates its `output` field. If no match is found, the
+   * output is buffered and applied to the next matching upsert.
    */
   private patchToolCallOutput(toolCallId: string, output: string): void {
+    let matched = false;
     this.messages.update(msgs => {
-      let patched = false;
-      const result = msgs.map(m => {
-        if (!m.tool_calls) return m;
-        const idx = m.tool_calls.findIndex(tc => tc.id === toolCallId);
-        if (idx < 0) return m;
-        const toolCalls = m.tool_calls.map((tc, i) =>
-          i === idx ? { ...tc, output } : tc
-        );
-        patched = true;
-        return { ...m, tool_calls: toolCalls };
-      });
-      return patched ? result : msgs;
+      const idx = msgs.findIndex(
+        m => m.tool_calls?.some(tc => tc.id === toolCallId)
+      );
+      if (idx < 0) return msgs;
+      matched = true;
+      const target = msgs[idx];
+      const toolCalls = target.tool_calls!.map(tc =>
+        tc.id === toolCallId ? { ...tc, output } : tc
+      );
+      const result = msgs.slice();
+      result[idx] = { ...target, tool_calls: toolCalls };
+      return result;
     });
+    if (!matched) {
+      this.pendingToolOutputs.set(toolCallId, output);
+    } else {
+      this.pendingToolOutputs.delete(toolCallId);
+    }
   }
 
   /**
@@ -312,5 +332,6 @@ export class SseService {
     this.messages.set([]);
     this.statusChange.set(null);
     this.instanceCreatedQueue.set([]);
+    this.pendingToolOutputs.clear();
   }
 }
