@@ -732,3 +732,62 @@ async def test_unregister_cancels_pending_autostart(mock_manager):
     registry.unregister("src-1")
 
     assert "src-1" not in registry._autostart_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_adapter_persists_status_by_default(mock_manager):
+    """Explicit stop_adapter (user-initiated) persists status=stopped to DB."""
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
+    registry._source_repo.update_source_status = MagicMock()
+
+    config = SourceConfig("src-1", "telegram", "Test", {}, {})
+    adapter = MockMessageAdapter(config, lambda msg: None)
+    registry.register(adapter)
+
+    await registry.stop_adapter("src-1")
+
+    registry._source_repo.update_source_status.assert_called_with("src-1", "stopped")
+
+
+@pytest.mark.asyncio
+async def test_stop_adapter_skips_persist_when_disabled(mock_manager):
+    """stop_all path (persist_status=False) does not write status=stopped."""
+    registry = SourceRegistry(mock_manager._source_repo, mock_manager)
+    registry._source_repo.update_source_status = MagicMock()
+
+    config = SourceConfig("src-1", "telegram", "Test", {}, {})
+    adapter = MockMessageAdapter(config, lambda msg: None)
+    registry.register(adapter)
+
+    await registry.stop_adapter("src-1", persist_status=False)
+
+    registry._source_repo.update_source_status.assert_not_called()
+    # In-memory status still flipped so supervisor exits cleanly
+    assert adapter._status == SourceStatus.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_stop_all_does_not_persist_stopped_status(mock_manager):
+    """stop_all (daemon shutdown) leaves DB status untouched for running sources.
+
+    This ensures that a daemon restart does not silently mark previously-running
+    sources as manually stopped, so they auto-start on the next boot.
+    """
+    repo = mock_manager._source_repo
+    repo.update_source_status = MagicMock()
+
+    registry = SourceRegistry(repo, mock_manager)
+    registry._source_repo = repo
+    config = SourceConfig("src-1", "telegram", "Test", {}, {})
+    adapter = MockMessageAdapter(config, lambda msg: None)
+    registry.register(adapter)
+    # Simulate a running supervisor task so stop_all picks it up
+    registry._supervisor_tasks["src-1"] = asyncio.create_task(asyncio.sleep(60))
+
+    await registry.stop_all()
+
+    # No 'stopped' status should have been written to the DB
+    for call in repo.update_source_status.call_args_list:
+        assert call.args[1] != "stopped", f"stop_all wrote stopped to DB: {call}"
+    assert registry._stopping is True
+

@@ -449,7 +449,7 @@ class SourceRegistry:
         source_ids = list(self._supervisor_tasks.keys())
         
         for source_id in source_ids:
-            await self.stop_adapter(source_id)
+            await self.stop_adapter(source_id, persist_status=False)
         
         logger.info("All adapters stopped")
     
@@ -484,12 +484,15 @@ class SourceRegistry:
         logger.info(f"Started adapter: {source_id}")
         return True
     
-    async def stop_adapter(self, source_id: str) -> bool:
+    async def stop_adapter(self, source_id: str, persist_status: bool = True) -> bool:
         """Stop a specific adapter gracefully.
-        
+
         Args:
             source_id: The source_id of the adapter to stop.
-            
+            persist_status: When False, do not write status='stopped' to the DB.
+                Used by stop_all during shutdown so that the next boot can still
+                auto-start sources that were running before shutdown.
+
         Returns:
             True if stopped successfully, False if adapter not found.
         """
@@ -526,9 +529,11 @@ class SourceRegistry:
         except Exception as e:
             logger.error(f"Error stopping adapter {source_id}: {e}")
         
-        # Update status
+        # Update status (skipped during bulk shutdown so running sources stay
+        # runnable across restarts; only explicit user stops persist 'stopped')
         adapter._status = SourceStatus.STOPPED
-        await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.STOPPED.value)
+        if persist_status:
+            await asyncio.to_thread(self._source_repo.update_source_status, source_id, SourceStatus.STOPPED.value)
         
         logger.info(f"Stopped adapter: {source_id}")
         return True
