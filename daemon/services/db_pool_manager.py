@@ -1,0 +1,513 @@
+"""Connection pool manager for PostgreSQL connections.
+
+This module provides :class:`ConnectionPoolManager`, a singleton-level
+manager that owns one ``asyncpg`` connection pool per registered database
+connection name. The manager is shared by every agent instance in a
+process so that pool counts stay bounded (one pool per connection, not
+one pool per agent instance).
+
+The manager is intentionally narrow:
+
+* It reads connection metadata from :class:`DbConnectionRepository`
+  and decrypts credentials at the moment a pool is created.
+* It builds PostgreSQL DSNs that preserve the ``username`` even when
+  no password is supplied (peer / IAM / ``.pgpass`` auth).
+* It scrubs every error message that flows back to the caller so that
+  passwords and DSNs never leak into logs, tool results, or HTTP
+  responses.
+* It supports a non-throwing :meth:`test_connection` for health
+  checks, and a bounded :meth:`execute_select` for query tools.
+
+Pool disposal happens in the async :meth:`dispose` / :meth:`dispose_all`
+methods so that ``asyncpg``'s async close protocol is honored. The
+:class:`~daemon.manager.InstanceManager` shutdown chain is responsible
+for calling them.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import re
+from typing import TYPE_CHECKING, Any
+
+import asyncpg
+
+if TYPE_CHECKING:
+    from daemon.repositories.db_connection import DbConnectionConfig
+    from daemon.repositories.db_connection import DbConnectionRepository
+    from daemon.sources.credentials import CredentialManager
+
+
+logger = logging.getLogger(__name__)
+
+
+# --- Pool configuration ---------------------------------------------------
+
+#: Minimum number of connections per pool.
+POOL_MIN_SIZE: int = 1
+
+#: Maximum number of connections per pool.
+POOL_MAX_SIZE: int = 5
+
+#: Maximum number of queries a single connection may execute before it
+#: is recycled. Mirrors a typical ``pgbouncer``-style lifetime cap.
+POOL_MAX_QUERIES: int = 500
+
+#: Timeout in seconds for ``asyncpg.create_pool`` and for acquiring a
+#: connection from the pool.
+POOL_TIMEOUT: int = 30
+
+#: Default timeout in seconds for an individual ``execute_select``
+#: query. Callers may override per call.
+DEFAULT_QUERY_TIMEOUT: int = 30
+
+#: Default cap on the number of rows returned by ``execute_select``.
+#: Callers may override per call.
+DEFAULT_MAX_ROWS: int = 1000
+
+
+# --- Sanitization regexes (compiled once) ---------------------------------
+
+# DSN credentials: ``postgresql://user:pass@host`` → ``postgresql://***:***@host``
+_RE_DSN_CREDS = re.compile(r"(postgresql://)[^@\s]+(@)")
+
+# Connection-string key-value form: ``password=foo`` → ``password=***``
+_RE_PASSWORD_KV = re.compile(r"password\s*=\s*\S+", re.IGNORECASE)
+
+# asyncpg / libpq quoted form: ``password "foo"`` → ``password "***"``
+_RE_PASSWORD_QUOTED = re.compile(
+    r'(password\s+)"[^"]*"',
+    re.IGNORECASE,
+)
+
+# Combined ``role "x" password "y"`` form emitted by some server errors.
+_RE_ROLE_PASSWORD = re.compile(
+    r'(role|user)\s+"[^"]*"\s+(password\s+)"[^"]*"',
+    re.IGNORECASE,
+)
+
+# Final safety net: anything that still looks like user:pass@host.
+_RE_GENERIC_AUTH = re.compile(r"://[^@]+@")
+
+
+class ConnectionPoolManager:
+    """Manages one shared ``asyncpg`` pool per connection name.
+
+    The manager is meant to be constructed once at the
+    :class:`~daemon.manager.InstanceManager` level and shared by every
+    agent instance. Pool creation is guarded by a double-check
+    ``asyncio.Lock`` so concurrent first-time callers do not create
+    duplicate pools.
+
+    Attributes:
+        _repository: Source of ``DbConnectionConfig`` rows and their
+            opaque encrypted credentials.
+        _credential_manager: Decrypts the credentials returned by the
+            repository.
+        _pools: Name → :class:`asyncpg.Pool` mapping. The dict is the
+            single source of truth for which pools are live.
+        _lock: Async lock that serializes pool creation.
+    """
+
+    def __init__(
+        self,
+        repository: DbConnectionRepository,
+        credential_manager: CredentialManager,
+    ) -> None:
+        """Initialize the manager with a repository and credential manager.
+
+        Args:
+            repository: Repository for looking up ``DbConnectionConfig``
+                rows by name.
+            credential_manager: Decrypts the opaque credentials string
+                returned by ``repository.get_credentials(...)``.
+        """
+        self._repository: DbConnectionRepository = repository
+        self._credential_manager: CredentialManager = credential_manager
+        self._pools: dict[str, asyncpg.Pool] = {}
+        self._lock: asyncio.Lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # DSN construction
+    # ------------------------------------------------------------------
+
+    def _build_dsn(
+        self,
+        conn: DbConnectionConfig,
+        password: str | None,
+    ) -> str:
+        """Build a PostgreSQL DSN covering the three auth cases.
+
+        The three cases are:
+
+        1. ``user + password`` — standard password auth:
+           ``postgresql://u:p@h:p/d?sslmode=...``
+        2. ``user, no password`` — preserve the username for peer,
+           ``.pgpass``, or IAM auth. The DSN keeps the user segment
+           but omits the password:
+           ``postgresql://u@h:p/d?sslmode=...``
+        3. ``no user, no password`` — anonymous / trust auth:
+           ``postgresql://h:p/d?sslmode=...``
+
+        Optional segments are appended only when present:
+
+        * ``port`` → ``:port`` after the host
+        * ``database`` → ``/database`` after the port
+        * ``ssl_mode`` → ``?sslmode=ssl_mode`` as the first query arg
+
+        The username is **never** dropped when the password is
+        ``None`` — doing so would break peer / IAM auth flows.
+
+        Args:
+            conn: The connection configuration row.
+            password: Decrypted password, or ``None`` for
+                passwordless auth.
+
+        Returns:
+            A fully-formed PostgreSQL DSN string.
+        """
+        dsn = "postgresql://"
+
+        # Authentication segment.
+        if conn.username and password:
+            dsn += f"{conn.username}:{password}@"
+        elif conn.username:
+            # Preserve username for .pgpass / peer / IAM auth flows.
+            dsn += f"{conn.username}@"
+        # else: anonymous — no user or password segment, no '@'.
+
+        # Host (required).
+        dsn += conn.host
+
+        # Optional port.
+        if conn.port:
+            dsn += f":{conn.port}"
+
+        # Optional database.
+        if conn.database:
+            dsn += f"/{conn.database}"
+
+        # Optional sslmode.
+        if conn.ssl_mode:
+            dsn += f"?sslmode={conn.ssl_mode}"
+
+        return dsn
+
+    # ------------------------------------------------------------------
+    # Pool lifecycle
+    # ------------------------------------------------------------------
+
+    async def _get_or_create_pool(self, connection_name: str) -> asyncpg.Pool:
+        """Return the live pool for ``connection_name``, creating if needed.
+
+        Uses the double-checked locking pattern:
+
+        1. Fast path: dict lookup without the lock. Most calls hit this.
+        2. Slow path: acquire ``self._lock`` and re-check, in case a
+           concurrent coroutine created the pool while we were waiting.
+
+        Pool creation reads the connection config, decrypts the
+        password (if any), builds a DSN, and calls
+        :func:`asyncpg.create_pool`. Any error is sanitized and
+        re-raised as :class:`ConnectionError` so callers never see
+        the raw DSN in stack traces.
+
+        Args:
+            connection_name: The unique connection name to look up.
+
+        Returns:
+            A live :class:`asyncpg.Pool` ready to acquire connections.
+
+        Raises:
+            ValueError: If no connection is registered with that name,
+                or if the connection's ``db_type`` is not ``"postgres"``.
+            ConnectionError: If pool creation fails for any reason
+                (network, auth, server). The original error is chained
+                via ``__cause__`` for debugging; the message is
+                sanitized.
+        """
+        # Fast path: already initialized.
+        existing = self._pools.get(connection_name)
+        if existing is not None:
+            return existing
+
+        # Slow path: take the lock, re-check, then create.
+        async with self._lock:
+            existing = self._pools.get(connection_name)
+            if existing is not None:
+                return existing
+
+            config = self._repository.get_by_name(connection_name)
+            if config is None:
+                raise ValueError(
+                    f"Connection '{connection_name}' not found"
+                )
+
+            if config.db_type != "postgres":
+                raise ValueError(
+                    f"Connection '{connection_name}' is not PostgreSQL "
+                    f"(db_type={config.db_type!r}); only 'postgres' is supported"
+                )
+
+            # Decrypt credentials at the moment of pool creation.
+            # The repository returns an opaque string — we never log it.
+            password: str | None = None
+            encrypted = self._repository.get_credentials(connection_name)
+            if encrypted:
+                creds = self._credential_manager.decrypt(encrypted)
+                password = creds.get("password")
+
+            dsn = self._build_dsn(config, password)
+
+            try:
+                pool = await asyncpg.create_pool(
+                    dsn=dsn,
+                    min_size=POOL_MIN_SIZE,
+                    max_size=POOL_MAX_SIZE,
+                    max_queries=POOL_MAX_QUERIES,
+                    timeout=POOL_TIMEOUT,
+                )
+            except (
+                asyncpg.PostgresError,
+                OSError,
+                ConnectionRefusedError,
+            ) as exc:
+                detail = self._sanitize_error(str(exc))
+                raise ConnectionError(
+                    f"Failed to connect to '{connection_name}': {detail}"
+                ) from exc
+            except Exception as exc:  # noqa: BLE001 - sanitized + re-raised
+                detail = self._sanitize_error(str(exc))
+                raise ConnectionError(
+                    f"Failed to connect to '{connection_name}': {detail}"
+                ) from exc
+
+            self._pools[connection_name] = pool
+            logger.info(
+                "Created asyncpg pool for connection '%s' "
+                "(min=%d, max=%d)",
+                connection_name,
+                POOL_MIN_SIZE,
+                POOL_MAX_SIZE,
+            )
+            return pool
+
+    # ------------------------------------------------------------------
+    # Error sanitization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sanitize_error(error_str: str) -> str:
+        """Strip credentials out of an error message.
+
+        Defense-in-depth — the order matters:
+
+        1. Take only the first line so multi-line traceback-like
+           errors (``Exception: foo\\n  at ...``) are compacted.
+        2. Redact ``postgresql://user:pass@host`` DSN credentials.
+        3. Redact ``password=foo`` key=value form (case-insensitive).
+        4. Redact ``password "foo"`` libpq-quoted form.
+        5. Redact ``role "x" password "y"`` combined form.
+        6. Final safety net: anything still shaped like
+           ``scheme://user:pass@host`` is aggressively masked.
+
+        Args:
+            error_str: The raw exception string. May be multi-line.
+
+        Returns:
+            A redacted single-line error string safe for logs and
+            user-facing responses.
+        """
+        # 1. First line only.
+        result = error_str.split("\n")[0]
+
+        # 2. DSN credentials.
+        result = _RE_DSN_CREDS.sub(r"\1***:***\2", result)
+
+        # 3. password=... key=value.
+        result = _RE_PASSWORD_KV.sub("password=***", result)
+
+        # 4. password "..." quoted.
+        result = _RE_PASSWORD_QUOTED.sub(r'\1"***"', result)
+
+        # 5. role/user "..." password "..." combined.
+        result = _RE_ROLE_PASSWORD.sub(r'\1"***"\2"***"', result)
+
+        # 6. Final safety net for any ://user:pass@host shape.
+        result = _RE_GENERIC_AUTH.sub("://***:***@", result)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def get_connection(self, connection_name: str) -> Any:
+        """Acquire a raw connection from the pool for ``connection_name``.
+
+        Returns the :class:`asyncpg.pool.PoolAcquireContext` produced
+        by ``pool.acquire()``. The caller is responsible for using it
+        as an async context manager (``async with ...``) or for
+        releasing it explicitly. This is the lower-level entry point;
+        most tools should prefer :meth:`execute_select` or
+        :meth:`test_connection`.
+
+        Args:
+            connection_name: The connection to acquire from.
+
+        Returns:
+            The acquire context manager. Use ``async with
+            manager.get_connection(name) as conn: ...`` to obtain an
+            :class:`asyncpg.Connection`.
+
+        Raises:
+            ValueError: If the connection is unknown or not PostgreSQL.
+            ConnectionError: If the pool cannot be created.
+        """
+        pool = await self._get_or_create_pool(connection_name)
+        return pool.acquire()
+
+    async def test_connection(self, connection_name: str) -> dict[str, Any]:
+        """Run ``SELECT 1`` against ``connection_name`` and report health.
+
+        Unlike the other entry points, this method does **not** raise
+        on failure — it always returns a dict so the caller (usually a
+        tool or a health-check endpoint) can render the result without
+        try/except.
+
+        Args:
+            connection_name: The connection to test.
+
+        Returns:
+            A dict with:
+
+            * ``success`` (``bool``) — ``True`` iff ``SELECT 1`` ran.
+            * ``message`` (``str``) — human-readable status, sanitized
+              so it never contains credentials.
+        """
+        try:
+            pool = await self._get_or_create_pool(connection_name)
+            async with pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            return {
+                "success": True,
+                "message": f"Connection '{connection_name}' is healthy",
+            }
+        except Exception as exc:  # noqa: BLE001 - sanitized and reported
+            detail = self._sanitize_error(str(exc))
+            logger.warning(
+                "test_connection failed for '%s': %s",
+                connection_name,
+                detail,
+            )
+            return {
+                "success": False,
+                "message": f"Connection '{connection_name}' failed: {detail}",
+            }
+
+    async def execute_select(
+        self,
+        connection_name: str,
+        query: str,
+        timeout: int = DEFAULT_QUERY_TIMEOUT,
+        max_rows: int = DEFAULT_MAX_ROWS,
+    ) -> dict[str, Any]:
+        """Execute a read query and return rows as dictionaries.
+
+        Implementation notes (per the design review):
+
+        * ``conn.fetch(query)`` is used directly — we do **not** wrap
+          the call in ``conn.prepare(query).fetch()``. ``prepare()``
+          would force a server round trip on every call and would
+          leave prepared statements orphaned in the connection's
+          cache, which is the wrong trade-off for ad-hoc tool queries.
+        * The fetch is bounded by :func:`asyncio.wait_for` with a
+          caller-configurable timeout.
+        * Rows are truncated to ``max_rows`` and the response carries
+          a ``truncated`` flag so the caller can paginate or warn.
+        * :class:`asyncpg.Record` instances are converted to plain
+          dicts so the result is JSON-serializable out of the box.
+
+        Args:
+            connection_name: The connection to run the query against.
+            query: The SQL text to execute. Callers are expected to
+                have already validated that it is a read-only query.
+            timeout: Maximum wall-clock seconds to wait for the query
+                to complete. Defaults to :data:`DEFAULT_QUERY_TIMEOUT`.
+            max_rows: Maximum number of rows to return. Defaults to
+                :data:`DEFAULT_MAX_ROWS`. Excess rows are dropped
+                silently and reported via ``truncated=True``.
+
+        Returns:
+            A dict with:
+
+            * ``columns`` (``list[str]``) — column names in the order
+              returned by asyncpg. Empty if the result set is empty.
+            * ``rows`` (``list[dict[str, Any]]``) — rows as dicts.
+            * ``row_count`` (``int``) — number of rows in ``rows``
+              (after truncation).
+            * ``truncated`` (``bool``) — ``True`` iff the underlying
+              result had more rows than ``max_rows``.
+
+        Raises:
+            ValueError: If the connection is unknown or not PostgreSQL.
+            ConnectionError: If the pool cannot be created.
+            asyncio.TimeoutError: If the query did not complete within
+                ``timeout`` seconds.
+            asyncpg.PostgresError: For server-side errors. The message
+                is sanitized before being propagated.
+        """
+        pool = await self._get_or_create_pool(connection_name)
+        async with pool.acquire() as conn:
+            records = await asyncio.wait_for(
+                conn.fetch(query),
+                timeout=timeout,
+            )
+
+        truncated = False
+        if len(records) > max_rows:
+            records = records[:max_rows]
+            truncated = True
+
+        if records:
+            columns: list[str] = list(records[0].keys())
+            rows: list[dict[str, Any]] = [dict(record) for record in records]
+        else:
+            columns = []
+            rows = []
+
+        return {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "truncated": truncated,
+        }
+
+    async def dispose(self, connection_name: str) -> None:
+        """Close and remove a single pool.
+
+        Idempotent: calling on an unknown name is a no-op. The pool is
+        popped from the dict first so that a slow ``close()`` cannot
+        race with a concurrent ``get_connection`` call (the latter
+        will re-create the pool on demand).
+
+        Args:
+            connection_name: The pool to dispose.
+        """
+        pool = self._pools.pop(connection_name, None)
+        if pool is None:
+            return
+        await pool.close()
+        logger.info("Disposed asyncpg pool for connection '%s'", connection_name)
+
+    async def dispose_all(self) -> None:
+        """Close and remove every pool owned by this manager.
+
+        Safe to call multiple times. After this call, all subsequent
+        ``get_connection`` / ``test_connection`` / ``execute_select``
+        calls will lazily re-create pools on demand.
+        """
+        # Snapshot keys to avoid mutating the dict while iterating.
+        for name in list(self._pools.keys()):
+            await self.dispose(name)

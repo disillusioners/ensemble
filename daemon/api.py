@@ -168,8 +168,15 @@ async def lifespan(app: FastAPI):
         daemon_logger.error(str(e))
         raise SystemExit(1)
 
+    # Initialize CredentialManager BEFORE InstanceManager (BLOCKER 1 for Phase 2
+    # of Database Tool Category). InstanceManager needs the singleton to wire
+    # it into tool factories via closure injection.
+    credential_manager = CredentialManager()
+
     # Initialize InstanceManager
-    manager = InstanceManager(config, ensemble_config)
+    manager = InstanceManager(
+        config, ensemble_config, credential_manager=credential_manager
+    )
     await manager.initialize()
 
     # Execution Gate: clear any leases left behind by a previous
@@ -227,9 +234,6 @@ async def lifespan(app: FastAPI):
     
     # Set DispatchEventBus on JobQueueMgmtService
     job_queue_mgmt_service._dispatch_bus = dispatch_event_bus
-    
-    # Initialize CredentialManager
-    credential_manager = CredentialManager()
     
     # Initialize JobQueueService
     job_queue_service = JobQueueService(

@@ -438,7 +438,12 @@ class AsyncMessageResult:
 class InstanceManager:
     """Manages all agent instances, their graphs, and lifecycle."""
 
-    def __init__(self, config: Config, ensemble_config: EnsembleConfig | None = None):
+    def __init__(
+        self,
+        config: Config,
+        ensemble_config: EnsembleConfig | None = None,
+        credential_manager: "CredentialManager | None" = None,
+    ):
         """Initialize the instance manager.
 
         Args:
@@ -447,6 +452,12 @@ class InstanceManager:
                 selection. When None or is_sqlite, the existing SQLite engine
                 creation path is used (backward compatible). When is_postgres,
                 ``create_postgres_engine`` is used instead.
+            credential_manager: Optional shared :class:`CredentialManager` used
+                by the database tool layer to decrypt connection credentials at
+                query time. Injected from ``app.state.credential_manager`` in
+                production (N5: shared singleton, not per-instance); falls back
+                to constructing a fresh one for tests that build ``InstanceManager``
+                directly.
         """
         self.config = config
         self._ensemble_config = ensemble_config
@@ -552,6 +563,26 @@ class InstanceManager:
         # startup.
         if self._ensemble_config is not None and self._ensemble_config.is_postgres:
             self._ensure_postgres_columns()
+
+        # ── Database Tool Category (Phase 2) ──────────────────────────────
+        # ConnectionPoolManager is a shared singleton at the manager level (C3)
+        # so N instances share M connection pools instead of proliferating them.
+        # Both the repository and the pool manager need access to the engine,
+        # which is why this block sits here, after engine/migrations/columns.
+        # Imports are inline to avoid circular dependencies at module load time.
+        from .sources.credentials import CredentialManager
+        if credential_manager is None:
+            credential_manager = CredentialManager()
+        self._credential_manager = credential_manager
+
+        from .repositories.db_connection.repository import DbConnectionRepository
+        self._db_connection_repository = DbConnectionRepository(self._engine)
+
+        from .services.db_pool_manager import ConnectionPoolManager
+        self._db_pool_manager = ConnectionPoolManager(
+            self._db_connection_repository,
+            self._credential_manager,
+        )
 
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
@@ -982,6 +1013,40 @@ class InstanceManager:
             The shared SQLAlchemy Engine instance used by all repositories.
         """
         return self._engine
+
+    @property
+    def db_connection_repository(self):
+        """Public read-only access to the DB-connection registry repository.
+
+        Used by the database tool layer (``create_db_tools``) and HTTP routes
+        to manage ``DbConnectionConfig`` rows. Constructed in ``__init__`` with
+        the shared engine; no credential decryption happens here — that's
+        the responsibility of the tool layer (matches the
+        ``routers/sources.py`` encryption pattern).
+        """
+        return self._db_connection_repository
+
+    @property
+    def db_pool_manager(self):
+        """Public read-only access to the shared :class:`ConnectionPoolManager`.
+
+        This is the singleton pool owner for all DB-connection tool calls.
+        Kept at the manager level (C3 fix) so N instances share M pools
+        rather than multiplying them. Disposed in ``shutdown()`` —
+        see the ``dispose_db_pools`` step.
+        """
+        return self._db_pool_manager
+
+    @property
+    def credential_manager(self):
+        """Public read-only access to the shared :class:`CredentialManager`.
+
+        Injected from ``app.state.credential_manager`` in production so all
+        long-lived components share one Fernet key handle; falls back to a
+        freshly constructed one for tests that build ``InstanceManager``
+        directly without going through the FastAPI lifespan.
+        """
+        return self._credential_manager
 
     @property
     def ensemble_config(self) -> "EnsembleConfig | None":
@@ -2872,6 +2937,7 @@ class InstanceManager:
             ("shutdown_worker_pool", asyncio.to_thread(self.shutdown_worker_pool)),
             ("shutdown_event_bus", self._event_bus.shutdown()),
             ("shutdown_maintenance_service", self._maintenance_service.stop() if self._maintenance_service else asyncio.sleep(0)),
+            ("dispose_db_pools", self._db_pool_manager.dispose_all() if hasattr(self, '_db_pool_manager') else asyncio.sleep(0)),
             ("close_checkpointer", self.close_checkpointer()),
             ("drain_mcp_pool", self._drain_warmup_pool()),
             ("shutdown_mcp_service", self._mcp_service.close_all_connections()),
