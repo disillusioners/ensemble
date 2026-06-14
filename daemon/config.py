@@ -200,11 +200,30 @@ class CompactionConfig(BaseSettings):
             "Example: {'vision': 16385} caps any model name containing 'vision'."
         ),
     )
+
+    @field_validator("context_window_overrides")
+    @classmethod
+    def _validate_overrides(cls, v: dict[str, int]) -> dict[str, int]:
+        """Reject empty keys and non-positive values to fail fast on bad config."""
+        cleaned: dict[str, int] = {}
+        for key, value in v.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ValueError(
+                    f"context_window_overrides keys must be non-empty strings, got {key!r}"
+                )
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(
+                    f"context_window_overrides[{key!r}] must be a positive integer, got {value!r}"
+                )
+            cleaned[key] = value
+        return cleaned
     context_window_default: int = Field(
-        default=180000,
+        default=0,
+        ge=0,
         description=(
-            "Fallback context window when the model is unknown and no "
-            "context_window_overrides entry matches. 0 = use built-in default."
+            "Fallback context window used when neither context_window_overrides "
+            "nor the built-in MODEL_CONTEXT_LIMITS registry match the active model. "
+            "0 = fall through to the hard-coded DEFAULT_CONTEXT_LIMIT (180k)."
         ),
     )
     target_ratio: float = Field(default=0.40, description="Target token usage after compaction as fraction of context window")

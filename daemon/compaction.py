@@ -111,14 +111,14 @@ def get_model_context_limit(model_name: str, config: object | None = None) -> in
     1. ``config.context_window_overrides`` — substring match against the model
        name; longest key wins. Lets operators cap distinct models (e.g. a
        smaller vision model) without touching the registry.
-    2. ``config.context_window_default`` — used when no override matches and
-       the registry has no entry. Set to 0 to fall through to the registry
-       default.
-    3. ``MODEL_CONTEXT_LIMITS`` registry — fuzzy substring match (case-insensitive).
+    2. ``MODEL_CONTEXT_LIMITS`` registry — fuzzy substring match (case-insensitive).
+    3. ``config.context_window_default`` — used when neither overrides nor the
+       registry match. Set to 0 to fall through to the hard-coded fallback.
     4. ``DEFAULT_CONTEXT_LIMIT`` — last-resort fallback.
 
     Args:
         model_name: Model identifier string (e.g., "gpt-4o", "claude-3.5-sonnet").
+            Whitespace is stripped and matching is case-insensitive.
         config: Optional config object exposing ``context_window_overrides``
             (dict[str, int]) and ``context_window_default`` (int). Both are
             optional; missing attributes are treated as empty/zero.
@@ -126,20 +126,19 @@ def get_model_context_limit(model_name: str, config: object | None = None) -> in
     Returns:
         Context window size in tokens.
     """
+    # Normalize once so override and registry matching see the same string.
+    normalized = model_name.strip().lower()
+
     # Per-model overrides take priority (longest key first for specificity)
     if config is not None:
         overrides = getattr(config, "context_window_overrides", None) or {}
-        if overrides and model_name:
-            normalized = model_name.lower()
+        if overrides and normalized:
             for key in sorted(overrides.keys(), key=len, reverse=True):
                 if not key:
                     continue
                 if key.lower() in normalized:
                     return int(overrides[key])
 
-    # Normalize model name for matching
-    normalized = model_name.lower().strip()
-    
     # Direct match first
     if normalized in MODEL_CONTEXT_LIMITS:
         return MODEL_CONTEXT_LIMITS[normalized]

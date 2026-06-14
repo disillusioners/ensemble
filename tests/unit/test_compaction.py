@@ -133,6 +133,48 @@ class TestGetModelContextLimit:
         # Registry match still wins over the default fallback.
         assert get_model_context_limit("gpt-4o", config=config) == 128000
 
+    def test_override_match_strips_surrounding_whitespace(self):
+        """Leading/trailing whitespace on the model name must not break override matching."""
+        config = make_compaction_config(context_window_overrides={"gpt-4o": 5000})
+        assert get_model_context_limit("  gpt-4o  ", config=config) == 5000
+        assert get_model_context_limit("\tgpt-4o\n", config=config) == 5000
+
+    def test_override_match_is_case_insensitive(self):
+        """Override keys and model names are matched case-insensitively."""
+        config = make_compaction_config(context_window_overrides={"GPT-4O": 7777})
+        assert get_model_context_limit("gpt-4o", config=config) == 7777
+        assert get_model_context_limit("GPT-4O-2024", config=config) == 7777
+
+    def test_empty_string_key_in_overrides_is_rejected_at_load(self):
+        """An empty override key must fail validation at config load time, not silently match."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            CompactionConfigModel(context_window_overrides={"": 999})
+
+        # A valid config with a real key still works as expected; the runtime
+        # helper only sees well-formed configs since the validator already ran.
+        config = make_compaction_config(context_window_overrides={"gpt-4o": 1111})
+        assert get_model_context_limit("gpt-4o", config=config) == 1111
+        # And an unknown model falls through to the registry/default — never
+        # to a silently-skipped empty key.
+        assert get_model_context_limit("totally-unknown") == DEFAULT_CONTEXT_LIMIT
+
+    def test_config_validator_rejects_invalid_overrides(self):
+        """Bad values in context_window_overrides must fail at config load time."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            CompactionConfigModel(context_window_overrides={"gpt-4o": 0})
+        with pytest.raises(ValidationError):
+            CompactionConfigModel(context_window_overrides={"gpt-4o": -100})
+        with pytest.raises(ValidationError):
+            CompactionConfigModel(context_window_overrides={"gpt-4o": "not-a-number"})
+        with pytest.raises(ValidationError):
+            CompactionConfigModel(context_window_overrides={"": 1000})
+        with pytest.raises(ValidationError):
+            CompactionConfigModel(context_window_default=-1)
+
 
 class TestIdentifyBoundaryGroups:
     """Tests for identify_boundary_groups function (7 cases)."""
