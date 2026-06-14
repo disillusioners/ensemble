@@ -1202,14 +1202,28 @@ class InstanceManager:
         if task is not None and not task.done():
             task.cancel()
             logger.debug(f"Cancelled lingering graph task for {instance_id[:8]}...")
+
+        # Drop the per-instance context-usage dedup entry (same lifetime
+        # as _graph_tasks). See release_context_usage_cache() for rationale.
+        self.release_context_usage_cache(instance_id)
         
         # Cancel any active requests (shouldn't exist for paused instance but safety first)
         # Using SESSION_TERMINATED since this is a TTL-based eviction - the session
         # is being terminated due to inactivity/paused duration exceeding the limit
         self._request_registry.cancel_by_instance(
-            instance_id, 
+            instance_id,
             CancellationReason.SESSION_TERMINATED
         )
+
+    def release_context_usage_cache(self, instance_id: str) -> None:
+        """Drop the per-instance context-usage dedup entry.
+
+        Called whenever an instance is released, terminated, paused, or
+        otherwise cleaned up so the dedup map doesn't grow without
+        bound over a long-lived daemon. Mirrors the lifetime of
+        ``_graph_tasks``.
+        """
+        self._last_context_usage.pop(instance_id, None)
     
     async def _cleanup_cached_instances(self) -> None:
         """Background task to release in-memory graphs for non-active cached instances exceeding TTL.

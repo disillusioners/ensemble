@@ -599,8 +599,9 @@ class InstanceMessagingService:
                 existing = self._manager._graph_tasks.get(instance_id)
                 if existing is current_task:
                     self._manager._graph_tasks.pop(instance_id, None)
+                    self._manager.release_context_usage_cache(instance_id)
                     logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
-        
+
         # Extract message data from the current turn
         messages = result.get("messages", [])
         
@@ -1055,16 +1056,6 @@ class InstanceMessagingService:
             checkpoint_id="user",
         )
 
-        # Broadcast initial context usage (before the assistant starts) so the
-        # FE indicator reflects the pre-response state. The streaming loop
-        # will emit updates as the graph accumulates messages.
-        try:
-            pre_state = await graph.aget_state(config)
-            pre_messages = (pre_state.values.get("messages", []) if pre_state else []) + [user_msg]
-        except Exception:
-            pre_messages = [user_msg]
-        await self._emit_context_usage(instance_id, pre_messages)
-
         # Reset state for this processing call to prevent unbounded growth
         all_state_messages: list = []
         tool_outputs: dict = {}
@@ -1267,6 +1258,7 @@ class InstanceMessagingService:
                 existing = self._manager._graph_tasks.get(instance_id)
                 if existing is current_task:
                     self._manager._graph_tasks.pop(instance_id, None)
+                    self._manager.release_context_usage_cache(instance_id)
                     logger.debug(f"Unregistered graph task for instance {instance_id[:8]}...")
 
         # Parse <think/> tags from final content

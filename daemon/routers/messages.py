@@ -241,36 +241,37 @@ async def stream_events(instance_id: str, request: Request):
         # task tracked so we don't leak on early disconnect.
         async def _initial_snapshot() -> None:
             try:
-                messaging = getattr(manager, "_messaging_service", None)
-                if messaging is not None and hasattr(messaging, "emit_context_usage_for_instance"):
-                    await messaging.emit_context_usage_for_instance(instance_id)
+                await manager._messaging_service.emit_context_usage_for_instance(instance_id)
             except Exception as e:
                 logger.debug(f"Failed to emit initial context usage: {e}")
 
         snapshot_task = asyncio.create_task(_initial_snapshot())
-        snapshot_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
-        
+
         try:
             while True:
                 if await request.is_disconnected():
                     break
-                
+
                 if manager.is_shutting_down:
                     yield {"event": "error", "data": json.dumps({"error": "server_shutdown"})}
                     break
-                
+
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=SSE_TIMEOUT_S)
                 except asyncio.TimeoutError:
                     yield {"event": "keepalive", "data": "{}"}
                     continue
-                
+
                 yield {
                     "event": event["event_type"],
                     "id": event.get("event_id", ""),
                     "data": json.dumps(event),
                 }
         finally:
+            # Cancel the initial snapshot if it's still running so we don't
+            # do a wasted checkpointer round-trip after the client has gone.
+            if not snapshot_task.done():
+                snapshot_task.cancel()
             await live_hub.remove_connection(instance_id, queue)
     
     return EventSourceResponse(event_generator(), ping=SSE_PING_INTERVAL)

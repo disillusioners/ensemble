@@ -816,6 +816,7 @@ async def delete_project(
                     
                     # Cancel and remove graph task
                     task = manager._graph_tasks.pop(instance_id, None)
+                    manager.release_context_usage_cache(instance_id)
                     if task and not task.done():
                         task.cancel()
                     

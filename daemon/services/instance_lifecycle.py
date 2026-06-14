@@ -460,6 +460,7 @@ class InstanceLifecycleService:
         # asyncio.shield protects against outer-cancel (e.g., client disconnect)
         # leaking the unwinding graph task — the very problem this fix is closing.
         graph_task = self._manager._graph_tasks.pop(instance_id, None)
+        self._manager.release_context_usage_cache(instance_id)
         graph_unwind_ms = 0
         if graph_task and not graph_task.done():
             graph_task.cancel()
@@ -699,6 +700,7 @@ class InstanceLifecycleService:
             # This raises asyncio.CancelledError in the streaming coroutine
             # Use pop() to prevent stale references after cancellation (consistent with terminate_instance)
             graph_task = self._manager._graph_tasks.pop(target_id, None)
+            self._manager.release_context_usage_cache(target_id)
             if graph_task and not graph_task.done():
                 graph_task.cancel()
                 logger.info(f"Cancelled graph task for instance {target_id[:8]}...")
