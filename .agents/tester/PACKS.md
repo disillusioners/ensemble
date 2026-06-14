@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 105 packs
-- Unit: 90 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 109 packs
+- Unit: 94 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -27,6 +27,10 @@
 | jober_watch_integration_test | tests/job_queue/test_jober_watch_integration.py | Phase 3 jober watch: 7 terminal paths, 13 edge cases, notification format (5 tests), tool registration, agent definition, crash recovery | 2 min | 2026-06-01 | ✅ PASS (42/42 format tests, feature/job-report-format, 0 regressions) |
 | frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD, dialog template pills + JSON editor, **test connection button + SSRF**, **notification.service WAV/audio unlock/cleanup**, **defer queue visibility**, **scroll preservation + refresh button**, **mergeInstances sort order (new at top)**, **sortByCreatedAtDesc utility (9 tests)**, **ensureSystemQueues service method (2 tests)**, **notification sound exclusion (7 tests)**, **jobs page remember project (11+ tests)**, **pause/resume toggle visibility**, **project-aware URL routing (77 tests)**, **instance_created SSE queue + KB filtering**) | 2 min | 2026-05-30 | ✅ PASS (800/800, instance_created SSE feature, 0 regressions) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-23 | ✅ PASS (14 passed, Phase 6 no regression) |
+| db_connection_repository_unit_test | tests/test_db_connection_repository.py | DbConnectionRepository: model, CRUD, credential isolation, unique constraint, factory | 2 min | 2026-06-14 | ✅ PASS (33/33, feature/db-tools, 0 failures) |
+| db_pool_manager_unit_test | tests/test_db_pool_manager.py | ConnectionPoolManager: DSN build, error sanitization, pool lifecycle, execute_select, LIMIT injection prevention | 2 min | 2026-06-14 | ✅ PASS (61/61, feature/db-tools, 0 failures) |
+| db_select_guard_unit_test | tests/test_db_select_guard.py | _validate_select_only: forbidden keywords, false positive prevention, multi-statement, empty/comment queries | 2 min | 2026-06-14 | ✅ PASS (27/27, feature/db-tools, 0 failures) |
+| db_tools_integration_test | tests/test_db_tools.py | DB tools integration: add/list/delete, credential security, SELECT guard at tool layer, category filtering | 2 min | 2026-06-14 | ✅ PASS (17/17, feature/db-tools, 0 failures) |
 | models_split_unit_test | tests/unit/test_models_split.py | Phase 2 models split: backward compat, __all__ completeness, cross-module refs, instantiation, HealthResponse, Pydantic behavior | 2 min | 2026-04-23 | ✅ PASS (30 passed, Phase 6 no regression) |
 | message_service_unit_test | tests/unit/test_message_service.py | MessageService, UnifiedMessage, ToolCallInfo (SSE message unification) | 2 min | 2026-04-23 | ⚠️ FILE NOT FOUND (stale entry) |
 | api_router_extraction_test | tests/unit/test_api_router_extraction.py | Phase 3 router extraction: route registration, app.state, backward compat, _validate_instance_mode, _get_manager DI, router structure, API size | 2 min | 2026-04-23 | ✅ PASS (47 passed, Phase 6 no regression) |
