@@ -1,0 +1,12 @@
+{
+  "id": "devops",
+  "name": "DevOps",
+  "description": "Infrastructure, deployment, CI/CD, Docker, Kubernetes, Terraform, shell scripting specialist",
+  "icon": "⚙️",
+  "color": "accent-orange",
+  "version": "1.0.0",
+  "capabilities": ["docker", "kubernetes", "terraform", "ci-cd", "shell-ops"],
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
+  }
+}
