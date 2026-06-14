@@ -100,6 +100,22 @@ These tools are always available:
 - `docker volume rm <volume>` — Remove volume (Critical — data loss)
 - `docker network rm <network>` — Remove network (High)
 
+## Container Exec Operations (High Risk)
+
+`docker exec` and `kubectl exec` — High Risk: Allows arbitrary command execution inside containers. Can access mounted secrets, modify application state, or install packages. Use only for diagnostics, never as a substitute for proper debugging or persistent changes.
+
+- `docker exec -it <container> /bin/sh` — Interactive shell in container (High)
+- `docker exec <container> <cmd>` — Run a single command in container (High)
+- `kubectl exec -it <pod> -n <ns> -- /bin/sh` — Interactive shell in pod (High)
+- `kubectl exec <pod> -n <ns> -- <cmd>` — Run a single command in pod (High)
+
+When you must exec:
+1. Confirm the container/pod name and namespace explicitly
+2. Prefer read-only diagnostics first (`ls`, `cat <logfile>`, `ps`, `env | grep -v SECRET`)
+3. Never `cat` files that may contain secrets (`/run/secrets/*`, env files, credential mounts) — use redacted inspection instead
+4. Never install packages or modify filesystem state inside a running container — that's a code/config change, fix it via a new image or manifest, not a hot-patch
+5. Document the exec invocation in the runbook: pod, command, timestamp, why it was needed
+
 ## Kubernetes Commands Reference
 
 ### Read-Only (Low Risk)
@@ -148,19 +164,19 @@ These tools are always available:
 - `terraform -chdir=infra workspace show` — Show current workspace
 - `terraform -chdir=infra graph` — Resource graph
 
-### Plan (Medium Risk)
+### Plan
 
-- `terraform -chdir=infra init -upgrade` — Initialize with provider upgrade
-- `terraform -chdir=infra plan` — Show plan
-- `terraform -chdir=infra plan -out=tfplan` — Save plan to file
-- `terraform -chdir=infra show tfplan` — Inspect saved plan
+- `terraform -chdir=infra init -upgrade` — Initialize with provider upgrade (Medium)
+- `terraform -chdir=infra plan` — Show plan (Low Risk — read-only, no state changes)
+- `terraform -chdir=infra plan -out=tfplan` — Save plan to file (Medium Risk — generates a state artifact that could be applied)
+- `terraform -chdir=infra show tfplan` — Inspect saved plan (Low)
 
 ### Apply (High / Critical Risk)
 
 - `terraform -chdir=infra apply tfplan` — Apply saved plan
 - `terraform -chdir=infra apply -auto-approve` — Apply without prompt (NEVER without explicit plan)
-- `terraform -chdir=infra destroy -plan` — Plan destruction first
-- `terraform -chdir=infra apply -target=<resource>` — Targeted apply (use with caution)
+- `terraform -chdir=infra plan -destroy -out=tfdestroyplan` — Plan destruction (Critical — review every line)
+- `terraform -chdir=infra apply -target=<resource>` — Targeted apply (Critical — bypasses dependency ordering, can leave state inconsistent. Never use to skip plan review)
 
 ### Destructive (Critical Risk)
 
