@@ -476,9 +476,16 @@ def _save_explorer_result(
 def _is_duplicate_experience(new_text: str, context_dir: Path, threshold: float = 0.8) -> bool:
     """Check if a similar experience text already exists in the context dir.
 
-    Uses Jaccard-like token overlap: |intersection| / |union|. Lightweight and
-    fast — no external dependencies. Skips empty/short texts to avoid false
-    positives on near-empty inputs.
+    Uses containment-based token overlap: |intersection| / min(|A|, |B|).
+    Containment (rather than Jaccard) is used because the stored file
+    includes a markdown header (``# Experience Recorded``, ``**Time**:``,
+    ``**Project**:``, etc.) that inflates the union denominator without
+    contributing to the intersection — under Jaccard, the ratio drops
+    below threshold even for near-identical content. Containment
+    measures "how much of the new text is already present" which is
+    what we actually care about for dedup.
+
+    Skips empty/short texts to avoid false positives on near-empty inputs.
     """
     try:
         new_tokens = set(new_text.lower().split())
@@ -492,10 +499,7 @@ def _is_duplicate_experience(new_text: str, context_dir: Path, threshold: float 
             existing_tokens = set(existing.lower().split())
             if not existing_tokens:
                 continue
-            union = new_tokens | existing_tokens
-            if not union:
-                continue
-            overlap = len(new_tokens & existing_tokens) / len(union)
+            overlap = len(new_tokens & existing_tokens) / min(len(new_tokens), len(existing_tokens))
             if overlap >= threshold:
                 return True
     except Exception:
@@ -511,9 +515,14 @@ def _save_experience_result(
     """Auto-save experience text to shared context directory. Fire-and-forget.
 
     Mirrors the structure of ``_save_explorer_result`` but for the experience
-    tool. Skips near-duplicates (Jaccard overlap >= 0.8) against existing
+    tool. Skips near-duplicates (containment overlap >= 0.8) against existing
     ``*_experience.md`` files in the same context dir to avoid redundant
     saves when the same knowledge is recorded repeatedly.
+
+    Filename includes a ``%Y%m%d_%H%M%S`` timestamp (matching
+    ``_save_explorer_result``) so successive saves never overwrite each
+    other and there is no TOCTOU race between filename derivation and
+    write.
 
     Never raises — all errors are logged at DEBUG and swallowed.
     """
@@ -524,12 +533,14 @@ def _save_experience_result(
         slug = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')[:60]
         if not slug:
             slug = "experience"
+        now = datetime.now()
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
         dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
-        file_path = dir_path / f"{slug}_experience.md"
+        file_path = dir_path / f"{slug}_{timestamp}_experience.md"
 
         dir_path.mkdir(parents=True, exist_ok=True)
 
-        iso_ts = datetime.now().isoformat()
+        iso_ts = now.isoformat()
 
         # Dedup: skip if a file with very similar content already exists
         if _is_duplicate_experience(text, dir_path):

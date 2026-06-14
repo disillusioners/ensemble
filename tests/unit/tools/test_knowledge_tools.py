@@ -2674,22 +2674,58 @@ class TestExperienceAutoSave:
     async def test_experience_skips_duplicate_content(
         self, mock_manager_for_experience_save, tmp_path
     ):
-        """Duplicate content (>= 0.8 Jaccard overlap) is skipped — no new file."""
-        # Pre-seed a file with content very similar to what we'll send.
+        """Near-duplicate content (containment overlap >= 0.8) is skipped.
+
+        Regression test for the Jaccard→containment fix in
+        ``_is_duplicate_experience``: with Jaccard, the file's markdown
+        header (``# Experience Recorded``, ``**Time**:``, ``**Project**:``,
+        etc.) inflates the union denominator without contributing to the
+        intersection, so the ratio drops well below 0.8 even for
+        near-identical content. Containment (intersection / min) is the
+        correct metric here.
+
+        This test also deliberately uses a *different* first 60 chars
+        for the new text vs. the pre-seeded text — i.e. a different
+        slug — so any future change that brings back silent overwrite
+        (e.g. dropping the timestamp and re-introducing slug collision)
+        would no longer be masked as "dedup". With a unique timestamped
+        filename (post Fix #2), a true dedup failure would create a
+        second file and the assertion would fail.
+        """
         context_dir = tmp_path / "ensemble" / "context" / "experience-save-context"
         context_dir.mkdir(parents=True, exist_ok=True)
 
-        # Use a long-enough body so dedup actually runs (>= 5 tokens).
-        text = (
+        # Pre-seeded text — opens with "The authentication..." (slug: "the-...")
+        pre_seeded_text = (
             "The authentication system uses JWT tokens for user authentication "
             "with refresh tokens for session security and rotation."
         )
-        existing_file = context_dir / "the-authentication-system-uses-jwt-tokens-for-user-authentic_experience.md"
-        existing_file.write_text(
+        pre_seeded_slug = "the-authentication-system-uses-jwt-tokens-for-user-authentic"
+        pre_seeded_file = context_dir / f"{pre_seeded_slug}_experience.md"
+        pre_seeded_file.write_text(
             f"# Experience Recorded\n**Time**: 2026-06-14T12:00:00\n"
-            f"**Project**: agents-ensemble\n\n{text}\n",
+            f"**Project**: agents-ensemble\n\n{pre_seeded_text}\n",
             encoding="utf-8",
         )
+
+        # New text — opens with "JWT-based..." (slug: "jwt-based-...") but
+        # shares enough tokens with the pre-seeded text to trip containment
+        # dedup. Token math:
+        #   pre_seeded unique tokens: ~14 (incl. "the", "jwt", "tokens"...)
+        #   new unique tokens:         ~13 (incl. "jwt-based" instead of "the", "jwt")
+        #   shared:                    ~12
+        #   Jaccard (old):             12 / (13 + 14 - 12) = 12/15 ≈ 0.80 — borderline
+        #   Jaccard vs. file content:  12 / (13 + 21 - 12) = 12/22 ≈ 0.55 < 0.8
+        #   Containment (new):         12 / min(13, 21) = 12/13 ≈ 0.92 ≥ 0.8
+        # So Jaccard would *not* trigger dedup (especially against the file
+        # content which includes the markdown header); containment does.
+        new_text = (
+            "JWT-based authentication system uses tokens for user "
+            "authentication with refresh tokens for session security and rotation."
+        )
+        new_slug = "jwt-based-authentication-system-uses-tokens-for-user-authen"
+        # Sanity: slugs must differ or this test is meaningless.
+        assert pre_seeded_slug != new_slug
 
         with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
             mock_tempfile.gettempdir.return_value = str(tmp_path)
@@ -2699,15 +2735,20 @@ class TestExperienceAutoSave:
             )
             experience_tool = next(t for t in tools if t.name == "experience")
 
-            await experience_tool.ainvoke({"text": text})
+            await experience_tool.ainvoke({"text": new_text})
 
             await asyncio.sleep(0.1)
 
-            # Should still be exactly 1 file (the pre-seeded one).
+            # Should still be exactly 1 file (the pre-seeded one). If dedup
+            # did not fire, the timestamped new filename would have produced
+            # a second file (different slug → no overwrite possible).
             files = list(context_dir.glob("*_experience.md"))
             assert len(files) == 1, (
                 f"Expected 1 file (duplicate skip), got {len(files)}: "
                 f"{[f.name for f in files]}"
+            )
+            assert files[0].name == f"{pre_seeded_slug}_experience.md", (
+                f"Expected the pre-seeded file to remain, got {files[0].name}"
             )
 
     @pytest.mark.asyncio
