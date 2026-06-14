@@ -156,6 +156,66 @@ class TestToPublicDict:
 
 
 # =============================================================================
+# Group 2.5: Pydantic-level credential non-leak protection
+#
+# Guards the field-level Pydantic protections added on the
+# ``credentials`` field (``exclude=True``, ``repr=False``) and the
+# explicit ``__repr__`` override. ``to_public_dict`` is covered by
+# Group 2 above; this group covers *every other* standard Pydantic /
+# Python serialization surface. If any future contributor relaxes the
+# field flags or removes the repr override, these tests fail loudly.
+# =============================================================================
+
+
+class TestCredentialNonLeak:
+    """Regression tests: ``credentials`` must never leak via repr/str/dump."""
+
+    SECRET = "encrypted_secret_value"
+
+    def _make_config(self) -> DbConnectionConfig:
+        return DbConnectionConfig(
+            connection_name="leak_check",
+            db_type="postgres",
+            host="db.example.com",
+            port=5432,
+            database="app",
+            username="app_user",
+            credentials=self.SECRET,
+            ssl_mode="require",
+        )
+
+    def test_repr_does_not_contain_credential(self):
+        """``repr(config)`` must never include the credential value."""
+        config = self._make_config()
+        rendered = repr(config)
+        assert self.SECRET not in rendered
+        # Defensive: also check the field name is not even mentioned
+        # in the explicit repr, to make the contract obvious.
+        assert "credentials=" not in rendered
+
+    def test_str_does_not_contain_credential(self):
+        """``str(config)`` must never include the credential value."""
+        config = self._make_config()
+        assert self.SECRET not in str(config)
+
+    def test_model_dump_excludes_credentials_key(self):
+        """``model_dump()`` must omit the ``credentials`` key entirely."""
+        config = self._make_config()
+        dumped = config.model_dump()
+        assert "credentials" not in dumped
+        assert self.SECRET not in dumped.values()
+        assert self.SECRET not in str(dumped)
+
+    def test_model_dump_json_excludes_credential_value(self):
+        """``model_dump_json()`` must not include the credential value."""
+        config = self._make_config()
+        json_str = config.model_dump_json()
+        assert self.SECRET not in json_str
+        # And the key should be absent from the JSON payload too.
+        assert '"credentials"' not in json_str
+
+
+# =============================================================================
 # Group 3: Repository CRUD
 # =============================================================================
 

@@ -160,6 +160,77 @@ class DbConnectionRepository:
             return None
         return config.credentials
 
+    # Fields that callers may NOT change via update_connection().
+    # ``id`` is the primary key, ``connection_name`` is the public identifier
+    # (rename is intentionally not supported in Phase 1), and ``created_at``
+    # is immutable for audit consistency.
+    _PROTECTED_UPDATE_FIELDS = frozenset({"id", "connection_name", "created_at"})
+
+    def update_connection(
+        self,
+        connection_name: str,
+        **fields: Any,
+    ) -> DbConnectionConfig | None:
+        """Update fields on an existing connection and bump ``updated_at``.
+
+        Accepts arbitrary keyword fields matching the model columns
+        (e.g. ``host``, ``port``, ``database``, ``username``,
+        ``credentials``, ``ssl_mode``, ``db_type``). Protected fields
+        (``id``, ``connection_name``, ``created_at``) are silently
+        filtered out and a warning is logged.
+
+        Args:
+            connection_name: The unique name of the connection to
+                update. The connection is looked up by this value;
+                renaming via update is not supported.
+            **fields: Column values to overwrite on the model.
+
+        Returns:
+            The updated ``DbConnectionConfig`` instance, or ``None`` if
+            no connection with the given name exists.
+
+        Raises:
+            AttributeError: If any of the supplied field names does not
+                correspond to a column on ``DbConnectionConfig``.
+        """
+        with Session(self.engine) as session:
+            config = session.exec(
+                select(DbConnectionConfig).where(
+                    DbConnectionConfig.connection_name == connection_name
+                )
+            ).first()
+            if config is None:
+                logger.warning(
+                    f"DB connection not found for update: name={connection_name}"
+                )
+                return None
+
+            applied_fields: list[str] = []
+            for key, value in fields.items():
+                if key in self._PROTECTED_UPDATE_FIELDS:
+                    logger.warning(
+                        f"Ignoring protected field in update_connection: "
+                        f"name={connection_name}, field={key}"
+                    )
+                    continue
+                if not hasattr(config, key):
+                    raise AttributeError(
+                        f"DbConnectionConfig has no field {key!r}"
+                    )
+                setattr(config, key, value)
+                applied_fields.append(key)
+
+            config.update_timestamp()
+            session.add(config)
+            session.commit()
+            session.refresh(config)
+
+            logger.info(
+                f"Updated db connection: name={connection_name}, "
+                f"fields={applied_fields}"
+            )
+            return config
+
     def delete(self, connection_name: str) -> bool:
         """Delete a connection configuration by name.
 

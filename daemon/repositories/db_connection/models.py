@@ -40,7 +40,11 @@ class DbConnectionConfig(SQLModel, table=True):
     database: str | None = Field(default=None)
     username: str | None = Field(default=None)
     # Opaque encrypted string. Repository never decrypts.
-    credentials: str | None = Field(default=None)
+    # ``exclude=True`` blocks serialization via model_dump() / model_dump_json()
+    # and FastAPI response models. ``repr=False`` blocks the default Pydantic
+    # repr. Combined with the explicit ``__repr__`` below, this makes the
+    # credential value unprintable through any standard Pydantic surface.
+    credentials: str | None = Field(default=None, exclude=True, repr=False)
     ssl_mode: str = Field(default="prefer", max_length=32)
     created_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -48,6 +52,21 @@ class DbConnectionConfig(SQLModel, table=True):
     updated_at: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
+
+    def __repr__(self) -> str:
+        """Return a safe repr that never includes the credential value.
+
+        The ``credentials`` field is marked ``repr=False`` at the Pydantic
+        level, but we also override ``__repr__`` explicitly so that:
+        * interactive debugging (REPL, ``!r`` formatting) does not leak it,
+        * logs that use ``repr(config)`` stay safe,
+        * the contract is obvious to readers — not hidden in a field flag.
+        """
+        return (
+            f"DbConnectionConfig(connection_name={self.connection_name!r}, "
+            f"db_type={self.db_type!r}, "
+            f"has_password={self.credentials is not None})"
+        )
 
     def to_public_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization, omitting credentials.
