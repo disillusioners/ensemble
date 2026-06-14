@@ -248,10 +248,12 @@ class SlackMrkdwnFormatter(OutputFormatter):
     def _parse_table_row(self, line: str) -> list[str]:
         """Parse a markdown table row into its cell strings.
 
-        Cells are split on unescaped ``|`` characters. A backslash-escaped
-        pipe (``\\|``) is preserved inside the cell content so that links
-        such as ``[text](https://example.com/with|pipe)`` do not break the
-        table layout.
+        Cells are split on ``|`` characters that are neither escaped
+        (``\\|``) nor the separator inside a Slack-style link
+        (``<url|text>``). Both cases must be preserved inside the cell
+        content so that links such as ``[text](https://example.com)``
+        (which the link step rewrites to ``<https://example.com|text>``)
+        do not break the table layout.
 
         Args:
             line: A markdown table row.
@@ -264,8 +266,36 @@ class SlackMrkdwnFormatter(OutputFormatter):
             s = s[1:]
         if s.endswith("|"):
             s = s[:-1]
-        # Split on unescaped pipes only; escaped pipes (\|) are preserved.
-        return [c.strip() for c in re.split(r"(?<!\\)\|", s)]
+
+        # Walk character by character so we can ignore pipes that are
+        # either backslash-escaped or sit inside ``<...>`` (Slack link
+        # delimiters). Plain ``re.split`` cannot express the "not inside
+        # angle brackets" condition cleanly.
+        cells: list[str] = []
+        current: list[str] = []
+        in_angle = False
+        i = 0
+        n = len(s)
+        while i < n:
+            ch = s[i]
+            if ch == "<":
+                in_angle = True
+                current.append(ch)
+            elif ch == ">":
+                in_angle = False
+                current.append(ch)
+            elif ch == "\\" and i + 1 < n and s[i + 1] == "|":
+                # Escaped pipe — keep both characters inside the cell.
+                current.append("\\|")
+                i += 1
+            elif ch == "|" and not in_angle:
+                cells.append("".join(current).strip())
+                current = []
+            else:
+                current.append(ch)
+            i += 1
+        cells.append("".join(current).strip())
+        return cells
 
     def _build_ascii_table(self, header_line: str, data_lines: list[str]) -> str:
         """Build an ASCII table from parsed markdown table parts.

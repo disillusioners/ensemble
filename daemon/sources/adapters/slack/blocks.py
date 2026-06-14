@@ -202,6 +202,11 @@ def _split_text_chunk(text: str, max_length: int) -> list[str]:
     split never lands inside an open code fence (which would leave one
     chunk with an unbalanced opening ``````` and Slack would render the
     rest of the message as raw code).
+
+    If the chunk is so large that no safe (outside-fence) newline exists
+    in the scan window, the function force-splits at ``max_length`` and
+    re-balances the fence delimiters across the two halves so each chunk
+    has an even (balanced) count of fences.
     """
     chunks: list[str] = []
 
@@ -226,8 +231,17 @@ def _split_text_chunk(text: str, max_length: int) -> list[str]:
         if split_point == -1:
             # No safe split point in the window (either no newlines or every
             # newline is inside a code fence). Force a split at max_length
-            # to make progress.
-            split_point = max_length
+            # to make progress. If we are mid-fence, re-balance the fences
+            # across the two halves so each chunk has an even count of ```.
+            if fence_count % 2 == 1:
+                chunk = text[:max_length] + "\n```"
+                remainder = "```\n" + text[max_length:]
+            else:
+                chunk = text[:max_length]
+                remainder = text[max_length:]
+            chunks.append(chunk)
+            text = remainder.lstrip("\n")
+            continue
 
         chunks.append(text[:split_point])
         text = text[split_point:].lstrip("\n")

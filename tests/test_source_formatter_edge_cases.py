@@ -945,6 +945,160 @@ class TestCodeBlockLanguagePlusComment:
         assert "print('hi')" in inner
 
 
+class TestTableWithLinkInCell:
+    """C3 (regression): A table cell with a ``[text](url)`` link must
+    produce a well-formed table.
+
+    The Slack link form ``<url|text>`` contains a ``|`` character. The
+    table parser must NOT treat that pipe as a column separator.
+    """
+
+    def test_link_in_data_cell(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A 2-column table whose data cell holds a link is preserved.
+
+        The link ``[bar](http://x.com)`` is converted by the link step to
+        ``<http://x.com|bar>``; the cell parser must keep that intact
+        inside the second cell, so the resulting table has exactly two
+        columns matching the header.
+        """
+        text = (
+            "| Foo | [bar](http://x.com) |\n"
+            "|-----|------|\n"
+            "| A | B |"
+        )
+        result = formatter.format(text)
+        # Wrapped in code fences.
+        assert result.startswith("```\n")
+        assert result.endswith("\n```")
+        body = result.strip("`").strip()
+        # All four tokens must survive in the body.
+        assert "Foo" in body
+        assert "bar" in body
+        assert "A" in body
+        assert "B" in body
+        # The Slack-form link should appear (the formatter converts
+        # ``[bar](http://x.com)`` to ``<http://x.com|bar>``).
+        assert "<http://x.com|bar>" in result
+
+    def test_multiple_link_cells(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A 3-column table with links in two cells is preserved.
+
+        Each link is converted to ``<url|text>`` containing a ``|``.
+        None of those pipes must be treated as column separators; the
+        resulting table must still have three columns.
+        """
+        text = (
+            "| Name | Docs | Source |\n"
+            "|------|------|--------|\n"
+            "| alpha | [alpha docs](https://example.com/a) | [alpha src](https://example.com/a/src) |\n"
+            "| beta | [beta docs](https://example.com/b) | [beta src](https://example.com/b/src) |"
+        )
+        result = formatter.format(text)
+        assert result.startswith("```\n")
+        assert result.endswith("\n```")
+        body = result.strip("`").strip()
+        # All header and data tokens present.
+        for token in ("Name", "Docs", "Source", "alpha", "beta"):
+            assert token in body, f"Missing token: {token!r}"
+        # All Slack-form links present.
+        assert "<https://example.com/a|alpha docs>" in result
+        assert "<https://example.com/a/src|alpha src>" in result
+        assert "<https://example.com/b|beta docs>" in result
+        assert "<https://example.com/b/src|beta src>" in result
+
+    def test_link_in_header_cell(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A link in the header cell is also preserved (pipe inside
+        ``<url|text>`` must not split the header into extra columns).
+        """
+        text = (
+            "| [Docs](https://example.com) | Name |\n"
+            "|------|------|\n"
+            "| x | y |"
+        )
+        result = formatter.format(text)
+        assert result.startswith("```\n")
+        assert result.endswith("\n```")
+        assert "<https://example.com|Docs>" in result
+        # Still a 2-column table.
+        body = result.strip("`").strip()
+        assert "Name" in body
+        assert "x" in body
+        assert "y" in body
+
+
+class TestLargeAsciiTableFenceBalanced:
+    """W4: A large ASCII table that triggers fence splitting must
+    produce blocks with balanced ``````` fences (even count per block).
+    """
+
+    def test_large_table_balanced_fences(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A table whose ASCII form exceeds 3000 chars still produces
+        balanced code fences in every block after splitting.
+
+        The formatter wraps the table in ```````...`````; when the
+        result is long enough to be force-split mid-fence by the block
+        splitter, each resulting block must have an even count of
+        ``````` so that Slack renders the code block correctly.
+        """
+        # Build a wide table (long column widths) so the ASCII body
+        # exceeds 3000 chars even with just header + separator.
+        header = (
+            "| "
+            + " | ".join(f"Col{i:02d}" for i in range(20))
+            + " |"
+        )
+        sep = "|" + "|".join("-" * 8 for _ in range(20)) + "|"
+        text = header + "\n" + sep
+        result = formatter.format(text)
+        # Pass through the block splitter (the same path the Slack
+        # adapter uses).
+        blocks = markdown_to_slack_blocks(result)
+        # Every block must have a balanced fence count.
+        for idx, block in enumerate(blocks):
+            block_text = block["text"]["text"]
+            fence_count = block_text.count("```")
+            assert fence_count % 2 == 0, (
+                f"Unbalanced fences in block {idx}: {fence_count} "
+                f"occurrences of ```\nBlock text: {block_text!r}"
+            )
+
+    def test_force_split_inside_fence_balances(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A single-line ```````...````` with no newlines inside that
+        exceeds 3000 chars must be split into multiple blocks, each with
+        balanced fences.
+
+        This is the exact W4 case: the splitter cannot find a safe
+        newline outside the fence, so it must re-balance fences across
+        the split.
+        """
+        # 4000 chars of non-newline content inside a code fence.
+        inner = "x" * 4000
+        text = f"```\n{inner}\n```"
+        blocks = markdown_to_slack_blocks(text)
+        # At least one split occurred.
+        assert len(blocks) >= 1
+        for idx, block in enumerate(blocks):
+            block_text = block["text"]["text"]
+            fence_count = block_text.count("```")
+            assert fence_count % 2 == 0, (
+                f"Unbalanced fences in block {idx}: {fence_count} "
+                f"occurrences of ```"
+            )
+        # No content lost: the X's survive across the split.
+        total = "".join(b["text"]["text"] for b in blocks)
+        assert total.count("x") == 4000
+
+
 # --------------------------------------------------------------------------- #
 # End
 # --------------------------------------------------------------------------- #
