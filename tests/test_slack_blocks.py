@@ -57,6 +57,56 @@ class TestMarkdownToSlackBlocks:
         assert "• Second" in text
         assert "• Third" in text
 
+    def test_strikethrough_conversion(self):
+        """Markdown strikethrough ~~text~~ should convert to Slack ~text~."""
+        blocks = markdown_to_slack_blocks("This is ~~deleted~~ text")
+        assert len(blocks) == 1
+        text = blocks[0]["text"]["text"]
+        assert "~deleted~" in text
+        # Double tildes should not remain
+        assert "~~deleted~~" not in text
+
+    def test_heading_conversion(self):
+        """Markdown heading # Heading should convert to Slack *Heading* (bold)."""
+        blocks = markdown_to_slack_blocks("# My Heading")
+        assert len(blocks) == 1
+        text = blocks[0]["text"]["text"]
+        assert "*My Heading*" in text
+        # The leading '#' should not be present
+        assert text.strip().startswith("*")
+        assert "# My Heading" not in text
+
+    def test_heading_level_two_conversion(self):
+        """Markdown heading ## Sub should convert to Slack *Sub* (bold)."""
+        blocks = markdown_to_slack_blocks("## Sub Heading")
+        assert len(blocks) == 1
+        text = blocks[0]["text"]["text"]
+        assert "*Sub Heading*" in text
+        assert "## " not in text
+
+    def test_table_conversion(self):
+        """Markdown tables should be converted to ASCII art in a code block."""
+        table_text = (
+            "| Name | Age |\n"
+            "|------|-----|\n"
+            "| Alice | 30 |\n"
+            "| Bob | 25 |"
+        )
+        blocks = markdown_to_slack_blocks(table_text)
+        assert len(blocks) == 1
+        text = blocks[0]["text"]["text"]
+        # The conversion wraps the table in triple backticks
+        assert text.startswith("```")
+        assert text.endswith("```")
+        # Header cells should be present (without pipe characters)
+        assert "Name" in text
+        assert "Age" in text
+        # Data should be present
+        assert "Alice" in text
+        assert "Bob" in text
+        # Separator row uses dashes
+        assert "---" in text
+
 
 class TestMarkdownToSlackBlocksCodeBlocks:
     """Tests for code block handling in markdown_to_slack_blocks."""
@@ -177,6 +227,55 @@ def fibonacci(n):
         assert "code 1" in blocks[0]["text"]["text"]
         assert "Some text" in blocks[1]["text"]["text"]
         assert "code 2" in blocks[2]["text"]["text"]
+
+    def test_code_block_with_hash_comment_first_line_preserved(self):
+        """Code block whose first line is a `#` comment must keep the comment.
+
+        Regression test: prior to the fix, ``not line.startswith('#')`` was
+        treated as a signal to strip the first line, which incorrectly removed
+        legitimate comments, shebangs, and `#!` headers.
+        """
+        text = "```\n# This is a comment\nprint('hello')\n```"
+        blocks = markdown_to_slack_blocks(text)
+        assert len(blocks) == 1
+        content = blocks[0]["text"]["text"]
+        inner = content[3:-3]
+        # The leading comment line must remain intact in the inner content.
+        assert "# This is a comment" in inner
+        assert "print('hello')" in inner
+
+    def test_code_block_with_shebang_preserved(self):
+        """A code block starting with ``#!/bin/bash`` must keep the shebang line.
+
+        ``#!`` looks like a comment but is part of a real shell script; the
+        language-specifier heuristic must not strip it.
+        """
+        text = "```\n#!/bin/bash\necho hello\n```"
+        blocks = markdown_to_slack_blocks(text)
+        assert len(blocks) == 1
+        content = blocks[0]["text"]["text"]
+        inner = content[3:-3]
+        assert "#!/bin/bash" in inner
+        assert "echo hello" in inner
+
+    def test_code_block_with_known_language_strips_specifier_only(self):
+        """When a known language is given, only the specifier is stripped.
+
+        For ``\\`\\`\\`bash\\n#!/bin/bash\\necho\\n\\`\\`\\`\\``, the specifier
+        ``bash`` is stripped, but the shebang on the next line is preserved.
+        """
+        text = "```bash\n#!/bin/bash\necho hello\n```"
+        blocks = markdown_to_slack_blocks(text)
+        assert len(blocks) == 1
+        content = blocks[0]["text"]["text"]
+        inner = content[3:-3]
+        # The inner content must start with the shebang (so the "bash"
+        # specifier is no longer its own first line) and end with echo.
+        assert inner.startswith("#!/bin/bash")
+        assert inner.endswith("echo hello")
+        # The first line on its own must be the shebang, not a "bash" line.
+        first_inner_line = inner.split("\n", 1)[0]
+        assert first_inner_line == "#!/bin/bash"
 
 
 class TestMarkdownToSlackBlocksSplitting:

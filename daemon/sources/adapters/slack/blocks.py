@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 
@@ -74,27 +73,36 @@ def _parse_blocks(text: str) -> list[dict[str, Any]]:
                     blocks.append({"type": "section", "content": section_text})
                 current_section_lines = []
 
-            # Strip language specifier from first line if present
+            # Strip language specifier from first line ONLY if it is a
+            # known language keyword (alphanumeric token in the common langs
+            # set). Lines that happen to start with `#` (comments, shebangs)
+            # are NOT language specifiers and must be preserved.
             code_content = part
             first_newline = code_content.find('\n')
             if first_newline != -1:
                 # Has content after opening delimiter
                 first_line = code_content[:first_newline]
                 rest_content = code_content[first_newline + 1:]
-                # If first line is just whitespace or language specifier, skip it
-                if first_line.strip() and not first_line.strip().startswith('#'):
-                    # Check if it's a language specifier (alphanumeric)
-                    lang_match = re.match(r'^([a-zA-Z0-9_-]+)(?:\s|$)', first_line.strip())
-                    common_langs = {'python', 'js', 'bash', 'sh', 'json', 'yaml', 'xml',
-                                   'html', 'css', 'sql', 'go', 'rust', 'java', 'c', 'cpp',
-                                   'ruby', 'php', 'swift', 'kotlin', 'typescript', 'c#'}
-                    if lang_match or first_line.strip().lower() in common_langs:
+                if first_line.strip():
+                    common_langs = {
+                        'python', 'py', 'js', 'javascript', 'ts', 'typescript',
+                        'bash', 'sh', 'shell', 'zsh', 'json', 'yaml', 'yml',
+                        'xml', 'html', 'css', 'sql', 'go', 'rust', 'rs',
+                        'java', 'c', 'cpp', 'c++', 'c#', 'cs', 'ruby', 'rb',
+                        'php', 'swift', 'kotlin', 'kt', 'scala', 'perl', 'r',
+                        'lua', 'haskell', 'hs', 'markdown', 'md', 'text', 'txt',
+                        'diff', 'dockerfile', 'makefile', 'ini', 'toml',
+                    }
+                    first_line_lower = first_line.strip().lower()
+                    if first_line_lower in common_langs:
                         # It's a language specifier, skip it
                         code_content = rest_content
                     else:
-                        # Keep the content as-is (might be actual code)
+                        # Keep the content as-is (actual code, comment, etc.)
                         code_content = part
                 else:
+                    # First line is whitespace only; treat the next line as
+                    # the start of the actual content.
                     code_content = rest_content
 
             # Remove trailing newline from closing delimiter if present
@@ -114,30 +122,17 @@ def _parse_blocks(text: str) -> list[dict[str, Any]]:
 
 
 def _convert_markdown(text: str) -> str:
-    """Convert Markdown formatting to Slack-compatible format."""
-    # Convert bold: **text** -> *text* (do first to avoid italic regex matching it)
-    # Use a placeholder to prevent italic conversion from affecting it
-    text = re.sub(r'\*\*(.+?)\*\*', r'⟦\1⟧', text)
+    """Convert Markdown formatting to Slack-compatible format.
 
-    # Convert italic: *text* -> _text_ (but not if it was bold)
-    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'_\1_', text)
+    Delegates mrkdwn conversion to the registered Slack formatter
+    (``daemon.sources.formatters.slack.mrkdwn.SlackMrkdwnFormatter``).
+    The import is lazy to avoid pulling the formatters package in at module
+    import time, which keeps the Block Kit builder usable in isolation.
+    """
+    from daemon.sources.formatters.registry import get_or_passthrough
 
-    # Convert bold placeholder back to Slack bold format
-    text = text.replace('⟦', '*').replace('⟧', '*')
-
-    # Convert inline code: `code` -> `code` (keep as is)
-    # Already valid in Slack, no conversion needed
-
-    # Convert links: [text](url) -> <url|text>
-    text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<\2|\1>', text)
-
-    # Convert bullet lists: lines starting with - or * to • format
-    text = re.sub(r'^[\-\*]\s+', '• ', text, flags=re.MULTILINE)
-
-    # Convert numbered lists: 1. to • (for simplicity)
-    text = re.sub(r'^\d+\.\s+', '• ', text, flags=re.MULTILINE)
-
-    return text
+    formatter = get_or_passthrough("slack")
+    return formatter.format(text)
 
 
 def _split_large_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
