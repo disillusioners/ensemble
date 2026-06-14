@@ -37,6 +37,10 @@ from .execution_lease.models import InstanceExecutionLease, LeaseHolderKind
 from .event.repository import EventRepository
 from .event.models import Event, EventKind
 
+# Database connection repository
+from .db_connection.repository import DbConnectionRepository
+from .db_connection.models import DbConnectionConfig
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -49,6 +53,7 @@ from .factory import (
     create_job_queue_repository,
     create_mcp_server_repository,
     create_execution_lease_repository,
+    create_db_connection_repository,
     run_migrations,
 )
 
@@ -97,6 +102,9 @@ __all__ = [
     "EventRepository",
     "Event",
     "EventKind",
+    # Database connection
+    "DbConnectionRepository",
+    "DbConnectionConfig",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
@@ -108,5 +116,6 @@ __all__ = [
     "create_job_queue_repository",
     "create_mcp_server_repository",
     "create_execution_lease_repository",
+    "create_db_connection_repository",
     "run_migrations",
 ]

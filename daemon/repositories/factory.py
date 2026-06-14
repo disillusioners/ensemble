@@ -18,6 +18,7 @@ from .job_queue.repository import JobRepository
 from .job_queue.queue_repository import JobQueueRepository
 from .mcp_server.repository import SQLModelMcpServerRepository
 from .execution_lease.repository import ExecutionLeaseRepository
+from .db_connection.repository import DbConnectionRepository
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -449,6 +450,41 @@ def create_source_repository(
     return SQLModelSourceRepository(engine)
 
 
+def create_db_connection_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> DbConnectionRepository:
+    """Create a DbConnectionRepository from configuration or shared engine.
+
+    The repository is the persistence layer for the Database Tool
+    Category's Connection Registry (Phase 1). It stores credentials
+    as opaque encrypted strings — encryption/decryption is the
+    responsibility of the tool layer, not the repository.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured DbConnectionRepository instance.
+
+    Note:
+        Either config or engine must be provided. If both are provided,
+        engine takes precedence.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return DbConnectionRepository(engine)
+
+
 def create_job_repository(
     config: DatabaseConfig | None = None,
     engine: Engine | None = None,
@@ -555,6 +591,7 @@ __all__ = [
     "create_instance_repository",
     "create_message_queue_repository",
     "create_source_repository",
+    "create_db_connection_repository",
     "create_job_repository",
     "create_job_queue_repository",
     "create_mcp_server_repository",

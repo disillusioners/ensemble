@@ -50,6 +50,7 @@ from .repositories.instance.models import Instance, InstanceStatus
 from .repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
 from .repositories.task.models import Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
+from .repositories.db_connection.models import DbConnectionConfig
 from sqlmodel import Session
 from sqlalchemy import text, select
 from .tools import create_instance_tools

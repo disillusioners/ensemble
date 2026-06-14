@@ -1,5 +1,5 @@
-Current Plan: OpenCode Native Python Tools
-Tracking File: opencode-native-python-tools-tracking.md
-Iteration: 003
+Current Plan: Database Tool Category (`db`)
+Tracking File: db-tool-category-tracking.md
+Iteration: 002
 Status: APPROVED
-Last Updated: 2026-06-07 11:20
+Last Updated: 2026-06-16 12:30
