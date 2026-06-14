@@ -131,7 +131,7 @@ logger = logging.getLogger(__name__)
 # minutes; we heartbeat at 30 s so ~10 missed beats (worker process
 # death) are required before the lease is considered stale. Sized to
 # match the existing task-heartbeat convention.
-DEFAULT_LEASE_HEARTBEAT_SECONDS = 30.0
+DEFAULT_LEASE_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
 class LeaseContentionReason(str, Enum):
@@ -218,11 +218,11 @@ class ExecutionGateService:
     DEFAULT_STALE_LEASE_SECONDS = 300
 
     # Default lease heartbeat interval (the in-process refresh
-    # cadence). Same default as the module-level
-    # ``DEFAULT_LEASE_HEARTBEAT_SECONDS`` but exposed on the class so
-    # external callers (e.g. ``InstanceManager.__init__``) can reach
-    # it without importing the module constant.
-    DEFAULT_LEASE_HEARTBEAT_SECONDS = DEFAULT_LEASE_HEARTBEAT_SECONDS
+    # cadence). Mirrors the module-level
+    # ``DEFAULT_LEASE_HEARTBEAT_INTERVAL_SECONDS`` so external
+    # callers (e.g. ``InstanceManager.__init__``) can reach it via
+    # the class without importing the module constant.
+    DEFAULT_LEASE_HEARTBEAT_SECONDS = DEFAULT_LEASE_HEARTBEAT_INTERVAL_SECONDS
 
     def __init__(
         self,
