@@ -29,6 +29,10 @@ from .job_queue.models import JobItem, JobStatus, JobLockInfo, JobQueue, QueueTy
 from .task.repository import TaskRepository
 from .task.models import Task, TaskStatus, TaskType
 
+# Execution lease (Execution Gate)
+from .execution_lease.repository import ExecutionLeaseRepository
+from .execution_lease.models import InstanceExecutionLease, LeaseHolderKind
+
 # Event repository
 from .event.repository import EventRepository
 from .event.models import Event, EventKind
@@ -44,6 +48,7 @@ from .factory import (
     create_job_repository,
     create_job_queue_repository,
     create_mcp_server_repository,
+    create_execution_lease_repository,
     run_migrations,
 )
 
@@ -84,6 +89,10 @@ __all__ = [
     "Task",
     "TaskStatus",
     "TaskType",
+    # Execution lease (Execution Gate)
+    "ExecutionLeaseRepository",
+    "InstanceExecutionLease",
+    "LeaseHolderKind",
     # Event
     "EventRepository",
     "Event",
@@ -98,5 +107,6 @@ __all__ = [
     "create_job_repository",
     "create_job_queue_repository",
     "create_mcp_server_repository",
+    "create_execution_lease_repository",
     "run_migrations",
 ]

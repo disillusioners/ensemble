@@ -23,6 +23,29 @@ from daemon.repositories.event.models import Event, EventKind
 from daemon.repositories.event.repository import EventRepository
 
 
+async def _passthrough_gate(*args, **kwargs):
+    """Default Execution Gate stub for unit tests.
+
+    Most tests want the Gate to be transparent — the work runs, no
+    contention. Tests that exercise the contention path override
+    ``manager.execution_gate.run`` to return a
+    ``LeaseContention`` instance instead.
+
+    The signature is ``(*args, **kwargs)`` so it accepts whatever
+    the production code passes (typically
+    ``instance_id=..., holder_id=..., holder_kind=..., work_fn=...``).
+
+    Note: this is a coroutine function passed directly to
+    ``AsyncMock(side_effect=...)``. Do NOT wrap it in a lambda that
+    returns a coroutine — AsyncMock's side_effect handling expects
+    either a value or a coroutine function whose result is awaited,
+    not a lambda that returns a coroutine (which would not be
+    awaited and would leak the coroutine as the return value).
+    """
+    work_fn = kwargs.get("work_fn")
+    return await work_fn()
+
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -1160,13 +1183,32 @@ class TestMessageJobHandlerCompletionHandler:
         return AsyncMock(return_value=None)
 
     @pytest.fixture
-    def mock_manager_with_completion(self, mock_completion_handler):
+    def mock_manager_with_completion(self, mock_completion_handler, monkeypatch):
         """Create a mock manager with _process_child_completion_and_notify_parent."""
         manager = MagicMock()
         manager._process_message_with_tracking = AsyncMock(
             return_value=MagicMock(content="Processed response", tool_calls=None)
         )
         manager._process_child_completion_and_notify_parent = mock_completion_handler
+        # Execution Gate stub: the MessageJobHandler now wraps its
+        # processing call in ``manager.execution_gate.run(...)``.
+        # The default behaviour is "lease is free, work runs, no
+        # contention" — tests that need contention can override.
+        from daemon.services.execution_gate import ExecutionGateService
+        gate = MagicMock(spec=ExecutionGateService)
+        gate.run = AsyncMock(side_effect=_passthrough_gate)
+        gate.is_held_locally = MagicMock(return_value=False)
+        manager.execution_gate = gate
+        # The MessageJobHandler's cross-dispatcher pre-flight
+        # (``_find_running_task_for_instance``) opens a real SQL
+        # session on the engine. Patch it at the class level so
+        # tests don't need a real DB. Tests that want to exercise
+        # the contention path can override this patch.
+        from daemon.services.message_job_handler import MessageJobHandler
+        monkeypatch.setattr(
+            MessageJobHandler, "_find_running_task_for_instance",
+            lambda self, instance_id: None,
+        )
         return manager
 
     @pytest.fixture

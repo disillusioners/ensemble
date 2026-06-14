@@ -29,7 +29,7 @@ def mock_source_dispatcher():
 
 
 @pytest.fixture
-def mock_manager():
+def mock_manager(monkeypatch):
     """Create a mock InstanceManager with _process_message_with_tracking."""
     manager = MagicMock()
     manager._process_message_with_tracking = AsyncMock(
@@ -37,6 +37,23 @@ def mock_manager():
     )
     manager._instance_repository = MagicMock()
     manager._queue_repository = MagicMock()
+    # Execution Gate stub: transparent, runs the work.
+    from daemon.services.execution_gate import ExecutionGateService
+
+    async def _passthrough(*args, **kwargs):
+        work_fn = kwargs.get("work_fn")
+        return await work_fn()
+
+    gate = MagicMock(spec=ExecutionGateService)
+    gate.run = AsyncMock(side_effect=_passthrough)
+    manager.execution_gate = gate
+    # Cross-dispatcher pre-flight is now a SQL query — patch it out
+    # for these unit tests (no real DB).
+    from daemon.services.message_job_handler import MessageJobHandler
+    monkeypatch.setattr(
+        MessageJobHandler, "_find_running_task_for_instance",
+        lambda self, instance_id: None,
+    )
     return manager
 
 

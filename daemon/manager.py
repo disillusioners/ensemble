@@ -526,6 +526,7 @@ class InstanceManager:
         # Import SchemaMigration to register it with SQLModel.metadata
         # This ensures the schema_migrations table is created
         from .migrations.models import SchemaMigration
+        from .repositories.execution_lease.models import InstanceExecutionLease
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -641,6 +642,19 @@ class InstanceManager:
         self._worker_pool: WorkerPool | None = None
         self._task_processor: TaskProcessor | None = None
         self._stale_recovery: StaleTaskRecovery | None = None
+
+        # Execution Gate: the single owner of graph.astream per
+        # thread_id. Initialised with a per-instance lease repository
+        # so the two physical dispatchers (MessageJobHandler and
+        # ProcessMessageProcessor) can never run astream concurrently
+        # for the same instance. See daemon/services/execution_gate.py
+        # and docs/bugs/child-completion-report-lost-*.
+        from .repositories.execution_lease.repository import ExecutionLeaseRepository
+        from .services.execution_gate import ExecutionGateService
+        self._execution_lease_repo = ExecutionLeaseRepository(engine=self._engine)
+        self._execution_gate = ExecutionGateService(
+            lease_repo=self._execution_lease_repo,
+        )
 
         # Shutdown flag for graceful shutdown
         self._shutting_down = False
@@ -1002,10 +1016,29 @@ class InstanceManager:
         swapping the underlying engine.
 
         Returns:
-            The shared ``WritePauseGuard`` instance owned by this
+            The shared :class:`WritePauseGuard` instance owned by this
             manager.
         """
         return self._write_guard
+
+    @property
+    def execution_gate(self) -> "ExecutionGateService":
+        """Public read-only access to the Execution Gate.
+
+        The Execution Gate is the single owner of ``graph.astream``
+        per ``thread_id`` (== ``instance_id``). Both dispatchers
+        (MessageJobHandler on the JobQueue side, ProcessMessageProcessor
+        on the WorkerPool side) call ``gate.run(...)`` to acquire the
+        per-instance lease before driving the langgraph thread, and
+        back off / re-queue if the gate reports ``LeaseContention``.
+
+        Always available after ``__init__`` completes.
+
+        Returns:
+            The :class:`ExecutionGateService` instance owned by this
+            manager.
+        """
+        return self._execution_gate
 
     @property
     def is_write_paused(self) -> bool:
@@ -1418,6 +1451,31 @@ class InstanceManager:
             ),
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
+            # instance_execution_leases: the Execution Gate's per-instance
+            # lease table. SQLite gets it via the .sql migration; on
+            # Postgres we create it inline because the migration runner
+            # is SQLite-only. The table is the single source of truth
+            # for "which dispatcher is driving graph.astream for this
+            # instance?" and closes the dual-dispatcher checkpoint
+            # race (see docs/bugs/child-completion-report-lost-*).
+            (
+                "CREATE TABLE IF NOT EXISTS instance_execution_leases ("
+                "instance_id TEXT PRIMARY KEY, "
+                "holder_id TEXT NOT NULL, "
+                "holder_kind TEXT NOT NULL "
+                "CHECK(holder_kind IN ('message_job', 'task', 'resume')), "
+                "acquired_at TIMESTAMP NOT NULL, "
+                "heartbeat_at TIMESTAMP NOT NULL, "
+                "process_id INTEGER)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_lease_holder_id "
+                "ON instance_execution_leases(holder_id)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_lease_holder_kind "
+                "ON instance_execution_leases(holder_kind)"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
@@ -1503,6 +1561,15 @@ class InstanceManager:
         stale_recovery.recover_on_startup()
         # FIX: C2 — Start periodic background recovery thread
         stale_recovery.start()
+
+        # Execution Gate: clear any leases left behind by a previous
+        # process that died mid-execution. ``recover_stale_leases_sync``
+        # is the sync wrapper that the manager uses here (the call site
+        # is in the lifespan's pre-event-loop path). The very first
+        # ``gate.run`` after startup is guaranteed to see a clean
+        # state. Operators see the cleared count in the startup log if
+        # a previous run died unexpectedly.
+        self._execution_gate.recover_stale_leases_sync()
         
         # Create task processor with manager reference
         self._task_processor = TaskProcessor(
@@ -2187,23 +2254,51 @@ class InstanceManager:
         Does NOT remove the instance from memory (unlike terminate).
 
         Args:
-            instance_id: The instance whose graph task should be cancelled.
+            instance_id: The ID of the instance whose graph task should be cancelled.
 
         Returns:
             True if a task was found and cancelled, False otherwise.
         """
+        # Prefer the Execution Gate's task registry: the gate is the
+        # canonical owner of any in-flight ``graph.astream`` call (any
+        # path that goes through ``gate.run`` registers there). Fall
+        # back to the legacy ``_graph_tasks`` dict for paths that
+        # have not yet been migrated (e.g. the synchronous
+        # ``send_message`` ``graph.ainvoke`` path in
+        # ``InstanceMessagingService.send_message``).
+        try:
+            gate_cancelled = False
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Sync caller; schedule the coroutine and check
+                    # locally for any tracked task.
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._execution_gate.cancel_instance_execution(instance_id),
+                        loop,
+                    )
+                    try:
+                        gate_cancelled = fut.result(timeout=0.1)
+                    except Exception:
+                        gate_cancelled = False
+            except RuntimeError:
+                pass
+        except Exception:
+            gate_cancelled = False
+
         task = self._graph_tasks.get(instance_id)
-        if task is None:
+        if task is None and not gate_cancelled:
             logger.debug(f"No graph task to cancel for instance {instance_id[:8]}...")
             return False
 
-        if task.done():
+        if task is not None and task.done():
             logger.debug(f"Graph task already done for instance {instance_id[:8]}...")
             del self._graph_tasks[instance_id]
-            return False
+            return gate_cancelled
 
-        logger.info(f"Cancelling graph task for instance {instance_id[:8]}...")
-        task.cancel()
+        if task is not None:
+            logger.info(f"Cancelling graph task for instance {instance_id[:8]}...")
+            task.cancel()
         return True
 
     async def terminate_instance(self, instance_id: str) -> bool:

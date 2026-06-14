@@ -17,6 +17,7 @@ from .source.repository import SQLModelSourceRepository
 from .job_queue.repository import JobRepository
 from .job_queue.queue_repository import JobQueueRepository
 from .mcp_server.repository import SQLModelMcpServerRepository
+from .execution_lease.repository import ExecutionLeaseRepository
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -488,15 +489,15 @@ def create_job_queue_repository(
     create_tables: bool = True,
 ) -> JobQueueRepository:
     """Create a JobQueueRepository from configuration or shared engine.
-    
+
     Args:
         config: Database configuration (required if engine not provided).
         engine: Shared engine instance (recommended for avoiding lock contention).
         create_tables: If True, create tables if they don't exist.
-    
+
     Returns:
         Configured JobQueueRepository instance.
-    
+
     Note:
         Either config or engine must be provided. If both are provided,
         engine takes precedence.
@@ -505,12 +506,58 @@ def create_job_queue_repository(
         if config is None:
             raise ValueError("Either config or engine must be provided")
         engine = create_engine_from_config(config)
-    
+
     if create_tables:
         SQLModel.metadata.create_all(engine)
-    
+
     return JobQueueRepository(engine)
+
+
+def create_execution_lease_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> ExecutionLeaseRepository:
+    """Create an ExecutionLeaseRepository from configuration or shared engine.
+
+    The lease table is the Execution Gate's single source of truth for
+    "which dispatcher is currently driving graph.astream for this
+    instance?". See ``daemon/services/execution_gate.py`` and
+    ``daemon/repositories/execution_lease/models.py`` for the design.
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured ExecutionLeaseRepository instance.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return ExecutionLeaseRepository(engine)
 
 
 # Backward compatibility alias
 create_task_repository = create_job_repository
+
+
+__all__ = [
+    "DatabaseConfig",
+    "create_engine_from_config",
+    "create_project_repository",
+    "create_instance_repository",
+    "create_message_queue_repository",
+    "create_source_repository",
+    "create_job_repository",
+    "create_job_queue_repository",
+    "create_mcp_server_repository",
+    "create_execution_lease_repository",
+    "run_migrations",
+]

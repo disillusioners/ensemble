@@ -11,7 +11,7 @@ These tests verify:
 import pytest
 import threading
 from datetime import datetime, timezone
-from unittest.mock import Mock, MagicMock, patch, call, PropertyMock
+from unittest.mock import Mock, MagicMock, patch, call, PropertyMock, AsyncMock
 from typing import Any
 
 from daemon.cancellation import (
@@ -29,17 +29,47 @@ from daemon.repositories.task.models import Task, TaskStatus, TaskType
 # Test Fixtures
 # ============================================================================
 
+def _attach_passthrough_gate(mock_manager) -> None:
+    """Attach a transparent Execution Gate stub to a mock manager.
+
+    The ProcessMessageProcessor now wraps its processing call in
+    ``manager.execution_gate.run(...)``. Most tests want the gate
+    to be transparent — the work runs, no contention. The default
+    ``MagicMock(spec=ExecutionGateService)`` would return a MagicMock
+    from ``run()`` instead of running the work, breaking tests that
+    assert on the work's return value. This helper installs a
+    passthrough.
+
+    Note: ``_passthrough`` is passed directly as the AsyncMock
+    side_effect (a coroutine function), NOT a lambda that returns a
+    coroutine. AsyncMock's side_effect handling expects either a
+    value or a coroutine function whose result is awaited. A
+    ``lambda *a, **kw: coroutine_func(...)`` returning a coroutine
+    would not be awaited and would leak the coroutine as the
+    return value.
+    """
+    from daemon.services.execution_gate import ExecutionGateService
+
+    async def _passthrough(*args, **kwargs):
+        work_fn = kwargs.get("work_fn")
+        return await work_fn()
+
+    gate = MagicMock(spec=ExecutionGateService)
+    gate.run = AsyncMock(side_effect=_passthrough)
+    mock_manager.execution_gate = gate
+
+
 class MockWorkerPool:
     """Mock worker pool for testing."""
     def __init__(self):
         self._condition = threading.Condition()
         self._notification_count = 0
-    
+
     def notify_work(self):
         with self._condition:
             self._notification_count += 1
             self._condition.notify_all()
-    
+
     def wait_for_work(self, timeout=3.0):
         with self._condition:
             if self._notification_count > 0:
@@ -211,6 +241,7 @@ class TestRetryCountPassthrough:
         # Create mock dependencies
         mock_manager = Mock()
         mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="ok"))
+        _attach_passthrough_gate(mock_manager)
 
         mock_task_repo = Mock()
         mock_message_repo = Mock()
@@ -252,6 +283,7 @@ class TestRetryCountPassthrough:
         # Create mock dependencies
         mock_manager = Mock()
         mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="ok"))
+        _attach_passthrough_gate(mock_manager)
 
         mock_task_repo = Mock()
         mock_message_repo = Mock()
@@ -862,6 +894,7 @@ class TestOriginalSourcePreservation:
         # Create mock dependencies
         mock_manager = Mock()
         mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Response"))
+        _attach_passthrough_gate(mock_manager)
         mock_manager._instance_repository = Mock()
         
         # Mock instance metadata with original_source
@@ -911,6 +944,7 @@ class TestOriginalSourcePreservation:
         # Create mock dependencies
         mock_manager = Mock()
         mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Response"))
+        _attach_passthrough_gate(mock_manager)
         mock_manager._instance_repository = Mock()
         
         # Mock instance metadata WITHOUT original_source
@@ -958,6 +992,7 @@ class TestOriginalSourcePreservation:
         # Create mock dependencies
         mock_manager = Mock()
         mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Response"))
+        _attach_passthrough_gate(mock_manager)
         mock_manager._instance_repository = Mock()
         
         mock_task_repo = Mock()
@@ -1007,6 +1042,7 @@ class TestOriginalSourcePreservation:
 
         mock_manager = Mock()
         mock_manager._process_message_with_tracking = AsyncMock(return_value=Mock(content="Result"))
+        _attach_passthrough_gate(mock_manager)
         mock_manager._instance_repository = Mock()
 
         mock_instance_meta = Mock()

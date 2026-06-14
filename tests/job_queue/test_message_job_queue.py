@@ -44,11 +44,27 @@ def message_job_data(sample_job_data):
 
 
 @pytest.fixture
-def mock_manager():
+def mock_manager(monkeypatch):
     """Create a mock InstanceManager with _process_message_with_tracking."""
     manager = MagicMock()
     manager._process_message_with_tracking = AsyncMock(
         return_value=MessageResult(content="Processed message response", tool_calls=None)
+    )
+    # Execution Gate stub: transparent, runs the work.
+    from daemon.services.execution_gate import ExecutionGateService
+
+    async def _passthrough(*args, **kwargs):
+        work_fn = kwargs.get("work_fn")
+        return await work_fn()
+
+    gate = MagicMock(spec=ExecutionGateService)
+    gate.run = AsyncMock(side_effect=_passthrough)
+    manager.execution_gate = gate
+    # Cross-dispatcher pre-flight is a SQL query — patch it.
+    from daemon.services.message_job_handler import MessageJobHandler
+    monkeypatch.setattr(
+        MessageJobHandler, "_find_running_task_for_instance",
+        lambda self, instance_id: None,
     )
     return manager
 
@@ -362,6 +378,25 @@ class TestMessageJobCancellation:
 
 
 class TestCancelledErrorOnTerminate:
+    """Tests for cancellation handling in MessageJobHandler."""
+
+    @pytest.fixture(autouse=True)
+    def _patch_running_task_check(self, monkeypatch):
+        """Patch the cross-dispatcher task check to return None.
+
+        Same rationale as the same fixture in
+        ``TestPauseVsShutdownDistinction`` in
+        ``test_pause_while_processing.py``: the test repo's mock
+        engine returns a truthy value from the SQL query, which
+        would trigger the re-queue-for-contention path. The tests
+        in this class exercise the gate's CancelledError → pause/
+        terminate discrimination, not the contention re-queue.
+        """
+        from daemon.services.message_job_handler import MessageJobHandler
+        monkeypatch.setattr(
+            MessageJobHandler, "_find_running_task_for_instance",
+            lambda self, instance_id: None,
+        )
     """Tests for asyncio.CancelledError handler when instance is terminated (not paused)."""
 
     @pytest.mark.asyncio

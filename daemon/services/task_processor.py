@@ -8,6 +8,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
+from .execution_gate import LeaseContention
 from .main_loop_bridge import MainLoopBridge
 from daemon.cancellation import CancellationToken, OperationCancelledError
 from daemon.constants import MAX_ERROR_LEN
@@ -207,19 +208,66 @@ class ProcessMessageProcessor(BaseProcessor):
         silent = message_metadata.get("silent", False) if message_metadata else False
         
         try:
-            # Process the message via manager's existing logic (LangGraph execution)
-            # When resume_mode=True or retry_count>0, is_retry=True → graph_input=None → pure checkpoint resume
-            result = await self._manager._process_message_with_tracking(
+            # Execution Gate: acquire the per-instance lease before
+            # driving graph.astream. The lease is the single source of
+            # truth for "who is driving graph.astream for this
+            # instance?"; the Gate prevents the dual-dispatcher
+            # checkpoint race documented in
+            # docs/bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md.
+            #
+            # If the lease is held by another dispatcher (most likely
+            # a MessageJobHandler driving a sibling MESSAGE job), the
+            # gate returns ``LeaseContention`` and we re-queue the
+            # task in PENDING state so the next worker poll picks it
+            # up after the holder releases.
+            async def _do_process():
+                return await self._manager._process_message_with_tracking(
+                    instance_id=task.instance_id,
+                    message=message_content,
+                    message_id=task.message_id,
+                    cancellation_token=cancellation_token,
+                    is_retry=is_retry,
+                    retry_count=task.retry_count,
+                    message_source=message_source,
+                    images=message_images,
+                    silent=silent,
+                )
+
+            gate_outcome = await self._manager.execution_gate.run(
                 instance_id=task.instance_id,
-                message=message_content,
-                message_id=task.message_id,
-                cancellation_token=cancellation_token,
-                is_retry=is_retry,
-                retry_count=task.retry_count,
-                message_source=message_source,
-                images=message_images,
-                silent=silent,
+                holder_id=f"task:{task.id}",
+                holder_kind="task",
+                work_fn=_do_process,
             )
+            if isinstance(gate_outcome, LeaseContention):
+                # Cross-dispatcher contention: a MESSAGE job is
+                # currently driving graph.astream for this instance.
+                # Back off: re-queue the task to PENDING so the next
+                # worker poll re-runs it after the MESSAGE job
+                # releases the lease.
+                logger.info(
+                    f"ProcessMessageProcessor: lease contention for task {task.id} "
+                    f"instance={task.instance_id[:8]}... "
+                    f"(holder_id={gate_outcome.holder_id} "
+                    f"holder_kind={gate_outcome.holder_kind}) — re-queuing"
+                )
+                # Transition: RUNNING -> PENDING (releasing the
+                # worker's claim, so the next poll re-claims it).
+                # ``requeue_task`` is conditional on
+                # ``status='running'`` so a task that has been
+                # completed/cancelled in the meantime is left alone.
+                await asyncio.to_thread(
+                    self._task_repo.requeue_task, task.id
+                )
+                # Bail out of this task run without an exception —
+                # the next worker poll will re-claim and retry.
+                return {
+                    "success": False,
+                    "requeued": True,
+                    "content": None,
+                    "message_id": task.message_id,
+                }
+            result = gate_outcome
             
             # Mark message as completed so _process_child_completion_and_notify_parent can proceed
             if self._message_repo:

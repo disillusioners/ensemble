@@ -47,13 +47,29 @@ class TestPauseKeepsJobProcessing:
     """Tests that pause leaves job in PROCESSING state."""
 
     @pytest.fixture
-    def mock_manager(self):
+    def mock_manager(self, monkeypatch):
         """Create mock manager with _process_message_with_tracking."""
         manager = MagicMock()
         manager._process_message_with_tracking = AsyncMock()
         manager._queue_repository = MagicMock()
         manager._instance_repository = MagicMock()
         manager._process_child_completion_and_notify_parent = AsyncMock()
+        # Execution Gate stub: transparent, runs the work.
+        from daemon.services.execution_gate import ExecutionGateService
+
+        async def _passthrough(*args, **kwargs):
+            work_fn = kwargs.get("work_fn")
+            return await work_fn()
+
+        gate = MagicMock(spec=ExecutionGateService)
+        gate.run = AsyncMock(side_effect=_passthrough)
+        manager.execution_gate = gate
+        # Cross-dispatcher pre-flight is a SQL query — patch it.
+        from daemon.services.message_job_handler import MessageJobHandler
+        monkeypatch.setattr(
+            MessageJobHandler, "_find_running_task_for_instance",
+            lambda self, instance_id: None,
+        )
         return manager
 
     @pytest.fixture
@@ -244,6 +260,7 @@ class TestProcessMessageProcessorPause:
         """Test that ProcessMessageProcessor properly handles CancelledError from pause."""
         import asyncio
         from daemon.services.task_processor import ProcessMessageProcessor
+        from daemon.services.execution_gate import ExecutionGateService
         from unittest.mock import MagicMock, AsyncMock
 
         # Create mock task
@@ -260,6 +277,14 @@ class TestProcessMessageProcessorPause:
         )
         mock_manager._instance_repository = MagicMock()
         mock_manager._event_bus = None
+        # Transparent Execution Gate: the work raises CancelledError,
+        # which is exactly what we want to test.
+        async def _passthrough(*args, **kwargs):
+            work_fn = kwargs.get("work_fn")
+            return await work_fn()
+        gate = MagicMock(spec=ExecutionGateService)
+        gate.run = AsyncMock(side_effect=_passthrough)
+        mock_manager.execution_gate = gate
 
         # Create processor
         processor = ProcessMessageProcessor(
@@ -327,9 +352,26 @@ class TestWorkerPoolPathCancellation:
 class TestPauseVsShutdownDistinction:
     """Tests that distinguish pause cancellation from shutdown cancellation."""
 
+    @pytest.fixture(autouse=True)
+    def _patch_running_task_check(self, monkeypatch):
+        """Patch the cross-dispatcher task check to return None.
+
+        The default MagicMock engine returns a truthy value from the
+        SQL query, which would trigger the re-queue-for-contention
+        path. The tests in this class don't exercise that path — they
+        exercise the gate's CancelledError → pause/terminate
+        discrimination — so we patch the check to return None.
+        """
+        from daemon.services.message_job_handler import MessageJobHandler
+        monkeypatch.setattr(
+            MessageJobHandler, "_find_running_task_for_instance",
+            lambda self, instance_id: None,
+        )
+
     @pytest.mark.asyncio
     async def test_message_job_handler_pause_leaves_processing(self):
         """Test that CancelledError with PAUSED instance leaves job PROCESSING."""
+        from daemon.services.execution_gate import ExecutionGateService
         handler = MessageJobHandler(
             manager=MagicMock(),
             job_queue_service=MagicMock(),
@@ -345,6 +387,14 @@ class TestPauseVsShutdownDistinction:
         handler._manager._queue_repository = MagicMock()
         handler._manager._instance_repository = MagicMock()
         handler._manager._process_child_completion_and_notify_parent = AsyncMock()
+        # Transparent Execution Gate (the work raises CancelledError,
+        # which is what this test is exercising).
+        async def _passthrough(*args, **kwargs):
+            work_fn = kwargs.get("work_fn")
+            return await work_fn()
+        gate = MagicMock(spec=ExecutionGateService)
+        gate.run = AsyncMock(side_effect=_passthrough)
+        handler._manager.execution_gate = gate
 
         # Instance is PAUSED
         mock_instance = MagicMock()
@@ -359,7 +409,8 @@ class TestPauseVsShutdownDistinction:
 
     @pytest.mark.asyncio
     async def test_message_job_handler_shutdown_propagates_cancelled_error(self):
-        """Test that CancelledError with non-PAUSED instance propagates error."""
+        """Test that CancelledError with RUNNING instance propagates and completes job as CANCELLED."""
+        from daemon.services.execution_gate import ExecutionGateService
         handler = MessageJobHandler(
             manager=MagicMock(),
             job_queue_service=MagicMock(),
@@ -375,6 +426,14 @@ class TestPauseVsShutdownDistinction:
         handler._manager._queue_repository = MagicMock()
         handler._manager._instance_repository = MagicMock()
         handler._manager._process_child_completion_and_notify_parent = AsyncMock()
+        # Transparent Execution Gate: the work raises CancelledError,
+        # which is what this test is exercising.
+        async def _passthrough(*args, **kwargs):
+            work_fn = kwargs.get("work_fn")
+            return await work_fn()
+        gate = MagicMock(spec=ExecutionGateService)
+        gate.run = AsyncMock(side_effect=_passthrough)
+        handler._manager.execution_gate = gate
 
         # Instance is RUNNING (not paused - simulating shutdown scenario)
         mock_instance = MagicMock()
@@ -396,6 +455,7 @@ class TestPauseVsShutdownDistinction:
         """Test that ProcessMessageProcessor raises CancelledError when paused."""
         import asyncio
         from daemon.services.task_processor import ProcessMessageProcessor
+        from daemon.services.execution_gate import ExecutionGateService
 
         task = MagicMock()
         task.id = "task-123"
@@ -409,6 +469,14 @@ class TestPauseVsShutdownDistinction:
         )
         mock_manager._instance_repository = MagicMock()
         mock_manager._event_bus = None
+        # Transparent Execution Gate: the work raises CancelledError,
+        # which is what this test is exercising.
+        async def _passthrough(*args, **kwargs):
+            work_fn = kwargs.get("work_fn")
+            return await work_fn()
+        gate = MagicMock(spec=ExecutionGateService)
+        gate.run = AsyncMock(side_effect=_passthrough)
+        mock_manager.execution_gate = gate
 
         # Instance is PAUSED
         mock_instance = MagicMock()
@@ -431,6 +499,7 @@ class TestPauseVsShutdownDistinction:
         """Test that ProcessMessageProcessor raises CancelledError when shutting down (not paused)."""
         import asyncio
         from daemon.services.task_processor import ProcessMessageProcessor
+        from daemon.services.execution_gate import ExecutionGateService
 
         task = MagicMock()
         task.id = "task-123"
@@ -444,6 +513,14 @@ class TestPauseVsShutdownDistinction:
         )
         mock_manager._instance_repository = MagicMock()
         mock_manager._event_bus = None
+        # Transparent Execution Gate: the work raises CancelledError,
+        # which is what this test is exercising.
+        async def _passthrough(*args, **kwargs):
+            work_fn = kwargs.get("work_fn")
+            return await work_fn()
+        gate = MagicMock(spec=ExecutionGateService)
+        gate.run = AsyncMock(side_effect=_passthrough)
+        mock_manager.execution_gate = gate
 
         # Instance is RUNNING (not paused - simulating shutdown)
         mock_instance = MagicMock()
