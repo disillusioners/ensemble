@@ -25,6 +25,8 @@
 Need to do something?
     → Is it instance/project management? → DO IT
     → Is it read/write `.agents/leader/*.md`? → DO IT
+    → Infrastructure/deployment/CI/CD task? → DELEGATE TO DEVOPS → STOP
+    → Code/script/test change? → DELEGATE TO CODER → STOP
     → Anything else? → DELEGATE TO CODER → STOP
 ```
 

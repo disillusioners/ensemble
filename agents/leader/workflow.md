@@ -191,8 +191,13 @@ I support three workflows. The user may invoke them sequentially within a single
 **⚠️ SemiAuto Override:** In SemiAuto mode, use complexity-based skipping for Reviewer/Tester. Only ask user when complexity is HIGH, architecture changes, or structure breaks.
 
 ```raw
-1. Delegate to Coder: "Implement [goal]. [Key constraints]. [Context from plan if available]."
-2. Wait for coder result
+1. Assess task domain and route to the right specialist:
+   ├─ Application source code, bug fixes, features, tests, scripts → **Coder**
+   ├─ Infrastructure, Docker, CI/CD, deployment, Kubernetes, Terraform, environment config → **DevOps**
+   └─ Multi-domain (both code + infrastructure) → **Split**: sequential Coder→DevOps for dependent steps, parallel for independent steps (within 3-instance budget)
+   
+   Delegate to the matched specialist: "[goal]. [Key constraints]. [Context from plan if available]."
+2. Wait for the delegated specialist's result
 
 3. Leader assesses CODE complexity:
    ├─ Low (trivial fix, config, cosmetic, single-line change)
@@ -392,11 +397,21 @@ PHASE 1 — COLLECT EVIDENCE  (Leader)
 2. **Evidence checklist** — do I have (a) full error/trace, (b) raw logs, (c) repro steps, (d) "when did it start / what changed"? If any is missing: ask the user OR delegate a repro to Tester. **Do not proceed to Phase 2 with gaps.**
 3. Assemble a Problem Brief: symptoms + full evidence + repro + context
 
-PHASE 2 — INVESTIGATE  (Team — DIAGNOSIS ONLY, NO FIX)
-   Delegate investigation to the right specialists, EACH receiving the full Problem Brief:
+PHASE 1.5 — CLASSIFY DOMAIN
+   Determine if this is an application bug or infrastructure bug:
+   ├─ Application bug (code error, logic failure, test failure) → Investigators: Coder + Tester
+   ├─ Infrastructure bug (pod crash-loop, CI failure, terraform drift, deployment issue) → Investigators: DevOps + Tester
+   └─ Mixed/unclear → Investigators: Coder + DevOps + Tester (parallel, within 3-instance budget)
+   
+   Each investigator still receives the FULL Problem Brief.
 
-   Coder:    "Investigate bug [brief]. FULL logs: [paste]. Find WHERE the code fails
+PHASE 2 — INVESTIGATE  (Team — DIAGNOSIS ONLY, NO FIX)
+   Delegate investigation to the specialists selected in Phase 1.5, EACH receiving the full Problem Brief:
+
+   Coder (if application/mixed):    "Investigate bug [brief]. FULL logs: [paste]. Find WHERE the code fails
              and WHY. Report root cause + exact file:line. DO NOT fix yet."
+   DevOps (if infrastructure/mixed): "Investigate bug [brief]. FULL logs: [paste]. Find WHERE the infra
+             (container, CI, deploy, config) fails and WHY. Report root cause + exact location. DO NOT fix yet."
    Tester:   "Reproduce bug [brief]. FULL logs: [paste]. Capture the failing scenario
              as a reproducible test. Report the exact trigger conditions."
    Explorer: "Retrieve past experiences / gotchas for [symptom or error] — has this
@@ -415,7 +430,12 @@ PHASE 3 — SYNTHESIZE ROOT CAUSE  (Leader)
 8. If causes conflict or stay unclear → do not guess; return to Phase 2 (or escalate).
 
 PHASE 4 — FIX  (Implementation Workflow)
-9. Delegate to Coder with: confirmed root cause + the fix + the FULL evidence/logs.
+9. Route the fix to the domain-matched specialist from Phase 1.5:
+   ├─ Code bug → Delegate to **Coder**
+   ├─ Infrastructure bug → Delegate to **DevOps**
+   └─ Mixed → Split: delegate each fix to its domain specialist (sequential if dependent, parallel if independent)
+   
+   Hand off: confirmed root cause + the fix + the FULL evidence/logs.
    "Confirmed root cause: [X]. Evidence: [paste]. Fix: [plan]. Implement, then confirm
    the original repro now passes."
 10. Continue through the normal Implementation review/test flow.
