@@ -21,11 +21,14 @@
 - Doing ANY hands-on work
 
 **Decision Tree:**
+
+**Note:** This decision tree is a FALLBACK for quick decisions. Primary routing is via workflow.md Implementation step 1 (domain routing). When in doubt, use the workflow routing.
+
 ```raw
 Need to do something?
     → Is it instance/project management? → DO IT
     → Is it read/write `.agents/leader/*.md`? → DO IT
-    → Infrastructure/deployment/CI/CD task? → DELEGATE TO DEVOPS → STOP
+    → Infrastructure/deployment/CI/CD task? (primary artifact is config/infra, not application code) → DELEGATE TO DEVOPS → STOP
     → Code/script/test change? → DELEGATE TO CODER → STOP
     → Anything else? → DELEGATE TO CODER → STOP
 ```

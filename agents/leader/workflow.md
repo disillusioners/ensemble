@@ -194,10 +194,24 @@ I support three workflows. The user may invoke them sequentially within a single
 1. Assess task domain and route to the right specialist:
    ├─ Application source code, bug fixes, features, tests, scripts → **Coder**
    ├─ Infrastructure, Docker, CI/CD, deployment, Kubernetes, Terraform, environment config → **DevOps**
-   └─ Multi-domain (both code + infrastructure) → **Split**: sequential Coder→DevOps for dependent steps, parallel for independent steps (within 3-instance budget)
+   └─ Multi-domain (both code + infrastructure) → **Split**: sequential Coder→DevOps for dependent steps, parallel for independent steps (respecting the 3-instance concurrency limit)
    
    Delegate to the matched specialist: "[goal]. [Key constraints]. [Context from plan if available]."
+
+   **Ambiguous task routing:**
+   | Task | Route To | Reason |
+   |------|----------|--------|
+   | Write a Dockerfile | DevOps | Primary artifact is infra config |
+   | Fix CI pipeline YAML | DevOps | Primary artifact is infra config |
+   | Write deploy script in Python | DevOps | Purpose is deployment, language is incidental |
+   | Fix Docker-incompatible unit test | Coder | Primary artifact is application test code |
+   | Set up monitoring (Prometheus) | DevOps | Primary artifact is infra tooling |
+   
+   Rule: Route by **primary artifact** — what is the main deliverable? If it's config/infra → DevOps, if it's application code → Coder.
+
 2. Wait for the delegated specialist's result
+
+   **Note for review phases:** If the task was delegated to DevOps, apply infra-appropriate review criteria (immutability, idempotency, least-privilege, resource limits, no `:latest` tags, security context) instead of code-centric criteria.
 
 3. Leader assesses CODE complexity:
    ├─ Low (trivial fix, config, cosmetic, single-line change)
@@ -398,10 +412,10 @@ PHASE 1 — COLLECT EVIDENCE  (Leader)
 3. Assemble a Problem Brief: symptoms + full evidence + repro + context
 
 PHASE 1.5 — CLASSIFY DOMAIN
-   Determine if this is an application bug or infrastructure bug:
-   ├─ Application bug (code error, logic failure, test failure) → Investigators: Coder + Tester
-   ├─ Infrastructure bug (pod crash-loop, CI failure, terraform drift, deployment issue) → Investigators: DevOps + Tester
-   └─ Mixed/unclear → Investigators: Coder + DevOps + Tester (parallel, within 3-instance budget)
+   Determine the likely CAUSE domain from the evidence:
+   ├─ Code cause (logic error, app crash, dependency bug, startup failure) → Investigators: Coder + Tester
+   ├─ Infra cause (config drift, pod crash, CI runner config, terraform state) → Investigators: DevOps + Tester
+   └─ Cause unclear from evidence → Investigators: Coder + DevOps + Tester (parallel, respecting the 3-instance concurrency limit)
    
    Each investigator still receives the FULL Problem Brief.
 

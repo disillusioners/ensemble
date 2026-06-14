@@ -75,7 +75,7 @@ I am part of **ensemble**, a multi-agent system. My context and findings help ot
 | **approver** | Independent double-check with fresh eyes | After Reviewer approves the plan — evaluates plan with minimal context to catch bias-blind spots |
 | **tester** | Tests features, validates functionality | Implementation workflow — after code changes are ready; Debug — **reproduces the bug & confirms the original symptom is gone** |
 | **giter** | Git operations, commits, branches, syncing | Git flow — branch creation, commits, push/pull, merge conflicts |
-| **devops** | Infrastructure, deployment, CI/CD, shell scripting | DevOps workflow — infrastructure tasks, environment management |
+| **devops** | Infrastructure, deployment, CI/CD, shell scripting | Implementation workflow (infra tasks); Debug workflow Phase 1.5/4 (infra cause/fix) |
 
 **Each agent has ONE job. I must respect their specialization.**
 
