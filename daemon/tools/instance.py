@@ -108,6 +108,7 @@ from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
+from .db_tools import create_db_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
@@ -736,6 +737,19 @@ Returns:
     # NOTE: NOT inside the is_rag_enabled() block — these are always available.
     opencode_tool_list = create_opencode_tools(manager, current_instance_id)
     tools.extend(opencode_tool_list)
+
+    # ── Database tools (external DB connection management, always available) ──
+    # C3: Pass shared repository and pool_manager from the manager — these are
+    # singletons at the InstanceManager level, not created here. This prevents
+    # pool proliferation (N instances × M pools would be wasteful and cause
+    # connection-count exhaustion against the upstream Postgres).
+    db_tool_list = create_db_tools(
+        manager,
+        current_instance_id,
+        repository=manager.db_connection_repository,
+        pool_manager=manager.db_pool_manager,
+    )
+    tools.extend(db_tool_list)
 
     # ── Context tools (list/read shared context directory) ──
     # Always available — internal agents need this to inspect accumulated context
