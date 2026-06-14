@@ -8,6 +8,6 @@
   "innate_skills": [],
   "capabilities": ["docker", "kubernetes", "terraform", "ci-cd", "shell-ops"],
   "tools": {
-    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "db"]
   }
 }
