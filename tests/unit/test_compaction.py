@@ -45,7 +45,8 @@ def make_compaction_config(**overrides) -> CompactionConfigModel:
         "threshold": 0.80,
         "recent_message_window": 10,
         "min_recent_window": 3,
-        "context_window_override": 0,
+        "context_window_overrides": {},
+        "context_window_default": 0,
         "target_ratio": 0.40,
         "summarization_model": "",
         "min_messages_before_compaction": 10,
@@ -102,9 +103,35 @@ class TestGetModelContextLimit:
 
     def test_config_override_and_unknown_model_fallback(self):
         """Test config override takes priority; unknown models use DEFAULT_CONTEXT_LIMIT."""
-        config = make_compaction_config(context_window_override=50000)
+        config = make_compaction_config(context_window_overrides={"any-model": 50000})
         assert get_model_context_limit("any-model", config=config) == 50000
         assert get_model_context_limit("totally-unknown-model") == DEFAULT_CONTEXT_LIMIT
+
+    def test_per_model_overrides_substring_longest_wins(self):
+        """Test that per-model overrides substring-match and longest key wins."""
+        config = make_compaction_config(
+            context_window_overrides={
+                "gpt-4o-mini": 32000,
+                "gpt-4o-mini-vision": 16385,
+                "vision": 8192,
+            }
+        )
+        # "gpt-4o-mini-vision" matches both "gpt-4o-mini-vision" and "vision";
+        # the longer key wins → 16385.
+        assert get_model_context_limit("gpt-4o-mini-vision", config=config) == 16385
+        # "gpt-4o-mini" (no "-vision" suffix) matches only "gpt-4o-mini" → 32000.
+        assert get_model_context_limit("gpt-4o-mini", config=config) == 32000
+        # Bare "vision" key catches any model name containing the word.
+        assert get_model_context_limit("claude-3-vision-proxy", config=config) == 8192
+        # Unknown model with no matching key falls through to the registry/default.
+        assert get_model_context_limit("gpt-4o", config=config) == 128000
+
+    def test_context_window_default_overrides_built_in_fallback(self):
+        """context_window_default kicks in when neither overrides nor the registry match."""
+        config = make_compaction_config(context_window_default=42000)
+        assert get_model_context_limit("totally-unknown-xyz", config=config) == 42000
+        # Registry match still wins over the default fallback.
+        assert get_model_context_limit("gpt-4o", config=config) == 128000
 
 
 class TestIdentifyBoundaryGroups:
@@ -655,7 +682,7 @@ class TestToolCallIntegrity:
 
         # Configure compactor with small context to trigger compaction
         config = make_compaction_config(
-            context_window_override=500,  # Very small context
+            context_window_overrides={"gpt-4o": 500},  # Very small context
             threshold=0.10,  # Low threshold to trigger compaction
             recent_message_window=3,  # Keep last 3 groups (tool_sequence groups)
             min_recent_window=2,
@@ -741,7 +768,7 @@ class TestCompactState:
             threshold=0.01,
             recent_message_window=2,
             min_recent_window=1,
-            context_window_override=1000,  # Small context to reliably trigger
+            context_window_overrides={"gpt-4o": 1000},  # Small context to reliably trigger
         )
         messages = make_messages(200)
         context = CompactionContext(
@@ -772,7 +799,7 @@ class TestCompactState:
             threshold=0.01,
             recent_message_window=2,
             min_recent_window=1,
-            context_window_override=1000,
+            context_window_overrides={"gpt-4o": 1000},
         )
         messages = make_messages(200)
         context = CompactionContext(
@@ -798,7 +825,7 @@ class TestCompactState:
             threshold=0.01,
             recent_message_window=200,
             min_recent_window=200,
-            context_window_override=100,
+            context_window_overrides={"gpt-4o": 100},
         )
         messages = make_messages(20)
         context = CompactionContext(

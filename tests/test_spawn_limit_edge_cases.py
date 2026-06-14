@@ -29,7 +29,8 @@ def mock_config():
     config.compaction.threshold = 0.80
     config.compaction.recent_message_window = 10
     config.compaction.min_recent_window = 3
-    config.compaction.context_window_override = 0
+    config.compaction.context_window_overrides = {}
+    config.compaction.context_window_default = 0
     config.compaction.target_ratio = 0.40
     config.compaction.summarization_model = ""
     config.compaction.min_messages_before_compaction = 10

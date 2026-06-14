@@ -157,7 +157,8 @@ def make_compaction_config(**overrides):
         "threshold": 0.80,
         "recent_message_window": 10,
         "min_recent_window": 3,
-        "context_window_override": 0,
+        "context_window_overrides": {},
+        "context_window_default": 0,
         "target_ratio": 0.40,
         "summarization_model": "",
         "min_messages_before_compaction": 10,
@@ -411,7 +412,7 @@ async def test_compaction_and_graph_continuation():
 
         # Now compact the state using ContextCompactor (outside patch, with separate mock)
         compaction_config = make_compaction_config(
-            context_window_override=1000,  # Small window to trigger compaction easily
+            context_window_overrides={"gpt-4o": 1000},  # Small window to trigger compaction easily
             threshold=0.50,
             recent_message_window=4,
             min_recent_window=2,
@@ -422,7 +423,7 @@ async def test_compaction_and_graph_continuation():
         history_tokens = estimate_messages_tokens(messages)
         system_prompt_tokens = 50
         total_tokens = history_tokens + system_prompt_tokens
-        context_window = compaction_config.context_window_override  # 1000
+        context_window = compaction_config.context_window_overrides["gpt-4o"]  # 1000
 
         # Our messages should exceed the threshold for compaction
         # Each message is ~20+ tokens, 24 messages = ~480+ tokens, plus overhead
@@ -634,7 +635,7 @@ async def test_crash_recovery_after_compaction():
         assert len(messages) == 20
 
         compaction_config = make_compaction_config(
-            context_window_override=800,
+            context_window_overrides={"gpt-4o": 800},
             threshold=0.50,
             recent_message_window=3,
             min_recent_window=2,
@@ -815,7 +816,7 @@ async def test_dedup_via_session_state():
         assert len(messages) == 20
 
         compaction_config = make_compaction_config(
-            context_window_override=800,
+            context_window_overrides={"gpt-4o": 800},
             threshold=0.50,
             recent_message_window=4,
             min_recent_window=2,

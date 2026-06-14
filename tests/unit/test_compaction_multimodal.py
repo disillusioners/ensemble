@@ -44,7 +44,8 @@ def make_compaction_config(**overrides) -> CompactionConfigModel:
         "threshold": 0.80,
         "recent_message_window": 10,
         "min_recent_window": 3,
-        "context_window_override": 0,
+        "context_window_overrides": {},
+        "context_window_default": 0,
         "target_ratio": 0.40,
         "summarization_model": "",
         "min_messages_before_compaction": 10,
@@ -516,7 +517,7 @@ class TestContextCompactorMultimodal:
             threshold=0.01,
             recent_message_window=2,
             min_recent_window=1,
-            context_window_override=1000,
+            context_window_overrides={"gpt-4o": 1000},
         )
         
         context = CompactionContext(
@@ -564,7 +565,7 @@ class TestContextCompactorMultimodal:
             threshold=0.01,
             recent_message_window=5,
             min_recent_window=2,
-            context_window_override=500,
+            context_window_overrides={"gpt-4o": 500},
         )
         
         context = CompactionContext(
@@ -844,7 +845,7 @@ class TestMultimodalIntegration:
                 threshold=0.01,
                 recent_message_window=2,
                 min_recent_window=1,
-                context_window_override=1000,
+                context_window_overrides={"gpt-4o": 1000},
             )
             
             context = CompactionContext(

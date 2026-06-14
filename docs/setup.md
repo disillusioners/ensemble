@@ -423,7 +423,12 @@ compaction:
   threshold: 0.80
   recent_message_window: 10
   min_recent_window: 3
-  context_window_override: 0
+  # Per-model context window overrides. Substring match; longest key wins.
+  # Useful when the main model and a vision/specialized sub-model have
+  # different context windows. Falls back to context_window_default, then
+  # the built-in MODEL_CONTEXT_LIMITS registry, then 180k.
+  context_window_default: 0
+  context_window_overrides: {}
   target_ratio: 0.40
   summarization_model: ""
   min_messages_before_compaction: 10
@@ -436,11 +441,22 @@ compaction:
 | `compaction.threshold` | float | `0.80` | Compact when context reaches 80% of window |
 | `compaction.recent_message_window` | integer | `10` | Keep this many recent messages separate |
 | `compaction.min_recent_window` | integer | `3` | Minimum recent messages to preserve |
-| `compaction.context_window_override` | integer | `0` | Override context window (0 = use model default) |
+| `compaction.context_window_default` | integer | `0` | Fallback context window when neither overrides nor the registry match. `0` = use built-in default (180k) |
+| `compaction.context_window_overrides` | object | `{}` | Per-model context windows (`model_substring → tokens`). Substring match; longest key wins. Takes priority over the built-in registry |
 | `compaction.target_ratio` | float | `0.40` | Target ratio after compaction (40%) |
 | `compaction.summarization_model` | string | — | Model for summarization (empty = use default) |
 | `compaction.min_messages_before_compaction` | integer | `10` | Minimum messages before first compaction |
 | `compaction.summarization_chunk_threshold` | float | `0.60` | Chunk long histories at 60% of window |
+
+Example: cap a smaller vision sub-model independently of the main model.
+
+```yaml
+compaction:
+  context_window_default: 128000
+  context_window_overrides:
+    "gpt-4o-mini-vision": 32768   # tighter window for the vision model
+    "claude-3-5-haiku": 50000     # haiku has a smaller effective window
+```
 
 #### Services Configuration
 

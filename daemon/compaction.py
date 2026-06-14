@@ -106,38 +106,56 @@ DEFAULT_CONTEXT_LIMIT = 180000
 
 def get_model_context_limit(model_name: str, config: object | None = None) -> int:
     """Get the context window limit for a given model name.
-    
-    Uses fuzzy matching against MODEL_CONTEXT_LIMITS registry.
-    If config has context_window_override set (non-zero), that takes priority.
-    
+
+    Resolution order (first match wins):
+    1. ``config.context_window_overrides`` — substring match against the model
+       name; longest key wins. Lets operators cap distinct models (e.g. a
+       smaller vision model) without touching the registry.
+    2. ``config.context_window_default`` — used when no override matches and
+       the registry has no entry. Set to 0 to fall through to the registry
+       default.
+    3. ``MODEL_CONTEXT_LIMITS`` registry — fuzzy substring match (case-insensitive).
+    4. ``DEFAULT_CONTEXT_LIMIT`` — last-resort fallback.
+
     Args:
-        model_name: Model identifier string (e.g., "gpt-4o", "claude-3.5-sonnet")
-        config: Optional config object with context_window_override attribute.
-                If provided and context_window_override > 0, overrides the 
-                registry lookup.
-                
+        model_name: Model identifier string (e.g., "gpt-4o", "claude-3.5-sonnet").
+        config: Optional config object exposing ``context_window_overrides``
+            (dict[str, int]) and ``context_window_default`` (int). Both are
+            optional; missing attributes are treated as empty/zero.
+
     Returns:
         Context window size in tokens.
     """
-    # Config override takes priority
+    # Per-model overrides take priority (longest key first for specificity)
     if config is not None:
-        override = getattr(config, 'context_window_override', 0)
-        if override > 0:
-            return override
-    
+        overrides = getattr(config, "context_window_overrides", None) or {}
+        if overrides and model_name:
+            normalized = model_name.lower()
+            for key in sorted(overrides.keys(), key=len, reverse=True):
+                if not key:
+                    continue
+                if key.lower() in normalized:
+                    return int(overrides[key])
+
     # Normalize model name for matching
     normalized = model_name.lower().strip()
     
     # Direct match first
     if normalized in MODEL_CONTEXT_LIMITS:
         return MODEL_CONTEXT_LIMITS[normalized]
-    
+
     # Fuzzy match: check if any registry key is contained in the model name
     # Check longer keys first to get more specific matches
     for key in sorted(MODEL_CONTEXT_LIMITS.keys(), key=len, reverse=True):
         if key in normalized:
             return MODEL_CONTEXT_LIMITS[key]
-    
+
+    # Operator-supplied fallback when registry has no entry
+    if config is not None:
+        default = getattr(config, "context_window_default", 0)
+        if default and default > 0:
+            return int(default)
+
     return DEFAULT_CONTEXT_LIMIT
 
 

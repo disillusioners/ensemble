@@ -75,7 +75,17 @@ compaction:
   threshold: 0.80
   recent_message_window: 10
   min_recent_window: 3
-  context_window_override: 0
+  # Per-model context window overrides (substring match; longest key wins).
+  # Takes priority over the built-in MODEL_CONTEXT_LIMITS registry, so you
+  # can cap a smaller vision model (or any proxy-hosted variant) without
+  # touching code. Example: the leader uses 'gpt-4o' (128k) but a vision
+  # sub-agent uses 'gpt-4o-mini-vision' with a tighter 32k window.
+  # context_window_default is the fallback when neither an override nor
+  # the registry matches the active model. 0 = use built-in default (180k).
+  context_window_default: 0
+  context_window_overrides:
+    "agentic": 500000
+    "vision": 120000
   target_ratio: 0.40
   summarization_model: ""
   min_messages_before_compaction: 10

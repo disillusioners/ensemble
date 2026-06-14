@@ -191,7 +191,22 @@ class CompactionConfig(BaseSettings):
     threshold: float = Field(default=0.80, description="Trigger compaction when tokens exceed this fraction of context window")
     recent_message_window: int = Field(default=10, description="Number of most recent boundary GROUPS to keep intact during compaction")
     min_recent_window: int = Field(default=3, description="Hard minimum for recent window during progressive reduction")
-    context_window_override: int = Field(default=0, description="Override context window size. 0 = auto-detect from model name")
+    context_window_overrides: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "Per-model context window overrides (model_name_substring -> tokens). "
+            "Substring match against the active model name; longest key wins. "
+            "Takes priority over the built-in MODEL_CONTEXT_LIMITS registry. "
+            "Example: {'vision': 16385} caps any model name containing 'vision'."
+        ),
+    )
+    context_window_default: int = Field(
+        default=180000,
+        description=(
+            "Fallback context window when the model is unknown and no "
+            "context_window_overrides entry matches. 0 = use built-in default."
+        ),
+    )
     target_ratio: float = Field(default=0.40, description="Target token usage after compaction as fraction of context window")
     summarization_model: str = Field(default="", description="Model to use for summarization. Empty = use session model")
     min_messages_before_compaction: int = Field(default=10, description="Minimum number of messages before compaction is considered")
