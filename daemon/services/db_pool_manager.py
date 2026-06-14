@@ -81,6 +81,14 @@ _RE_PASSWORD_QUOTED = re.compile(
     re.IGNORECASE,
 )
 
+# Single-quoted variant: ``password 'foo'`` → ``password '***'``.
+# Distinct from the double-quoted form above (some libpq dialects
+# and psql output emit single-quoted passwords).
+_RE_PASSWORD_QUOTED_SINGLE = re.compile(
+    r"(password\s+)'[^']*'",
+    re.IGNORECASE,
+)
+
 # Combined ``role "x" password "y"`` form emitted by some server errors.
 _RE_ROLE_PASSWORD = re.compile(
     r'(role|user)\s+"[^"]*"\s+(password\s+)"[^"]*"',
@@ -132,23 +140,14 @@ class ConnectionPoolManager:
     # DSN construction
     # ------------------------------------------------------------------
 
-    def _build_dsn(
-        self,
-        conn: DbConnectionConfig,
-        password: str | None,
-    ) -> str:
-        """Build a PostgreSQL DSN covering the three auth cases.
+    def _build_dsn(self, conn: DbConnectionConfig) -> str:
+        """Build a credential-free DSN for logging purposes only.
 
-        The three cases are:
+        The returned string is intended for log messages and operational
+        diagnostics. It MUST NEVER contain credentials — no username,
+        no password, no auth token of any kind.
 
-        1. ``user + password`` — standard password auth:
-           ``postgresql://u:p@h:p/d?sslmode=...``
-        2. ``user, no password`` — preserve the username for peer,
-           ``.pgpass``, or IAM auth. The DSN keeps the user segment
-           but omits the password:
-           ``postgresql://u@h:p/d?sslmode=...``
-        3. ``no user, no password`` — anonymous / trust auth:
-           ``postgresql://h:p/d?sslmode=...``
+        Format: ``postgresql://host[:port]/database[?sslmode=...]``
 
         Optional segments are appended only when present:
 
@@ -156,26 +155,19 @@ class ConnectionPoolManager:
         * ``database`` → ``/database`` after the port
         * ``ssl_mode`` → ``?sslmode=ssl_mode`` as the first query arg
 
-        The username is **never** dropped when the password is
-        ``None`` — doing so would break peer / IAM auth flows.
+        Note: pool creation in :meth:`_get_or_create_pool` uses
+        kwargs-based ``asyncpg.create_pool`` (host/port/database/user/
+        password) so the password is never embedded in a DSN string.
+        This method is logging-only.
 
         Args:
             conn: The connection configuration row.
-            password: Decrypted password, or ``None`` for
-                passwordless auth.
 
         Returns:
-            A fully-formed PostgreSQL DSN string.
+            A safe, credential-free PostgreSQL DSN string suitable for
+            log messages.
         """
         dsn = "postgresql://"
-
-        # Authentication segment.
-        if conn.username and password:
-            dsn += f"{conn.username}:{password}@"
-        elif conn.username:
-            # Preserve username for .pgpass / peer / IAM auth flows.
-            dsn += f"{conn.username}@"
-        # else: anonymous — no user or password segment, no '@'.
 
         # Host (required).
         dsn += conn.host
@@ -208,10 +200,14 @@ class ConnectionPoolManager:
            concurrent coroutine created the pool while we were waiting.
 
         Pool creation reads the connection config, decrypts the
-        password (if any), builds a DSN, and calls
-        :func:`asyncpg.create_pool`. Any error is sanitized and
-        re-raised as :class:`ConnectionError` so callers never see
-        the raw DSN in stack traces.
+        password (if any), and calls :func:`asyncpg.create_pool`
+        using **kwargs** (``host``, ``port``, ``database``, ``user``,
+        ``password``) so the password is never embedded in a DSN
+        string that could leak into error messages or logs. Any error
+        is sanitized and re-raised as :class:`ConnectionError`. The
+        ``__cause__`` chain is intentionally NOT preserved (see C4)
+        to avoid leaking the raw exception to logging middleware
+        that uses ``exc_info=True``.
 
         Args:
             connection_name: The unique connection name to look up.
@@ -223,8 +219,8 @@ class ConnectionPoolManager:
             ValueError: If no connection is registered with that name,
                 or if the connection's ``db_type`` is not ``"postgres"``.
             ConnectionError: If pool creation fails for any reason
-                (network, auth, server). The original error is chained
-                via ``__cause__`` for debugging; the message is
+                (network, auth, server). The original error is
+                **not** chained via ``__cause__``; the message is
                 sanitized.
         """
         # Fast path: already initialized.
@@ -258,11 +254,18 @@ class ConnectionPoolManager:
                 creds = self._credential_manager.decrypt(encrypted)
                 password = creds.get("password")
 
-            dsn = self._build_dsn(config, password)
-
+            # Kwargs-based pool creation (C1, C2, C3, C5): the password
+            # is passed as a separate kwarg and never embedded in a DSN
+            # string. This eliminates the entire class of leaks where
+            # the DSN appears in asyncpg error messages, libpq
+            # diagnostics, or Python tracebacks.
             try:
                 pool = await asyncpg.create_pool(
-                    dsn=dsn,
+                    host=config.host,
+                    port=config.port or 5432,
+                    database=config.database or "",
+                    user=config.username or "",
+                    password=password,
                     min_size=POOL_MIN_SIZE,
                     max_size=POOL_MAX_SIZE,
                     max_queries=POOL_MAX_QUERIES,
@@ -273,23 +276,30 @@ class ConnectionPoolManager:
                 OSError,
                 ConnectionRefusedError,
             ) as exc:
+                # C4: do NOT chain via `from exc` — the __cause__
+                # chain would expose the raw exception (and any
+                # connection details it may carry) to logging
+                # middleware that uses exc_info=True.
                 detail = self._sanitize_error(str(exc))
                 raise ConnectionError(
                     f"Failed to connect to '{connection_name}': {detail}"
-                ) from exc
+                )
             except Exception as exc:  # noqa: BLE001 - sanitized + re-raised
+                # C4: same — no `from exc`.
                 detail = self._sanitize_error(str(exc))
                 raise ConnectionError(
                     f"Failed to connect to '{connection_name}': {detail}"
-                ) from exc
+                )
 
             self._pools[connection_name] = pool
+            safe_dsn = self._build_dsn(config)
             logger.info(
                 "Created asyncpg pool for connection '%s' "
-                "(min=%d, max=%d)",
+                "(min=%d, max=%d, dsn=%s)",
                 connection_name,
                 POOL_MIN_SIZE,
                 POOL_MAX_SIZE,
+                safe_dsn,
             )
             return pool
 
@@ -308,6 +318,7 @@ class ConnectionPoolManager:
         2. Redact ``postgresql://user:pass@host`` DSN credentials.
         3. Redact ``password=foo`` key=value form (case-insensitive).
         4. Redact ``password "foo"`` libpq-quoted form.
+        4b. Redact ``password 'foo'`` libpq single-quoted form.
         5. Redact ``role "x" password "y"`` combined form.
         6. Final safety net: anything still shaped like
            ``scheme://user:pass@host`` is aggressively masked.
@@ -330,6 +341,9 @@ class ConnectionPoolManager:
 
         # 4. password "..." quoted.
         result = _RE_PASSWORD_QUOTED.sub(r'\1"***"', result)
+
+        # 4b. password '...' single-quoted.
+        result = _RE_PASSWORD_QUOTED_SINGLE.sub(r"\1'***'", result)
 
         # 5. role/user "..." password "..." combined.
         result = _RE_ROLE_PASSWORD.sub(r'\1"***"\2"***"', result)
@@ -394,7 +408,16 @@ class ConnectionPoolManager:
                 "success": True,
                 "message": f"Connection '{connection_name}' is healthy",
             }
-        except Exception as exc:  # noqa: BLE001 - sanitized and reported
+        except (
+            asyncpg.PostgresError,
+            OSError,
+            ConnectionError,
+            asyncio.TimeoutError,
+        ) as exc:
+            # W5: only catch the expected I/O / protocol failure modes.
+            # Anything else (TypeError, AttributeError, KeyError, …) is
+            # almost certainly a programming bug and must propagate so
+            # it can be diagnosed in tests and alerting.
             detail = self._sanitize_error(str(exc))
             logger.warning(
                 "test_connection failed for '%s': %s",
@@ -460,6 +483,13 @@ class ConnectionPoolManager:
         """
         pool = await self._get_or_create_pool(connection_name)
         async with pool.acquire() as conn:
+            # W1: inject LIMIT if not already present to prevent OOM
+            # on unconstrained queries. We fetch at most max_rows + 1
+            # rows so the truncation flag below can detect "more rows
+            # exist" without a second round trip.
+            query_upper = query.upper().strip()
+            if "LIMIT" not in query_upper:
+                query = f"{query.rstrip(';')} LIMIT {max_rows + 1}"
             records = await asyncio.wait_for(
                 conn.fetch(query),
                 timeout=timeout,
@@ -487,15 +517,18 @@ class ConnectionPoolManager:
     async def dispose(self, connection_name: str) -> None:
         """Close and remove a single pool.
 
-        Idempotent: calling on an unknown name is a no-op. The pool is
-        popped from the dict first so that a slow ``close()`` cannot
-        race with a concurrent ``get_connection`` call (the latter
-        will re-create the pool on demand).
+        Idempotent: calling on an unknown name is a no-op. The pop
+        happens inside ``self._lock`` so a concurrent
+        ``_get_or_create_pool`` cannot re-create a pool for the same
+        name while we are disposing it. The actual ``pool.close()``
+        is awaited **outside** the lock so the lock is not held
+        during the (potentially slow) network close.
 
         Args:
             connection_name: The pool to dispose.
         """
-        pool = self._pools.pop(connection_name, None)
+        async with self._lock:
+            pool = self._pools.pop(connection_name, None)
         if pool is None:
             return
         await pool.close()

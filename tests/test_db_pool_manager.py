@@ -133,20 +133,24 @@ def _make_mock_pool(mock_conn: AsyncMock | MagicMock) -> MagicMock:
 
 
 # =============================================================================
-# Group 1: _build_dsn() — three authentication cases (N3)
+# Group 1: _build_dsn() — credential-free logging DSN (C1, C2, C3, C5)
 # =============================================================================
 
 
 class TestBuildDsn:
-    """Cover the three authentication shapes that ``_build_dsn`` emits.
+    """Cover the credential-free DSN shape that ``_build_dsn`` emits.
 
-    The order matters: when a password is present we *include* the
-    user segment; when it is absent we must still preserve the
-    username for ``.pgpass`` / peer / IAM flows.
+    The DSN is for log messages only — it MUST NOT contain any
+    credentials. The constructor therefore takes only ``conn`` and
+    never a password. Format: ``postgresql://host[:port]/database[?sslmode=...]``.
+
+    These tests guard the security contract: a regression that
+    re-introduces the username or a password argument would be
+    caught here.
     """
 
-    def test_user_and_password_emits_full_credentials(self):
-        """``user + password`` → ``postgresql://user:pass@host:port/db?sslmode=...``."""
+    def test_basic_dsn_with_host_port_database_sslmode(self):
+        """Standard case → ``postgresql://host:port/db?sslmode=...``."""
         manager, _, _ = _make_manager()
         conn = _make_config(
             host="db.example.com",
@@ -155,24 +159,22 @@ class TestBuildDsn:
             username="app_user",
             ssl_mode="require",
         )
-        dsn = manager._build_dsn(conn, password="s3cret")
-        assert dsn == "postgresql://app_user:s3cret@db.example.com:5432/appdb?sslmode=require"
+        dsn = manager._build_dsn(conn)
+        assert dsn == "postgresql://db.example.com:5432/appdb?sslmode=require"
 
-    def test_user_without_password_preserves_username(self):
-        """``user, no password`` → username kept, password slot omitted."""
+    def test_username_is_never_included(self):
+        """Username is dropped — it is identity, not a credential, but still
+        avoided in the safe DSN so the value cannot be used to pivot
+        during log review.
+        """
         manager, _, _ = _make_manager()
-        conn = _make_config(
-            host="db.example.com",
-            port=5432,
-            database="appdb",
-            username="app_user",
-            ssl_mode="require",
-        )
-        dsn = manager._build_dsn(conn, password=None)
-        assert dsn == "postgresql://app_user@db.example.com:5432/appdb?sslmode=require"
+        conn = _make_config(username="app_user")
+        dsn = manager._build_dsn(conn)
+        assert "app_user" not in dsn
+        assert "@" not in dsn
 
-    def test_anonymous_when_no_user_and_no_password(self):
-        """``no user, no password`` → no auth segment, no ``@``."""
+    def test_no_user_no_password_anonymous_dsn(self):
+        """No username, no password → just host:port/db."""
         manager, _, _ = _make_manager()
         conn = _make_config(
             host="db.example.com",
@@ -181,54 +183,56 @@ class TestBuildDsn:
             username=None,
             ssl_mode="require",
         )
-        dsn = manager._build_dsn(conn, password=None)
+        dsn = manager._build_dsn(conn)
         assert dsn == "postgresql://db.example.com:5432/appdb?sslmode=require"
 
     def test_port_omitted_when_none(self):
         """``port=None`` → no ``:port`` segment."""
         manager, _, _ = _make_manager()
         conn = _make_config(port=None, username="u", database="d")
-        dsn = manager._build_dsn(conn, password="p")
+        dsn = manager._build_dsn(conn)
         assert ":None" not in dsn
-        assert dsn == "postgresql://u:p@db.example.com/d?sslmode=require"
+        assert dsn == "postgresql://db.example.com/d?sslmode=require"
 
     def test_database_omitted_when_none(self):
         """``database=None`` → no ``/database`` segment."""
         manager, _, _ = _make_manager()
         conn = _make_config(port=5432, database=None, username="u")
-        dsn = manager._build_dsn(conn, password="p")
+        dsn = manager._build_dsn(conn)
         assert "/None" not in dsn
-        assert dsn == "postgresql://u:p@db.example.com:5432?sslmode=require"
+        assert dsn == "postgresql://db.example.com:5432?sslmode=require"
 
     def test_ssl_mode_omitted_when_none(self):
         """``ssl_mode=None`` → no ``?sslmode=...`` query string."""
         manager, _, _ = _make_manager()
         conn = _make_config(ssl_mode=None, username="u", database="d")
-        dsn = manager._build_dsn(conn, password="p")
+        dsn = manager._build_dsn(conn)
         assert "sslmode" not in dsn
-        assert dsn == "postgresql://u:p@db.example.com:5432/d"
+        assert dsn == "postgresql://db.example.com:5432/d"
 
     def test_all_optional_fields_none_produces_minimal_dsn(self):
         """Edge: every optional field is ``None`` → bare DSN."""
         manager, _, _ = _make_manager()
         conn = _make_config(host="h", port=None, database=None,
                             username=None, ssl_mode=None)
-        dsn = manager._build_dsn(conn, password=None)
+        dsn = manager._build_dsn(conn)
         assert dsn == "postgresql://h"
 
-    def test_user_kept_when_password_is_empty_string(self):
-        """Defensive: empty-string password is *not* the same as None.
+    def test_signature_has_no_password_parameter(self):
+        """The method must not accept a password argument at all.
 
-        An empty string is falsy in the ``if`` check, so this code
-        path falls into the "no password" branch — which preserves
-    the username (intentional, per docstring).
+        A regression that re-adds a password parameter would silently
+        re-enable the entire class of DSN-leak bugs the refactor
+        removed. This test pins the signature.
         """
-        manager, _, _ = _make_manager()
-        conn = _make_config(username="u", database="d")
-        dsn = manager._build_dsn(conn, password="")
-        # No password segment, but username segment is kept.
-        assert "u@" in dsn
-        assert ":@" not in dsn
+        import inspect
+
+        sig = inspect.signature(ConnectionPoolManager._build_dsn)
+        params = list(sig.parameters.keys())
+        assert params == ["self", "conn"], (
+            f"_build_dsn signature changed: {params} — must not accept "
+            f"a password (would re-introduce DSN-leak risk)"
+        )
 
 
 # =============================================================================
@@ -313,6 +317,45 @@ class TestSanitizeError:
         assert "pass" not in result or "***:***" in result
         assert "***:***@cache-host" in result
 
+    def test_sanitize_password_with_at_symbol(self):
+        """Sanitizer must redact passwords containing ``@``.
+
+        ``password=p@ss@word`` style patterns are common in service
+        meshes / sidecar configs that embed raw credentials in error
+        messages. The ``password=...`` key=value regex must consume the
+        full non-whitespace token (``\\S+``) so embedded ``@`` does not
+        leave a tail behind.
+        """
+        result = ConnectionPoolManager._sanitize_error(
+            "auth failed: password=p@ss@word supplied"
+        )
+        assert "password=***" in result
+        assert "p@ss@word" not in result
+
+        # DSN-style: the literal password (with embedded ``@``) must
+        # not survive sanitization. The current DSN regex stops at the
+        # first ``@`` and the safety net is conservative, so the strict
+        # assertion is "the literal password string is absent".
+        dsn_result = ConnectionPoolManager._sanitize_error(
+            "could not connect to postgresql://user:p@ss@word@host/db"
+        )
+        assert "p@ss@word" not in dsn_result
+        assert "***:***" in dsn_result
+
+    def test_sanitize_single_quoted_password(self):
+        """Sanitizer must redact ``password 'foo'`` (single-quoted) form.
+
+        Some libpq / psql error dialects emit single-quoted passwords
+        rather than the double-quoted form handled by
+        ``_RE_PASSWORD_QUOTED``. The defense-in-depth sanitizer covers
+        both quote styles so neither leaks.
+        """
+        result = ConnectionPoolManager._sanitize_error(
+            "auth error: password 'secret123' is wrong"
+        )
+        assert "secret123" not in result
+        assert "password '***'" in result
+
 
 # =============================================================================
 # Group 3: Pool caching (lazy creation)
@@ -355,8 +398,14 @@ class TestGetOrCreatePool:
         assert create_pool.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_create_pool_receives_dsn_and_pool_constants(self):
-        """Pool construction is wired with the documented constants."""
+    async def test_create_pool_receives_kwargs_and_pool_constants(self):
+        """Pool construction is wired with kwargs (not a DSN) and the
+        documented constants (C1, C2, C3, C5).
+
+        Kwargs-based ``create_pool`` is the only safe way to pass a
+        password — a DSN-based call would risk embedding the secret
+        in a URL string that could leak via asyncpg error messages.
+        """
         manager, _, _ = _make_manager(
             config=_make_config(),
             credentials_blob="enc::blob",
@@ -370,12 +419,20 @@ class TestGetOrCreatePool:
             await manager._get_or_create_pool("primary")
         create_pool.assert_awaited_once()
         kwargs = create_pool.await_args.kwargs
+        # Pool constants.
         assert kwargs["min_size"] == POOL_MIN_SIZE == 1
         assert kwargs["max_size"] == POOL_MAX_SIZE == 5
         assert kwargs["max_queries"] == POOL_MAX_QUERIES == 500
         assert kwargs["timeout"] == POOL_TIMEOUT == 30
-        assert "dsn" in kwargs
-        assert "secret" in kwargs["dsn"]  # decrypted password is in the DSN
+        # Kwargs-based connection (C1-C3, C5): host/port/database/user/
+        # password must be passed as separate kwargs — never a `dsn`.
+        assert "dsn" not in kwargs
+        assert kwargs["host"] == "db.example.com"
+        assert kwargs["port"] == 5432
+        assert kwargs["database"] == "appdb"
+        assert kwargs["user"] == "app_user"
+        # The decrypted password is passed as a separate kwarg.
+        assert kwargs["password"] == "secret"
 
     @pytest.mark.asyncio
     async def test_unknown_connection_name_raises_value_error(self):
@@ -413,6 +470,118 @@ class TestGetOrCreatePool:
                 await manager._get_or_create_pool("primary")
         # Original secret must not appear in the wrapped message.
         assert "hunter2" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_concurrent_pool_creation_single_create(self):
+        """Double-checked locking: 10 concurrent calls trigger ONE
+        ``asyncpg.create_pool``.
+
+        The slow-path lock + re-check guarantees that even if N
+        coroutines race past the fast-path dict lookup, exactly one of
+        them reaches the pool-construction site. The other N-1 find
+        the cached entry on the re-check and short-circuit.
+        """
+        manager, _, _ = _make_manager(config=_make_config())
+
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=MagicMock(name="shared_pool"),
+        ) as create_pool:
+            results = await asyncio.gather(
+                *[manager._get_or_create_pool("db1") for _ in range(10)]
+            )
+
+        # All 10 callers got the same (mocked) pool.
+        assert len(results) == 10
+        assert all(r is results[0] for r in results)
+        # But the underlying factory was hit exactly once.
+        create_pool.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_pool_reuse_after_dispose(self):
+        """After ``dispose(name)``, a fresh pool is created on next access.
+
+        ``dispose`` pops the entry from ``_pools`` and awaits
+        ``pool.close()``. A subsequent ``_get_or_create_pool`` must hit
+        the slow path and construct a *new* pool — not return a stale
+        reference to the disposed one.
+        """
+        manager, _, _ = _make_manager(config=_make_config())
+
+        # Use a real async-mock for ``close`` so ``dispose`` can await it.
+        first_pool = MagicMock(name="first_pool")
+        first_pool.close = AsyncMock(return_value=None)
+
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=first_pool,
+        ) as create_pool:
+            returned_first = await manager._get_or_create_pool("primary")
+        assert returned_first is first_pool
+        assert manager._pools["primary"] is first_pool
+
+        # Dispose pops the entry and awaits close.
+        await manager.dispose("primary")
+        assert "primary" not in manager._pools
+        first_pool.close.assert_awaited_once()
+
+        # Second round: a different mock pool. Reset the call counter
+        # so we can assert a *new* creation event fires.
+        second_pool = MagicMock(name="second_pool")
+        second_pool.close = AsyncMock(return_value=None)
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=second_pool,
+        ) as create_pool:
+            returned_second = await manager._get_or_create_pool("primary")
+
+        assert returned_second is second_pool
+        assert returned_second is not first_pool
+        # The new pool is now cached.
+        assert manager._pools["primary"] is second_pool
+        create_pool.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_execute_select_special_char_password(self):
+        """Pool construction passes special-char passwords as a kwarg.
+
+        The kwargs-based ``create_pool`` approach is what makes
+        passwords containing URL-reserved characters (``,``, ``:``,
+        ``/``, ``#``) safe to use: they are never embedded in a DSN
+        string that asyncpg or libpq might echo back in an error
+        message. This test pins that contract for an adversarial
+        password.
+        """
+        nasty_password = "p@ss:w0rd#1"
+        manager, repository, credential_manager = _make_manager(
+            config=_make_config(),
+        )
+        # The repository must return a non-None ``credentials_blob`` so
+        # the manager actually decrypts; otherwise it short-circuits and
+        # passes ``password=None`` to ``create_pool``.
+        repository.get_credentials = MagicMock(return_value="enc::blob")
+        # Override the default ``secret`` password with the nasty one.
+        credential_manager.decrypt = MagicMock(
+            return_value={"password": nasty_password}
+        )
+
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=MagicMock(),
+        ) as create_pool:
+            await manager._get_or_create_pool("special-db")
+
+        create_pool.assert_awaited_once()
+        kwargs = create_pool.await_args.kwargs
+        # The password is passed as its own kwarg — the dangerous path
+        # of string-embedding is structurally impossible here.
+        assert kwargs.get("password") == nasty_password
+        # And, critically, no ``dsn`` argument is present at all.
+        assert "dsn" not in kwargs
 
 
 def asyncpg_postgres_error(message: str):
@@ -470,12 +639,19 @@ class TestConnection:
 
     @pytest.mark.asyncio
     async def test_failure_returns_sanitized_message(self):
-        """fetchval raises → ``success=False``, message never contains DSN/secret."""
+        """fetchval raises an I/O-class error → ``success=False``, message
+        never contains DSN/secret.
+
+        Uses ``OSError`` so it matches the narrowed W5 catch list
+        (``asyncpg.PostgresError``, ``OSError``, ``ConnectionError``,
+        ``asyncio.TimeoutError``). ``RuntimeError`` is intentionally
+        not in the catch list — programming bugs must propagate.
+        """
         manager, _, _ = _make_manager(config=_make_config())
 
         mock_conn = MagicMock()
         mock_conn.fetchval = AsyncMock(
-            side_effect=RuntimeError(
+            side_effect=OSError(
                 "connection to postgresql://u:hunter2@host failed"
             )
         )
@@ -617,7 +793,12 @@ class TestExecuteSelect:
         assert result["truncated"] is False
 
         # Sanity: we used ``conn.fetch``, not ``conn.prepare(...).fetch()``.
-        mock_conn.fetch.assert_awaited_once_with("SELECT * FROM users")
+        # W1: the query is suffixed with ``LIMIT <max_rows + 1>`` to
+        # prevent OOM on unconstrained queries. ``DEFAULT_MAX_ROWS``
+        # is 1000, so the injected limit is 1001.
+        mock_conn.fetch.assert_awaited_once_with(
+            "SELECT * FROM users LIMIT 1001"
+        )
         mock_conn.prepare.assert_not_called()
 
     @pytest.mark.asyncio
@@ -819,10 +1000,28 @@ class TestMissingConnection:
             await manager.execute_select("ghost", "SELECT 1")
 
     @pytest.mark.asyncio
-    async def test_test_connection_returns_failure_dict(self):
-        """``test_connection`` never raises — it returns a failure dict."""
-        manager, repository, _ = _make_manager()
-        repository.get_by_name = MagicMock(return_value=None)
-        result = await manager.test_connection("ghost")
+    async def test_test_connection_returns_failure_dict_on_io_error(self):
+        """``test_connection`` swallows I/O-class errors and returns a dict.
+
+        Per W5 the catch list is narrowed to ``asyncpg.PostgresError``,
+        ``OSError``, ``ConnectionError``, ``asyncio.TimeoutError``.
+        Programming errors (e.g. ``ValueError`` from a missing config
+        name) intentionally propagate so they are caught in tests and
+        alerting rather than being silently masked.
+        """
+        manager, _, _ = _make_manager(config=_make_config())
+
+        mock_conn = MagicMock()
+        mock_conn.fetchval = AsyncMock(
+            side_effect=ConnectionError("server unreachable")
+        )
+        fake_pool = _make_mock_pool(mock_conn)
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=fake_pool,
+        ):
+            result = await manager.test_connection("primary")
+
         assert result["success"] is False
-        assert "ghost" in result["message"]
+        assert "primary" in result["message"]
