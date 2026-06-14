@@ -116,6 +116,36 @@ class TaskRepository:
             stmt = select(Task).where(Task.message_id == message_id)
             return db_session.exec(stmt).first()
 
+    def find_running_by_instance(self, instance_id: str) -> Task | None:
+        """Return the first RUNNING ``task`` row for ``instance_id``,
+        or None.
+
+        Used by the cross-dispatcher pre-flight in
+        ``MessageJobHandler.handle``: if a WorkerPool task is
+        currently driving ``graph.astream`` for an instance, an
+        incoming MESSAGE job for the same instance should back off
+        rather than risk a concurrent stream. The Execution Gate's
+        ``try_acquire`` is the authoritative safety net, so a
+        non-None return is an optimisation, not a hard guarantee.
+
+        Lifted from the handler so the data access pattern stays on
+        the repository (consistent with the rest of the task
+        access code).
+
+        Args:
+            instance_id: The langgraph thread_id / instance_id.
+
+        Returns:
+            The first RUNNING Task for the instance, or None.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.instance_id == instance_id)
+                .where(Task.status == TaskStatus.RUNNING.value)
+            )
+            return db_session.exec(stmt).first()
+
     # --------------------------------------------------------
     # CLAIM (Atomic)
     # --------------------------------------------------------
@@ -296,6 +326,78 @@ class TaskRepository:
             # Return a freshly-loaded ORM object for the caller's
             # convenience (callers usually don't need it but it's
             # symmetric with complete_task / fail_task).
+            return self.get(task_id)
+
+    def requeue_task_with_backoff(
+        self, task_id: int, min_delay_seconds: float = 0.5, max_delay_seconds: float = 2.0
+    ) -> Task | None:
+        """Re-queue a RUNNING task back to PENDING with a jittered backoff.
+
+        Like ``requeue_task`` but sets ``next_retry_at`` to
+        ``now + uniform(min, max)`` so the task is not eligible for
+        re-claim until that time. ``claim_pending_task`` already
+        filters on ``next_retry_at <= now_str``, so the worker poll
+        will see the task as "not yet ready" and move on to a
+        different pending task. This prevents a tight CPU spin when
+        a sibling MESSAGE job holds the lease for minutes at a
+        time and the worker would otherwise re-claim the same task
+        immediately, re-run, hit contention again, and re-queue —
+        looping at the speed of the DB.
+
+        The delay is stored as a string in the same format
+        ``claim_pending_task`` parses (ISO-8601 with fractional
+        seconds and timezone offset).
+
+        Atomicity: same as ``requeue_task`` — the UPDATE is
+        conditional on ``status='running'``. A task that was
+        concurrently completed/failed/cancelled is left alone.
+
+        Args:
+            task_id: The Task ID to re-queue.
+            min_delay_seconds: Lower bound for the jittered delay.
+            max_delay_seconds: Upper bound for the jittered delay.
+
+        Returns:
+            The updated Task in PENDING status, or None if the task
+            was not in RUNNING status when we tried to re-queue.
+        """
+        import random
+        delay = random.uniform(min_delay_seconds, max_delay_seconds)
+        next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        next_retry_at_str = (
+            next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
+            + next_retry_at.strftime("%z")
+        )
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE task
+                    SET status = :status_pending,
+                        worker_id = NULL,
+                        started_at = NULL,
+                        last_heartbeat_at = NULL,
+                        next_retry_at = :next_retry_at
+                    WHERE id = :task_id
+                      AND status = :status_running
+                    RETURNING id
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "status_pending": TaskStatus.PENDING.value,
+                    "status_running": TaskStatus.RUNNING.value,
+                    "next_retry_at": next_retry_at_str,
+                },
+            )
+            row = result.first()
+            if row is None:
+                return None
+            # Don't notify workers — the task is intentionally not
+            # claimable yet, and a wake-up would just be ignored
+            # (claim_pending_task will skip it on next_retry_at).
+            # Notify the next time something else makes the task
+            # claimable (e.g. a manual clear, a sibling completion).
             return self.get(task_id)
 
     def update_heartbeat(self, task_id: int) -> bool:

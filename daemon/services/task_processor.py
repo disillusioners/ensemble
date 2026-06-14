@@ -12,6 +12,7 @@ from .execution_gate import LeaseContention
 from .main_loop_bridge import MainLoopBridge
 from daemon.cancellation import CancellationToken, OperationCancelledError
 from daemon.constants import MAX_ERROR_LEN
+from daemon.repositories.execution_lease.models import LeaseHolderKind
 
 if TYPE_CHECKING:
     from daemon.repositories.task.models import Task
@@ -236,28 +237,35 @@ class ProcessMessageProcessor(BaseProcessor):
             gate_outcome = await self._manager.execution_gate.run(
                 instance_id=task.instance_id,
                 holder_id=f"task:{task.id}",
-                holder_kind="task",
+                holder_kind=LeaseHolderKind.TASK.value,
                 work_fn=_do_process,
             )
             if isinstance(gate_outcome, LeaseContention):
                 # Cross-dispatcher contention: a MESSAGE job is
                 # currently driving graph.astream for this instance.
-                # Back off: re-queue the task to PENDING so the next
-                # worker poll re-runs it after the MESSAGE job
-                # releases the lease.
+                # Back off: re-queue the task to PENDING with a
+                # jittered ``next_retry_at`` (0.5–2.0 s) so the worker
+                # poll does NOT re-claim the same task immediately
+                # and busy-spin against the holding MESSAGE job. The
+                # MESSAGE job side is self-limiting (JobQueue polls
+                # every ~30 s) but the task side was not — without
+                # this backoff a task for the same instance would
+                # re-claim, re-run, hit contention, and re-queue in
+                # a tight loop for the entire duration of the sibling
+                # MESSAGE job.
                 logger.info(
                     f"ProcessMessageProcessor: lease contention for task {task.id} "
                     f"instance={task.instance_id[:8]}... "
                     f"(holder_id={gate_outcome.holder_id} "
-                    f"holder_kind={gate_outcome.holder_kind}) — re-queuing"
+                    f"holder_kind={gate_outcome.holder_kind}) — re-queuing with backoff"
                 )
-                # Transition: RUNNING -> PENDING (releasing the
-                # worker's claim, so the next poll re-claims it).
-                # ``requeue_task`` is conditional on
-                # ``status='running'`` so a task that has been
-                # completed/cancelled in the meantime is left alone.
+                # Transition: RUNNING -> PENDING with a short
+                # jittered backoff. ``requeue_task_with_backoff`` is
+                # conditional on ``status='running'`` so a task that
+                # has been completed/cancelled in the meantime is
+                # left alone.
                 await asyncio.to_thread(
-                    self._task_repo.requeue_task, task.id
+                    self._task_repo.requeue_task_with_backoff, task.id
                 )
                 # Bail out of this task run without an exception —
                 # the next worker poll will re-claim and retry.

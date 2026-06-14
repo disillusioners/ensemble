@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -228,24 +228,37 @@ class ExecutionLeaseRepository:
         hours but is still heartbeating is NOT stale; a holder that
         died mid-run is. If the holder never heartbeats, ``acquired_at``
         is the floor.
+
+        Filtering is done in SQL using ``COALESCE(heartbeat_at,
+        acquired_at)`` so the scan is bounded by the table size but
+        we still correctly fall back to ``acquired_at`` if a row
+        somehow ended up with a NULL ``heartbeat_at`` (the
+        default_factory on the column makes this impossible on
+        freshly-inserted rows, but rows from older schema versions
+        or hand-edited data could in principle be NULL).
         """
-        cutoff = datetime.now(timezone.utc).timestamp() - max_age_seconds
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
         with SQLModelSession(self.engine) as session:
-            from sqlmodel import select
-            rows = session.exec(
-                select(InstanceExecutionLease)
-            ).all()
-            stale = []
-            for row in rows:
-                # Use heartbeat_at; if heartbeat never happened (None or
-                # very old) fall back to acquired_at.
-                hb = row.heartbeat_at
-                if hb is None:
-                    continue
-                age_ref = hb
-                if age_ref.timestamp() < cutoff:
-                    stale.append(row)
-            return stale
+            stmt = text(
+                """
+                SELECT instance_id, holder_id, holder_kind, acquired_at,
+                       heartbeat_at, process_id
+                FROM instance_execution_leases
+                WHERE COALESCE(heartbeat_at, acquired_at) < :cutoff
+                """
+            )
+            rows = session.execute(stmt, {"cutoff": cutoff}).fetchall()
+            return [
+                InstanceExecutionLease(
+                    instance_id=r[0],
+                    holder_id=r[1],
+                    holder_kind=r[2],
+                    acquired_at=r[3],
+                    heartbeat_at=r[4],
+                    process_id=r[5],
+                )
+                for r in rows
+            ]
 
     def clear_stale(self, instance_id: str) -> bool:
         """Delete a stale lease row outright (no holder_id check).

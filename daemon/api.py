@@ -171,7 +171,21 @@ async def lifespan(app: FastAPI):
     # Initialize InstanceManager
     manager = InstanceManager(config, ensemble_config)
     await manager.initialize()
-    
+
+    # Execution Gate: clear any leases left behind by a previous
+    # process that died mid-execution. Done HERE (and awaited) so
+    # the first ``gate.run`` after startup is guaranteed to see a
+    # clean state. Doing it inside ``setup_worker_pool`` would
+    # schedule-and-return-0 under the running event loop, leaving up
+    # to a 5-minute window where a fresh ``gate.run`` could
+    # contend against a stale lease from the previous process.
+    cleared_leases = await manager._execution_gate.recover_stale_leases()
+    if cleared_leases:
+        daemon_logger.warning(
+            f"[Startup] Cleared {cleared_leases} stale execution lease(s) "
+            "from previous process"
+        )
+
     # Set up worker pool for message processing
     manager.setup_worker_pool()
     start_time = time.time()

@@ -1517,6 +1517,10 @@ class InstanceManager:
             engine=self._engine,
             on_pending_task=lambda: self._worker_pool.notify_work() if self._worker_pool else None
         )
+        # Expose on the manager so cross-dispatcher handlers
+        # (``MessageJobHandler._find_running_task_for_instance``)
+        # can read the repo without reaching into a private local.
+        self._task_repo = task_repo
         event_repo = EventRepository(engine=self._engine)
 
         # Backfill last_heartbeat_at for any RUNNING tasks that lack one
@@ -1562,14 +1566,14 @@ class InstanceManager:
         # FIX: C2 — Start periodic background recovery thread
         stale_recovery.start()
 
-        # Execution Gate: clear any leases left behind by a previous
-        # process that died mid-execution. ``recover_stale_leases_sync``
-        # is the sync wrapper that the manager uses here (the call site
-        # is in the lifespan's pre-event-loop path). The very first
-        # ``gate.run`` after startup is guaranteed to see a clean
-        # state. Operators see the cleared count in the startup log if
-        # a previous run died unexpectedly.
-        self._execution_gate.recover_stale_leases_sync()
+        # Execution Gate: stale-lease recovery is performed by the
+        # async lifespan in ``daemon/api.py`` BEFORE this method runs,
+        # so the very first ``gate.run`` after startup is guaranteed
+        # to see a clean state. We deliberately do NOT call the sync
+        # wrapper here — it would be fire-and-forget under the
+        # running event loop and would leave up to a 5-minute window
+        # where the first ``gate.run`` could contend against a stale
+        # lease from a crashed prior process.
         
         # Create task processor with manager reference
         self._task_processor = TaskProcessor(

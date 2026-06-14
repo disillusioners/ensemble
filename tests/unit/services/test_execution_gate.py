@@ -233,6 +233,34 @@ class TestLeaseRepositoryRecovery:
         # No holder_id provided — should still work.
         assert lease_repo.clear_stale("inst-1") is True
 
+    def test_find_stale_leases_uses_sql_filter(self, lease_repo):
+        """The stale-lease scan must filter in SQL (not load all
+        rows into Python) so it stays cheap as the table grows.
+        The default_factory on the column guarantees
+        ``heartbeat_at`` is never NULL on insert, so the
+        ``COALESCE(heartbeat_at, acquired_at)`` is a defensive
+        belt-and-braces against hand-edited or older-schema rows.
+        """
+        lease_repo.try_acquire(
+            "inst-stale-2", "task:42", LeaseHolderKind.TASK.value
+        )
+        # A row whose heartbeat is well past the threshold is stale.
+        with SQLModelSession(lease_repo.engine) as session:
+            row = session.get(InstanceExecutionLease, "inst-stale-2")
+            row.heartbeat_at = datetime.now(timezone.utc) - timedelta(
+                seconds=1000
+            )
+            session.add(row)
+            session.commit()
+        # A row whose heartbeat is fresh is NOT stale.
+        lease_repo.try_acquire(
+            "inst-fresh-2", "task:43", LeaseHolderKind.TASK.value
+        )
+        stale = lease_repo.find_stale_leases(max_age_seconds=300)
+        ids = {s.instance_id for s in stale}
+        assert "inst-stale-2" in ids
+        assert "inst-fresh-2" not in ids
+
 
 # ─── Service: happy path ──────────────────────────────────────────────────────
 
@@ -532,6 +560,21 @@ class TestExecutionGateRecovery:
         cleared = gate.recover_stale_leases_sync(max_age_seconds=300)
         assert cleared == 1
 
+    @pytest.mark.asyncio
+    async def test_sync_wrapper_returns_minus_one_under_running_loop(
+        self, gate, lease_repo
+    ):
+        """When a real event loop is already running, the sync
+        wrapper cannot block on the recovery; it schedules the
+        coroutine and returns -1 to signal "in-flight, count
+        unknown to caller". The daemon's startup path uses the
+        async method directly to avoid this case.
+        """
+        cleared = gate.recover_stale_leases_sync(max_age_seconds=300)
+        assert cleared == -1
+        # Yield so the scheduled coroutine has a chance to run.
+        await asyncio.sleep(0.05)
+
 
 # ─── Integration: ProcessMessageProcessor re-queue ───────────────────────────
 
@@ -570,6 +613,78 @@ class TestTaskProcessorRequeueOnContention:
         # Status unchanged.
         row = task_repo.get(task.id)
         assert row.status == TaskStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_with_backoff_sets_next_retry_at(
+        self, task_repo
+    ):
+        """requeue_task_with_backoff must set next_retry_at so the
+        worker does NOT re-claim the same task on the next poll.
+        The cross-dispatcher contention path uses this to prevent
+        busy-spin against a sibling MESSAGE job.
+        """
+        from datetime import datetime, timezone
+        task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-1",
+            message_id="msg-1",
+        )
+        task_repo.claim_pending_task(worker_id="worker-1")
+        requeued = task_repo.requeue_task_with_backoff(
+            task.id, min_delay_seconds=0.5, max_delay_seconds=2.0
+        )
+        assert requeued is not None
+        assert requeued.status == TaskStatus.PENDING.value
+        # next_retry_at must be in the future (within the jitter
+        # window) so the next poll skips this task.
+        assert requeued.next_retry_at is not None
+        ts = datetime.fromisoformat(requeued.next_retry_at)
+        now = datetime.now(timezone.utc).timestamp()
+        assert ts.timestamp() > now
+        # The worker re-poll must NOT claim it (next_retry_at > now).
+        re_claimed = task_repo.claim_pending_task(worker_id="worker-2")
+        assert re_claimed is None
+
+    @pytest.mark.asyncio
+    async def test_requeue_task_with_backoff_is_noop_for_completed(
+        self, task_repo
+    ):
+        task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-1",
+            message_id="msg-1",
+        )
+        task_repo.claim_pending_task(worker_id="worker-1")
+        task_repo.complete_task(task.id, {"ok": True})
+        assert task_repo.requeue_task_with_backoff(task.id) is None
+
+    def test_find_running_by_instance_returns_running_task(self, task_repo):
+        """TaskRepository.find_running_by_instance must return the
+        RUNNING task for an instance, or None.
+        """
+        task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-1",
+            message_id="msg-1",
+        )
+        task_repo.claim_pending_task(worker_id="worker-1")
+        running = task_repo.find_running_by_instance("inst-1")
+        assert running is not None
+        assert running.id == task.id
+        assert running.status == TaskStatus.RUNNING.value
+
+    def test_find_running_by_instance_returns_none_when_idle(self, task_repo):
+        assert task_repo.find_running_by_instance("inst-1") is None
+
+    def test_find_running_by_instance_ignores_completed(self, task_repo):
+        task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-1",
+            message_id="msg-1",
+        )
+        task_repo.claim_pending_task(worker_id="worker-1")
+        task_repo.complete_task(task.id, {"ok": True})
+        assert task_repo.find_running_by_instance("inst-1") is None
 
 
 # ─── In-process fast path ─────────────────────────────────────────────────────

@@ -452,23 +452,29 @@ class ExecutionGateService:
     ) -> int:
         """Synchronous wrapper around ``recover_stale_leases``.
 
-        ``InstanceManager.setup_worker_pool`` calls this from the
-        lifespan's pre-event-loop section. We run an ad-hoc asyncio
-        loop to drive the async implementation; the underlying
-        repository calls are already thread-safe and we don't expect
-        startup recovery to be on the hot path. If a real event loop
-        is already running (test fixtures), we fall back to scheduling
-        the coroutine on it.
+        Kept for callers (e.g. diagnostic scripts) that need to drive
+        recovery from a synchronous context. The daemon's own startup
+        path in ``daemon/api.py`` calls the async
+        ``recover_stale_leases`` directly so the recovery is
+        ``await``-ed before any ``gate.run`` can race with a stale
+        lease.
+
+        If a real event loop is already running (test fixtures), we
+        schedule the coroutine on it and return ``-1`` as a sentinel
+        — the scheduled task runs concurrently and its cleared count
+        is not available to the caller. Callers that need the count
+        should use the async method.
         """
         try:
             _loop = asyncio.get_event_loop()
             if _loop.is_running():
-                # A loop is already running — schedule and return 0
-                # immediately. The caller can check the result via the
-                # scheduled task if needed. This is the test fixture
-                # path; in production startup we're not in a loop.
+                # A loop is already running — schedule and return -1
+                # to signal "recovery is in-flight, count unknown to
+                # the caller". Use -1 (not 0) so a caller that
+                # inspects the return value can distinguish "nothing
+                # was stale" from "I have no idea".
                 _loop.create_task(self.recover_stale_leases(max_age_seconds))
-                return 0
+                return -1
             return _loop.run_until_complete(
                 self.recover_stale_leases(max_age_seconds)
             )

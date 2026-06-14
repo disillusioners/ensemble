@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from typing import Any
 
 from daemon.cancellation import (
     CancellationTokenSource,
@@ -9,6 +10,7 @@ from daemon.cancellation import (
     OperationCancelledError,
 )
 from daemon.models.instance import InstanceStatus
+from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.services.execution_gate import LeaseContention
 from daemon.services.job_queue_service import DemandState
 
@@ -94,6 +96,14 @@ class MessageJobHandler:
         # completes. (See
         # docs/bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md
         # for the bug this prevents.)
+        #
+        # The data access is delegated to
+        # ``TaskRepository.find_running_by_instance`` (see
+        # ``daemon/repositories/task/repository.py``) so the SQL
+        # is colocated with the rest of the task access code. The
+        # local ``_find_running_task_for_instance`` is a thin
+        # pass-through to that repository method; tests can still
+        # patch it to short-circuit the SQL.
         running_task = await asyncio.to_thread(
             self._find_running_task_for_instance, instance_id
         )
@@ -148,7 +158,7 @@ class MessageJobHandler:
             gate_outcome = await self._manager.execution_gate.run(
                 instance_id=instance_id,
                 holder_id=f"message_job:{job.job_id}",
-                holder_kind="message_job",
+                holder_kind=LeaseHolderKind.MESSAGE_JOB.value,
                 work_fn=_do_process,
             )
         except BaseException as e:  # noqa: BLE001 - we re-raise below after body cleanup
@@ -326,6 +336,14 @@ class MessageJobHandler:
         case and the new "lease held by Task (cross-dispatcher)" case.
         Same atomic_transition+release pattern in both — the only
         difference is the ``reason`` string we log for diagnostics.
+
+        Also wakes the JobProcessor dispatch bus so the next poll
+        cycle runs immediately rather than waiting up to
+        ``_poll_interval`` (default 30 s). Without this notification,
+        a hot instance receiving frequent child reports would see
+        ``_poll_interval`` of additional latency on every
+        cross-dispatcher back-off, because the job simply sits in
+        PENDING until the next scheduled poll.
         """
         logger.info(
             f"[TRACE] MessageJobHandler.handle: SKIP job {job.job_id[:8]}... — "
@@ -345,29 +363,31 @@ class MessageJobHandler:
             await self._job_service._lock_manager.release_queue_lock(
                 job.project_id, job.queue_id, job.job_id
             )
+        # Wake the JobProcessor dispatch bus so the freshly-requeued
+        # PENDING job is picked up on the next poll cycle, not at the
+        # end of the current ``_poll_interval`` (default 30 s). The
+        # bus is best-effort: if it's not wired in (e.g. test
+        # fixture) the periodic poll still drains the job.
+        bus = getattr(self._job_service, "_dispatch_bus", None)
+        if bus is not None and job.project_id is not None:
+            try:
+                bus.notify_new_job(job.project_id)
+            except Exception as e:
+                logger.debug(
+                    f"MessageJobHandler: dispatch bus notify failed "
+                    f"(non-fatal): {e}"
+                )
 
     def _find_running_task_for_instance(self, instance_id: str):
-        """Return a RUNNING ``task`` row for ``instance_id`` if one exists.
-
-        Synchronous SQL helper. Used by the cross-dispatcher
-        pre-flight in ``handle``: if a WorkerPool task is actively
-        running for the instance, the MESSAGE job should back off
-        rather than risk a concurrent ``graph.astream``.
-
-        Returns None if no RUNNING task exists. The Gate's
-        ``try_acquire`` is the authoritative safety net, so a
-        non-None return is an optimisation, not a hard guarantee.
+        """Deprecated: kept for backwards compatibility with any
+        external caller. Delegates to
+        ``TaskRepository.find_running_by_instance`` via the
+        manager. New code should call the repository directly.
         """
-        from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.task.models import Task, TaskStatus
-        from sqlmodel import select
-        with SQLModelSession(self._manager.engine) as session:
-            row = session.exec(
-                select(Task)
-                .where(Task.instance_id == instance_id)
-                .where(Task.status == TaskStatus.RUNNING.value)
-            ).first()
-            return row
+        task_repo = getattr(self._manager, "_task_repo", None)
+        if task_repo is None:
+            return None
+        return task_repo.find_running_by_instance(instance_id)
 
     async def cancel_message_job(self, job_id: str) -> None:
         """Cancel a MESSAGE job. Lives on MessageJobHandler, called via JobQueueService.
