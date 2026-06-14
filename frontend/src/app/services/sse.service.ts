@@ -24,6 +24,17 @@ export class SseService {
   // Instance created events for tree updates (queue to handle rapid spawning)
   instanceCreatedQueue = signal<InstanceInfo[]>([]);
 
+  // Latest context-usage snapshot for the connected instance. The backend
+  // emits this on SSE connect, on every user/assistant turn boundary, and
+  // after each LangGraph checkpoint update. The header indicator binds
+  // to this signal.
+  contextUsage = signal<{
+    tokens: number;
+    context_window: number;
+    percent: number;
+    model_name: string;
+  } | null>(null);
+
   // Pending tool_result outputs keyed by tool_call_id. Flushed whenever a
   // matching tool_call or assistant_message arrives, so a tool_result that
   // races ahead of its tool_call is not lost. Cleared on disconnect.
@@ -268,6 +279,25 @@ export class SseService {
       });
     });
 
+    // Context-usage snapshot. Backend emits this on SSE connect, before
+    // every user turn, and after each LangGraph checkpoint update. The
+    // payload is small ({tokens, context_window, percent, model_name}).
+    eventSource.addEventListener('context_usage', (e: MessageEvent) => {
+      this.ngZone.run(() => {
+        try {
+          const data = JSON.parse(e.data);
+          this.contextUsage.set({
+            tokens: Number(data.tokens),
+            context_window: Number(data.context_window),
+            percent: Number(data.percent),
+            model_name: String(data.model_name ?? ''),
+          });
+        } catch (err) {
+          console.error('[SSE] Failed to parse context_usage:', err);
+        }
+      });
+    });
+
     // Error event
     eventSource.addEventListener('error', (e: MessageEvent) => {
       this.ngZone.run(() => {
@@ -332,6 +362,7 @@ export class SseService {
     this.messages.set([]);
     this.statusChange.set(null);
     this.instanceCreatedQueue.set([]);
+    this.contextUsage.set(null);
     this.pendingToolOutputs.clear();
   }
 }

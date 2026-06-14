@@ -238,6 +238,43 @@ class LiveEventHub:
             event["agent_id"] = agent_id
         await self._stream_to_connections(instance_id, event)
 
+    async def stream_context_usage(
+        self,
+        instance_id: str,
+        tokens: int,
+        context_window: int,
+        model_name: str,
+    ) -> None:
+        """Stream current context-window usage to all active connections.
+
+        The frontend uses this to drive a small percent indicator next to
+        the Think/Tools toggles. The payload is intentionally tiny and
+        emitted only when the underlying token count actually changes
+        (callers should de-duplicate), so it adds no meaningful load to
+        the SSE stream.
+
+        Args:
+            instance_id: The instance this usage snapshot belongs to.
+            tokens: Estimated tokens currently in context (history + system prompt).
+            context_window: Effective context window for the active model
+                (already resolved against per-model overrides).
+            model_name: Resolved model name (used for tooltip on the FE).
+        """
+        # Clamp percent to [0, 100] so a misbehaving estimator never produces
+        # a negative or >100 indicator.
+        percent = 0.0
+        if context_window > 0:
+            percent = max(0.0, min(100.0, (tokens / context_window) * 100.0))
+        event: dict[str, Any] = {
+            "instance_id": instance_id,
+            "event_type": "context_usage",
+            "tokens": int(tokens),
+            "context_window": int(context_window),
+            "percent": round(percent, 1),
+            "model_name": model_name,
+        }
+        await self._stream_to_connections(instance_id, event)
+
     async def stream_instance_created(
         self,
         parent_id: str,

@@ -65,6 +65,19 @@
             >
               🔧 Tools
             </button>
+            <!-- Context usage indicator. Hidden until the first SSE
+                 snapshot arrives so we don't flash 0% on every page load. -->
+            @if (contextUsage(); as usage) {
+              <span
+                class="context-usage-pill"
+                [class.warn]="usage.percent >= 60 && usage.percent < 85"
+                [class.danger]="usage.percent >= 85"
+                [attr.title]="contextUsageTooltip(usage)"
+              >
+                <span class="context-usage-icon" aria-hidden="true">📊</span>
+                <span class="context-usage-pct">{{ usage.percent | number:'1.0-0' }}%</span>
+              </span>
+            }
           </div>
           @if (currentInstance()) {
             <span class="instance-id">

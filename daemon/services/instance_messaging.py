@@ -13,7 +13,8 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from sqlmodel import Session
 
 from ..cancellation import CancellationToken
-from ..compaction import ContextCompactor, CompactionContext
+from ..compaction import ContextCompactor, CompactionContext, get_model_context_limit
+from ..loader import estimate_messages_tokens
 from ..persistence import get_instance_messages
 from ..repositories.event.models import Event, EventKind
 from ..repositories.instance.models import Instance, InstanceStatus
@@ -293,6 +294,123 @@ class InstanceMessagingService:
             return 0
         except Exception:
             return 0
+
+    def _compute_context_usage(
+        self,
+        instance_id: str,
+        messages: list,
+    ) -> tuple[int, int, str] | None:
+        """Compute the current context usage snapshot for an instance.
+
+        Returns (tokens, context_window, model_name) or None if the model
+        cannot be resolved (e.g. instance missing). The token count is
+        history tokens + cached system prompt tokens so it matches what
+        ``_maybe_compact_context`` measures internally.
+
+        Args:
+            instance_id: The instance to compute usage for.
+            messages: The current message list (LangChain BaseMessage objects
+                or dicts). Empty/None is fine — we still return a snapshot.
+        """
+        try:
+            model_name = self._config.llm.model or ""
+            context_window = get_model_context_limit(model_name, self._config.compaction)
+            history_tokens = estimate_messages_tokens(messages or [])
+            system_prompt_tokens = self._get_system_prompt_tokens(instance_id)
+            return history_tokens + system_prompt_tokens, context_window, model_name
+        except Exception as e:
+            logger.debug(f"Failed to compute context usage for {instance_id[:8]}...: {e}")
+            return None
+
+    async def _emit_context_usage(
+        self,
+        instance_id: str,
+        messages: list,
+        force: bool = False,
+    ) -> None:
+        """Compute and broadcast a context_usage event, suppressing duplicates.
+
+        Compares against the last snapshot broadcast for this instance; if
+        the token count is unchanged, the call is a no-op so the SSE
+        stream isn't polluted with redundant updates. The check is per-
+        process; an instance with N active SSE connections pays the cost
+        once per call regardless of N.
+
+        Pass ``force=True`` to skip the dedup check — used by the SSE
+        connect handler so the first event for a freshly connected
+        client always gets through, even if the instance was recently
+        snapshotted for another client.
+
+        Args:
+            instance_id: The instance to snapshot.
+            messages: The current message list.
+            force: If True, skip the dedup check and always broadcast.
+        """
+        snapshot = self._compute_context_usage(instance_id, messages)
+        if snapshot is None:
+            return
+        tokens, context_window, model_name = snapshot
+
+        if not force:
+            last = self._manager._last_context_usage.get(instance_id)
+            # Suppress if the token count hasn't moved (typical while a long
+            # assistant response is streaming one token at a time — only the
+            # final value changes). 1-token jitter is ignored.
+            if last is not None and abs(last - tokens) < 1 and tokens > 0:
+                return
+        self._manager._last_context_usage[instance_id] = tokens
+
+        try:
+            await self._manager._live_hub.stream_context_usage(
+                instance_id=instance_id,
+                tokens=tokens,
+                context_window=context_window,
+                model_name=model_name,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to broadcast context usage for {instance_id[:8]}...: {e}")
+
+    async def emit_context_usage_for_instance(self, instance_id: str) -> None:
+        """Public wrapper: load current state messages and emit context usage.
+
+        Used by the SSE connect handler to populate the FE indicator
+        immediately on connect, before any user interaction. Any failure
+        is logged at debug level and swallowed so a transient checkpointer
+        hiccup never breaks the SSE connection.
+        """
+        try:
+            messages = await self.get_messages(instance_id)
+        except Exception as e:
+            logger.debug(f"emit_context_usage_for_instance: get_messages failed for {instance_id[:8]}...: {e}")
+            return
+
+        # get_messages returns dicts; convert to lightweight LangChain messages
+        # so estimate_messages_tokens can read .content / .tool_calls / .name.
+        from langchain_core.messages import (
+            AIMessage,
+            HumanMessage,
+            SystemMessage,
+            ToolMessage,
+        )
+        _cls_for_role = {
+            "user": HumanMessage,
+            "assistant": AIMessage,
+            "system": SystemMessage,
+            "tool": ToolMessage,
+        }
+        adapted = []
+        for raw in messages or []:
+            cls = _cls_for_role.get(raw.get("role", "user"), HumanMessage)
+            msg = cls(content=raw.get("content", "") or "")
+            if raw.get("id"):
+                msg.id = raw["id"]
+            if raw.get("tool_calls"):
+                msg.tool_calls = raw["tool_calls"]
+            if raw.get("name"):
+                msg.name = raw["name"]
+            adapted.append(msg)
+
+        await self._emit_context_usage(instance_id, adapted, force=True)
 
     def _fetch_critical_notes_safe(self, project_id: str) -> list[dict]:
         """Fetch critical notes for a project, returning empty list on failure."""
@@ -937,6 +1055,16 @@ class InstanceMessagingService:
             checkpoint_id="user",
         )
 
+        # Broadcast initial context usage (before the assistant starts) so the
+        # FE indicator reflects the pre-response state. The streaming loop
+        # will emit updates as the graph accumulates messages.
+        try:
+            pre_state = await graph.aget_state(config)
+            pre_messages = (pre_state.values.get("messages", []) if pre_state else []) + [user_msg]
+        except Exception:
+            pre_messages = [user_msg]
+        await self._emit_context_usage(instance_id, pre_messages)
+
         # Reset state for this processing call to prevent unbounded growth
         all_state_messages: list = []
         tool_outputs: dict = {}
@@ -1023,7 +1151,13 @@ class InstanceMessagingService:
                         
                         if not any_new:
                             continue
-                        
+
+                        # Broadcast context usage against the latest accumulated
+                        # state. _emit_context_usage dedupes so this is cheap
+                        # when the token count is unchanged (e.g. during a long
+                        # single-response stream).
+                        await self._emit_context_usage(instance_id, all_state_messages)
+
                         # Build tool_outputs from ALL messages (including ToolMessages)
                         tool_outputs = {}
                         for m in all_state_messages:

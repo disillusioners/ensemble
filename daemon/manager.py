@@ -497,6 +497,11 @@ class InstanceManager:
         # Used to detect if a message was updated between streaming and final state.
         self._emitted_message_content: dict[str, str] = {}
 
+        # Last context-usage token count broadcast per instance. Used to
+        # suppress redundant context_usage SSE events (see
+        # ``InstanceMessaging._emit_context_usage``).
+        self._last_context_usage: dict[str, int] = {}
+
         # LLM concurrency setting
         self._llm_semaphore = asyncio.Semaphore(config.limits.llm_concurrency)
 

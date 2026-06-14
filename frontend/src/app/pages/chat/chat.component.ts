@@ -58,6 +58,25 @@ export class ChatComponent implements OnInit, OnDestroy {
   readonly sendError = signal<string | null>(null);
   readonly instanceNotFound = signal<string | null>(null);
 
+  /**
+   * Context-usage snapshot for the currently open instance. Mirrors the
+   * sseService signal so the header pill updates reactively. Null when
+   * the backend hasn't sent a snapshot yet (e.g. instance has zero
+   * messages, or SSE hasn't connected).
+   */
+  readonly contextUsage = computed(() => this.sseService.contextUsage());
+
+  /**
+   * Formatted tooltip "X / Y tokens (model)" for the header pill.
+   * Re-rendered whenever the snapshot changes thanks to signal binding.
+   */
+  contextUsageTooltip(usage: { tokens: number; context_window: number; model_name: string }): string {
+    const tokens = usage.tokens.toLocaleString();
+    const window = usage.context_window.toLocaleString();
+    const model = usage.model_name || 'model';
+    return `${tokens} / ${window} tokens (${model})`;
+  }
+
   private tabEffect = effect(() => {
     const projectId = this.tabStateService.activeProjectId();
     this.instanceService.startPolling(projectId ?? undefined);

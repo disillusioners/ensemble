@@ -223,10 +223,32 @@ async def stream_events(instance_id: str, request: Request):
             "event": "connected",
             "data": json.dumps({"instance_id": instance_id}),
         }
-        
-        # 2. Create a queue for this connection
+
+        # 2. Create a queue and register it BEFORE any helper that
+        # broadcasts through the live hub. Otherwise the broadcast finds
+        # zero registered connections and the event is silently dropped.
         queue: asyncio.Queue = asyncio.Queue(maxsize=SSE_QUEUE_MAXSIZE)
         await live_hub.add_connection(instance_id, queue)
+
+        # 2b. Initial context_usage snapshot. Lets the FE indicator populate
+        # immediately on connect, without waiting for the next message
+        # round-trip. The helper is a no-op if the instance has no messages
+        # yet and is cheap to call. The event lands on the queue above and
+        # is yielded by the consumer loop below.
+        #
+        # Run it as a background task so any DB I/O in get_messages happens
+        # off the SSE send-path. create_task + add_done_callback keeps the
+        # task tracked so we don't leak on early disconnect.
+        async def _initial_snapshot() -> None:
+            try:
+                messaging = getattr(manager, "_messaging_service", None)
+                if messaging is not None and hasattr(messaging, "emit_context_usage_for_instance"):
+                    await messaging.emit_context_usage_for_instance(instance_id)
+            except Exception as e:
+                logger.debug(f"Failed to emit initial context usage: {e}")
+
+        snapshot_task = asyncio.create_task(_initial_snapshot())
+        snapshot_task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
         
         try:
             while True:
