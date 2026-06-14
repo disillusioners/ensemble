@@ -37,7 +37,7 @@ _OPENCODE_CONTROL_MESSAGES = frozenset({"continue", "retry", "abort", "start-wor
 # ``external_opencode_wait_any``. Previously exposed as a ``timeout`` parameter
 # (default 600s); now centralized here so callers can't accidentally truncate
 # long-running opencode sessions.
-WAIT_TIMEOUT_S = 660
+WAIT_TIMEOUT_S = 610
 
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager

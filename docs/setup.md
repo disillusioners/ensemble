@@ -321,7 +321,7 @@ llm:
   model_title: ${OPENAI_MODEL_TITLE:-}
   model_vision: ${OPENAI_MODEL_VISION:-}
   temperature: 0.7
-  request_timeout: 660
+  request_timeout: 610
 ```
 
 | Key | Type | Default | Description |
@@ -332,7 +332,7 @@ llm:
 | `llm.model_title` | string | — | Model used for generating conversation titles (optional, can use cheaper model) |
 | `llm.model_vision` | string | — | Vision-capable model for image analysis tasks |
 | `llm.temperature` | float | `0.7` | Default temperature for LLM requests (0.0-2.0) |
-| `llm.request_timeout` | integer | `660` | Timeout for LLM API requests in seconds |
+| `llm.request_timeout` | integer | `610` | Timeout for LLM API requests in seconds |
 
 #### Daemon Configuration
 

@@ -26,7 +26,7 @@ SSE_QUEUE_MAXSIZE: int = 50  # Max size for SSE event queue
 EVENT_STREAM_POLL_INTERVAL: int = 2  # Job SSE poll interval (seconds)
 
 # ── Timeouts (seconds) ───────────────────────────────────────────────────────────
-REQUEST_TIMEOUT_S: int = 660  # LLM request timeout (11 minutes)
+REQUEST_TIMEOUT_S: int = 610  # LLM request timeout (11 minutes)
 INSTANCE_TIMEOUT_S: int = 60  # Instance timeout (minutes converted to seconds)
 GRAPH_TIMEOUT_S: int = 300  # MainLoopBridge default timeout (5 minutes)
 TASK_TIMEOUT_S: int = 300  # Default task timeout (5 minutes)

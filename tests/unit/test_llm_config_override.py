@@ -15,7 +15,7 @@ def create_mock_config(
     base_url: str = "https://api.openai.com/v1",
     api_key: str = "test-key",
     temperature: float = 0.7,
-    request_timeout: int = 660,
+    request_timeout: int = 610,
     model_vision: str | None = None,
 ) -> Config:
     """Create a mock Config with customizable LLM settings."""
@@ -88,7 +88,7 @@ class TestBuildLLMConfig:
         assert result["base_url"] == "https://api.openai.com/v1"
         assert result["api_key"] == "test-key"
         assert result["temperature"] == 0.7
-        assert result["request_timeout"] == 660
+        assert result["request_timeout"] == 610
         assert result["model_vision"] is None
 
     def test_returns_global_config_when_llm_model_is_none(self) -> None:

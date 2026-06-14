@@ -56,7 +56,7 @@ class LLMConfig(BaseSettings):
     )
     model_vision: str | None = Field(default=None, description="Model for vision/image processing (e.g., gpt-4o)")
     temperature: float = Field(default=0.7)
-    request_timeout: int = Field(default=660, description="Request timeout in seconds (default: 11 minutes)")
+    request_timeout: int = Field(default=610, description="Request timeout in seconds (default: 11 minutes)")
 
     # Models for which reasoning_content from a previous turn must be echoed
     # back in subsequent assistant messages. Substring match is performed

@@ -40,8 +40,8 @@ class TestConstants:
     # ── Timeouts (seconds) ──────────────────────────────────────────────────────
 
     def test_request_timeout(self):
-        """REQUEST_TIMEOUT_S should be 660 (11 minutes)."""
-        assert constants.REQUEST_TIMEOUT_S == 660
+        """REQUEST_TIMEOUT_S should be 610 (11 minutes)."""
+        assert constants.REQUEST_TIMEOUT_S == 610
 
     def test_instance_timeout(self):
         """INSTANCE_TIMEOUT_S should be 60."""
