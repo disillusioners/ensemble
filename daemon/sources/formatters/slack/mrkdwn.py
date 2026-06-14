@@ -6,9 +6,11 @@ before any other transformation, then restored at the end.
 
 Two distinct placeholder mechanisms are used to avoid collisions:
 
-* Bold/heading placeholders use ``⟦...⟧`` (matching the convention in
-  ``daemon/sources/adapters/slack/blocks.py``) and are later rewritten to
-  ``*text*``.
+* Bold/heading placeholders use Unicode noncharacters (``\\uFDD2``/``\\uFDD3``)
+  and are later rewritten to ``*text*``. These sentinels are guaranteed never
+  to occur in real text and cannot collide with the code-block placeholders
+  or with legitimate Unicode math brackets (``⟦``/``⟧``) that may appear in
+  LLM output.
 * Code-block placeholders use Unicode noncharacters (``\\uFDD0``/``\\uFDD1``)
   and are restored verbatim at the end. These sentinels are guaranteed never
   to occur in real text and cannot collide with the bold placeholders.
@@ -20,10 +22,11 @@ import re
 
 from daemon.sources.formatters.base import OutputFormatter
 
-# Bold/heading placeholders — match the convention in
-# daemon/sources/adapters/slack/blocks.py and are later rewritten to "*text*".
-_BOLD_PLACEHOLDER_OPEN = "\u27e6"  # ⟦
-_BOLD_PLACEHOLDER_CLOSE = "\u27e7"  # ⟧
+# Bold/heading placeholders — Unicode noncharacters (never appear in real
+# text) so they cannot collide with code-block placeholders or with
+# legitimate Unicode math brackets in LLM output. Later rewritten to "*text*".
+_BOLD_PLACEHOLDER_OPEN = "\uFDD2"
+_BOLD_PLACEHOLDER_CLOSE = "\uFDD3"
 
 # Code-block placeholders — Unicode noncharacters (never appear in real text)
 # so they cannot collide with markdown syntax or with bold placeholders.
@@ -37,17 +40,19 @@ class SlackMrkdwnFormatter(OutputFormatter):
     The conversion pipeline (applied in this exact order):
         1. Extract & protect fenced code blocks (```...```)
         2. Extract & protect inline code (`...`)
-        3. Convert ``bold`` to placeholders
-        4. Convert ``bold`` to placeholders (word-boundary aware)
-        5. Convert ``italic`` to ``_italic_`` (safe - bold is in placeholders)
-        6. Replace bold/heading placeholders with ``*text*``
-        7. Convert ``strike`` to ``~strike~``
-        8. Convert ``[text](url)`` to ``<url|text>`` (parens in URL supported)
-        9. Convert headings (````, ````, ````+) to ``*text*`` (already-formatted
+        3. Convert ``***bold+italic***`` to ``*_text_*`` (must run before
+           regular ``**bold**``)
+        4. Convert ``**bold**`` to placeholders
+        5. Convert ``__bold__`` to placeholders (word-boundary aware)
+        6. Convert ``*italic*`` to ``_italic_`` (safe - bold is in placeholders)
+        7. Replace bold/heading placeholders with ``*text*``
+        8. Convert ``~~strike~~`` to ``~strike~``
+        9. Convert ``[text](url)`` to ``<url|text>`` (parens in URL supported)
+       10. Convert headings (````, ````, ````+) to ``*text*`` (already-formatted
            text is left as-is)
-       10. Convert list markers (-, ``*``, 1.) to bullets (•)
-       11. Convert markdown tables to ASCII tables in code fences
-       12. Restore protected code blocks
+       11. Convert list markers (-, ``*``, 1.) to bullets (•)
+       12. Convert markdown tables to ASCII tables in code fences
+       13. Restore protected code blocks
     """
 
     def format(self, text: str) -> str:
@@ -77,14 +82,23 @@ class SlackMrkdwnFormatter(OutputFormatter):
         # Step 2: Protect inline code (`...`)
         text = re.sub(r"`[^`\n]+`", _save, text)
 
-        # Step 3: Convert **bold** to placeholders.
+        # Step 3: Handle ***bold+italic*** (must run BEFORE **bold** to avoid
+        # the bold regex swallowing the outer pair and leaving the inner * as
+        # an unmatched italic marker).
+        text = re.sub(
+            r"\*\*\*(\S(?:[^*]*\S)?)\*\*\*",
+            rf"{_BOLD_PLACEHOLDER_OPEN}_\1_{_BOLD_PLACEHOLDER_CLOSE}",
+            text,
+        )
+
+        # Step 4: Convert **bold** to placeholders.
         text = re.sub(
             r"\*\*(.+?)\*\*",
             rf"{_BOLD_PLACEHOLDER_OPEN}\1{_BOLD_PLACEHOLDER_CLOSE}",
             text,
         )
 
-        # Step 4: Convert __bold__ to placeholders (with word boundaries to avoid
+        # Step 5: Convert __bold__ to placeholders (with word boundaries to avoid
         # false positives on dunders like __init__).
         text = re.sub(
             r"(?<![A-Za-z0-9])__(.+?)__(?![A-Za-z0-9])",
@@ -92,21 +106,24 @@ class SlackMrkdwnFormatter(OutputFormatter):
             text,
         )
 
-        # Step 5: Convert *italic* to _italic_.
+        # Step 6: Convert *italic* to _italic_.
         # At this point, all bold/heading markers are inside placeholders,
-        # so single * pairs are safe to convert. We still use negative
-        # lookbehind/lookahead to be defensive against any leftover single *.
-        text = re.sub(r"(?<!\*)\*([^*\n]+?)\*(?!\*)", r"_\1_", text)
+        # so single * pairs are safe to convert. The content between the
+        # asterisks must start and end with a non-whitespace character; this
+        # avoids false positives on math expressions like "2 * 3 * 4" while
+        # still allowing the common "a *quick* brown fox" form (the *s are
+        # adjacent to letters, not whitespace).
+        text = re.sub(r"(?<!\*)\*(\S(?:[^*\n]*\S)?)\*(?!\*)", r"_\1_", text)
 
-        # Step 6: Restore bold/heading placeholders to *text* (Slack bold).
+        # Step 7: Restore bold/heading placeholders to *text* (Slack bold).
         text = text.replace(_BOLD_PLACEHOLDER_OPEN, "*").replace(
             _BOLD_PLACEHOLDER_CLOSE, "*"
         )
 
-        # Step 7: Convert ~~strikethrough~~ to ~strikethrough~.
+        # Step 8: Convert ~~strikethrough~~ to ~strikethrough~.
         text = re.sub(r"~~(.+?)~~", r"~\1~", text)
 
-        # Step 8: Convert [text](url) to <url|text>, allowing one level of
+        # Step 9: Convert [text](url) to <url|text>, allowing one level of
         # nested parentheses in URLs (e.g. Wikipedia links).
         text = re.sub(
             r"\[([^\]]+)\]\(([^()]*(?:\([^()]*\)[^()]*)*)\)",
@@ -114,7 +131,7 @@ class SlackMrkdwnFormatter(OutputFormatter):
             text,
         )
 
-        # Step 9: Convert headings to Slack bold, running after all inline
+        # Step 10: Convert headings to Slack bold, running after all inline
         # conversions are complete so heading content is already formatted.
         # If the heading text is already wrapped in *...* (e.g. from inline
         # bold), leave it unchanged; otherwise wrap it in *...*.
@@ -126,19 +143,23 @@ class SlackMrkdwnFormatter(OutputFormatter):
 
         text = re.sub(r"^#{1,6}[ \t]+(\S(?:.*\S)?)[ \t]*$", _heading_repl, text, flags=re.MULTILINE)
 
-        # Step 10: Convert list markers to bullets.
+        # Step 11: Convert list markers to bullets.
         # `- ` or `* ` at the start of a line -> `• `.
         text = re.sub(r"^[\-\*][ \t]+", "\u2022 ", text, flags=re.MULTILINE)
         # Numbered lists `1. `, `2. `, etc. -> `• `.
         text = re.sub(r"^\d+\.[ \t]+", "\u2022 ", text, flags=re.MULTILINE)
 
-        # Step 11: Convert markdown tables to ASCII tables in code fences.
+        # Step 12: Convert markdown tables to ASCII tables in code fences.
         text = self._convert_tables(text)
 
-        # Step 12: Restore protected code blocks.
+        # Step 13: Restore protected code blocks.
         def _restore(match: re.Match[str]) -> str:
             idx = int(match.group(1))
-            return protected[idx]
+            # Bounds-check: if the index is out of range, leave the original
+            # sentinel untouched instead of crashing with IndexError. This
+            # guards against any text in the input that happens to look like
+            # a sentinel (e.g. literal "\uFDD00\uFDD1").
+            return protected[idx] if 0 <= idx < len(protected) else match.group(0)
 
         text = re.sub(
             rf"{re.escape(_CODE_PLACEHOLDER_OPEN)}(\d+){re.escape(_CODE_PLACEHOLDER_CLOSE)}",
@@ -227,6 +248,11 @@ class SlackMrkdwnFormatter(OutputFormatter):
     def _parse_table_row(self, line: str) -> list[str]:
         """Parse a markdown table row into its cell strings.
 
+        Cells are split on unescaped ``|`` characters. A backslash-escaped
+        pipe (``\\|``) is preserved inside the cell content so that links
+        such as ``[text](https://example.com/with|pipe)`` do not break the
+        table layout.
+
         Args:
             line: A markdown table row.
 
@@ -238,7 +264,8 @@ class SlackMrkdwnFormatter(OutputFormatter):
             s = s[1:]
         if s.endswith("|"):
             s = s[:-1]
-        return [c.strip() for c in s.split("|")]
+        # Split on unescaped pipes only; escaped pipes (\|) are preserved.
+        return [c.strip() for c in re.split(r"(?<!\\)\|", s)]
 
     def _build_ascii_table(self, header_line: str, data_lines: list[str]) -> str:
         """Build an ASCII table from parsed markdown table parts.
@@ -257,12 +284,17 @@ class SlackMrkdwnFormatter(OutputFormatter):
         headers = self._parse_table_row(header_line)
         rows = [self._parse_table_row(line) for line in data_lines]
 
-        ncols = len(headers)
-        widths = [len(h) for h in headers]
+        # Widen the column count to the maximum seen across ALL rows so that
+        # data rows with extra columns are not silently truncated.
+        ncols = max(len(headers), max((len(r) for r in rows), default=0))
+        widths = [0] * ncols
+        # Initialise widths from the header first.
+        for k, h in enumerate(headers):
+            widths[k] = len(h)
+        # Then widen using all data rows (including any columns beyond header).
         for row in rows:
             for k, cell in enumerate(row):
-                if k < ncols:
-                    widths[k] = max(widths[k], len(cell))
+                widths[k] = max(widths[k], len(cell))
 
         def _format_row(cells: list[str]) -> str:
             parts: list[str] = []

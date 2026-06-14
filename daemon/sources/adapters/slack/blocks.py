@@ -5,6 +5,58 @@ from __future__ import annotations
 from typing import Any
 
 
+# Common language specifiers recognised at the start of a fenced code block.
+# Kept as a module-level constant so the same set is used everywhere in this
+# file and tests can introspect it if needed.
+_COMMON_LANGS: frozenset[str] = frozenset(
+    {
+        'python', 'py', 'js', 'javascript', 'ts', 'typescript',
+        'bash', 'sh', 'shell', 'zsh', 'json', 'yaml', 'yml',
+        'xml', 'html', 'css', 'sql', 'go', 'rust', 'rs',
+        'java', 'c', 'cpp', 'c++', 'c#', 'cs', 'ruby', 'rb',
+        'php', 'swift', 'kotlin', 'kt', 'scala', 'perl', 'r',
+        'lua', 'haskell', 'hs', 'markdown', 'md', 'text', 'txt',
+        'diff', 'dockerfile', 'makefile', 'ini', 'toml',
+    }
+)
+
+
+def _strip_language_specifier(first_line: str, rest_content: str) -> str:
+    """Return the code body with a leading language specifier (if any) removed.
+
+    Only the *first whitespace-delimited token* of ``first_line`` is matched
+    against the known language set. This avoids stripping legitimate content
+    that just happens to start with a language-like word (e.g. ``python # noqa``)
+    or with a ``#`` comment / shebang.
+
+    Args:
+        first_line: The first line of the code block (no trailing newline).
+        rest_content: Everything after that first line and its trailing newline.
+
+    Returns:
+        The code content with the language specifier (if any) removed.
+    """
+    stripped = first_line.strip()
+    if not stripped:
+        # First line is whitespace only: keep ``rest_content`` as-is.
+        return rest_content
+
+    # Only the first TOKEN of the first line is tested. This is the key fix
+    # for ``python # noqa`` style inputs where the line is not purely a
+    # language name.
+    first_token = stripped.split()[0].lower()
+    if first_token in _COMMON_LANGS:
+        # Strip the first token plus any following whitespace from the
+        # original first_line, then re-attach the rest.
+        remaining_first_line = stripped[len(first_token):].lstrip()
+        if remaining_first_line:
+            return remaining_first_line + "\n" + rest_content
+        return rest_content
+
+    # Not a known language specifier: keep the original content untouched.
+    return first_line + "\n" + rest_content if rest_content else first_line
+
+
 def markdown_to_slack_blocks(text: str) -> list[dict[str, Any]]:
     """Convert Markdown text to Slack Block Kit sections.
 
@@ -83,27 +135,14 @@ def _parse_blocks(text: str) -> list[dict[str, Any]]:
                 # Has content after opening delimiter
                 first_line = code_content[:first_newline]
                 rest_content = code_content[first_newline + 1:]
-                if first_line.strip():
-                    common_langs = {
-                        'python', 'py', 'js', 'javascript', 'ts', 'typescript',
-                        'bash', 'sh', 'shell', 'zsh', 'json', 'yaml', 'yml',
-                        'xml', 'html', 'css', 'sql', 'go', 'rust', 'rs',
-                        'java', 'c', 'cpp', 'c++', 'c#', 'cs', 'ruby', 'rb',
-                        'php', 'swift', 'kotlin', 'kt', 'scala', 'perl', 'r',
-                        'lua', 'haskell', 'hs', 'markdown', 'md', 'text', 'txt',
-                        'diff', 'dockerfile', 'makefile', 'ini', 'toml',
-                    }
-                    first_line_lower = first_line.strip().lower()
-                    if first_line_lower in common_langs:
-                        # It's a language specifier, skip it
-                        code_content = rest_content
-                    else:
-                        # Keep the content as-is (actual code, comment, etc.)
-                        code_content = part
-                else:
-                    # First line is whitespace only; treat the next line as
-                    # the start of the actual content.
-                    code_content = rest_content
+                code_content = _strip_language_specifier(first_line, rest_content)
+            else:
+                # No newline inside the code block: a single-line code fence
+                # such as ```` ```python print("hi")``` ````. The whole
+                # payload is the first_line; rest is empty. The language-
+                # specifier check still applies and must not crash.
+                first_line = code_content
+                code_content = _strip_language_specifier(first_line, "")
 
             # Remove trailing newline from closing delimiter if present
             if code_content.endswith('\n'):
@@ -157,21 +196,43 @@ def _split_large_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _split_text_chunk(text: str, max_length: int) -> list[str]:
-    """Split text into chunks, trying to break at line boundaries."""
+    """Split text into chunks, trying to break at line boundaries.
+
+    Tracks the ````` fence state while scanning for split points so a
+    split never lands inside an open code fence (which would leave one
+    chunk with an unbalanced opening ``````` and Slack would render the
+    rest of the message as raw code).
+    """
     chunks: list[str] = []
-    
+
     while len(text) > max_length:
-        # Find the last newline before max_length
-        split_point = text.rfind('\n', 0, max_length)
-        
+        # Find the last newline at or before max_length that lies OUTSIDE
+        # an open code fence. We track how many fence delimiters (`````)
+        # we have seen so far in the scan window: an even count means we
+        # are outside a fence, an odd count means we are inside one.
+        split_point = -1
+        fence_count = 0
+        scan_end = min(len(text), max_length + 1)
+        i = 0
+        while i < scan_end:
+            if text[i:i + 3] == "```":
+                fence_count += 1
+                i += 3
+                continue
+            if text[i] == "\n" and fence_count % 2 == 0:
+                split_point = i
+            i += 1
+
         if split_point == -1:
-            # No newline found, force split at max_length
+            # No safe split point in the window (either no newlines or every
+            # newline is inside a code fence). Force a split at max_length
+            # to make progress.
             split_point = max_length
-        
+
         chunks.append(text[:split_point])
-        text = text[split_point:].lstrip('\n')
-    
+        text = text[split_point:].lstrip("\n")
+
     if text:
         chunks.append(text)
-    
+
     return chunks

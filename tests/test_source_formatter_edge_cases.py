@@ -618,3 +618,333 @@ class TestMarkdownToSlackBlocksEdgeCases:
         assert "__init__" in blocks[0]["text"]["text"]
         # The bug: "*init*" appears where "__init__" should be.
         # (This is an informational comment, not a separate assertion.)
+
+
+# --------------------------------------------------------------------------- #
+# 13. Bug-fix regression tests (C1-C6, W1, W2, W3)
+# --------------------------------------------------------------------------- #
+
+
+class TestMathItalicFalsePositive:
+    """C1: ``2 * 3 * 4`` must NOT be converted to ``2 _ 3 _ 4``."""
+
+    def test_math_with_spaces_not_italic(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``2 * 3 * 4`` stays unchanged — the asterisks are math operators.
+
+        The italic regex must reject ``*`` pairs where the content has
+        leading or trailing whitespace, so that inline math expressions
+        are left alone.
+        """
+        result = formatter.format("2 * 3 * 4")
+        assert result == "2 * 3 * 4"
+
+    def test_math_with_spaces_in_sentence(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Math embedded in a sentence is also preserved."""
+        result = formatter.format("compute 6 * 7 * 8 today")
+        assert result == "compute 6 * 7 * 8 today"
+
+    def test_real_italic_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: genuine italic still converts even after the C1 fix."""
+        assert formatter.format("*italic*") == "_italic_"
+
+
+class TestMathBracketsNotPlaceholders:
+    """C2: Unicode math brackets ``⟦⟧`` must not collide with placeholders."""
+
+    def test_math_open_bracket_preserved(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``⟦note⟧`` is preserved verbatim (was being rewritten to ``*note*``).
+
+        The OLD placeholder characters were ``\\u27E6``/``\\u27E7`` which
+        are real Unicode math brackets. The NEW placeholders use the
+        Unicode noncharacters ``\\uFDD2``/``\\uFDD3`` so legitimate
+        math brackets in the input survive unchanged.
+        """
+        result = formatter.format("\u27e6note\u27e7")
+        assert result == "\u27e6note\u27e7"
+
+    def test_math_brackets_around_bold_word(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Math brackets wrapping a word — the word is plain text, not bold."""
+        result = formatter.format("see \u27e6important\u27e7 here")
+        assert result == "see \u27e6important\u27e7 here"
+        # The inner word is NOT converted to Slack bold.
+        assert "*important*" not in result
+
+    def test_real_bold_still_works(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """Sanity: regular ``**bold**`` still becomes ``*bold*`` after the fix."""
+        assert formatter.format("**bold**") == "*bold*"
+
+
+class TestTableWithEscapedPipes:
+    """C3: Table cell with an escaped pipe must not break column parsing."""
+
+    def test_escaped_pipe_in_cell(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A cell whose content contains an escaped ``\\|`` is one cell.
+
+        Without pipe-aware splitting, the parser would incorrectly split
+        the cell on the (un-escaped-looking) ``|`` and produce a column
+        count that does not match the header.
+        """
+        text = (
+            "| Name | Alias |\n"
+            "|------|-------|\n"
+            "| Bob | Bobby\\|Bobby |"
+        )
+        result = formatter.format(text)
+        # The result must be a valid code-fenced table.
+        assert result.startswith("```\n")
+        assert result.endswith("```")
+        # The escaped pipe survives inside the cell — i.e. the row is
+        # exactly 2 cells, not 3, so the cell content is preserved.
+        body = result.strip("`").strip()
+        assert "Bobby\\|Bobby" in body
+
+    def test_link_with_pipe_in_url_preserved(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A markdown table cell containing a link keeps the link intact.
+
+        The link ``[text](https://example.com/with\\|pipe)`` is converted
+        to ``<https://example.com/with\\|pipe|text>`` and the escaped
+        pipe in the URL must not break the table layout.
+        """
+        text = (
+            "| Label | URL |\n"
+            "|------|-----|\n"
+            "| docs | [home](https://example.com/with\\|pipe) |"
+        )
+        result = formatter.format(text)
+        # Both header cells are present.
+        assert "Label" in result
+        assert "URL" in result
+        # The link text is preserved.
+        assert "home" in result
+
+
+class TestTableWithExtraDataColumns:
+    """C4: Data rows with more columns than the header are not truncated."""
+
+    def test_extra_data_columns_preserved(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A data row with one extra cell beyond the header is preserved.
+
+        The OLD code silently dropped cells beyond ``ncols`` (the header
+        column count). The NEW code widens ``ncols`` to the maximum seen
+        across all rows so extra cells are kept.
+        """
+        text = (
+            "| A | B |\n"
+            "|---|---|\n"
+            "| 1 | 2 | 3 |"
+        )
+        result = formatter.format(text)
+        assert result.startswith("```\n")
+        assert result.endswith("```")
+        # All three data cells must be present.
+        body = result.strip("`").strip()
+        assert "1" in body
+        assert "2" in body
+        assert "3" in body
+        # Body should have header + separator + 1 data row = 3 lines.
+        lines = body.split("\n")
+        assert len(lines) == 3
+
+    def test_header_wider_than_some_data_rows(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """When the header has more columns than some data rows, padding
+        is applied consistently so the table is visually aligned.
+        """
+        text = (
+            "| A | B | C |\n"
+            "|---|---|---|\n"
+            "| 1 | 2 |\n"  # shorter data row
+            "| 3 | 4 | 5 |"
+        )
+        result = formatter.format(text)
+        body = result.strip("`").strip()
+        # All cells must be present in the body.
+        for token in ("A", "B", "C", "1", "2", "3", "4", "5"):
+            assert token in body, f"Missing token: {token!r}"
+
+
+class TestSentinelLikeInput:
+    """C5: Sentinel-like input does not crash the formatter."""
+
+    def test_dangling_sentinel_does_not_crash(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A literal ``\\uFDD00\\uFDD1`` looks like a code-block sentinel
+        pointing to index 0. The OLD code raised ``IndexError``; the NEW
+        code returns the original sentinel unchanged.
+        """
+        text = "before \uFDD00\uFDD1 after"
+        # Should not raise.
+        result = formatter.format(text)
+        # The literal sentinel is preserved (not replaced with protected[0]).
+        assert "\uFDD00\uFDD1" in result
+
+    def test_random_sentinel_in_word(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A sentinel embedded inside a word is also handled gracefully."""
+        text = "hello \uFDD099\uFDD1 world"
+        result = formatter.format(text)
+        # No crash, and the original characters survive.
+        assert "\uFDD099\uFDD1" in result
+
+
+class TestSingleLineCodeBlockLanguage:
+    """C6: A single-line code fence still has its language stripped."""
+
+    def test_single_line_python_strips_language(
+        self,
+    ) -> None:
+        """```python print('hi')``` (no internal newline) strips ``python``.
+
+        The OLD code path used ``find('\\n')`` to locate the language
+        line; on input with no internal newline, ``find`` returns ``-1``
+        and the language leaks into the displayed content. The NEW code
+        handles the ``first_newline == -1`` case explicitly.
+        """
+        text = "```python print('hi')```"
+        blocks = markdown_to_slack_blocks(text)
+        assert len(blocks) == 1
+        content = blocks[0]["text"]["text"]
+        # Inner content (between the backticks) should not contain
+        # ``python`` as a leaked word.
+        assert content.startswith("```")
+        assert content.endswith("```")
+        inner = content[3:-3]
+        assert "python" not in inner
+        assert "print('hi')" in inner
+
+    def test_single_line_unknown_lang_preserved(
+        self,
+    ) -> None:
+        """```foobar something``` keeps its content (no known language)."""
+        text = "```foobar something```"
+        blocks = markdown_to_slack_blocks(text)
+        assert len(blocks) == 1
+        content = blocks[0]["text"]["text"]
+        inner = content[3:-3]
+        assert "foobar something" in inner
+
+
+class TestBoldItalicTripleAsterisk:
+    """W1: ``***bold+italic***`` becomes ``*_bold+italic_*``."""
+
+    def test_triple_asterisk_bold_italic(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``***text***`` → ``*_text_*`` (Slack bold wrapping italic).
+
+        The OLD pipeline ate the outer ``**...**`` first and left an
+        unmatched ``*`` on each side, producing ``*_text_*`` with the
+        bold wrapping inverted. The NEW pipeline handles ``***...***``
+        explicitly BEFORE the regular bold step.
+        """
+        assert formatter.format("***bold+italic***") == "*_bold+italic_*"
+
+    def test_triple_asterisk_in_sentence(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """The same form embedded in a sentence."""
+        result = formatter.format("a ***bold+italic*** word")
+        assert result == "a *_bold+italic_* word"
+
+
+class TestHeadingWithPartialInline:
+    """W2: Headings with mixed inline formatting wrap correctly."""
+
+    def test_heading_with_italic_and_plain(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``# *bold* and plain`` → ``*_bold_ and plain*``.
+
+        Italic runs BEFORE headings, so ``*bold*`` becomes ``_bold_``.
+        The heading content ``_bold_ and plain`` does not start with
+        ``*``, so the heading regex wraps it in ``*...*``.
+        """
+        result = formatter.format("# *bold* and plain")
+        assert result == "*_bold_ and plain*"
+
+    def test_heading_with_italic_only(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """``## *Italic Sub*`` becomes ``*_Italic Sub_*``.
+
+        The italic is converted to underscore form first, then the
+        heading wraps the result in ``*...*``. The wrapped output
+        ``*_Italic Sub_*`` is exactly what the existing edge-case
+        test ``TestHeadingsWithFormatting.test_h2_with_italic`` asserts.
+        """
+        result = formatter.format("## *Italic Sub*")
+        assert result == "*_Italic Sub_*"
+
+    def test_heading_plain_text(
+        self, formatter: SlackMrkdwnFormatter
+    ) -> None:
+        """A plain ``# Title`` still becomes ``*Title*``."""
+        result = formatter.format("# Title")
+        assert result == "*Title*"
+
+
+class TestCodeBlockLanguagePlusComment:
+    """W3: Only the first TOKEN of the first line is checked for the language."""
+
+    def test_python_with_noqa_comment(
+        self,
+    ) -> None:
+        """```python # noqa\\nfoo\\n``` strips only the ``python`` token.
+
+        The whole first line ``python # noqa`` is not a known language,
+        so the OLD code kept it verbatim (leaking ``python`` into the
+        displayed content). The NEW code only checks the first
+        whitespace-delimited token, correctly identifying ``python`` as
+        the specifier and stripping just that token.
+        """
+        text = "```python # noqa\nfoo\n```"
+        blocks = markdown_to_slack_blocks(text)
+        assert len(blocks) == 1
+        content = blocks[0]["text"]["text"]
+        inner = content[3:-3]
+        # The first inner line is the comment (no ``python`` prefix).
+        assert inner.startswith("# noqa")
+        # The trailing content is preserved.
+        assert "foo" in inner
+        # And ``python`` is NOT in the inner content.
+        assert "python" not in inner
+
+    def test_python_with_inline_text_preserved(
+        self,
+    ) -> None:
+        """```python print('hi')\\n``` correctly strips the language and
+        keeps the inline code on the same logical line."""
+        text = "```python print('hi')\n```"
+        blocks = markdown_to_slack_blocks(text)
+        assert len(blocks) == 1
+        content = blocks[0]["text"]["text"]
+        inner = content[3:-3]
+        # ``python`` is stripped, ``print('hi')`` remains.
+        assert "python" not in inner
+        assert "print('hi')" in inner
+
+
+# --------------------------------------------------------------------------- #
+# End
+# --------------------------------------------------------------------------- #

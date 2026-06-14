@@ -302,6 +302,34 @@ class TestMarkdownToSlackBlocksSplitting:
         # Total should be preserved (5000 chars + newlines)
         assert len(total_text) >= 5000
 
+    def test_large_text_with_code_fence_split_outside_fence(self):
+        """Large text containing a code fence must not split inside the fence.
+
+        When a section exceeds 3000 chars and contains ``` fences, the splitter
+        must only break at newlines OUTSIDE the code fence, keeping each chunk's
+        fences balanced.
+        """
+        # Build text: ~2000 chars of text, then a code fence with ~2000 chars inside,
+        # then more text. Total > 3000 so it triggers splitting.
+        prefix = "line of text\n" * 130  # ~1690 chars
+        code_inner = "x" * 2000  # 2000 chars inside the fence
+        suffix = "\nafter code\nmore text"
+        text = f"{prefix}```\n{code_inner}\n```{suffix}"
+
+        blocks = markdown_to_slack_blocks(text)
+
+        # Each resulting block must have balanced fences (even count of ```)
+        for block in blocks:
+            block_text = block["text"]["text"]
+            fence_count = block_text.count("```")
+            assert fence_count % 2 == 0, (
+                f"Unbalanced code fence in block: {fence_count} occurrences of ```"
+            )
+
+        # No content should be lost
+        total_text = "".join(b["text"]["text"] for b in blocks)
+        assert "after code" in total_text
+
 
 class TestMarkdownToSlackBlocksEdgeCases:
     """Tests for edge cases in markdown_to_slack_blocks."""
