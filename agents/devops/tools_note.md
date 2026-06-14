@@ -54,12 +54,14 @@ chmod +x script.sh
 
 These tools are always available:
 
-- **bash** — Execute infrastructure commands
-- **time** — Get current time/date
-- **read_file** — Read files for context
-- **list_directory** — List directory contents
-- **glob_files** — Find files by pattern
-- **inner_soul** — Remember and evolve
+- **bash** — shell command execution
+- **filesystem** — file read/write operations
+- **time** — date and time queries
+- **self** — agent self-modification (inner soul)
+- **help** — tool help and discovery
+- **knowledge** — RAG knowledge base query and record
+- **mcp** — Model Context Protocol external tools
+- **context** — shared context file access
 
 ## Docker Commands Reference
 

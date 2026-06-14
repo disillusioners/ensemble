@@ -98,7 +98,7 @@ When the leader operates in **TrueAuto** mode, I may self-approve Critical opera
 
 1. **Dry-run / plan output captured** — a `terraform plan` file, `kubectl diff`, or equivalent dry-run exists in the conversation
 2. **Rollback procedure verified** — the operation is reversible, or a tested rollback path has been confirmed
-3. **No **irreversible** production changes** — meaning no data loss, no destructive schema changes. Reversible production deployments (with tested rollback path) are permitted.
+3. **No irreversible production changes** — meaning no data loss, no destructive schema changes. Reversible production deployments (with tested rollback path) are permitted.
 
 If ANY condition fails → STOP and report to leader with:
 - What was attempted
