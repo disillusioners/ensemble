@@ -222,12 +222,16 @@ class ExecutionLeaseRepository:
     def find_stale_leases(self, max_age_seconds: int) -> list[InstanceExecutionLease]:
         """Find leases whose heartbeat is older than the threshold.
 
-        Used by ``ExecutionGateService.recover_stale_leases`` at
-        daemon startup. ``heartbeat_at`` is preferred over
-        ``acquired_at`` because a holder that has been running for
-        hours but is still heartbeating is NOT stale; a holder that
-        died mid-run is. If the holder never heartbeats, ``acquired_at``
-        is the floor.
+        NOTE: no longer called by production code — production uses
+        ``clear_stale_leases`` (single bulk DELETE) for startup
+        recovery. This method is kept for tests and for ad-hoc
+        diagnostic scripts that want to inspect what would be
+        recovered without actually deleting anything.
+
+        ``heartbeat_at`` is preferred over ``acquired_at`` because a
+        holder that has been running for hours but is still
+        heartbeating is NOT stale; a holder that died mid-run is. If
+        the holder never heartbeats, ``acquired_at`` is the floor.
 
         Filtering is done in SQL using ``COALESCE(heartbeat_at,
         acquired_at)`` so the scan is bounded by the table size but
@@ -263,9 +267,16 @@ class ExecutionLeaseRepository:
     def clear_stale(self, instance_id: str) -> bool:
         """Delete a stale lease row outright (no holder_id check).
 
-        Used ONLY by crash recovery. A normal caller should use
-        ``release()`` instead so it cannot accidentally evict a
-        live lease.
+        NOTE: no longer called by production code — production uses
+        ``clear_stale_leases`` (single bulk DELETE) for startup
+        recovery. This method is kept for tests and for ad-hoc
+        diagnostic / repair scripts.
+
+        A normal dispatcher should use ``release()`` instead so it
+        cannot accidentally evict a live lease. The ``holder_id``
+        check is what makes ``release`` safe to call from a
+        dispatcher; this method is the recovery primitive for
+        operators and tests.
         """
         with self.engine.begin() as conn:
             result = conn.execute(

@@ -529,6 +529,53 @@ class TestExecutionGateCancel:
         ok = await gate.cancel_instance_execution("inst-1")
         assert ok is False
 
+    @pytest.mark.asyncio
+    async def test_cancel_drains_inner_work_task(
+        self, gate, lease_repo
+    ):
+        """Regression: after ``cancel_instance_execution`` returns,
+        the inner ``work_task`` (the actual ``graph.astream`` driver)
+        must be cancelled AND drained — not left running detached.
+
+        The bug was that the gate's ``finally`` only cancelled the
+        heartbeat task; the ``work_task`` was a bare
+        ``asyncio.create_task`` that the structured-concurrency
+        cleanup path didn't see. With the fix, the finally cancels
+        and awaits both child tasks.
+        """
+        work_cancelled = {"flag": False}
+        work_finished = asyncio.Event()
+
+        async def work():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                work_cancelled["flag"] = True
+                raise
+            finally:
+                work_finished.set()
+
+        task = asyncio.create_task(
+            gate.run(
+                "inst-1",
+                "message_job:job-A",
+                LeaseHolderKind.MESSAGE_JOB.value,
+                work,
+            )
+        )
+        # Let the work_fn start.
+        await asyncio.sleep(0.05)
+        ok = await gate.cancel_instance_execution("inst-1")
+        assert ok is True
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # Both must have settled before the await returned.
+        assert work_cancelled["flag"] is True
+        assert work_finished.is_set()
+        # The lease must be released.
+        assert lease_repo.get_holder("inst-1") is None
+
 
 # ─── Service: crash recovery ──────────────────────────────────────────────────
 
@@ -643,7 +690,6 @@ class TestExecutionGateHeartbeat:
             # heartbeat task should have fired at least once.
             await asyncio.sleep(gate._heartbeat_interval * 3 + 0.05)
             return "done"
-
         before = datetime.now(timezone.utc)
         out = await gate.run(
             "inst-1",
@@ -659,6 +705,44 @@ class TestExecutionGateHeartbeat:
         # work completed). ``before``/``after`` is just to ensure
         # the test exercised real time.
         assert (after - before).total_seconds() >= gate._heartbeat_interval
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_escalates_to_lease_lost_after_consecutive_errors(
+        self, gate, lease_repo
+    ):
+        """After ``heartbeat_max_consecutive_errors`` consecutive DB
+        errors, the heartbeat loop must escalate to ``lease_lost``
+        so the in-flight work is cancelled deterministically rather
+        than left running against an un-refreshed lease that
+        ``recover_stale_leases`` on another node would eventually
+        evict anyway.
+        """
+        work_cancelled = {"flag": False}
+
+        async def work():
+            try:
+                # Long enough for several heartbeat ticks to fail.
+                await asyncio.sleep(2.0)
+            except asyncio.CancelledError:
+                work_cancelled["flag"] = True
+                raise
+
+        async def always_failing_heartbeat(instance_id, holder_id):
+            raise RuntimeError("simulated DB outage")
+
+        gate.heartbeat = always_failing_heartbeat  # type: ignore[assignment]
+        gate._heartbeat_interval = 0.05
+        # Tighten the threshold so the test doesn't have to wait long.
+        gate._heartbeat_max_consecutive_errors = 3
+
+        with pytest.raises(LeaseLostError):
+            await gate.run(
+                "inst-1",
+                "task:42",
+                LeaseHolderKind.TASK.value,
+                work,
+            )
+        assert work_cancelled["flag"] is True
 
     @pytest.mark.asyncio
     async def test_lease_lost_during_contention_flag(

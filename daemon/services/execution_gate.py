@@ -156,12 +156,15 @@ class LeaseContention:
     how to back off (e.g. message_job callers atomically back-transition
     the job to PENDING; task callers re-poll the task table).
 
-    ``holder_lost_during_contention`` is True when the row was deleted
-    between ``try_acquire`` and ``get_holder`` (rare; ``holder_id`` and
-    ``holder_kind`` are empty in that case). Callers that want to log
-    "who held the lease" should check the flag and handle the
-    "I lost, nobody's there" case distinctly from the
-    "I lost, here's who beat me" case.
+    ``reason`` is the authoritative signal: ``HELD_BY_OTHER`` means
+    another holder has the lease (``holder_id``/``holder_kind``
+    identify them); ``HELD_BY_LOST`` means the row vanished between
+    ``try_acquire`` and ``get_holder`` (vanishingly rare;
+    ``holder_id``/``holder_kind`` are empty).
+
+    ``holder_lost_during_contention`` is a deprecated convenience
+    alias for ``reason == HELD_BY_LOST``. Prefer checking ``reason``
+    directly. Kept for backward compatibility.
     """
 
     reason: LeaseContentionReason
@@ -224,11 +227,23 @@ class ExecutionGateService:
     # the class without importing the module constant.
     DEFAULT_LEASE_HEARTBEAT_SECONDS = DEFAULT_LEASE_HEARTBEAT_INTERVAL_SECONDS
 
+    # After this many consecutive heartbeat DB errors (e.g. the
+    # database is unreachable), escalate to ``LeaseLostError`` so the
+    # in-flight work is cancelled deterministically rather than left
+    # running against an un-refreshed lease that ``recover_stale_leases``
+    # on another node would then evict. 5 consecutive failures at the
+    # default 30s interval = 2.5 minutes of inability to refresh,
+    # well below the 5-minute staleness threshold.
+    DEFAULT_HEARTBEAT_MAX_CONSECUTIVE_ERRORS = 5
+
     def __init__(
         self,
         lease_repo: ExecutionLeaseRepository,
         stale_lease_seconds: int = DEFAULT_STALE_LEASE_SECONDS,
         heartbeat_interval_seconds: float = DEFAULT_LEASE_HEARTBEAT_SECONDS,
+        heartbeat_max_consecutive_errors: int = (
+            DEFAULT_HEARTBEAT_MAX_CONSECUTIVE_ERRORS
+        ),
     ):
         """Initialize the gate.
 
@@ -241,10 +256,25 @@ class ExecutionGateService:
                 ``gate.run`` is in flight. Should be at least 5-10x
                 smaller than ``stale_lease_seconds`` so a few missed
                 beats don't false-positive flag a live lease.
+            heartbeat_max_consecutive_errors: How many consecutive
+                heartbeat DB errors before the heartbeat loop
+                escalates to ``lease_lost`` (cancelling the
+                in-flight work and raising ``LeaseLostError``).
+                Prevents the gate from sitting on a long-running
+                ``graph.astream`` whose lease can no longer be
+                refreshed — that lease would be considered stale by
+                ``recover_stale_leases`` on another node and
+                cancelled anyway, but only after a full
+                ``stale_lease_seconds`` window and only on the
+                recovery side. This knob makes the in-process
+                holder react sooner.
         """
         self._lease_repo = lease_repo
         self._stale_lease_seconds = stale_lease_seconds
         self._heartbeat_interval = max(0.1, heartbeat_interval_seconds)
+        self._heartbeat_max_consecutive_errors = max(
+            1, heartbeat_max_consecutive_errors
+        )
         # In-process fast path: which (instance_id, holder_id) pairs
         # are *currently* running in this Python process?
         # ``is_held_locally`` answers "is anyone in this process the
@@ -448,6 +478,7 @@ class ExecutionGateService:
                 # cancel_instance_execution can still reach it.
                 self._running_tasks.setdefault(instance_id, current_task)
         heartbeat_task: asyncio.Task | None = None
+        work_task: asyncio.Task | None = None
         lease_lost = asyncio.Event()
         try:
             heartbeat_task = asyncio.create_task(
@@ -482,11 +513,30 @@ class ExecutionGateService:
                 "another process or replaced by a different holder)"
             )
         finally:
-            if heartbeat_task is not None:
+            # Cancel both child tasks and drain them. Without this,
+            # an outer cancel (``cancel_instance_execution``) or a
+            # raised exception would leave the in-flight ``work_task``
+            # — the actual ``graph.astream`` driver — running detached,
+            # which is exactly the in-flight stream the cancel was
+            # meant to stop. The same applies to the heartbeat.
+            if work_task is not None and not work_task.done():
+                work_task.cancel()
+            if heartbeat_task is not None and not heartbeat_task.done():
                 heartbeat_task.cancel()
+            for t in (work_task, heartbeat_task):
+                if t is None:
+                    continue
                 try:
-                    await heartbeat_task
-                except (asyncio.CancelledError, Exception):
+                    await t
+                except BaseException:
+                    # Swallow EVERYTHING: CancelledError is the normal
+                    # exit for both tasks (we just cancelled them);
+                    # work_fn's own exception is the caller's concern
+                    # and is re-raised by the path that awaited
+                    # ``work_task.result()`` above. BaseException
+                    # (not Exception) is intentional because
+                    # CancelledError is a BaseException subclass on
+                    # Python 3.8+.
                     pass
             if current_task is not None:
                 with self._running_tasks_lock:
@@ -507,24 +557,60 @@ class ExecutionGateService:
 
         Errors other than False-return are swallowed and logged: a
         transient DB error should not kill an in-flight
-        ``graph.astream`` call. The next heartbeat tick (or the
-        next startup recovery pass) will catch a real problem.
+        ``graph.astream`` call on the first failure. However, after
+        ``_heartbeat_max_consecutive_errors`` consecutive failures we
+        escalate to ``lease_lost`` so the in-flight work is
+        cancelled deterministically rather than left running against
+        a lease that ``recover_stale_leases`` on another node would
+        eventually evict.
+
+        Throttled logging: the first error in a run is logged at
+        WARNING, subsequent consecutive errors at DEBUG; the recovery
+        escalation logs at WARNING once more.
         """
+        consecutive_errors = 0
         try:
             while True:
                 await asyncio.sleep(self._heartbeat_interval)
                 try:
                     ok = await self.heartbeat(instance_id, holder_id)
                 except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        f"ExecutionGate.heartbeat error "
-                        f"instance={instance_id[:8]}... "
-                        f"holder_id={holder_id}: {type(e).__name__}: {e}"
-                    )
+                    consecutive_errors += 1
+                    if consecutive_errors == 1:
+                        logger.warning(
+                            f"ExecutionGate.heartbeat error "
+                            f"instance={instance_id[:8]}... "
+                            f"holder_id={holder_id}: "
+                            f"{type(e).__name__}: {e} "
+                            f"(suppressing further errors until "
+                            f"recovery or success; "
+                            f"consecutive_errors={consecutive_errors})"
+                        )
+                    else:
+                        logger.debug(
+                            f"ExecutionGate.heartbeat error "
+                            f"instance={instance_id[:8]}... "
+                            f"consecutive_errors={consecutive_errors}"
+                        )
+                    if (
+                        consecutive_errors
+                        >= self._heartbeat_max_consecutive_errors
+                    ):
+                        logger.warning(
+                            f"ExecutionGate escalating to lease_lost "
+                            f"after {consecutive_errors} consecutive "
+                            f"heartbeat errors "
+                            f"instance={instance_id[:8]}... "
+                            f"holder_id={holder_id}"
+                        )
+                        lease_lost.set()
+                        return
                     continue
                 if not ok:
                     lease_lost.set()
                     return
+                # Success resets the failure counter.
+                consecutive_errors = 0
         except asyncio.CancelledError:
             return
 
