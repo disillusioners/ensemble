@@ -1025,3 +1025,218 @@ class TestMissingConnection:
 
         assert result["success"] is False
         assert "primary" in result["message"]
+
+
+# =============================================================================
+# Group 9: F3 fix — LIMIT injection bypass via string literals/comments
+# =============================================================================
+
+
+class TestHasLimitClause:
+    """Unit tests for :meth:`ConnectionPoolManager._has_limit_clause`.
+
+    The previous implementation used a naive ``"LIMIT" not in query_upper``
+    check, which was bypassable: putting "LIMIT" inside a string literal
+    (e.g. ``WHERE msg = 'no LIMIT here'``) caused the safety LIMIT to be
+    skipped, so an unconstrained query could OOM the worker. A naive
+    ``\bLIMIT\b`` regex is also not enough on its own: apostrophes and
+    spaces are non-word characters, so the regex still matches the
+    "LIMIT" inside a quoted string.
+
+    The fix strips comments and single-quoted string literals first,
+    then applies the word-boundary regex. These tests lock in the new
+    behavior across the bypass vectors.
+    """
+
+    def test_no_limit_returns_false(self):
+        """Plain SELECT with no LIMIT → ``False`` (inject safety LIMIT)."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM logs"
+        ) is False
+
+    def test_real_uppercase_limit_returns_true(self):
+        """``LIMIT`` keyword is detected (do not double-inject)."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM users LIMIT 5"
+        ) is True
+
+    def test_real_lowercase_limit_returns_true(self):
+        """``limit`` keyword is detected case-insensitively."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "select * from t limit 10"
+        ) is True
+
+    def test_real_mixed_case_limit_returns_true(self):
+        """``Limit`` keyword is detected case-insensitively."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM t Limit 7"
+        ) is True
+
+    def test_limit_in_string_literal_does_not_count(self):
+        """F3 bypass: 'LIMIT' inside a string value must not satisfy the check.
+
+        Without the fix, the naive substring match would see "LIMIT" and
+        skip the safety injection, even though the query has no actual
+        LIMIT clause.
+        """
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM logs WHERE msg = 'no LIMIT here'"
+        ) is False
+
+    def test_limit_lowercase_in_string_literal_does_not_count(self):
+        """Bypass with case-insensitive substring in string value."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM logs WHERE msg = 'no limit here'"
+        ) is False
+
+    def test_limit_in_column_name_does_not_count(self):
+        """A column name containing 'limit' is not a LIMIT clause."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT limit_per_user FROM settings"
+        ) is False
+
+    def test_limit_in_single_line_comment_does_not_count(self):
+        """A ``LIMIT`` in a single-line ``--`` comment is not a clause."""
+        query = "-- this query has LIMIT 100 in a comment\nSELECT * FROM t"
+        assert ConnectionPoolManager._has_limit_clause(query) is False
+
+    def test_limit_in_block_comment_does_not_count(self):
+        """A ``LIMIT`` in a multi-line ``/* */`` comment is not a clause."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "/* LIMIT 999 */ SELECT * FROM t"
+        ) is False
+
+    def test_real_limit_after_string_literal_is_detected(self):
+        """A real LIMIT after a string literal containing 'LIMIT' is found."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM logs WHERE msg = 'LIMIT warning' LIMIT 50"
+        ) is True
+
+    def test_sql_string_escape_handled(self):
+        """The ``''`` SQL escape inside a string does not break parsing."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM t WHERE x = 'it''s LIMIT'"
+        ) is False
+
+    def test_limit_with_trailing_semicolon_detected(self):
+        """Trailing semicolons do not hide a real LIMIT clause."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM users LIMIT 5;"
+        ) is True
+
+    def test_no_limit_with_trailing_semicolon_not_detected(self):
+        """No-LIMIT case still injects the safety LIMIT."""
+        assert ConnectionPoolManager._has_limit_clause(
+            "SELECT * FROM users;"
+        ) is False
+
+
+class TestExecuteSelectLimitInjectionBypass:
+    """End-to-end tests for the F3 fix in :meth:`execute_select`.
+
+    These tests assert that ``conn.fetch`` is called with the **correct**
+    query text: queries without a real LIMIT clause must have the
+    safety LIMIT appended, and queries that legitimately declare a
+    LIMIT must be passed through unchanged. The bypass vectors from
+    :class:`TestHasLimitClause` are exercised here against the real
+    call path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bypass_string_literal_injects_safety_limit(self):
+        """F3: 'LIMIT' inside a string literal must NOT prevent injection.
+
+        Without the fix, the safety LIMIT would be skipped and an
+        unconstrained query would be sent to asyncpg — risking OOM.
+        """
+        manager, _, _ = _make_manager(config=_make_config())
+        mock_conn = MagicMock()
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        fake_pool = _make_mock_pool(mock_conn)
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=fake_pool,
+        ):
+            await manager.execute_select(
+                "primary",
+                "SELECT * FROM logs WHERE msg = 'no LIMIT here'",
+            )
+
+        # The safety LIMIT was injected — the query was NOT passed
+        # through unchanged.
+        called_with = mock_conn.fetch.await_args.args[0]
+        assert called_with.endswith(" LIMIT 1001")
+        # The original string is preserved (with the appended LIMIT).
+        assert "'no LIMIT here'" in called_with
+
+    @pytest.mark.asyncio
+    async def test_real_limit_is_not_double_injected(self):
+        """A query that already has LIMIT must not get a second one."""
+        manager, _, _ = _make_manager(config=_make_config())
+        mock_conn = MagicMock()
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        fake_pool = _make_mock_pool(mock_conn)
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=fake_pool,
+        ):
+            await manager.execute_select(
+                "primary", "SELECT * FROM users LIMIT 5"
+            )
+
+        called_with = mock_conn.fetch.await_args.args[0]
+        # No "LIMIT 5 LIMIT 1001" — the original LIMIT is preserved.
+        assert called_with == "SELECT * FROM users LIMIT 5"
+
+    @pytest.mark.asyncio
+    async def test_limit_in_comment_injects_safety_limit(self):
+        """A LIMIT inside a SQL comment must not block the safety injection.
+
+        The comment text is still sent to asyncpg (which will strip it
+        server-side); what matters here is that the safety ``LIMIT 1001``
+        clause is appended so the safety net is in place.
+        """
+        manager, _, _ = _make_manager(config=_make_config())
+        mock_conn = MagicMock()
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        fake_pool = _make_mock_pool(mock_conn)
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=fake_pool,
+        ):
+            await manager.execute_select(
+                "primary",
+                "-- LIMIT 999 in a comment\nSELECT * FROM t",
+            )
+
+        called_with = mock_conn.fetch.await_args.args[0]
+        # The safety LIMIT is appended after the actual SQL.
+        assert "LIMIT 1001" in called_with
+        # The original query body is preserved unchanged.
+        assert "SELECT * FROM t" in called_with
+
+    @pytest.mark.asyncio
+    async def test_lowercase_limit_keyword_detected(self):
+        """Lowercase 'limit' keyword is honored — no double-injection."""
+        manager, _, _ = _make_manager(config=_make_config())
+        mock_conn = MagicMock()
+        mock_conn.fetch = AsyncMock(return_value=[])
+
+        fake_pool = _make_mock_pool(mock_conn)
+        with patch(
+            "daemon.services.db_pool_manager.asyncpg.create_pool",
+            new_callable=AsyncMock,
+            return_value=fake_pool,
+        ):
+            await manager.execute_select(
+                "primary", "select * from t limit 10"
+            )
+
+        called_with = mock_conn.fetch.await_args.args[0]
+        assert called_with == "select * from t limit 10"

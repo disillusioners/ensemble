@@ -98,6 +98,16 @@ _RE_ROLE_PASSWORD = re.compile(
 # Final safety net: anything that still looks like user:pass@host.
 _RE_GENERIC_AUTH = re.compile(r"://[^@]+@")
 
+# F3 sanitization regexes: strip SQL noise so a LIMIT keyword scan
+# cannot be fooled by keyword-shaped substrings inside string literals
+# or comments.
+_RE_LIMIT_LINE_COMMENT = re.compile(r"--[^\n]*")
+_RE_LIMIT_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+# Single-quoted string literal, including the '' SQL escape sequence.
+# Mirrors the regex used in daemon.tools.db_tools._validate_select_only
+# so both guards share the same notion of "inside a string".
+_RE_LIMIT_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
+
 
 class ConnectionPoolManager:
     """Manages one shared ``asyncpg`` pool per connection name.
@@ -353,6 +363,46 @@ class ConnectionPoolManager:
 
         return result
 
+    @staticmethod
+    def _has_limit_clause(query: str) -> bool:
+        """Return True if ``query`` contains a real SQL ``LIMIT`` clause.
+
+        F3 fix: the previous ``"LIMIT" not in query_upper`` check could
+        be bypassed by putting the substring "LIMIT" inside a string
+        literal (e.g. ``WHERE msg = 'no LIMIT here'``), which would
+        prevent the safety LIMIT from being injected on queries that
+        actually had no LIMIT clause. A naive ``\bLIMIT\b`` regex is
+        also not enough on its own: apostrophes and spaces are
+        non-word characters, so the regex still matches the "LIMIT"
+        inside a quoted string.
+
+        The fix mirrors :func:`daemon.tools.db_tools._validate_select_only`:
+
+        1. Strip ``--`` single-line and ``/* */`` multi-line comments
+           so a ``LIMIT`` inside a comment does not satisfy the check.
+        2. Strip single-quoted string literals (with the ``''`` SQL
+           escape sequence) so a ``LIMIT`` inside a string value does
+           not satisfy the check.
+        3. Apply a case-insensitive, word-boundary regex to the
+           stripped query.
+
+        This is intentionally a defensive substring scan, not a full
+        SQL parser. The trust boundary for actual query safety is the
+        database user, not this guard. The goal here is narrow: do
+        not let a string literal defeat the safety row cap.
+
+        Args:
+            query: The SQL query text.
+
+        Returns:
+            True iff the query contains a real ``LIMIT`` keyword
+            outside of comments and string literals.
+        """
+        stripped = _RE_LIMIT_LINE_COMMENT.sub("", query)
+        stripped = _RE_LIMIT_BLOCK_COMMENT.sub("", stripped)
+        stripped = _RE_LIMIT_STRING_LITERAL.sub("", stripped)
+        return re.search(r"\bLIMIT\b", stripped, re.IGNORECASE) is not None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -487,8 +537,14 @@ class ConnectionPoolManager:
             # on unconstrained queries. We fetch at most max_rows + 1
             # rows so the truncation flag below can detect "more rows
             # exist" without a second round trip.
-            query_upper = query.upper().strip()
-            if "LIMIT" not in query_upper:
+            #
+            # F3 fix: delegate the LIMIT-presence check to
+            # :meth:`_has_limit_clause`, which strips comments and
+            # single-quoted string literals before scanning with a
+            # word-boundary regex. The previous ``"LIMIT" not in
+            # query_upper`` check was bypassable by queries like
+            # ``SELECT * FROM logs WHERE msg = 'no LIMIT here'``.
+            if not self._has_limit_clause(query):
                 query = f"{query.rstrip(';')} LIMIT {max_rows + 1}"
             records = await asyncio.wait_for(
                 conn.fetch(query),

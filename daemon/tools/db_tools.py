@@ -41,6 +41,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.tools import tool
+from sqlalchemy.exc import IntegrityError
 
 from ._tool_registry import register_tool_category
 
@@ -259,11 +260,20 @@ def create_db_tools(
     ) -> str:
         """Register a named database connection. Passwords are encrypted at the tool layer."""
         try:
-            # N1: Encrypt the password HERE in the tool before it ever
-            # touches the repository. The repository receives an opaque
-            # encrypted string and never sees the plaintext.
+            # F1: refuse to register a connection with a password when
+            # Fernet encryption is not configured. Storing plaintext
+            # credentials defeats the whole point of the encrypted column.
             credentials: str | None = None
             if password:
+                if not credential_manager.is_encryption_available():
+                    return (
+                        "ERROR: Credential encryption is not configured. "
+                        "Set SOURCE_CREDENTIAL_KEY and install the cryptography "
+                        "package before registering connections with passwords."
+                    )
+                # N1: Encrypt the password HERE in the tool before it ever
+                # touches the repository. The repository receives an opaque
+                # encrypted string and never sees the plaintext.
                 credentials = credential_manager.encrypt({"password": password})
 
             config = repository.create(
@@ -285,13 +295,22 @@ def create_db_tools(
                 f"db_type={config.db_type}, host={config.host}, "
                 f"has_password={config.credentials is not None}."
             )
+        except IntegrityError:
+            # F2: the SQLAlchemy IntegrityError message includes the bound
+            # parameters, which would expose the plaintext password in the
+            # tool output. Replace it with a fixed, safe message.
+            return f"ERROR: A db connection named '{connection_name}' already exists."
         except Exception as exc:
             # N9: catch all exceptions and return an error string. The
             # plaintext password must not appear in any error message —
             # asyncpg / SQLAlchemy error text generally does not include
             # tool input, but the explicit omission is documented in the
-            # constraint.
-            return f"ERROR: Failed to add db connection '{connection_name}': {exc}"
+            # constraint. Use only the exception class name — bound
+            # parameters can leak credentials via str(exc).
+            return (
+                f"ERROR: Failed to add db connection '{connection_name}' "
+                f"({type(exc).__name__})."
+            )
 
     db_conn_add._full_doc_ = """Register a named database connection.
 
@@ -512,7 +531,7 @@ Returns:
             )
         else:
             lines.append("")
-            lines.append(f"Rows: {row_count} (of {row_count})")
+            lines.append(f"Rows: {row_count}")
 
         return "\n".join(lines)
 
