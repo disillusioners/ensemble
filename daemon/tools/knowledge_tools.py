@@ -473,6 +473,81 @@ def _save_explorer_result(
         logger.debug("Failed to save explorer result to shared context: %s", e)
 
 
+def _is_duplicate_experience(new_text: str, context_dir: Path, threshold: float = 0.8) -> bool:
+    """Check if a similar experience text already exists in the context dir.
+
+    Uses Jaccard-like token overlap: |intersection| / |union|. Lightweight and
+    fast — no external dependencies. Skips empty/short texts to avoid false
+    positives on near-empty inputs.
+    """
+    try:
+        new_tokens = set(new_text.lower().split())
+        if len(new_tokens) < 5:
+            return False
+        for md_file in context_dir.glob("*_experience.md"):
+            try:
+                existing = md_file.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            existing_tokens = set(existing.lower().split())
+            if not existing_tokens:
+                continue
+            union = new_tokens | existing_tokens
+            if not union:
+                continue
+            overlap = len(new_tokens & existing_tokens) / len(union)
+            if overlap >= threshold:
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _save_experience_result(
+    text: str,
+    context_key: str,
+    project_name: str | None = None,
+) -> None:
+    """Auto-save experience text to shared context directory. Fire-and-forget.
+
+    Mirrors the structure of ``_save_explorer_result`` but for the experience
+    tool. Skips near-duplicates (Jaccard overlap >= 0.8) against existing
+    ``*_experience.md`` files in the same context dir to avoid redundant
+    saves when the same knowledge is recorded repeatedly.
+
+    Never raises — all errors are logged at DEBUG and swallowed.
+    """
+    try:
+        # Slug: first ~60 chars, slugified. Mirrors _save_explorer_result
+        # style but truncates earlier since text bodies tend to be longer
+        # than explorer queries.
+        slug = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')[:60]
+        if not slug:
+            slug = "experience"
+        dir_path = Path(tempfile.gettempdir()) / "ensemble" / "context" / context_key
+        file_path = dir_path / f"{slug}_experience.md"
+
+        dir_path.mkdir(parents=True, exist_ok=True)
+
+        iso_ts = datetime.now().isoformat()
+
+        # Dedup: skip if a file with very similar content already exists
+        if _is_duplicate_experience(text, dir_path):
+            logger.debug("Skipping save: experience too similar to existing file")
+            return
+
+        content = (
+            f"# Experience Recorded\n"
+            f"**Time**: {iso_ts}\n"
+            f"**Project**: {project_name or 'unknown'}\n\n"
+            f"{text}"
+        )
+
+        file_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logger.debug("Failed to save experience result to shared context: %s", e)
+
+
 def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str) -> list:
     """Create knowledge management tools with injected manager reference.
 
@@ -728,6 +803,38 @@ def create_knowledge_tools(manager: "InstanceManager", current_instance_id: str)
 
         if not pid:
             return "Error: project_id not available. Ensure the agent instance has a project context set."
+
+        # Derive context_key + project_name for the shared-context file save.
+        # Mirrors the explore() pattern at lines ~684-693.
+        try:
+            root_id = manager._instance_repository.get_tree_root_id(current_instance_id)
+            context_key = root_id or current_instance_id or "default"
+        except Exception:
+            context_key = current_instance_id or "default"
+        project_name = None
+        if pid and hasattr(manager, "_project_repository"):
+            try:
+                proj = manager._project_repository.get(pid)
+                project_name = proj.name if proj else None
+            except Exception:
+                pass
+
+        # Fire-and-forget: persist experience text to the shared context
+        # directory. Runs in a worker thread to avoid blocking the event
+        # loop on sync filesystem I/O — same pattern as explore()'s
+        # get_shared_context call at line ~566.
+        try:
+            asyncio.ensure_future(asyncio.to_thread(
+                _save_experience_result,
+                text,
+                context_key,
+                project_name,
+            ))
+        except RuntimeError as e:
+            # No running event loop - log warning but don't fail experience
+            logger.debug("Failed to schedule experience save (no event loop): %s", e)
+        except Exception as e:
+            logger.debug("Failed to schedule experience save: %s", e)
 
         # Fire-and-forget: enqueue job for experiencer agent
         try:

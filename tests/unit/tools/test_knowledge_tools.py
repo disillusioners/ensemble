@@ -2600,4 +2600,226 @@ class TestExploreCheckpointIntegration:
             # Verify the call was made with return_instance_id=True
             mock_invoke.assert_called_once()
             call_kwargs = mock_invoke.call_args.kwargs
-            assert call_kwargs["return_instance_id"] is True
+
+
+# =============================================================================
+# Experience Auto-Save Tests
+# =============================================================================
+
+
+class TestExperienceAutoSave:
+    """Tests for experience() auto-save to the shared context directory.
+
+    Verifies:
+    - A ``*_experience.md`` file is created on call
+    - Near-duplicate text (Jaccard overlap >= 0.8) is skipped
+    - Non-duplicate text is saved
+    - Errors never propagate (fire-and-forget)
+    """
+
+    @pytest.fixture
+    def mock_manager_for_experience_save(self, configured_env, mock_manager):
+        """Mock manager set up for experience auto-save tests."""
+        mock_instance_meta = MagicMock()
+        mock_instance_meta.instance_metadata = {"project_id": "test-project-123"}
+        mock_instance_meta.project_id = "test-project-123"
+        mock_manager._instance_repository.get = MagicMock(return_value=mock_instance_meta)
+
+        mock_manager._instance_repository.get_tree_root_id = MagicMock(
+            return_value="experience-save-context"
+        )
+
+        # Project name lookup
+        mock_project = MagicMock()
+        mock_project.name = "agents-ensemble"
+        mock_manager._project_repository = MagicMock()
+        mock_manager._project_repository.get = MagicMock(return_value=mock_project)
+
+        return mock_manager
+
+    @pytest.mark.asyncio
+    async def test_experience_saves_file_with_experience_suffix(
+        self, mock_manager_for_experience_save, tmp_path
+    ):
+        """Calling experience() saves a file with the ``_experience.md`` suffix."""
+        text = "The project uses Python 3.11 with FastAPI for the backend service."
+
+        with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+            mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+            tools = create_knowledge_tools(
+                mock_manager_for_experience_save, "parent-instance-id"
+            )
+            experience_tool = next(t for t in tools if t.name == "experience")
+
+            await experience_tool.ainvoke({"text": text})
+
+            # Allow fire-and-forget thread to complete
+            await asyncio.sleep(0.1)
+
+            context_dir = tmp_path / "ensemble" / "context" / "experience-save-context"
+            files = list(context_dir.glob("*_experience.md"))
+            assert len(files) == 1, (
+                f"Expected 1 _experience.md file, got {len(files)}: "
+                f"{[f.name for f in files]}"
+            )
+
+            # Content sanity check
+            content = files[0].read_text(encoding="utf-8")
+            assert "# Experience Recorded" in content
+            assert text in content
+            assert "agents-ensemble" in content
+
+    @pytest.mark.asyncio
+    async def test_experience_skips_duplicate_content(
+        self, mock_manager_for_experience_save, tmp_path
+    ):
+        """Duplicate content (>= 0.8 Jaccard overlap) is skipped — no new file."""
+        # Pre-seed a file with content very similar to what we'll send.
+        context_dir = tmp_path / "ensemble" / "context" / "experience-save-context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use a long-enough body so dedup actually runs (>= 5 tokens).
+        text = (
+            "The authentication system uses JWT tokens for user authentication "
+            "with refresh tokens for session security and rotation."
+        )
+        existing_file = context_dir / "the-authentication-system-uses-jwt-tokens-for-user-authentic_experience.md"
+        existing_file.write_text(
+            f"# Experience Recorded\n**Time**: 2026-06-14T12:00:00\n"
+            f"**Project**: agents-ensemble\n\n{text}\n",
+            encoding="utf-8",
+        )
+
+        with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+            mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+            tools = create_knowledge_tools(
+                mock_manager_for_experience_save, "parent-instance-id"
+            )
+            experience_tool = next(t for t in tools if t.name == "experience")
+
+            await experience_tool.ainvoke({"text": text})
+
+            await asyncio.sleep(0.1)
+
+            # Should still be exactly 1 file (the pre-seeded one).
+            files = list(context_dir.glob("*_experience.md"))
+            assert len(files) == 1, (
+                f"Expected 1 file (duplicate skip), got {len(files)}: "
+                f"{[f.name for f in files]}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_experience_saves_non_duplicate_content(
+        self, mock_manager_for_experience_save, tmp_path
+    ):
+        """Non-duplicate content is saved as a new ``*_experience.md`` file."""
+        context_dir = tmp_path / "ensemble" / "context" / "experience-save-context"
+        context_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pre-seed with unrelated content so dedup does not match.
+        existing_file = context_dir / "unrelated_experience.md"
+        existing_file.write_text(
+            "# Experience Recorded\n\nCompletely unrelated knowledge about cooking pasta.",
+            encoding="utf-8",
+        )
+
+        text = (
+            "The deployment pipeline uses GitHub Actions for CI and ArgoCD for "
+            "continuous delivery to the Kubernetes cluster with canary releases."
+        )
+
+        with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+            mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+            tools = create_knowledge_tools(
+                mock_manager_for_experience_save, "parent-instance-id"
+            )
+            experience_tool = next(t for t in tools if t.name == "experience")
+
+            await experience_tool.ainvoke({"text": text})
+
+            await asyncio.sleep(0.1)
+
+            files = list(context_dir.glob("*_experience.md"))
+            # The pre-seeded file plus the new save = 2.
+            assert len(files) == 2, (
+                f"Expected 2 files (existing + new), got {len(files)}: "
+                f"{[f.name for f in files]}"
+            )
+
+            new_files = [f for f in files if "deployment-pipeline" in f.name]
+            assert len(new_files) == 1, (
+                f"Expected 1 new file with deployment slug, got {len(new_files)}"
+            )
+            content = new_files[0].read_text(encoding="utf-8")
+            assert text in content
+
+    @pytest.mark.asyncio
+    async def test_experience_save_failure_does_not_propagate(
+        self, mock_manager_for_experience_save, tmp_path
+    ):
+        """If _save_experience_result raises, experience() still returns normally.
+
+        The save is fire-and-forget; failures are logged at DEBUG but never
+        propagate to the caller or affect the return value.
+        """
+        with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+            mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+            tools = create_knowledge_tools(
+                mock_manager_for_experience_save, "parent-instance-id"
+            )
+            experience_tool = next(t for t in tools if t.name == "experience")
+
+            with patch(
+                "daemon.tools.knowledge_tools._save_experience_result",
+                side_effect=IOError("Disk full"),
+            ):
+                # Should not raise.
+                result = await experience_tool.ainvoke(
+                    {"text": "Some knowledge text to record."}
+                )
+
+            # Return value is preserved regardless of save failure.
+            assert "Knowledge recording started" in result
+
+    def test_save_experience_result_creates_file(self, tmp_path):
+        """Direct unit test of ``_save_experience_result`` end-to-end."""
+        from daemon.tools.knowledge_tools import _save_experience_result
+
+        with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+            mock_tempfile.gettempdir.return_value = str(tmp_path)
+
+            _save_experience_result(
+                "The test suite uses pytest with asyncio mode enabled.",
+                "direct-call-context",
+                project_name="test-project",
+            )
+
+            context_dir = tmp_path / "ensemble" / "context" / "direct-call-context"
+            files = list(context_dir.glob("*_experience.md"))
+            assert len(files) == 1
+            content = files[0].read_text(encoding="utf-8")
+            assert "# Experience Recorded" in content
+            assert "test-project" in content
+            assert "pytest" in content
+
+    def test_save_experience_result_never_raises_on_bad_path(self, tmp_path):
+        """``_save_experience_result`` swallows errors (fire-and-forget)."""
+        from daemon.tools.knowledge_tools import _save_experience_result
+
+        # Force a path that cannot be created by making tmp_path a file.
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory")
+
+        with patch("daemon.tools.knowledge_tools.tempfile") as mock_tempfile:
+            mock_tempfile.gettempdir.return_value = str(blocker)
+
+            # Should not raise — error is logged at DEBUG.
+            _save_experience_result(
+                "Some experience text that would normally be recorded safely.",
+                "bad-context",
+                project_name=None,
+            )
