@@ -43,6 +43,14 @@ from typing import TYPE_CHECKING, Any
 from langchain_core.tools import tool
 from sqlalchemy.exc import IntegrityError
 
+from daemon.services.db_sql_utils import (
+    DEFAULT_MAX_ROWS,
+    DEFAULT_QUERY_TIMEOUT,
+    _RE_MULTI_LINE_COMMENT,
+    _RE_SINGLE_LINE_COMMENT,
+    _RE_STRING_LITERAL,
+)
+
 from ._tool_registry import register_tool_category
 
 if TYPE_CHECKING:
@@ -70,13 +78,6 @@ Manage external database connections and run queries.
 """
 
 
-# Default per-query timeout in seconds (used by db_postgres_dml_select).
-DEFAULT_QUERY_TIMEOUT: int = 30
-
-# Default row cap for db_postgres_dml_select results.
-DEFAULT_MAX_ROWS: int = 1000
-
-
 # Forbidden SQL keywords (defense-in-depth, not a security boundary).
 # ``INTO`` is included to block ``SELECT ... INTO`` which creates a table
 # (C1). The remaining keywords are DML/DDL/admin operations that an
@@ -88,14 +89,9 @@ _FORBIDDEN_KEYWORDS: frozenset[str] = frozenset({
 })
 
 
-# Pre-compiled regexes for the SELECT-only guard. Compiling once at
-# import time is cheaper than rebuilding on every call.
-_RE_SINGLE_LINE_COMMENT = re.compile(r"--[^\n]*")
-_RE_MULTI_LINE_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-# Single-quoted string literals, including the '' SQL escape sequence.
-# N4: stripped before keyword scanning to prevent false positives on
-# keywords that appear inside string values.
-_RE_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
+# Pre-compiled regexes for the SELECT-only guard. Imported from
+# :mod:`daemon.services.db_sql_utils` (single source of truth shared
+# with :mod:`daemon.services.db_pool_manager`).
 
 
 def _validate_select_only(query: str) -> None:
@@ -258,7 +254,7 @@ def create_db_tools(
         password: str | None = None,
         ssl_mode: str = "prefer",
     ) -> str:
-        """Register a named database connection. Passwords are encrypted at the tool layer."""
+        """Register a named database connection. Passwords are encrypted at the tool layer. Use tool_help("db_conn_add") for details."""
         try:
             # F1: refuse to register a connection with a password when
             # Fernet encryption is not configured. Storing plaintext
@@ -299,6 +295,7 @@ def create_db_tools(
             # F2: the SQLAlchemy IntegrityError message includes the bound
             # parameters, which would expose the plaintext password in the
             # tool output. Replace it with a fixed, safe message.
+            logger.warning("db_conn_add duplicate connection_name '%s'", connection_name)
             return f"ERROR: A db connection named '{connection_name}' already exists."
         except Exception as exc:
             # N9: catch all exceptions and return an error string. The
@@ -306,7 +303,13 @@ def create_db_tools(
             # asyncpg / SQLAlchemy error text generally does not include
             # tool input, but the explicit omission is documented in the
             # constraint. Use only the exception class name — bound
-            # parameters can leak credentials via str(exc).
+            # parameters can leak credentials via str(exc). The full
+            # exception is logged (for operators) with the connection
+            # name so the trail stays in the daemon logs, never in the
+            # agent-visible return value.
+            logger.warning(
+                "db_conn_add failed for '%s': %s", connection_name, exc
+            )
             return (
                 f"ERROR: Failed to add db connection '{connection_name}' "
                 f"({type(exc).__name__})."
@@ -352,7 +355,17 @@ Returns:
                 )
             return f"Deleted db connection: {connection_name} (pool disposed)."
         except Exception as exc:
-            return f"ERROR: Failed to delete db connection '{connection_name}': {exc}"
+            # N9: log the full exception for operators, but return only
+            # the class name to the agent. ``str(exc)`` is unsafe here
+            # because asyncpg / SQLAlchemy error text can occasionally
+            # echo connection parameters that include a password.
+            logger.warning(
+                "db_conn_delete failed for '%s': %s", connection_name, exc
+            )
+            return (
+                f"ERROR: Failed to delete db connection '{connection_name}' "
+                f"({type(exc).__name__})."
+            )
 
     db_conn_delete._full_doc_ = """Delete a named database connection and dispose its pool.
 
@@ -394,7 +407,15 @@ Returns:
                 lines.append(_format_conn_row(row))
             return "\n".join(lines)
         except Exception as exc:
-            return f"ERROR: Failed to list db connections: {exc}"
+            # N9: log the full exception for operators; return only the
+            # class name to the agent. The list path is read-only, so
+            # credential leakage is unlikely, but the convention is
+            # applied uniformly across the 5 tools.
+            logger.warning("db_conn_list failed: %s", exc)
+            return (
+                f"ERROR: Failed to list db connections "
+                f"({type(exc).__name__})."
+            )
 
     db_conn_list._full_doc_ = """List all registered database connections.
 
@@ -427,8 +448,15 @@ Returns:
             # unknown connection name) and return an error string. The
             # pool manager's own message for the unknown-name case is
             # "Connection '...' not found", so this branch should be
-            # rare in practice.
-            return f"ERROR: Failed to test db connection '{connection_name}': {exc}"
+            # rare in practice. Log the full exception for operators;
+            # return only the class name to the agent.
+            logger.warning(
+                "db_conn_test failed for '%s': %s", connection_name, exc
+            )
+            return (
+                f"ERROR: Failed to test db connection '{connection_name}' "
+                f"({type(exc).__name__})."
+            )
 
     db_conn_test._full_doc_ = """Test a database connection by running ``SELECT 1``.
 
@@ -458,7 +486,17 @@ Returns:
             # forbidden query never reaches the database.
             _validate_select_only(query)
         except ValueError as exc:
-            return f"ERROR: {exc}"
+            # The guard raises ValueError with a sanitized message (no
+            # user-supplied data is echoed), but the convention is to
+            # surface only the class name and rely on the daemon log
+            # for the detailed reason. ``logger.warning`` keeps the
+            # full text for operators.
+            logger.warning(
+                "db_postgres_dml_select guard rejected query on '%s': %s",
+                connection_name,
+                exc,
+            )
+            return f"ERROR: {type(exc).__name__} (see daemon log for details)."
 
         try:
             result = await pool_manager.execute_select(
@@ -473,8 +511,17 @@ Returns:
             # timeout, server error) is caught here and rendered as
             # an error string. The pool manager's message is already
             # sanitized, but we add a prefix so the agent knows the
-            # tool layer observed the failure.
-            return f"ERROR: Query failed on '{connection_name}': {exc}"
+            # tool layer observed the failure. Log the full exception
+            # for operators; return only the class name to the agent.
+            logger.warning(
+                "db_postgres_dml_select failed on '%s': %s",
+                connection_name,
+                exc,
+            )
+            return (
+                f"ERROR: Query failed on '{connection_name}' "
+                f"({type(exc).__name__})."
+            )
 
         columns: list[str] = result.get("columns", []) or []
         rows: list[dict[str, Any]] = result.get("rows", []) or []

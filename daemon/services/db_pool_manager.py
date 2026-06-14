@@ -33,6 +33,12 @@ from typing import TYPE_CHECKING, Any
 
 import asyncpg
 
+from daemon.services.db_sql_utils import (
+    DEFAULT_MAX_ROWS,
+    DEFAULT_QUERY_TIMEOUT,
+    strip_sql_noise,
+)
+
 if TYPE_CHECKING:
     from daemon.repositories.db_connection import DbConnectionConfig
     from daemon.repositories.db_connection import DbConnectionRepository
@@ -57,14 +63,6 @@ POOL_MAX_QUERIES: int = 500
 #: Timeout in seconds for ``asyncpg.create_pool`` and for acquiring a
 #: connection from the pool.
 POOL_TIMEOUT: int = 30
-
-#: Default timeout in seconds for an individual ``execute_select``
-#: query. Callers may override per call.
-DEFAULT_QUERY_TIMEOUT: int = 30
-
-#: Default cap on the number of rows returned by ``execute_select``.
-#: Callers may override per call.
-DEFAULT_MAX_ROWS: int = 1000
 
 
 # --- Sanitization regexes (compiled once) ---------------------------------
@@ -97,16 +95,6 @@ _RE_ROLE_PASSWORD = re.compile(
 
 # Final safety net: anything that still looks like user:pass@host.
 _RE_GENERIC_AUTH = re.compile(r"://[^@]+@")
-
-# F3 sanitization regexes: strip SQL noise so a LIMIT keyword scan
-# cannot be fooled by keyword-shaped substrings inside string literals
-# or comments.
-_RE_LIMIT_LINE_COMMENT = re.compile(r"--[^\n]*")
-_RE_LIMIT_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
-# Single-quoted string literal, including the '' SQL escape sequence.
-# Mirrors the regex used in daemon.tools.db_tools._validate_select_only
-# so both guards share the same notion of "inside a string".
-_RE_LIMIT_STRING_LITERAL = re.compile(r"'(?:[^']|'')*'")
 
 
 class ConnectionPoolManager:
@@ -371,20 +359,16 @@ class ConnectionPoolManager:
         be bypassed by putting the substring "LIMIT" inside a string
         literal (e.g. ``WHERE msg = 'no LIMIT here'``), which would
         prevent the safety LIMIT from being injected on queries that
-        actually had no LIMIT clause. A naive ``\bLIMIT\b`` regex is
+        actually had no LIMIT clause. A naive ``\\bLIMIT\\b`` regex is
         also not enough on its own: apostrophes and spaces are
         non-word characters, so the regex still matches the "LIMIT"
         inside a quoted string.
 
-        The fix mirrors :func:`daemon.tools.db_tools._validate_select_only`:
-
-        1. Strip ``--`` single-line and ``/* */`` multi-line comments
-           so a ``LIMIT`` inside a comment does not satisfy the check.
-        2. Strip single-quoted string literals (with the ``''`` SQL
-           escape sequence) so a ``LIMIT`` inside a string value does
-           not satisfy the check.
-        3. Apply a case-insensitive, word-boundary regex to the
-           stripped query.
+        The fix mirrors :func:`daemon.tools.db_tools._validate_select_only`
+        and uses :func:`daemon.services.db_sql_utils.strip_sql_noise` to
+        strip comments and single-quoted string literals (with the
+        ``''`` SQL escape sequence) before applying a case-insensitive,
+        word-boundary regex to the stripped query.
 
         This is intentionally a defensive substring scan, not a full
         SQL parser. The trust boundary for actual query safety is the
@@ -398,9 +382,7 @@ class ConnectionPoolManager:
             True iff the query contains a real ``LIMIT`` keyword
             outside of comments and string literals.
         """
-        stripped = _RE_LIMIT_LINE_COMMENT.sub("", query)
-        stripped = _RE_LIMIT_BLOCK_COMMENT.sub("", stripped)
-        stripped = _RE_LIMIT_STRING_LITERAL.sub("", stripped)
+        stripped = strip_sql_noise(query)
         return re.search(r"\bLIMIT\b", stripped, re.IGNORECASE) is not None
 
     # ------------------------------------------------------------------
