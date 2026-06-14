@@ -290,6 +290,18 @@ class ServicesConfig(BaseSettings):
             "don't false-positive flag live tasks."
         ),
     )
+    lease_heartbeat_interval_seconds: float = Field(
+        default=30.0,
+        description=(
+            "How often the in-process Execution Gate heartbeat task "
+            "refreshes a lease's heartbeat_at column while a "
+            "graph.astream call is in flight. Defaults to match "
+            "task_heartbeat_interval_seconds. Keep this at least "
+            "5-10x smaller than DEFAULT_STALE_LEASE_SECONDS (300 s) "
+            "so a few missed beats don't false-positive flag a live "
+            "lease as stale."
+        ),
+    )
     graph_timeout_minutes: float = Field(
         default=55.0,
         description="Hard timeout for LangGraph execution via MainLoopBridge (minutes). Set to 0 to disable."

@@ -47,13 +47,14 @@ def mock_manager(monkeypatch):
     gate = MagicMock(spec=ExecutionGateService)
     gate.run = AsyncMock(side_effect=_passthrough)
     manager.execution_gate = gate
-    # Cross-dispatcher pre-flight is now a SQL query — patch it out
-    # for these unit tests (no real DB).
-    from daemon.services.message_job_handler import MessageJobHandler
-    monkeypatch.setattr(
-        MessageJobHandler, "_find_running_task_for_instance",
-        lambda self, instance_id: None,
-    )
+    # Cross-dispatcher pre-flight is now a SQL query on
+    # ``TaskRepository.find_running_by_instance``. The mock manager's
+    # ``_task_repo`` is a MagicMock by default; override it with a
+    # tiny stub whose ``find_running_by_instance`` returns None so
+    # the handler takes the happy path (no running task to defer to).
+    task_repo_stub = MagicMock()
+    task_repo_stub.find_running_by_instance = MagicMock(return_value=None)
+    manager._task_repo = task_repo_stub
     return manager
 
 

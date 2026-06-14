@@ -60,12 +60,13 @@ def mock_manager(monkeypatch):
     gate = MagicMock(spec=ExecutionGateService)
     gate.run = AsyncMock(side_effect=_passthrough)
     manager.execution_gate = gate
-    # Cross-dispatcher pre-flight is a SQL query — patch it.
-    from daemon.services.message_job_handler import MessageJobHandler
-    monkeypatch.setattr(
-        MessageJobHandler, "_find_running_task_for_instance",
-        lambda self, instance_id: None,
-    )
+    # Cross-dispatcher pre-flight now reads
+    # ``TaskRepository.find_running_by_instance`` via
+    # ``manager._task_repo``. Stub the repo so the handler takes
+    # the happy path.
+    task_repo_stub = MagicMock()
+    task_repo_stub.find_running_by_instance = MagicMock(return_value=None)
+    manager._task_repo = task_repo_stub
     return manager
 
 
@@ -382,7 +383,7 @@ class TestCancelledErrorOnTerminate:
 
     @pytest.fixture(autouse=True)
     def _patch_running_task_check(self, monkeypatch):
-        """Patch the cross-dispatcher task check to return None.
+        """Stub the cross-dispatcher task check to return None.
 
         Same rationale as the same fixture in
         ``TestPauseVsShutdownDistinction`` in
@@ -392,9 +393,9 @@ class TestCancelledErrorOnTerminate:
         in this class exercise the gate's CancelledError → pause/
         terminate discrimination, not the contention re-queue.
         """
-        from daemon.services.message_job_handler import MessageJobHandler
+        from daemon.repositories.task.repository import TaskRepository
         monkeypatch.setattr(
-            MessageJobHandler, "_find_running_task_for_instance",
+            TaskRepository, "find_running_by_instance",
             lambda self, instance_id: None,
         )
     """Tests for asyncio.CancelledError handler when instance is terminated (not paused)."""

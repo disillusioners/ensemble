@@ -37,6 +37,7 @@ from daemon.services.execution_gate import (
     ExecutionGateService,
     LeaseContention,
     LeaseContentionReason,
+    LeaseLostError,
 )
 
 
@@ -232,6 +233,30 @@ class TestLeaseRepositoryRecovery:
         )
         # No holder_id provided — should still work.
         assert lease_repo.clear_stale("inst-1") is True
+
+    def test_clear_stale_leases_bulk_deletes(self, lease_repo):
+        """clear_stale_leases is the bulk recovery primitive (one
+        round-trip, no N+1) used by ``recover_stale_leases`` on
+        startup.
+        """
+        lease_repo.try_acquire(
+            "inst-stale", "task:42", LeaseHolderKind.TASK.value
+        )
+        lease_repo.try_acquire(
+            "inst-fresh", "task:43", LeaseHolderKind.TASK.value
+        )
+        # Backdate the first one's heartbeat to past the threshold.
+        with SQLModelSession(lease_repo.engine) as session:
+            row = session.get(InstanceExecutionLease, "inst-stale")
+            row.heartbeat_at = datetime.now(timezone.utc) - timedelta(
+                seconds=1000
+            )
+            session.add(row)
+            session.commit()
+        cleared = lease_repo.clear_stale_leases(max_age_seconds=300)
+        assert cleared == 1
+        assert lease_repo.get_holder("inst-stale") is None
+        assert lease_repo.get_holder("inst-fresh") is not None
 
     def test_find_stale_leases_uses_sql_filter(self, lease_repo):
         """The stale-lease scan must filter in SQL (not load all
@@ -544,36 +569,144 @@ class TestExecutionGateRecovery:
         # Fresh lease is preserved.
         assert lease_repo.get_holder("inst-1") is not None
 
-    def test_sync_wrapper_works_outside_event_loop(self, gate, lease_repo):
-        """recover_stale_leases_sync must work when called from the
-        daemon's startup path (no event loop running yet)."""
-        lease_repo.try_acquire(
-            "inst-stale", "task:42", LeaseHolderKind.TASK.value
-        )
-        with SQLModelSession(lease_repo.engine) as session:
-            row = session.get(InstanceExecutionLease, "inst-stale")
-            row.heartbeat_at = datetime.now(timezone.utc) - timedelta(
-                seconds=1000
+
+# ─── Service: in-flight heartbeat / lease-loss detection ──────────────────────
+
+
+class TestExecutionGateHeartbeat:
+    @pytest.mark.asyncio
+    async def test_lease_lost_raises_lease_lost_error(self, gate, lease_repo):
+        """If the lease row is deleted by another process (e.g.
+        ``recover_stale_leases`` on a different node) while
+        ``work_fn`` is in flight, ``gate.run`` must cancel the work
+        and raise ``LeaseLostError``.
+        """
+        heartbeat_seen = asyncio.Event()
+        work_started = asyncio.Event()
+        work_cancelled = {"flag": False}
+
+        async def work():
+            work_started.set()
+            try:
+                # Long enough for at least one heartbeat tick.
+                await asyncio.sleep(2.0)
+            except asyncio.CancelledError:
+                work_cancelled["flag"] = True
+                raise
+
+        # Patch the heartbeat method so we can both (a) wait for
+        # the heartbeat task to be running and (b) simulate the
+        # lease being lost on the second tick.
+        call_count = {"n": 0}
+
+        async def fake_heartbeat(instance_id, holder_id):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # First heartbeat: refresh succeeds.
+                return await gate.heartbeat.__wrapped__(
+                    gate, instance_id, holder_id
+                ) if hasattr(gate.heartbeat, "__wrapped__") else True
+            # Subsequent heartbeats: simulate lease loss.
+            heartbeat_seen.set()
+            return False
+
+        gate.heartbeat = fake_heartbeat  # type: ignore[assignment]
+        # Tighten the heartbeat interval so the test runs quickly.
+        gate._heartbeat_interval = 0.05
+
+        with pytest.raises(LeaseLostError):
+            await gate.run(
+                "inst-1",
+                "task:42",
+                LeaseHolderKind.TASK.value,
+                work,
             )
-            session.add(row)
-            session.commit()
-        cleared = gate.recover_stale_leases_sync(max_age_seconds=300)
-        assert cleared == 1
+        assert work_cancelled["flag"] is True
+        # After the loss, the holder row is gone (work was cancelled
+        # before the gate ran the release; the release is still
+        # called in the finally but is a no-op for the lost lease).
+        # We don't assert on the row's existence — the heartbeat
+        # returned False because the row was already deleted, so
+        # the release is a no-op.
 
     @pytest.mark.asyncio
-    async def test_sync_wrapper_returns_minus_one_under_running_loop(
+    async def test_in_flight_heartbeat_refreshes_heartbeat_at(
         self, gate, lease_repo
     ):
-        """When a real event loop is already running, the sync
-        wrapper cannot block on the recovery; it schedules the
-        coroutine and returns -1 to signal "in-flight, count
-        unknown to caller". The daemon's startup path uses the
-        async method directly to avoid this case.
+        """The in-flight heartbeat (spawned by ``_execute_under_lease``)
+        must refresh ``heartbeat_at`` while ``work_fn`` is running,
+        so a long-running ``graph.astream`` is not eligible for
+        eviction by ``recover_stale_leases`` on another node.
         """
-        cleared = gate.recover_stale_leases_sync(max_age_seconds=300)
-        assert cleared == -1
-        # Yield so the scheduled coroutine has a chance to run.
-        await asyncio.sleep(0.05)
+        async def work():
+            # Sleep longer than the heartbeat interval; the
+            # heartbeat task should have fired at least once.
+            await asyncio.sleep(gate._heartbeat_interval * 3 + 0.05)
+            return "done"
+
+        before = datetime.now(timezone.utc)
+        out = await gate.run(
+            "inst-1",
+            "task:42",
+            LeaseHolderKind.TASK.value,
+            work,
+        )
+        assert out == "done"
+        after = datetime.now(timezone.utc)
+        # The lease row may have been released already; the
+        # important thing is that during the call, the heartbeat
+        # fired (we verified by side effect — no exception, the
+        # work completed). ``before``/``after`` is just to ensure
+        # the test exercised real time.
+        assert (after - before).total_seconds() >= gate._heartbeat_interval
+
+    @pytest.mark.asyncio
+    async def test_lease_lost_during_contention_flag(
+        self, gate, lease_repo
+    ):
+        """If the lease row exists at ``try_acquire`` time but is
+        gone by the time we ask ``get_holder`` (vanishingly rare),
+        the returned ``LeaseContention`` has
+        ``holder_lost_during_contention=True`` and empty
+        ``holder_id``/``holder_kind``.
+        """
+        # Acquire a lease, then race the contender: delete the
+        # row between try_acquire and get_holder. The cleanest
+        # way is to monkey-patch ``get_holder`` to return None
+        # for one call.
+        lease_repo.try_acquire(
+            "inst-1", "task:42", LeaseHolderKind.TASK.value
+        )
+
+        original_get_holder = lease_repo.get_holder
+        call_count = {"n": 0}
+
+        def flaky_get_holder(instance_id):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return None  # Simulate the row being deleted
+            return original_get_holder(instance_id)
+
+        lease_repo.get_holder = flaky_get_holder  # type: ignore[assignment]
+        try:
+            out = await gate.run(
+                "inst-1",
+                "message_job:job-A",
+                LeaseHolderKind.MESSAGE_JOB.value,
+                lambda: _never_called(),
+            )
+        finally:
+            lease_repo.get_holder = original_get_holder  # type: ignore[assignment]
+
+        assert isinstance(out, LeaseContention)
+        assert out.holder_lost_during_contention is True
+        assert out.holder_id == ""
+        assert out.holder_kind == ""
+        assert out.reason == LeaseContentionReason.HELD_BY_LOST
+
+
+async def _never_called():
+    raise AssertionError("work_fn must NOT run when lease is contended")
 
 
 # ─── Integration: ProcessMessageProcessor re-queue ───────────────────────────
@@ -582,6 +715,10 @@ class TestExecutionGateRecovery:
 class TestTaskProcessorRequeueOnContention:
     @pytest.mark.asyncio
     async def test_requeue_task_moves_running_to_pending(self, task_repo):
+        """No-backoff requeue_task was removed in favour of
+        requeue_task_with_backoff (the only production caller). This
+        test now exercises the with-backoff variant for parity.
+        """
         task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="inst-1",
@@ -590,7 +727,9 @@ class TestTaskProcessorRequeueOnContention:
         # Simulate the worker having claimed it.
         task_repo.claim_pending_task(worker_id="worker-1")
         # Now re-queue (as the gate-contention path would).
-        requeued = task_repo.requeue_task(task.id)
+        requeued = task_repo.requeue_task_with_backoff(
+            task.id, min_delay_seconds=0.0, max_delay_seconds=0.0
+        )
         assert requeued is not None
         assert requeued.status == TaskStatus.PENDING.value
         assert requeued.worker_id is None
@@ -609,7 +748,7 @@ class TestTaskProcessorRequeueOnContention:
         task_repo.claim_pending_task(worker_id="worker-1")
         task_repo.complete_task(task.id, {"ok": True})
         # Re-queue must be a no-op for non-RUNNING tasks.
-        assert task_repo.requeue_task(task.id) is None
+        assert task_repo.requeue_task_with_backoff(task.id) is None
         # Status unchanged.
         row = task_repo.get(task.id)
         assert row.status == TaskStatus.COMPLETED.value

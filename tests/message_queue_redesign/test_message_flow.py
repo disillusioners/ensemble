@@ -1199,16 +1199,13 @@ class TestMessageJobHandlerCompletionHandler:
         gate.run = AsyncMock(side_effect=_passthrough_gate)
         gate.is_held_locally = MagicMock(return_value=False)
         manager.execution_gate = gate
-        # The MessageJobHandler's cross-dispatcher pre-flight
-        # (``_find_running_task_for_instance``) opens a real SQL
-        # session on the engine. Patch it at the class level so
-        # tests don't need a real DB. Tests that want to exercise
-        # the contention path can override this patch.
-        from daemon.services.message_job_handler import MessageJobHandler
-        monkeypatch.setattr(
-            MessageJobHandler, "_find_running_task_for_instance",
-            lambda self, instance_id: None,
-        )
+        # The MessageJobHandler's cross-dispatcher pre-flight now
+        # reads ``TaskRepository.find_running_by_instance`` via
+        # ``manager._task_repo``. Stub the repo so the handler takes
+        # the happy path.
+        task_repo_stub = MagicMock()
+        task_repo_stub.find_running_by_instance = MagicMock(return_value=None)
+        manager._task_repo = task_repo_stub
         return manager
 
     @pytest.fixture

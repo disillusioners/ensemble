@@ -2,16 +2,16 @@
 
 import asyncio
 import logging
-from typing import Any
 
 from daemon.cancellation import (
     CancellationTokenSource,
     CancellationReason,
     OperationCancelledError,
 )
+from daemon.manager import MessageResult
 from daemon.models.instance import InstanceStatus
 from daemon.repositories.execution_lease.models import LeaseHolderKind
-from daemon.services.execution_gate import LeaseContention
+from daemon.services.execution_gate import LeaseContention, LeaseLostError
 from daemon.services.job_queue_service import DemandState
 
 logger = logging.getLogger(__name__)
@@ -96,22 +96,28 @@ class MessageJobHandler:
         # completes. (See
         # docs/bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md
         # for the bug this prevents.)
-        #
-        # The data access is delegated to
-        # ``TaskRepository.find_running_by_instance`` (see
-        # ``daemon/repositories/task/repository.py``) so the SQL
-        # is colocated with the rest of the task access code. The
-        # local ``_find_running_task_for_instance`` is a thin
-        # pass-through to that repository method; tests can still
-        # patch it to short-circuit the SQL.
-        running_task = await asyncio.to_thread(
-            self._find_running_task_for_instance, instance_id
-        )
-        if running_task is not None:
-            await self._requeue_for_contention(
-                job, f"a task is RUNNING for this instance (task_id={running_task.id})"
+        task_repo = getattr(self._manager, "_task_repo", None)
+        if task_repo is None:
+            # Misconfigured: InstanceManager must expose _task_repo
+            # (set in ``setup_worker_pool``) for the cross-dispatcher
+            # pre-flight to work. Without it we lose the optimisation
+            # but the Gate's ``try_acquire`` is still the
+            # authoritative safety net. Log a warning so a future
+            # operator notices.
+            logger.warning(
+                "MessageJobHandler: InstanceManager has no _task_repo; "
+                "skipping cross-dispatcher pre-flight. The Execution "
+                "Gate's try_acquire is the authoritative safety net."
             )
-            return
+        else:
+            running_task = await asyncio.to_thread(
+                task_repo.find_running_by_instance, instance_id
+            )
+            if running_task is not None:
+                await self._requeue_for_contention(
+                    job, f"a task is RUNNING for this instance (task_id={running_task.id})"
+                )
+                return
 
         # Create CancellationToken for this job
         cts = CancellationTokenSource()
@@ -151,7 +157,14 @@ class MessageJobHandler:
         # / Exception`` clauses below (which handle pause-vs-terminate
         # discrimination and FAILED-state reporting) see the
         # exception and run unchanged.
-        gate_outcome: Any | LeaseContention | None = None
+        #
+        # TODO(refactor): the dual-variable control flow
+        # (``gate_outcome`` / ``gate_raised``) is harder to read than
+        # a single ``try / except`` around ``gate.run`` that
+        # translates to the right terminal action. Preserved here
+        # to keep the existing tested ``except`` clauses
+        # untouched. Follow-up: refactor into a small state machine.
+        gate_outcome: "MessageResult | LeaseContention | None" = None
         gate_raised: BaseException | None = None
 
         try:
@@ -179,6 +192,25 @@ class MessageJobHandler:
             )
             await self._requeue_for_contention(job, holder_summary)
             # Clean up the CTS we stored — we never used it.
+            self._active_tokens.pop(job.job_id, None)
+            return
+
+        # Handle LeaseLostError: the gate detected (via the
+        # in-flight heartbeat) that our lease row was cleared by
+        # another process (most likely ``recover_stale_leases`` on a
+        # different node). The in-flight ``work_fn`` was cancelled
+        # by the gate before this point. Treat as transient: the
+        # job should re-queue and retry — the next attempt will
+        # acquire the lease fresh.
+        if isinstance(gate_raised, LeaseLostError):
+            logger.warning(
+                f"MessageJobHandler: lease lost mid-execution for "
+                f"job={job.job_id[:8]}... instance={instance_id[:8]}... "
+                f"— re-queuing (another process cleared the lease)"
+            )
+            await self._requeue_for_contention(
+                job, f"lease lost mid-execution: {gate_raised}"
+            )
             self._active_tokens.pop(job.job_id, None)
             return
 
@@ -377,17 +409,6 @@ class MessageJobHandler:
                     f"MessageJobHandler: dispatch bus notify failed "
                     f"(non-fatal): {e}"
                 )
-
-    def _find_running_task_for_instance(self, instance_id: str):
-        """Deprecated: kept for backwards compatibility with any
-        external caller. Delegates to
-        ``TaskRepository.find_running_by_instance`` via the
-        manager. New code should call the repository directly.
-        """
-        task_repo = getattr(self._manager, "_task_repo", None)
-        if task_repo is None:
-            return None
-        return task_repo.find_running_by_instance(instance_id)
 
     async def cancel_message_job(self, job_id: str) -> None:
         """Cancel a MESSAGE job. Lives on MessageJobHandler, called via JobQueueService.

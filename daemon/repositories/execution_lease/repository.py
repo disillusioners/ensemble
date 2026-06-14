@@ -277,6 +277,27 @@ class ExecutionLeaseRepository:
             )
             return (result.rowcount or 0) == 1
 
+    def clear_stale_leases(self, max_age_seconds: int) -> int:
+        """Bulk-delete every lease whose holder has not heartbeated
+        within ``max_age_seconds``. Single round-trip
+        (no N+1). The DELETE matches the recovery predicate in
+        ``find_stale_leases``: ``COALESCE(heartbeat_at, acquired_at)
+        < :cutoff``.
+
+        Used by ``ExecutionGateService.recover_stale_leases`` at
+        startup. Returns the number of rows cleared.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM instance_execution_leases "
+                    "WHERE COALESCE(heartbeat_at, acquired_at) < :cutoff"
+                ),
+                {"cutoff": cutoff},
+            )
+            return result.rowcount or 0
+
     def list_all(self) -> list[InstanceExecutionLease]:
         """Return every lease row. Used by diagnostics and tests."""
         from sqlmodel import select

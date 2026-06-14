@@ -64,12 +64,13 @@ class TestPauseKeepsJobProcessing:
         gate = MagicMock(spec=ExecutionGateService)
         gate.run = AsyncMock(side_effect=_passthrough)
         manager.execution_gate = gate
-        # Cross-dispatcher pre-flight is a SQL query — patch it.
-        from daemon.services.message_job_handler import MessageJobHandler
-        monkeypatch.setattr(
-            MessageJobHandler, "_find_running_task_for_instance",
-            lambda self, instance_id: None,
-        )
+        # Cross-dispatcher pre-flight now reads
+        # ``TaskRepository.find_running_by_instance`` via
+        # ``manager._task_repo``. Stub the repo so the handler takes
+        # the happy path.
+        task_repo_stub = MagicMock()
+        task_repo_stub.find_running_by_instance = MagicMock(return_value=None)
+        manager._task_repo = task_repo_stub
         return manager
 
     @pytest.fixture
@@ -354,17 +355,22 @@ class TestPauseVsShutdownDistinction:
 
     @pytest.fixture(autouse=True)
     def _patch_running_task_check(self, monkeypatch):
-        """Patch the cross-dispatcher task check to return None.
+        """Stub the cross-dispatcher task check to return None.
 
         The default MagicMock engine returns a truthy value from the
         SQL query, which would trigger the re-queue-for-contention
         path. The tests in this class don't exercise that path — they
         exercise the gate's CancelledError → pause/terminate
-        discrimination — so we patch the check to return None.
+        discrimination — so we patch the repository method to return
+        None via the manager's ``_task_repo`` attribute.
         """
-        from daemon.services.message_job_handler import MessageJobHandler
+        # Autouse for this class — patches ``TaskRepository.find_running_by_instance``
+        # globally on the class itself (any instance, including the
+        # ad-hoc ``MagicMock()`` managers created inside the test
+        # bodies) so the SQL short-circuits to None.
+        from daemon.repositories.task.repository import TaskRepository
         monkeypatch.setattr(
-            MessageJobHandler, "_find_running_task_for_instance",
+            TaskRepository, "find_running_by_instance",
             lambda self, instance_id: None,
         )
 
@@ -377,6 +383,10 @@ class TestPauseVsShutdownDistinction:
             job_queue_service=MagicMock(),
             job_repository=MagicMock(),
         )
+        # No task_repo on this ad-hoc mock — the handler logs a
+        # warning and skips the cross-dispatcher pre-flight (the
+        # Gate's try_acquire is still the authoritative safety net).
+        handler._manager._task_repo = None
 
         job = MockJob("job-123", instance_id="test-instance")
 
@@ -416,6 +426,8 @@ class TestPauseVsShutdownDistinction:
             job_queue_service=MagicMock(),
             job_repository=MagicMock(),
         )
+        # No task_repo on this ad-hoc mock — see the previous test.
+        handler._manager._task_repo = None
 
         job = MockJob("job-123", instance_id="test-instance")
 

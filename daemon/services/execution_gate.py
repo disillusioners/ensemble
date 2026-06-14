@@ -44,6 +44,12 @@ What this service does
   ``_process_message_with_tracking`` call. Release is atomic and
   conditional on ``holder_id`` matching — a stale loser cannot
   accidentally evict a fresh winner's lease.
+- The holder must keep the lease's ``heartbeat_at`` fresh while the
+  work is in flight; ``recover_stale_leases`` on another node uses
+  ``COALESCE(heartbeat_at, acquired_at) < :cutoff`` to detect a
+  crashed holder. ``_execute_under_lease`` spawns an
+  ``asyncio.create_task`` heartbeat at the configured interval so
+  long-running ``graph.astream`` calls cannot be evicted mid-execution.
 - On contention (the lease is already held by someone else), the
   caller receives a ``LeaseContention`` signal and is expected to back
   off and re-queue, not call ``graph.astream``.
@@ -60,11 +66,23 @@ Crash recovery
 --------------
 
 If the daemon dies while holding a lease, the lease row is left
-behind. The next startup runs ``recover_stale_leases`` which deletes
-rows whose ``heartbeat_at`` is older than a threshold. The default
-threshold is conservative (5 minutes) so a long-running astream
-isn't accidentally killed. The recovery is logged so operators can
-audit when stale leases had to be cleared.
+behind. The next startup runs ``recover_stale_leases`` which performs
+a single ``DELETE WHERE COALESCE(heartbeat_at, acquired_at) < :cutoff``
+to clear rows whose holder has not heartbeated within the threshold.
+The default threshold is conservative (5 minutes) so a long-running
+astream isn't accidentally killed. The recovery is logged so
+operators can audit when stale leases had to be cleared.
+
+``LeaseLostError``
+------------------
+
+If the holder's lease row is deleted out from under it (by
+``recover_stale_leases`` on another node, or any other code path
+that bypasses the holder_id check), the holder's in-flight
+``work_fn`` is cancelled and ``LeaseLostError`` is raised. The
+dispatcher treats this as a transient error and re-queues. Detection
+relies on the heartbeat: if the heartbeat returns False (the row was
+deleted or replaced), we know we lost the lease and cancel.
 
 What this service does NOT do
 ------------------------------
@@ -79,6 +97,18 @@ What this service does NOT do
   ``InstanceMessagingService._process_message_with_tracking``. This
   keeps the lease reusable from contexts where a custom function
   needs to be wrapped (e.g. tests, future sync invoke paths).
+
+Non-sentinel return value
+-------------------------
+
+``LeaseContention`` is a regular dataclass, not a sentinel/exception.
+``run`` returns the value of ``work_fn()`` on success — if your
+``work_fn`` ever returns a ``LeaseContention`` instance, the
+``isinstance(gate_outcome, LeaseContention)`` check in the dispatchers
+will misinterpret the success result as contention. Current
+``work_fn``s return ``MessageResult`` (a pydantic model), so the
+collision is impossible in practice. Do not return
+``LeaseContention`` from a custom ``work_fn``.
 """
 
 from __future__ import annotations
@@ -87,7 +117,6 @@ import asyncio
 import logging
 import os
 import threading
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
@@ -98,6 +127,13 @@ from ..repositories.execution_lease.repository import ExecutionLeaseRepository
 logger = logging.getLogger(__name__)
 
 
+# Default lease heartbeat interval. The recovery threshold is 5
+# minutes; we heartbeat at 30 s so ~10 missed beats (worker process
+# death) are required before the lease is considered stale. Sized to
+# match the existing task-heartbeat convention.
+DEFAULT_LEASE_HEARTBEAT_SECONDS = 30.0
+
+
 class LeaseContentionReason(str, Enum):
     """Why a lease could not be acquired. The caller uses this to decide
     how to back off (atomic_transition, re-poll, retry-after-delay, etc.).
@@ -106,6 +142,12 @@ class LeaseContentionReason(str, Enum):
     HELD_BY_OTHER = "held_by_other"
     """The lease row exists and is held by a different holder."""
 
+    HELD_BY_LOST = "held_by_lost"
+    """The lease row existed at ``try_acquire`` time but was gone by
+    the time we asked ``get_holder`` (vanishingly rare; the previous
+    holder released between our two queries). The caller cannot use
+    ``holder_id``/``holder_kind`` for diagnostics — both are empty."""
+
 
 @dataclass
 class LeaseContention:
@@ -113,21 +155,32 @@ class LeaseContention:
     someone else. ``holder_kind`` and ``holder_id`` let the caller decide
     how to back off (e.g. message_job callers atomically back-transition
     the job to PENDING; task callers re-poll the task table).
+
+    ``holder_lost_during_contention`` is True when the row was deleted
+    between ``try_acquire`` and ``get_holder`` (rare; ``holder_id`` and
+    ``holder_kind`` are empty in that case). Callers that want to log
+    "who held the lease" should check the flag and handle the
+    "I lost, nobody's there" case distinctly from the
+    "I lost, here's who beat me" case.
     """
 
     reason: LeaseContentionReason
     holder_id: str
     holder_kind: str
-    acquired_at: Any  # datetime
+    acquired_at: Optional[Any] = None  # datetime
+    holder_lost_during_contention: bool = False
 
 
 class LeaseLostError(Exception):
     """Raised inside ``gate.run`` if the caller lost the lease mid-execution.
 
-    This happens when ``recover_stale_leases`` (or any other code path)
-    deletes the lease out from under the holder — e.g. a process crash
-    recovery loop on a different node. The caller should treat this as
-    a transient error and let the dispatcher decide whether to re-queue.
+    Raised when the in-flight heartbeat returns False (the lease row
+    was deleted by ``recover_stale_leases`` on another node, or
+    replaced by a different holder) — i.e. the process is no longer
+    the authoritative driver of ``graph.astream`` for this instance.
+    The in-flight ``work_fn`` is cancelled and this exception
+    propagates to the caller. Dispatchers treat it as a transient
+    error and re-queue.
     """
 
 
@@ -135,7 +188,10 @@ WorkFn = Callable[[], Awaitable[Any]]
 """A user-supplied async callable that performs the actual work
 (typically a call to ``_process_message_with_tracking``). It runs only
 if the lease was acquired; otherwise ``run`` returns ``LeaseContention``
-without calling it."""
+without calling it.
+
+NOTE: do NOT return a ``LeaseContention`` instance from ``work_fn``;
+see the module docstring under "Non-sentinel return value"."""
 
 
 class ExecutionGateService:
@@ -161,10 +217,18 @@ class ExecutionGateService:
     # ``StaleTaskRecovery``.
     DEFAULT_STALE_LEASE_SECONDS = 300
 
+    # Default lease heartbeat interval (the in-process refresh
+    # cadence). Same default as the module-level
+    # ``DEFAULT_LEASE_HEARTBEAT_SECONDS`` but exposed on the class so
+    # external callers (e.g. ``InstanceManager.__init__``) can reach
+    # it without importing the module constant.
+    DEFAULT_LEASE_HEARTBEAT_SECONDS = DEFAULT_LEASE_HEARTBEAT_SECONDS
+
     def __init__(
         self,
         lease_repo: ExecutionLeaseRepository,
         stale_lease_seconds: int = DEFAULT_STALE_LEASE_SECONDS,
+        heartbeat_interval_seconds: float = DEFAULT_LEASE_HEARTBEAT_SECONDS,
     ):
         """Initialize the gate.
 
@@ -172,9 +236,15 @@ class ExecutionGateService:
             lease_repo: The DB-backed lease repository.
             stale_lease_seconds: How old a lease's ``heartbeat_at`` can
                 be before ``recover_stale_leases`` considers it stale.
+            heartbeat_interval_seconds: How often the in-process
+                heartbeat task refreshes ``heartbeat_at`` while a
+                ``gate.run`` is in flight. Should be at least 5-10x
+                smaller than ``stale_lease_seconds`` so a few missed
+                beats don't false-positive flag a live lease.
         """
         self._lease_repo = lease_repo
         self._stale_lease_seconds = stale_lease_seconds
+        self._heartbeat_interval = max(0.1, heartbeat_interval_seconds)
         # In-process fast path: which (instance_id, holder_id) pairs
         # are *currently* running in this Python process?
         # ``is_held_locally`` answers "is anyone in this process the
@@ -251,10 +321,23 @@ class ExecutionGateService:
               caller is expected to back off and re-queue.
             - If the work raises, the lease is still released before
               the exception propagates.
-            - If the lease is somehow lost mid-execution (e.g.
-              ``recover_stale_leases`` evicted the row), ``work_fn`` is
-              cancelled and ``LeaseLostError`` is raised. The
-              dispatcher treats this as a transient error.
+            - If the lease is somehow lost mid-execution (the
+              heartbeat returns False, meaning the row was deleted by
+              ``recover_stale_leases`` on another node), ``work_fn``
+              is cancelled and ``LeaseLostError`` is raised. The
+              dispatcher treats this as a transient error and
+              re-queues.
+
+        The in-flight heartbeat is critical: without it, a
+        ``graph.astream`` call longer than
+        ``stale_lease_seconds`` (default 5 min) would be eligible
+        for eviction by another node's ``recover_stale_leases``,
+        re-introducing the dual-driver race the gate is designed to
+        prevent.
+
+        IMPORTANT: ``work_fn`` must NOT return a ``LeaseContention``
+        instance — see the module docstring under "Non-sentinel
+        return value".
 
         Args:
             instance_id: The langgraph thread_id == instance_id.
@@ -268,7 +351,8 @@ class ExecutionGateService:
         Returns:
             The return value of ``work_fn()``, or a
             ``LeaseContention`` if the lease was held by another
-            caller.
+            caller. Raises ``LeaseLostError`` if the lease was
+            evicted mid-execution.
         """
         # Fast local pre-check: if THIS process holds the lease AND
         # it's the same holder_id, skip the DB roundtrip. We need
@@ -296,19 +380,23 @@ class ExecutionGateService:
             )
             if current is None:
                 # Vanishingly rare: the holder released between our
-                # failed acquire and our get_holder. Treat as
-                # contention-with-no-holder and let the caller retry.
+                # failed acquire and our get_holder. Surface this
+                # distinctly via ``holder_lost_during_contention``
+                # so callers don't try to log a non-existent
+                # ``holder_id``.
                 return LeaseContention(
-                    reason=LeaseContentionReason.HELD_BY_OTHER,
+                    reason=LeaseContentionReason.HELD_BY_LOST,
                     holder_id="",
                     holder_kind="",
                     acquired_at=None,
+                    holder_lost_during_contention=True,
                 )
             return LeaseContention(
                 reason=LeaseContentionReason.HELD_BY_OTHER,
                 holder_id=current.holder_id,
                 holder_kind=current.holder_kind,
                 acquired_at=current.acquired_at,
+                holder_lost_during_contention=False,
             )
 
         # We have the lease. Mark locally and run the work.
@@ -334,13 +422,22 @@ class ExecutionGateService:
         work_fn: WorkFn,
     ) -> Any:
         """Run ``work_fn`` while holding the lease, tracking the task for
-        cancellation.
+        cancellation AND keeping the lease's ``heartbeat_at`` fresh.
 
         Subroutine of ``run`` so the ``try/finally`` for release stays
-        at the call site. Registers the running ``asyncio.Task`` in
+        at the call site.
+
+        Cancellation: registers the running ``asyncio.Task`` in
         ``_running_tasks`` so ``cancel_instance_execution`` (used by
         terminate / pause) can interrupt it from elsewhere in the
         daemon.
+
+        Heartbeat: spawns a child task that calls
+        ``lease_repo.heartbeat`` every ``_heartbeat_interval``
+        seconds. If the heartbeat returns False (the row was deleted
+        by another node's ``recover_stale_leases``), the work_fn is
+        cancelled and ``LeaseLostError`` is raised so the dispatcher
+        can re-queue.
         """
         current_task = asyncio.current_task()
         if current_task is not None:
@@ -350,13 +447,86 @@ class ExecutionGateService:
                 # don't crash; the existing task is preserved so
                 # cancel_instance_execution can still reach it.
                 self._running_tasks.setdefault(instance_id, current_task)
+        heartbeat_task: asyncio.Task | None = None
+        lease_lost = asyncio.Event()
         try:
-            return await work_fn()
+            heartbeat_task = asyncio.create_task(
+                self._lease_heartbeat_loop(
+                    instance_id, holder_id, lease_lost
+                )
+            )
+            work_task = asyncio.create_task(work_fn())
+            lease_lost_wait = asyncio.create_task(lease_lost.wait())
+            done, pending = await asyncio.wait(
+                {work_task, lease_lost_wait},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if work_task in done:
+                lease_lost_wait.cancel()
+                try:
+                    await lease_lost_wait
+                except asyncio.CancelledError:
+                    pass
+                return work_task.result()
+            # Heartbeat reported lease loss. Cancel work_fn so it
+            # doesn't keep driving graph.astream for an instance whose
+            # lease has been revoked.
+            work_task.cancel()
+            try:
+                await work_task
+            except asyncio.CancelledError:
+                pass
+            raise LeaseLostError(
+                f"Lost execution lease for instance={instance_id[:8]}... "
+                f"holder_id={holder_id} mid-execution (row was cleared by "
+                "another process or replaced by a different holder)"
+            )
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             if current_task is not None:
                 with self._running_tasks_lock:
                     if self._running_tasks.get(instance_id) is current_task:
                         self._running_tasks.pop(instance_id, None)
+
+    async def _lease_heartbeat_loop(
+        self,
+        instance_id: str,
+        holder_id: str,
+        lease_lost: asyncio.Event,
+    ) -> None:
+        """Refresh the lease's ``heartbeat_at`` every
+        ``_heartbeat_interval`` seconds. If a heartbeat returns False
+        (the row was deleted or replaced), set ``lease_lost`` so
+        ``_execute_under_lease`` cancels the work and raises
+        ``LeaseLostError``.
+
+        Errors other than False-return are swallowed and logged: a
+        transient DB error should not kill an in-flight
+        ``graph.astream`` call. The next heartbeat tick (or the
+        next startup recovery pass) will catch a real problem.
+        """
+        try:
+            while True:
+                await asyncio.sleep(self._heartbeat_interval)
+                try:
+                    ok = await self.heartbeat(instance_id, holder_id)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"ExecutionGate.heartbeat error "
+                        f"instance={instance_id[:8]}... "
+                        f"holder_id={holder_id}: {type(e).__name__}: {e}"
+                    )
+                    continue
+                if not ok:
+                    lease_lost.set()
+                    return
+        except asyncio.CancelledError:
+            return
 
     # --------------------------------------------------------
     # DIRECT (NON-WORK) OPERATIONS
@@ -403,15 +573,11 @@ class ExecutionGateService:
     ) -> int:
         """Clear leases whose holder has died.
 
-        Called from daemon startup. For each lease whose
-        ``heartbeat_at`` is older than ``max_age_seconds``, the row is
-        deleted (no holder_id check — this is recovery, not release).
-        The next attempt to acquire the lease for that instance will
-        succeed.
-
-        Returns the number of leases cleared. Operators can read this
-        in the startup log to know whether a previous run died
-        mid-execution.
+        Called from daemon startup. Single bulk
+        ``DELETE WHERE COALESCE(heartbeat_at, acquired_at) < :cutoff``
+        (one round-trip rather than N+1). Returns the number of
+        rows cleared; operators read this in the startup log to know
+        whether a previous run died mid-execution.
 
         Args:
             max_age_seconds: Override the staleness threshold.
@@ -423,79 +589,32 @@ class ExecutionGateService:
             if max_age_seconds is not None
             else self._stale_lease_seconds
         )
-        stale = await asyncio.to_thread(
-            self._lease_repo.find_stale_leases, threshold
+        cleared = await asyncio.to_thread(
+            self._lease_repo.clear_stale_leases, threshold
         )
-        cleared = 0
-        for lease in stale:
-            ok = await asyncio.to_thread(
-                self._lease_repo.clear_stale, lease.instance_id
-            )
-            if ok:
-                cleared += 1
-                logger.warning(
-                    "ExecutionGate.recover_stale_leases: cleared stale lease "
-                    f"instance={lease.instance_id[:8]}... "
-                    f"holder_id={lease.holder_id} "
-                    f"holder_kind={lease.holder_kind} "
-                    f"acquired_at={lease.acquired_at} "
-                    f"heartbeat_at={lease.heartbeat_at}"
-                )
         if cleared:
-            logger.info(
-                f"ExecutionGate: cleared {cleared} stale lease(s) on startup"
+            logger.warning(
+                f"ExecutionGate: cleared {cleared} stale lease(s) on startup "
+                f"(threshold={threshold}s)"
             )
         return cleared
 
-    def recover_stale_leases_sync(
-        self, max_age_seconds: int | None = None
-    ) -> int:
-        """Synchronous wrapper around ``recover_stale_leases``.
-
-        Kept for callers (e.g. diagnostic scripts) that need to drive
-        recovery from a synchronous context. The daemon's own startup
-        path in ``daemon/api.py`` calls the async
-        ``recover_stale_leases`` directly so the recovery is
-        ``await``-ed before any ``gate.run`` can race with a stale
-        lease.
-
-        If a real event loop is already running (test fixtures), we
-        schedule the coroutine on it and return ``-1`` as a sentinel
-        — the scheduled task runs concurrently and its cleared count
-        is not available to the caller. Callers that need the count
-        should use the async method.
-        """
-        try:
-            _loop = asyncio.get_event_loop()
-            if _loop.is_running():
-                # A loop is already running — schedule and return -1
-                # to signal "recovery is in-flight, count unknown to
-                # the caller". Use -1 (not 0) so a caller that
-                # inspects the return value can distinguish "nothing
-                # was stale" from "I have no idea".
-                _loop.create_task(self.recover_stale_leases(max_age_seconds))
-                return -1
-            return _loop.run_until_complete(
-                self.recover_stale_leases(max_age_seconds)
-            )
-        except RuntimeError:
-            # No event loop at all. Spin one up just for the recovery.
-            return asyncio.run(self.recover_stale_leases(max_age_seconds))
-
     # --------------------------------------------------------
-    # HEARTBEAT (used by future work; not required for correctness
-    # of acquire/release under the current 'one call acquires, one
-    # call releases' model, but exposed for callers that want to
-    # demonstrate liveness to an external observer).
+    # HEARTBEAT
     # --------------------------------------------------------
 
     async def heartbeat(self, instance_id: str, holder_id: str) -> bool:
         """Refresh the lease's ``heartbeat_at`` timestamp.
 
         Returns False if the lease is no longer held by the caller
-        (stolen by recovery, or replaced by a different holder). The
-        caller should treat False as a signal that its execution
-        should be cancelled and re-queued.
+        (stolen by recovery, or replaced by a different holder).
+        Internal callers (``_lease_heartbeat_loop``) treat False as a
+        signal that the in-flight work must be cancelled and
+        re-queued via ``LeaseLostError``.
+
+        External callers (e.g. a worker that wants to demonstrate
+        liveness to an external observer) can also use this; the
+        return value carries the same meaning.
         """
         return await asyncio.to_thread(
             self._lease_repo.heartbeat, instance_id, holder_id

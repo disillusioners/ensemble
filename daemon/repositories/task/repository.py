@@ -274,60 +274,6 @@ class TaskRepository:
 
             return self._row_to_task(row)
 
-    def requeue_task(self, task_id: int) -> Task | None:
-        """Re-queue a RUNNING task back to PENDING.
-
-        Used by the cross-dispatcher contention path: a Task claimed
-        by the worker discovers (via the Execution Gate) that a
-        MESSAGE job is currently driving ``graph.astream`` for the
-        same instance. The task cannot run; we move it back to
-        PENDING (clearing the worker's claim) so the next poll cycle
-        re-claims it after the MESSAGE job releases the lease.
-
-        Atomicity: the transition is conditional on
-        ``status='running'`` and runs in a single ``UPDATE``. A task
-        that was concurrently completed, failed, or cancelled by
-        another worker is left alone (returns the unchanged row or
-        None).
-
-        Args:
-            task_id: The Task ID to re-queue.
-
-        Returns:
-            The updated Task in PENDING status, or None if the task
-            was not in RUNNING status when we tried to re-queue.
-        """
-        with self.engine.begin() as conn:
-            result = conn.execute(
-                text(
-                    """
-                    UPDATE task
-                    SET status = :status_pending,
-                        worker_id = NULL,
-                        started_at = NULL,
-                        last_heartbeat_at = NULL
-                    WHERE id = :task_id
-                      AND status = :status_running
-                    RETURNING id
-                    """
-                ),
-                {
-                    "task_id": task_id,
-                    "status_pending": TaskStatus.PENDING.value,
-                    "status_running": TaskStatus.RUNNING.value,
-                },
-            )
-            row = result.first()
-            if row is None:
-                return None
-            # Notify workers so the next poll picks up the
-            # freshly-requeued task without waiting for the heartbeat.
-            self._notify_pending_task()
-            # Return a freshly-loaded ORM object for the caller's
-            # convenience (callers usually don't need it but it's
-            # symmetric with complete_task / fail_task).
-            return self.get(task_id)
-
     def requeue_task_with_backoff(
         self, task_id: int, min_delay_seconds: float = 0.5, max_delay_seconds: float = 2.0
     ) -> Task | None:

@@ -42,11 +42,20 @@ from sqlmodel import SQLModel, Field
 
 
 class LeaseHolderKind(str, enum.Enum):
-    """What kind of dispatcher currently holds the execution lease."""
+    """What kind of dispatcher currently holds the execution lease.
+
+    Note on ``RESUME``: the resume path is planned to drive
+    ``graph.astream`` directly when a paused instance is resumed,
+    and will hold an execution lease so it cannot race with a
+    worker task that picked up a queued message for the same
+    instance. The enum member is included now so the DB CHECK
+    constraint does not need to be migrated when the resume path
+    lands. No code path currently produces a ``RESUME`` lease.
+    """
 
     MESSAGE_JOB = "message_job"
     TASK = "task"
-    RESUME = "resume"
+    RESUME = "resume"  # planned: paused-instance resume path
 
 
 class InstanceExecutionLease(SQLModel, table=True):

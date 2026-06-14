@@ -652,8 +652,20 @@ class InstanceManager:
         from .repositories.execution_lease.repository import ExecutionLeaseRepository
         from .services.execution_gate import ExecutionGateService
         self._execution_lease_repo = ExecutionLeaseRepository(engine=self._engine)
+        # Lease heartbeat interval: pulled from services config if
+        # present, otherwise the gate uses its own default. Using
+        # ``getattr`` keeps test mocks (which often pass a bare
+        # ``services`` object) from breaking on this lookup.
+        heartbeat_interval = getattr(
+            self.config.services,
+            "lease_heartbeat_interval_seconds",
+            None,
+        )
         self._execution_gate = ExecutionGateService(
             lease_repo=self._execution_lease_repo,
+            heartbeat_interval_seconds=heartbeat_interval
+            if heartbeat_interval is not None
+            else ExecutionGateService.DEFAULT_LEASE_HEARTBEAT_SECONDS,
         )
 
         # Shutdown flag for graceful shutdown
@@ -1452,12 +1464,11 @@ class InstanceManager:
             # source_configs.autostart: whether a source auto-starts on boot
             "ALTER TABLE source_configs ADD COLUMN IF NOT EXISTS autostart BOOLEAN DEFAULT TRUE",
             # instance_execution_leases: the Execution Gate's per-instance
-            # lease table. SQLite gets it via the .sql migration; on
-            # Postgres we create it inline because the migration runner
-            # is SQLite-only. The table is the single source of truth
-            # for "which dispatcher is driving graph.astream for this
-            # instance?" and closes the dual-dispatcher checkpoint
-            # race (see docs/bugs/child-completion-report-lost-*).
+            # lease table. SQLite gets it via the .sql migration at
+            # ``daemon/migrations/versions/20260614_000002_create_instance_execution_leases.sql``;
+            # on Postgres we create it inline here because the
+            # migration runner is SQLite-only. **If you change the
+            # schema, update BOTH definitions.**
             (
                 "CREATE TABLE IF NOT EXISTS instance_execution_leases ("
                 "instance_id TEXT PRIMARY KEY, "
