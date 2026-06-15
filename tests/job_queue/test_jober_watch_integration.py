@@ -556,7 +556,7 @@ class TestJoberWatchIntegration:
     # ==================== TASK 4 & 5: REGRESSION + TOOL REGISTRATION ====================
 
     def test_tool_registration(self):
-        """Task 4 & 5: Verify all 16 tools are registered correctly."""
+        """Task 4 & 5: Verify all 17 tools are registered correctly (16 original + job_continue)."""
         job_service = AsyncMock()
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
@@ -571,8 +571,8 @@ class TestJoberWatchIntegration:
             watcher_repo=watcher_repo
         )
 
-        # Task 4: Should have 16 tools (12 original + 4 watch tools)
-        assert len(tools) == 16
+        # Task 4: Should have 17 tools (12 original + 4 watch tools + job_continue)
+        assert len(tools) == 17
 
         # Task 5: All tools should have job category
         for tool in tools:

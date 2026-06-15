@@ -28,15 +28,15 @@ def setup_system_default_project():
 class TestJobQueueToolRegistration:
     """Tests for tool registration."""
 
-    def test_create_job_tools_returns_16_tools(self):
-        """Verify create_job_tools returns exactly 16 tools."""
+    def test_create_job_tools_returns_17_tools(self):
+        """Verify create_job_tools returns exactly 17 tools (16 original + job_continue)."""
         job_service = AsyncMock()
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
 
         tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
 
-        assert len(tools) == 16
+        assert len(tools) == 17
 
     def test_each_tool_has_job_category(self):
         """Verify each tool has _tool_category == 'job' attribute."""
@@ -876,3 +876,222 @@ class TestDlqReplayTool:
         })
 
         assert result == "ERROR: Failed to replay DLQ entry dlq-1: Service unavailable"
+
+
+class TestJobContinueTool:
+    """Tests for job_continue tool (tool index 12)."""
+
+    @pytest.fixture
+    def mock_services(self):
+        job_service = AsyncMock()
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        return job_service, queue_mgmt_service, dead_letter_service
+
+    @pytest.fixture
+    def mock_manager(self):
+        """Build a manager mock with _instance_repository and enqueue_message_via_jq."""
+        manager = MagicMock()
+        instance_repo = MagicMock()
+        manager._instance_repository = instance_repo
+        manager.enqueue_message_via_jq = AsyncMock()
+        return manager
+
+    @pytest.fixture
+    def tools(self, mock_services, mock_manager):
+        job_service, queue_mgmt_service, dead_letter_service = mock_services
+        return create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=mock_manager,
+        )
+
+    @pytest.fixture
+    def job_continue(self, tools):
+        return tools[12]  # job_continue is at index 12 (13th tool, after 12 + job_continue)
+
+    def _make_old_job(self, status="completed", instance_id="inst-1", deleted_at=None):
+        """Build a MagicMock standing in for a JobItem returned by job_service.get_job."""
+        old_job = MagicMock()
+        old_job.status = status
+        old_job.instance_id = instance_id
+        old_job.deleted_at = deleted_at
+        return old_job
+
+    def _make_instance(self, status="running"):
+        instance = MagicMock()
+        instance.status = status
+        return instance
+
+    def _mock_happy_path(self, job_service, mock_manager, *, instance_status="running"):
+        """Configure all mocks for the happy path; return the new_job_id used."""
+        old_job = self._make_old_job(instance_id="inst-1")
+        job_service.get_job.return_value = old_job
+        # No zombie PROCESSING MESSAGE jobs
+        job_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=[])
+        # Instance is healthy
+        instance = self._make_instance(status=instance_status)
+        mock_manager._instance_repository.get.return_value = instance
+        # enqueue returns an AsyncMessageResult-like object
+        from daemon.manager import AsyncMessageResult
+        mock_manager.enqueue_message_via_jq.return_value = AsyncMessageResult(
+            message_id="msg-1",
+            instance_id="inst-1",
+            status="queued",
+            job_id="new-job-1",
+        )
+        return "new-job-1"
+
+    @pytest.mark.asyncio
+    async def test_job_continue_happy_path(self, mock_services, mock_manager, tools):
+        """Happy: valid completed job, active instance, no zombie jobs → returns new_job_id."""
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+        new_job_id = self._mock_happy_path(job_service, mock_manager)
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Continue working on this",
+        })
+
+        assert result == {
+            "old_job_id": "old-job-1",
+            "instance_id": "inst-1",
+            "message_id": "msg-1",
+            "new_job_id": new_job_id,
+            "status": "queued",
+        }
+        mock_manager.enqueue_message_via_jq.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_job_not_found(self, mock_services, tools):
+        """Error: job_service.get_job returns None → {'error': 'Job {id} not found'}."""
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        job_service.get_job.return_value = None
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "missing-job",
+            "message": "Continue",
+        })
+
+        assert result == {"error": "Job missing-job not found"}
+
+    @pytest.mark.asyncio
+    async def test_job_continue_job_not_terminal(self, mock_services, tools):
+        """Error: job status is 'processing' (not in TERMINAL_STATES) → error."""
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        job_service.get_job.return_value = self._make_old_job(status="processing")
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Continue",
+        })
+
+        assert "error" in result
+        assert "not in a terminal state" in result["error"]
+        assert "processing" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_job_continue_job_soft_deleted(self, mock_services, tools):
+        """Error: deleted_at is not None → 'has been deleted and cannot be continued'."""
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        job_service.get_job.return_value = self._make_old_job(
+            status="completed",
+            deleted_at=MagicMock(),  # any non-None value
+        )
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Continue",
+        })
+
+        assert result == {"error": "Job old-job-1 has been deleted and cannot be continued"}
+
+    @pytest.mark.asyncio
+    async def test_job_continue_instance_terminated(self, mock_services, mock_manager, tools):
+        """Error: instance status is 'terminated' → 'Instance is terminated — spawn a new instance instead'."""
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        job_service.get_job.return_value = self._make_old_job()
+        instance = self._make_instance(status="terminated")
+        mock_manager._instance_repository.get.return_value = instance
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Continue",
+        })
+
+        assert result == {"error": "Instance is terminated — spawn a new instance instead"}
+        mock_manager.enqueue_message_via_jq.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_instance_paused(self, mock_services, mock_manager, tools):
+        """Error: instance status is 'paused' → 'Instance is paused — unpause it first'."""
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        job_service.get_job.return_value = self._make_old_job()
+        instance = self._make_instance(status="paused")
+        mock_manager._instance_repository.get.return_value = instance
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Continue",
+        })
+
+        assert result == {"error": "Instance is paused — unpause it first"}
+        mock_manager.enqueue_message_via_jq.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_manager_is_none(self, mock_services, tools):
+        """Error: manager not provided → 'Instance manager not available'."""
+        # Build tools without manager
+        job_service, queue_mgmt_service, dead_letter_service = mock_services
+        tools_no_mgr = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            # manager omitted → defaults to None
+        )
+        job_continue = tools_no_mgr[12]
+
+        job_service.get_job.return_value = self._make_old_job()
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Continue",
+        })
+
+        assert result == {
+            "error": "Instance manager not available — job_continue requires manager access"
+        }
+
+    @pytest.mark.asyncio
+    async def test_job_continue_zombie_processing_job(self, mock_services, mock_manager, tools):
+        """Error: a PROCESSING MESSAGE job already exists for the instance → 'has a job still processing'."""
+        job_service, _, _ = mock_services
+        job_continue = tools[12]
+
+        job_service.get_job.return_value = self._make_old_job()
+        instance = self._make_instance(status="running")
+        mock_manager._instance_repository.get.return_value = instance
+        # Zombie job exists
+        zombie = MagicMock()
+        job_service._repository.find_processing_message_jobs_by_instance = MagicMock(
+            return_value=[zombie]
+        )
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "old-job-1",
+            "message": "Continue",
+        })
+
+        assert "error" in result
+        assert "has a job still processing" in result["error"]
+        assert "inst-1" in result["error"]
+        # Critical: enqueue should NOT have been called
+        mock_manager.enqueue_message_via_jq.assert_not_awaited()

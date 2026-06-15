@@ -1,5 +1,6 @@
 """Job queue management tools for LangGraph agents."""
 
+import asyncio
 from typing import Annotated, Any, TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -417,6 +418,10 @@ def create_job_tools(
             if old_job is None:
                 return {"error": f"Job {old_job_id} not found"}
 
+            # 1a. Reject soft-deleted jobs — cannot continue a deleted job
+            if old_job.deleted_at is not None:
+                return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
+
             # 2. Validate the job is in a terminal state
             #    Valid terminal job states: completed, failed, cancelled, dead_letter
             #    (from ALL_TERMINAL_STATES in daemon/repositories/job_queue/watcher_models.py:12)
@@ -448,6 +453,16 @@ def create_job_tools(
                 return {"error": f"Instance is {instance_meta.status} — spawn a new instance instead"}
             if instance_meta.status == "paused":
                 return {"error": "Instance is paused — unpause it first"}
+
+            # 5a. Pre-check: reject if there's a zombie PROCESSING MESSAGE job for
+            #     this instance. find_processing_message_jobs_by_instance is a sync
+            #     method on the repository (DB-level concurrency gate); wrap in
+            #     to_thread so the event loop isn't blocked.
+            active_jobs = await asyncio.to_thread(
+                job_service._repository.find_processing_message_jobs_by_instance, instance_id
+            )
+            if active_jobs:
+                return {"error": f"Instance {instance_id} has a job still processing — wait for it to complete first"}
 
             # 6. Send message via the JobQueue path (same as FE "send message")
             result = await manager.enqueue_message_via_jq(
@@ -720,7 +735,8 @@ def create_job_tools(
 
     return [
         job_create, job_get, job_list, job_cancel, job_retry,
-        job_delete, job_restore, job_continue, queue_list, queue_create,
+        job_delete, job_restore, queue_list, queue_create,
         queue_update, dlq_list, dlq_replay,
+        job_continue,   # moved to end of non-watch tools (was index 7)
         watch_job, unwatch_job, list_watched_jobs, watch_jobs,
     ]
