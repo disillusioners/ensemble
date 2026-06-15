@@ -711,7 +711,8 @@ class TestJobWatcherRepository:
         watch = watcher_repo.add_watch("job-123", "instance-456")
         assert watch.job_id == "job-123"
         assert watch.instance_id == "instance-456"
-        assert watch.watch_events == ["completed", "failed", "cancelled", "dead_letter"]
+        # Default includes ALL watchable events (terminal + in_progress progress updates)
+        assert watch.watch_events == ["completed", "failed", "cancelled", "dead_letter", "in_progress"]
 
     def test_add_watch_with_custom_events(self, watcher_repo):
         """Add watch with custom event list."""

@@ -137,6 +137,12 @@ My primary workflow: receive, dispatch, monitor, react, report.
    b. Look up job in my tracking list
    c. Apply decision framework:
       ┌─────────────────────────────────────────────┐
+      │ IN_PROGRESS                                 │
+      │   → Root agent finished its turn            │
+      │   → Child agents still running              │
+      │   → Log progress update                     │
+      │   → Continue waiting (do NOT advance)       │
+      ├─────────────────────────────────────────────┤
       │ COMPLETED                                   │
       │   → Record result                           │
       │   → If last job → Phase 5                   │

@@ -309,6 +309,18 @@ class MessageJobHandler:
                     )
 
                 if skip_complete:
+                    # Emit in_progress notification so watchers know the instance finished
+                    # its turn but child agents are still pending
+                    try:
+                        wf = (instance.waiting_for or 0) if instance else 0
+                        await self._job_service.notify_watchers(
+                            job.job_id,
+                            status="in_progress",
+                            progress=result.content if result else None,
+                            waiting_for=wf,
+                        )
+                    except Exception as e:
+                        logger.warning(f"MessageJobHandler: failed to emit in_progress notification: {e}")
                     return
 
                 # Mark job complete

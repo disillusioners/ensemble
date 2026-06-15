@@ -151,46 +151,60 @@ class JobQueueService:
         """
         self._watcher_repo = watcher_repo
     
-    async def notify_watchers(self, job_id: str, status: str, error: str | None = None) -> int:
+    async def notify_watchers(
+        self,
+        job_id: str,
+        status: str,
+        error: str | None = None,
+        progress: str | None = None,
+        waiting_for: int | None = None,
+    ) -> int:
         """Notify ALL watchers for a job. Called from EVERY terminal path.
-        
+
         Returns number of watchers notified.
         Safe to call even if no watchers exist (returns 0).
         If watching instance is not running, message queues in DB for later delivery.
         """
         if self._watcher_repo is None or self._instance_manager is None:
             return 0
-        
+
         try:
             watchers = self._watcher_repo.get_watchers_for_job(job_id)
             if not watchers:
                 return 0
-            
+
             # Get job for notification details
             job = await asyncio.to_thread(self._repository.get, job_id)
             if job is None:
                 return 0
-            
+
             notified = 0
             for watcher in watchers:
                 if status not in watcher.watch_events:
                     continue
-                
+
                 # Build notification parts
                 status_display = status
                 if status == "completed":
                     status_display = "completed ✓"
                 elif status == "failed":
                     status_display = "failed ✗"
+                elif status == "in_progress":
+                    status_display = "in progress ⟳"
 
                 notification_parts = [f"[JOB_EVENT] Job {job_id[:8]}... {status_display}"]
                 notification_parts.append(f"  Agent: {job.agent_id}")
 
-                if job.result_summary:
-                    notification_parts.append(f"  Result:\n{job.result_summary}")
-
-                if error:
-                    notification_parts.append(f"  Error: {error}")
+                if status == "in_progress":
+                    if progress:
+                        notification_parts.append(f"  Progress:\n{progress}")
+                    if waiting_for is not None:
+                        notification_parts.append(f"  Waiting for: {waiting_for} child agent(s)")
+                else:
+                    if job.result_summary:
+                        notification_parts.append(f"  Result:\n{job.result_summary}")
+                    if error:
+                        notification_parts.append(f"  Error: {error}")
 
                 notification = "\n".join(notification_parts)
                 
@@ -201,8 +215,11 @@ class JobQueueService:
                 )
                 notified += 1
             
-            # Cleanup: terminal states are final, no need to keep watches
-            self._watcher_repo.remove_all_watches_for_job(job_id)
+            # Cleanup: only remove watches for terminal states.
+            # Non-terminal events (e.g., in_progress) must keep the watch alive
+            # so the watcher receives the final terminal notification later.
+            if status in ALL_TERMINAL_STATES:
+                self._watcher_repo.remove_all_watches_for_job(job_id)
             return notified
             
         except Exception as e:

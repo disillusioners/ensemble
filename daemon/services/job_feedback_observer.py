@@ -249,6 +249,42 @@ class JobFeedbackObserver:
             )
             return
 
+        # Guard: if instance is still waiting for spawned child agents to complete,
+        # defer job completion. The deferred path (cascade via child_reports.py)
+        # will fire the final [JOB_EVENT] when all children report back.
+        if status in ("completed", "error"):
+            try:
+                instance_meta = await asyncio.to_thread(
+                    self._instance_manager._instance_repository.get,
+                    instance_id,
+                )
+                if instance_meta is not None:
+                    wf = getattr(instance_meta, "waiting_for", None) or 0
+                    if wf > 0:
+                        logger.info(
+                            f"Observer: instance {instance_id[:8]}... emitted '{status}' "
+                            f"but has {wf} pending child agent(s); deferring job "
+                            f"{job.job_id[:8]}... completion"
+                        )
+                        # Emit in_progress notification so watchers know the root instance
+                        # finished its turn but children are still pending
+                        try:
+                            progress_text = await self._instance_manager._get_last_assistant_message_raw(instance_id)
+                            await self._job_queue_service.notify_watchers(
+                                job.job_id,
+                                status="in_progress",
+                                progress=progress_text,
+                                waiting_for=wf,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Observer: failed to emit in_progress notification: {e}")
+                        return
+            except Exception as e:
+                logger.warning(
+                    f"Observer: failed to check waiting_for for "
+                    f"instance {instance_id[:8]}...: {e}"
+                )
+
         # Map status to action using atomic transition
         now = datetime.now(timezone.utc).isoformat()
         try:

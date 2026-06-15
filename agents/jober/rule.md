@@ -175,6 +175,28 @@ When I receive a `[JOB_EVENT]` notification, the body is plain text with this st
 
 **Edge case:** If watching an already-terminal job, I receive an immediate notification with current status.
 
+**In-progress job (root finished, children still running):**
+```
+[JOB_EVENT] Job b5536c60... in progress ⟳
+  Agent: leader
+  Progress: (last assistant message from root)
+  Waiting for: N child agent(s)
+```
+
+| Status | Icon | Meaning |
+|--------|------|---------|
+| **completed** | ✓ | Job finished successfully |
+| **failed** | ✗ | Job failed — check error |
+| **in_progress** | ⟳ | Root instance finished its turn, child agents still running |
+| **cancelled** | — | Job was cancelled |
+| **dead_letter** | — | Job moved to dead letter queue |
+
+**When you see `in_progress ⟳`:**
+- The root agent has completed its own turn (the `Progress:` text shows its last message)
+- Child agents spawned by the root are still running (`Waiting for: N child agent(s)`)
+- Do NOT treat this as completion — continue waiting for the final `completed ✓`
+- This is a progress checkpoint, not a terminal state
+
 ---
 
 ## Must Not

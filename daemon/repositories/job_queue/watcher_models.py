@@ -11,6 +11,9 @@ from sqlmodel import SQLModel, Field
 
 ALL_TERMINAL_STATES: list[str] = ["completed", "failed", "cancelled", "dead_letter"]
 
+# All events a watcher can receive, including non-terminal (progress) events
+ALL_WATCHABLE_EVENTS: list[str] = ALL_TERMINAL_STATES + ["in_progress"]
+
 
 class JobWatcher(SQLModel, table=True):
     """Job watcher - subscribes to job lifecycle events.
@@ -36,10 +39,10 @@ class JobWatcher(SQLModel, table=True):
     # Foreign key to instances.instance_id
     instance_id: str = Field(foreign_key="instances.instance_id", index=True)
 
-    # JSON list of terminal states to watch for
-    # Default includes ALL terminal states including dead_letter
+    # JSON list of job lifecycle events to watch for.
+    # Default includes ALL events (terminal + in_progress progress updates).
     watch_events: list[str] = Field(
-        default_factory=lambda: list(ALL_TERMINAL_STATES),
+        default_factory=lambda: list(ALL_WATCHABLE_EVENTS),
         sa_column=Column(JSON)
     )
 
