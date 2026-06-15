@@ -185,8 +185,34 @@ class SQLModelInfraRepository:
         Numeric values (int / float, but not bool) are
         compared via the numeric path so JSON numbers sort
         correctly. Other values fall back to the TEXT path.
+
+        Booleans get the same dialect branch as
+        :meth:`_json_eq_predicate` because the two backends
+        encode JSON booleans differently when extracted to
+        text (``"true"``/``"false"`` on PostgreSQL,
+        ``"1"``/``"0"`` on SQLite). Without this, ``$ne`` on
+        a boolean would compare the SQLite ``"1"`` /
+        ``"0"`` extraction against Python's ``str(True)`` =
+        ``"True"`` and never match — every row passes the
+        filter.
         """
-        is_numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
+        if isinstance(value, bool):
+            if self._is_postgres():
+                text_value = "true" if value else "false"
+            else:
+                text_value = "1" if value else "0"
+            path = self._json_path_text(column, key)
+            if op == "!=":
+                return path != text_value
+            # ``>`` / ``>=`` / ``<`` / ``<=`` on booleans are
+            # semantically odd but supported for symmetry with
+            # ``$eq``: True sorts after False on both backends
+            # in this encoding.
+            cmp = {"$gt": ">", "$gte": ">=", "$lt": "<", "$lte": "<="}.get(
+                op, op
+            )
+            return path.op(cmp)(text_value)
+        is_numeric = isinstance(value, (int, float))
         path = (
             self._json_path_numeric(column, key)
             if is_numeric
