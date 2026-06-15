@@ -62,7 +62,7 @@ Returns:
     "job_list": """List jobs with optional filters.
 
 Args:
-    statuses: Filter by status - "pending", "processing", "completed", "failed", "cancelled", "dead_letter". Optional.
+    statuses: Filter by status - "pending", "processing", "completed", "failed", "cancelled", "dead_letter". Natural aliases also accepted (e.g. "running" → processing, "done" → completed, "waiting" → pending). Case-insensitive. Optional.
     project_id: Filter by project ID. Optional.
     queue_id: Filter by queue ID. Optional.
     offset: Number of jobs to skip (default: 0).
@@ -162,13 +162,13 @@ Returns:
 
     "watch_job": """Watch a job for lifecycle events.
 
-If the job is already in a terminal state (completed, failed, cancelled, terminated, dead_letter),
+If the job is already in a terminal state (completed, failed, cancelled, dead_letter),
 an immediate notification is sent. Otherwise, you will receive a message when the job reaches a terminal state.
 
 Args:
     job_id: The job ID to watch. Required.
     events: Specific terminal states to watch for. Optional.
-        Default: all terminal states ["completed", "failed", "cancelled", "terminated", "dead_letter"]
+        Default: all terminal states ["completed", "failed", "cancelled", "dead_letter"]
 
 Returns:
     Confirmation message or error.""",
@@ -294,7 +294,10 @@ def create_job_tools(
     @tool
     async def job_list(
         project_id: Annotated[str | None, Field(default=None, description="Filter by project ID")] = None,
-        statuses: Annotated[list[str] | None, Field(default=None, description="Filter by status values")] = None,
+        statuses: Annotated[list[str] | None, Field(
+            default=None,
+            description="Filter by job status. Valid values: pending, processing, completed, failed, cancelled, dead_letter. Aliases accepted: running (=processing), done (=completed), error (=failed), waiting (=pending). Case-insensitive."
+        )] = None,
         queue_id: Annotated[str | None, Field(default=None, description="Filter by queue ID")] = None,
         offset: Annotated[int, Field(default=0, ge=0, description="Number of jobs to skip")] = 0,
         limit: Annotated[int, Field(default=50, ge=1, le=100, description="Maximum jobs to return")] = 50,

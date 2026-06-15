@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from daemon.services.job_queue_service import JobQueueService
+from daemon.services.job_queue_service import JobQueueService, normalize_statuses
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.repositories.job_queue.models import JobStatus
@@ -280,6 +280,8 @@ async def list_jobs(
                 status_code=400,
                 detail={"error": "Too many status filters", "message": "Maximum 20 status values allowed"}
             )
+        # Resolve natural-language aliases (e.g. "running" -> "processing") before validation
+        status_list = normalize_statuses(status_list)
         invalid_statuses = [s for s in status_list if not JobStatus.is_valid(s)]
         if invalid_statuses:
             raise HTTPException(

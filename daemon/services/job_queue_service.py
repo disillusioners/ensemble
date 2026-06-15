@@ -44,6 +44,43 @@ TERMINAL_CANCEL_STATUSES = frozenset([
 ])
 
 
+# Natural-language aliases → canonical job status.
+# Applied in normalize_statuses() so that agents/LLMs that pass
+# "running" (meaning "processing") get correct results instead of empty lists.
+STATUS_ALIASES: dict[str, str] = {
+    "running": "processing",
+    "active": "processing",
+    "in_progress": "processing",
+    "queued": "pending",
+    "waiting": "pending",
+    "done": "completed",
+    "success": "completed",
+    "finished": "completed",
+    "error": "failed",
+    "failed": "failed",  # identity, for safety
+    "killed": "cancelled",
+    "canceled": "cancelled",  # common misspelling
+    "dlq": "dead_letter",
+    "dead": "dead_letter",
+}
+
+
+def normalize_statuses(statuses: list[str] | None) -> list[str] | None:
+    """Resolve natural-language status aliases to canonical job status values.
+
+    - Case-insensitive (lowercases before lookup)
+    - If a status is already a canonical value, keeps it as-is (backward compatible)
+    - If a status is not a known alias, passes it through unchanged (let SQL return empty)
+    """
+    if not statuses:
+        return statuses
+    out: list[str] = []
+    for s in statuses:
+        canonical = STATUS_ALIASES.get(s.lower(), s.lower())
+        out.append(canonical)
+    return out
+
+
 class DemandState(enum.Enum):
     """Job demand state for completion.
     
@@ -562,6 +599,7 @@ class JobQueueService:
         if meta is None:
             return False
         
+        # TODO: verify — "error" and "terminated" are not in JobStatus enum
         terminal_statuses = {"completed", "error", "terminated", "failed"}
         return meta.status not in terminal_statuses
     
@@ -645,6 +683,7 @@ class JobQueueService:
         Returns:
             List of JobItem objects.
         """
+        statuses = normalize_statuses(statuses)
         jobs, _ = await asyncio.to_thread(
             self._repository.list,
             statuses=statuses,
