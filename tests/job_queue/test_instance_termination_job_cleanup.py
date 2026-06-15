@@ -955,6 +955,7 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.get_instance.side_effect = KeyError("not found")
         terminated_instance = MagicMock()
         terminated_instance.status = InstanceStatus.TERMINATED.value
+        terminated_instance.waiting_for = 0
         mock_instance_manager._instance_repository.get.return_value = terminated_instance
 
         await processor._process_next_job()
@@ -1008,6 +1009,7 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.get_instance.side_effect = KeyError("not found")
         completed_instance = MagicMock()
         completed_instance.status = InstanceStatus.COMPLETED.value
+        completed_instance.waiting_for = 0
         mock_instance_manager._instance_repository.get.return_value = completed_instance
 
         await processor._process_next_job()
@@ -1059,6 +1061,7 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.get_instance.side_effect = KeyError("not found")
         error_instance = MagicMock()
         error_instance.status = InstanceStatus.ERROR.value
+        error_instance.waiting_for = 0
         mock_instance_manager._instance_repository.get.return_value = error_instance
 
         await processor._process_next_job()
@@ -1214,6 +1217,7 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.get_instance.side_effect = KeyError("not found")
         completed_instance = MagicMock()
         completed_instance.status = InstanceStatus.COMPLETED.value
+        completed_instance.waiting_for = 0
         mock_instance_manager._instance_repository.get.return_value = completed_instance
         mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
             return_value="Agent response for message job"
@@ -1271,6 +1275,7 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.get_instance.side_effect = KeyError("not found")
         terminated_instance = MagicMock()
         terminated_instance.status = InstanceStatus.TERMINATED.value
+        terminated_instance.waiting_for = 0
         mock_instance_manager._instance_repository.get.return_value = terminated_instance
 
         await processor._process_next_job()
@@ -1326,6 +1331,7 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.get_instance.side_effect = KeyError("not found")
         completed_instance = MagicMock()
         completed_instance.status = InstanceStatus.COMPLETED.value
+        completed_instance.waiting_for = 0
         mock_instance_manager._instance_repository.get.return_value = completed_instance
         mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
             side_effect=Exception("DB error")

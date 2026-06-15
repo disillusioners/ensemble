@@ -8,7 +8,7 @@ from sqlalchemy import delete as sql_delete, func
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
-from .watcher_models import JobWatcher, ALL_TERMINAL_STATES, ALL_WATCHABLE_EVENTS
+from .watcher_models import JobWatcher, ALL_WATCHABLE_EVENTS
 
 logger = logging.getLogger(__name__)
 

@@ -218,9 +218,10 @@ class TestPauseKeepsJobProcessing:
             content="done"
         )
 
-        # But instance is WAITING_CHILDREN
+        # But instance is WAITING_CHILDREN with children pending
         mock_instance = MagicMock()
         mock_instance.status = InstanceStatus.WAITING_CHILDREN.value
+        mock_instance.waiting_for = 1
         mock_manager._instance_repository.get.return_value = mock_instance
 
         # Call handle
