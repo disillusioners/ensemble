@@ -36,6 +36,7 @@ from .repositories import (
     create_source_repository,
     create_message_queue_repository,
     create_mcp_server_repository,
+    create_infra_repository,
 )
 from .repositories.task.repository import TaskRepository
 from .registry import get_registry
@@ -585,6 +586,24 @@ class InstanceManager:
             self._credential_manager,
         )
 
+        # ── Infra asset repository (shared singleton) ────────────────
+        # One repository at the manager level, bound to the shared
+        # engine — every instance and every tool call goes through
+        # this single object (C3: prevents per-instance engine
+        # allocation / lock contention). Tables are created by the
+        # MigrationRunner via the infra-info migration, so
+        # ``create_tables=False`` here. The default type registry
+        # (``server``, ``k8s_cluster``, ``datacenter``, …) is
+        # seeded idempotently on every startup by
+        # :meth:`_bootstrap_infra_types` (called below with
+        # try/except) — the inline ``bootstrap_default_types()``
+        # call that used to live here was the C1 bug (it bypassed
+        # the fault-tolerance wrap).
+        self._infra_repository = create_infra_repository(
+            engine=self._engine,
+            create_tables=False,
+        )
+
         # NEW: Message queue repository for SQLModel-based operations
         self._queue_repository = create_message_queue_repository(engine=self._engine, create_tables=False)
         
@@ -715,6 +734,12 @@ class InstanceManager:
 
         # Bootstrap built-in MCP servers
         self._bootstrap_builtin_servers()
+
+        # Bootstrap default infra asset types (Phase 1.5). Seeds the
+        # global ``infra_asset_types`` registry with the 9 built-in
+        # type definitions on first run, and upserts in place on
+        # subsequent startups so schema drift propagates safely.
+        self._bootstrap_infra_types()
 
         # ── Initialize Services ──────────────────────────────────────────────────
         # Services are initialized after all internal state is set up.
@@ -884,6 +909,45 @@ class InstanceManager:
 
         logger.info("Built-in MCP server bootstrap complete")
 
+    def _bootstrap_infra_types(self) -> None:
+        """Seed default infra asset type definitions on daemon startup.
+
+        Delegates to
+        :meth:`SQLModelInfraRepository.bootstrap_default_types` which
+        idempotently upserts the 9 built-in types from
+        :data:`~daemon.repositories.infra.types.INFRA_TYPE_DEFINITIONS`
+        (Phase 1.5 of the infra info storage design). On a fresh
+        database all 9 are inserted; on subsequent startups the
+        upsert path bumps ``updated_at`` so schema drift between
+        daemon versions propagates.
+
+        Fault-tolerant: a failure here is logged but does not block
+        daemon startup — the rest of the system can still run, and
+        the missing types can be re-seeded by calling
+        ``bootstrap_default_types`` again from a maintenance path
+        (e.g. a CLI tool) once the underlying issue is fixed.
+        """
+        try:
+            result = self._infra_repository.bootstrap_default_types()
+        except Exception as e:
+            logger.error(
+                f"Failed to bootstrap default infra asset types: {e}. "
+                f"The daemon will continue without them — investigate "
+                f"and re-run the bootstrap once the root cause is fixed."
+            )
+            return
+
+        if result.new_count > 0:
+            logger.info(
+                f"Seeded {result.new_count} new infra asset types "
+                f"({result.updated_count} updated) on startup"
+            )
+        else:
+            logger.debug(
+                f"Infra asset types already registered: "
+                f"{len(result.registered)} total, {result.updated_count} updated"
+            )
+
     def _init_warmup_pool(self) -> None:
         """Initialize and warm up the MCP connection pool.
 
@@ -1037,6 +1101,26 @@ class InstanceManager:
         see the ``dispose_db_pools`` step.
         """
         return self._db_pool_manager
+
+    @property
+    def infra_repository(self):
+        """Public read-only access to the shared :class:`SQLModelInfraRepository`.
+
+        Used by the infrastructure tool layer
+        (:func:`daemon.tools.infra.create_infra_tools`) to manage
+        ``InfraAsset`` / ``InfraAssetType`` / ``InfraAssetHistory`` rows.
+        Constructed once in ``__init__`` with the shared engine so all
+        instances share one repository bound to the same engine —
+        preventing per-instance engine allocation and lock contention
+        (C3). The default type registry is seeded by
+        :meth:`_bootstrap_infra_types` (with try/except fault
+        tolerance) later in ``__init__``.
+
+        There is exactly one source of truth for this repository
+        (C1 fix) — the ``_infra_repository`` attribute set in
+        ``__init__``.
+        """
+        return self._infra_repository
 
     @property
     def credential_manager(self):

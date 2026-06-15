@@ -21,7 +21,7 @@ schema works on both drivers.
 """
 
 from .models import InfraAsset, InfraAssetType, InfraAssetHistory, InfraChangeType
-from .repository import SQLModelInfraRepository
+from .repository import SQLModelInfraRepository, BootstrapResult
 from .types import (
     JSONBType,
     InfraTypeDefinition,
@@ -36,6 +36,7 @@ __all__ = [
     "InfraChangeType",
     # Repository
     "SQLModelInfraRepository",
+    "BootstrapResult",
     # Types
     "JSONBType",
     "InfraTypeDefinition",

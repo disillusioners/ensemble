@@ -42,7 +42,7 @@ from .db_connection.repository import DbConnectionRepository
 from .db_connection.models import DbConnectionConfig
 
 # Infra asset repository (Phase 1 of the infra info storage design)
-from .infra.repository import SQLModelInfraRepository
+from .infra.repository import SQLModelInfraRepository, BootstrapResult
 from .infra.models import InfraAsset, InfraAssetType, InfraAssetHistory, InfraChangeType
 from .infra.types import JSONBType, InfraTypeDefinition, INFRA_TYPE_DEFINITIONS
 
@@ -113,6 +113,7 @@ __all__ = [
     "DbConnectionConfig",
     # Infra asset (Phase 1)
     "SQLModelInfraRepository",
+    "BootstrapResult",
     "InfraAsset",
     "InfraAssetType",
     "InfraAssetHistory",

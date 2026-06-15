@@ -99,7 +99,18 @@ class TestCreateAsset:
     def test_create_asset_duplicate_raises_valueerror(
         self, infra_repository, seed_projects, project_id
     ):
-        """Duplicate (project_id, type, name) raises ValueError."""
+        """Duplicate (project_id, type, name) raises ValueError.
+
+        C4 fix: the UNIQUE-constraint message now uses the
+        canonical wording "An asset with type=... and name=...
+        already exists in project ..." which is more
+        informative than the previous "Asset with
+        (project_id=..., type=..., name=...) already exists"
+        — the new message is less repetitive and matches
+        the "Invalid reference" wording of the FK message so
+        both branches of ``_classify_integrity_error`` share
+        a consistent style.
+        """
         infra_repository.create_asset(
             project_id=project_id,
             type="server",
@@ -111,8 +122,15 @@ class TestCreateAsset:
                 type="server",
                 name="web-01",
             )
-        assert project_id in str(exc_info.value)
-        assert "web-01" in str(exc_info.value)
+        msg = str(exc_info.value)
+        # C4: the UNIQUE-constraint message format.
+        assert "already exists" in msg
+        assert project_id in msg
+        assert "web-01" in msg
+        # Crucially, the UNIQUE message must NOT contain
+        # "Invalid reference" — that would indicate a
+        # misclassification as a FK violation.
+        assert "Invalid reference" not in msg
 
     def test_create_asset_same_name_different_type_ok(
         self, infra_repository, seed_projects, project_id
@@ -288,7 +306,19 @@ class TestUpdateAsset:
     def test_update_asset_protected_fields_ignored(
         self, infra_repository, seed_projects, project_id, caplog
     ):
-        """Protected fields (id, project_id, created_at, created_by) are ignored."""
+        """Protected fields (id, created_at, created_by) are ignored.
+
+        C2 fix: ``project_id`` is no longer a ``**updates``
+        kwarg — it is now a named parameter on
+        :meth:`SQLModelInfraRepository.update_asset` for
+        project-isolation enforcement. The protected set
+        therefore no longer includes ``project_id`` (the
+        isolation check happens BEFORE the ``**updates`` loop
+        and acts as a gate, not a silent drop). The test
+        passes ``project_id=project_id`` (the asset's actual
+        project) so the isolation check passes and the
+        remaining protected fields can be verified.
+        """
         asset = infra_repository.create_asset(
             project_id=project_id,
             type="server",
@@ -297,8 +327,8 @@ class TestUpdateAsset:
 
         updated = infra_repository.update_asset(
             asset.id,
+            project_id=project_id,  # C2 fix: explicit isolation param
             id="new-id-ignored",
-            project_id="other-project-ignored",
             created_at="2020-01-01",
             created_by="someone-ignored",
         )
@@ -306,6 +336,43 @@ class TestUpdateAsset:
         assert updated is not None
         assert updated.id == asset.id
         assert updated.project_id == project_id
+
+    def test_update_asset_project_id_isolation(
+        self, infra_repository, seed_projects, project_id, other_project_id
+    ):
+        """C2 fix: ``update_asset`` refuses to operate on an
+        asset that belongs to a different project.
+
+        This is the regression test for the C2 security fix:
+        previously ``update_asset`` operated on any asset
+        matching the ``asset_id`` regardless of project
+        ownership. Now a mismatched ``project_id`` yields
+        ``None`` (same return as "asset not found").
+        """
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="iso-target",
+        )
+        # Update with the WRONG project_id — must be rejected.
+        result = infra_repository.update_asset(
+            asset.id,
+            project_id=other_project_id,
+            name="hijacked",
+        )
+        assert result is None
+        # Confirm the row was not mutated.
+        fetched = infra_repository.get_asset(asset.id)
+        assert fetched is not None
+        assert fetched.name == "iso-target"
+        # Update with the RIGHT project_id — must succeed.
+        result_ok = infra_repository.update_asset(
+            asset.id,
+            project_id=project_id,
+            name="renamed",
+        )
+        assert result_ok is not None
+        assert result_ok.name == "renamed"
 
     def test_update_asset_nonexistent(self, infra_repository):
         """update_asset returns None for unknown ID."""
@@ -342,6 +409,33 @@ class TestDeleteAsset:
     def test_delete_asset_nonexistent(self, infra_repository):
         """delete_asset returns False for unknown ID (does not raise)."""
         assert infra_repository.delete_asset("ghost-id") is False
+
+    def test_delete_asset_project_id_isolation(
+        self, infra_repository, seed_projects, project_id, other_project_id
+    ):
+        """C2 fix: ``delete_asset`` refuses to delete an asset
+        that belongs to a different project.
+
+        Previously ``delete_asset`` operated on any asset
+        matching the ``asset_id`` regardless of project
+        ownership. A mismatched ``project_id`` now yields
+        ``False`` (same return as "asset not found") and
+        leaves the row in place.
+        """
+        asset = infra_repository.create_asset(
+            project_id=project_id, type="server", name="iso-delete"
+        )
+        # Wrong project_id — must NOT delete.
+        assert infra_repository.delete_asset(
+            asset.id, project_id=other_project_id
+        ) is False
+        # Row must still exist in the correct project.
+        assert infra_repository.get_asset(asset.id) is not None
+        # Right project_id — must succeed.
+        assert infra_repository.delete_asset(
+            asset.id, project_id=project_id
+        ) is True
+        assert infra_repository.get_asset(asset.id) is None
 
 
 # =============================================================================
@@ -531,6 +625,38 @@ class TestGetHistoryPagination:
     def test_get_history_empty_for_unknown_asset(self, infra_repository):
         """get_history returns [] for an asset that never existed."""
         assert infra_repository.get_history("never-existed") == []
+
+    def test_get_history_project_id_isolation(
+        self, infra_repository, seed_projects, project_id, other_project_id
+    ):
+        """C2 fix: ``get_history`` filters by ``project_id``.
+
+        Previously the method returned history rows for any
+        project that matched ``asset_id`` (or the snapshot's
+        stored ``id``). A mismatched ``project_id`` now
+        returns ``[]`` — no audit rows leak across projects.
+        The ``project_id`` column is denormalized on
+        ``infra_asset_history`` (see InfraAssetHistory), so
+        the filter is a single WHERE clause.
+        """
+        asset = infra_repository.create_asset(
+            project_id=project_id, type="server", name="iso-history"
+        )
+        infra_repository.update_asset(asset.id, name="v2")
+        # Sanity: own project sees both rows.
+        own = infra_repository.get_history(
+            asset.id, project_id=project_id
+        )
+        assert len(own) == 2
+        # Cross-project returns nothing — same as "asset not found".
+        cross = infra_repository.get_history(
+            asset.id, project_id=other_project_id
+        )
+        assert cross == []
+        # No filter (project_id=None) still returns both rows —
+        # the C2 fix is opt-in for backward compatibility.
+        no_filter = infra_repository.get_history(asset.id)
+        assert len(no_filter) == 2
 
 
 # =============================================================================
@@ -1015,35 +1141,130 @@ class TestListTypes:
 class TestBootstrapDefaultTypes:
     """Tests for repository.bootstrap_default_types()."""
 
-    def test_bootstrap_inserts_three_types(self, infra_repository):
-        """bootstrap_default_types seeds the 3 built-in types."""
-        types = infra_repository.bootstrap_default_types()
+    EXPECTED_TYPE_NAMES: set[str] = {
+        "datacenter",
+        "server",
+        "rack",
+        "k8s_cluster",
+        "k8s_node",
+        "network",
+        "load_balancer",
+        "database",
+        "storage",
+    }
 
-        assert len(types) == 3
-        names = {t.name for t in types}
-        assert names == {"datacenter", "server", "k8s_cluster"}
+    def test_bootstrap_inserts_nine_types(self, infra_repository):
+        """bootstrap_default_types seeds all 9 built-in types."""
+        result = infra_repository.bootstrap_default_types()
+
+        assert len(result.registered) == 9
+        names = {t.name for t in result.registered}
+        assert names == self.EXPECTED_TYPE_NAMES
+        # First run: every type is new.
+        assert result.new_count == 9
+        assert result.updated_count == 0
 
     def test_bootstrap_idempotent(self, infra_repository):
         """Calling bootstrap_default_types twice is safe (upsert)."""
-        infra_repository.bootstrap_default_types()
-        types2 = infra_repository.bootstrap_default_types()
+        first = infra_repository.bootstrap_default_types()
+        assert first.new_count == 9
 
-        assert len(types2) == 3
-        # Should not raise — upsert path.
+        # Second call must not raise and must report 0 new rows.
+        second = infra_repository.bootstrap_default_types()
+        assert len(second.registered) == 9
+        assert second.new_count == 0
+        # updated_count == 9 because register_type bumps updated_at
+        # for every existing row, even when schema_doc is unchanged.
+        assert second.updated_count == 9
 
     def test_bootstrap_sets_correct_schemas(self, infra_repository):
-        """The 3 bootstrapped types have the expected schema_doc."""
+        """The 9 bootstrapped types have the expected schema_doc."""
         infra_repository.bootstrap_default_types()
 
         server = infra_repository.get_type("server")
         assert "properties" in server.schema_doc
         assert "hostname" in server.schema_doc["properties"]
+        # Phase 1.5: server schema now includes rack_id, cpu_cores,
+        # and the IP field is named ``ip`` (was ``ip_address``).
+        assert "rack_id" in server.schema_doc["properties"]
+        assert "cpu_cores" in server.schema_doc["properties"]
+        assert "ip" in server.schema_doc["properties"]
 
         k8s = infra_repository.get_type("k8s_cluster")
         assert "version" in k8s.schema_doc["properties"]
+        # Phase 1.5: k8s_cluster schema now includes api_endpoint
+        # and node_count was already declared.
+        assert "api_endpoint" in k8s.schema_doc["properties"]
 
         dc = infra_repository.get_type("datacenter")
         assert "location" in dc.schema_doc["properties"]
+        # Phase 1.5: provider is an enum and power_capacity is the
+        # declared field (was ``power_capacity_kw``).
+        assert dc.schema_doc["properties"]["provider"]["enum"] == [
+            "aws",
+            "gcp",
+            "azure",
+            "onprem",
+        ]
+        assert "power_capacity" in dc.schema_doc["properties"]
+
+    def test_bootstrap_picks_up_phase_1_5_types(self, infra_repository):
+        """All 6 newly-added Phase 1.5 types are seeded with schemas."""
+        result = infra_repository.bootstrap_default_types()
+        names = {t.name for t in result.registered}
+
+        for new_type in (
+            "rack",
+            "k8s_node",
+            "network",
+            "load_balancer",
+            "database",
+            "storage",
+        ):
+            row = infra_repository.get_type(new_type)
+            assert row is not None, f"{new_type!r} not seeded"
+            assert row.name in names
+            assert row.description  # every type has a one-liner
+            assert row.schema_doc.get("type") == "object"
+            assert "properties" in row.schema_doc
+
+    def test_bootstrap_type_enums(self, infra_repository):
+        """Enum-constrained fields carry their allowed values."""
+        infra_repository.bootstrap_default_types()
+
+        lb = infra_repository.get_type("load_balancer")
+        assert lb.schema_doc["properties"]["type"]["enum"] == ["l4", "l7"]
+        assert "backends" in lb.schema_doc["properties"]
+        assert lb.schema_doc["properties"]["backends"]["type"] == "array"
+
+        db = infra_repository.get_type("database")
+        assert db.schema_doc["properties"]["engine"]["enum"] == [
+            "postgresql",
+            "mysql",
+            "mongodb",
+            "redis",
+        ]
+        assert "port" in db.schema_doc["properties"]
+
+        storage = infra_repository.get_type("storage")
+        assert storage.schema_doc["properties"]["type"]["enum"] == [
+            "nas",
+            "san",
+            "object",
+            "block",
+        ]
+
+        k8s_node = infra_repository.get_type("k8s_node")
+        assert k8s_node.schema_doc["properties"]["role"]["enum"] == [
+            "master",
+            "worker",
+        ]
+
+    def test_bootstrap_updated_count_zero_on_first_run(self, infra_repository):
+        """First bootstrap: 9 new, 0 updated."""
+        result = infra_repository.bootstrap_default_types()
+        assert result.new_count == 9
+        assert result.updated_count == 0
 
 
 # =============================================================================
@@ -1493,19 +1714,31 @@ class TestEdgeCases:
     ):
         """Creating an asset for a non-existent project FK raises.
 
-        The repository catches :class:`IntegrityError` and raises
-        :class:`ValueError` — the implementation cannot currently
-        distinguish a unique-constraint violation from an FK
-        violation, so the wrapping message is misleading. This
-        test pins down the *contract*: the call MUST raise, not
-        silently insert an orphaned row.
+        C4 fix: the repository now classifies
+        :class:`IntegrityError` and surfaces a dedicated FK
+        message ("Invalid reference") that is distinct from
+        the UNIQUE-constraint message ("already exists").
+        Operators / agents can now tell *why* the create
+        failed instead of seeing a misleading "already
+        exists" for a brand-new (type, name) pair.
         """
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError) as exc_info:
             infra_repository.create_asset(
                 project_id="this-project-does-not-exist",
                 type="server",
                 name="orphan",
             )
+        msg = str(exc_info.value)
+        # C4: FK violation message is distinct from the
+        # UNIQUE-constraint message.
+        assert "Invalid reference" in msg
+        # The offending project_id is echoed so the caller can
+        # correlate.
+        assert "this-project-does-not-exist" in msg
+        # Crucially, the FK message must NOT contain
+        # "already exists" — that would be the misleading
+        # pre-fix behavior.
+        assert "already exists" not in msg
 
     def test_search_empty_project(self, infra_repository, seed_projects, project_id):
         """Searching a project with no assets returns []. doesn't raise."""

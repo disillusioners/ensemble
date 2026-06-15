@@ -9,11 +9,18 @@ This module exposes:
 
 * :class:`InfraTypeDefinition` and
   :data:`INFRA_TYPE_DEFINITIONS` — Pydantic definitions for the
-  three built-in infrastructure asset types (datacenter, server,
-  k8s_cluster). These are seed data consumed by
+  nine built-in infrastructure asset types (``datacenter``,
+  ``server``, ``rack``, ``k8s_cluster``, ``k8s_node``, ``network``,
+  ``load_balancer``, ``database``, ``storage``). These are seed
+  data consumed by
   ``SQLModelInfraRepository.bootstrap_default_types()`` (used to
   pre-populate ``infra_asset_types`` on first run) and by the
   DevOps tool layer for type-aware validation.
+
+The ``schema_doc`` payload is intentionally loose (a plain
+``dict``) — runtime validation lives in the tool layer, not the
+repository. The repository only stores the ``schema_doc`` blob
+verbatim.
 """
 
 from __future__ import annotations
@@ -116,11 +123,19 @@ INFRA_TYPE_DEFINITIONS: list[InfraTypeDefinition] = [
         schema_doc={
             "type": "object",
             "properties": {
+                "name": {"type": "string"},
                 "location": {"type": "string"},
-                "provider": {"type": "string"},
-                "tier": {"type": "string", "enum": ["tier1", "tier2", "tier3", "tier4"]},
-                "power_capacity_kw": {"type": "number"},
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "gcp", "azure", "onprem"],
+                },
+                "power_capacity": {"type": "number", "minimum": 0},
+                "tier": {
+                    "type": "string",
+                    "enum": ["tier1", "tier2", "tier3", "tier4"],
+                },
             },
+            "required": ["location"],
         },
     ),
     InfraTypeDefinition(
@@ -130,17 +145,27 @@ INFRA_TYPE_DEFINITIONS: list[InfraTypeDefinition] = [
             "type": "object",
             "properties": {
                 "hostname": {"type": "string"},
-                "ip_address": {"type": "string"},
-                "os": {"type": "string"},
-                "cpu_count": {"type": "integer", "minimum": 1},
+                "ip": {"type": "string"},
+                "cpu_cores": {"type": "integer", "minimum": 1},
                 "memory_gb": {"type": "number", "minimum": 0},
-                "environment": {
-                    "type": "string",
-                    "enum": ["production", "staging", "development", "test"],
-                },
-                "datacenter": {"type": "string"},
+                "os": {"type": "string"},
+                "rack_id": {"type": "string"},
             },
             "required": ["hostname"],
+        },
+    ),
+    InfraTypeDefinition(
+        type_name="rack",
+        description="A physical or virtual rack in a datacenter",
+        schema_doc={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "datacenter_id": {"type": "string"},
+                "units_total": {"type": "integer", "minimum": 1},
+                "units_used": {"type": "integer", "minimum": 0},
+            },
+            "required": ["name"],
         },
     ),
     InfraTypeDefinition(
@@ -149,13 +174,122 @@ INFRA_TYPE_DEFINITIONS: list[InfraTypeDefinition] = [
         schema_doc={
             "type": "object",
             "properties": {
+                "name": {"type": "string"},
                 "version": {"type": "string"},
-                "region": {"type": "string"},
+                "api_endpoint": {"type": "string"},
                 "node_count": {"type": "integer", "minimum": 1},
-                "network_cidr": {"type": "string"},
-                "managed_by": {"type": "string"},
+                "provider": {
+                    "type": "string",
+                    "enum": ["aws", "gcp", "azure", "onprem", "self-hosted"],
+                },
             },
             "required": ["version"],
+        },
+    ),
+    InfraTypeDefinition(
+        type_name="k8s_node",
+        description="A node (master or worker) in a Kubernetes cluster",
+        schema_doc={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "cluster_id": {"type": "string"},
+                "role": {
+                    "type": "string",
+                    "enum": ["master", "worker"],
+                },
+                "cpu_cores": {"type": "integer", "minimum": 1},
+                "memory_gb": {"type": "number", "minimum": 0},
+            },
+            "required": ["name", "role"],
+        },
+    ),
+    InfraTypeDefinition(
+        type_name="network",
+        description="A network segment (VLAN, VPC, or subnet)",
+        schema_doc={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "cidr": {"type": "string"},
+                "gateway": {"type": "string"},
+                "vlan_id": {"type": "integer", "minimum": 0},
+            },
+            "required": ["cidr"],
+        },
+    ),
+    InfraTypeDefinition(
+        type_name="load_balancer",
+        description="A load balancer (L4 or L7) fronting a backend pool",
+        schema_doc={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "type": {
+                    "type": "string",
+                    "enum": ["l4", "l7"],
+                },
+                "algorithm": {
+                    "type": "string",
+                    "enum": [
+                        "round_robin",
+                        "least_conn",
+                        "ip_hash",
+                        "weighted",
+                    ],
+                },
+                "backends": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["name", "type"],
+        },
+    ),
+    InfraTypeDefinition(
+        type_name="database",
+        description="A database instance (RDBMS, NoSQL, or in-memory)",
+        schema_doc={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "engine": {
+                    "type": "string",
+                    "enum": ["postgresql", "mysql", "mongodb", "redis"],
+                },
+                "version": {"type": "string"},
+                "endpoint": {"type": "string"},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+            },
+            "required": ["engine", "endpoint"],
+        },
+    ),
+    InfraTypeDefinition(
+        type_name="storage",
+        description="A storage system (block, file, or object)",
+        schema_doc={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "type": {
+                    "type": "string",
+                    "enum": ["nas", "san", "object", "block"],
+                },
+                "capacity_gb": {"type": "number", "minimum": 0},
+                "protocol": {
+                    "type": "string",
+                    "enum": [
+                        "nfs",
+                        "smb",
+                        "iscsi",
+                        "fc",
+                        "s3",
+                        "azure_blob",
+                        "gcs",
+                    ],
+                },
+            },
+            "required": ["name", "type"],
         },
     ),
 ]

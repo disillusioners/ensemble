@@ -109,6 +109,7 @@ from .critical_notes import create_critical_notes_tools
 from .project_history import create_project_history_tools
 from .context_tools import create_context_tools
 from .db_tools import create_db_tools
+from .infra import create_infra_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
@@ -751,6 +752,18 @@ Returns:
         pool_manager=manager.db_pool_manager,
     )
     tools.extend(db_tool_list)
+
+    # ── Infrastructure tools (asset / type-registry / history) ──
+    # Pass the shared infra repository from the manager — this is a
+    # singleton at the InstanceManager level, not created here. The
+    # repository's audit columns (created_by / updated_by / deleted_by)
+    # are auto-populated with current_instance_id inside the factory.
+    infra_tool_list = create_infra_tools(
+        manager,
+        current_instance_id,
+        repository=manager.infra_repository,
+    )
+    tools.extend(infra_tool_list)
 
     # ── Context tools (list/read shared context directory) ──
     # Always available — internal agents need this to inspect accumulated context

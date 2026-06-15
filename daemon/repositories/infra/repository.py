@@ -40,10 +40,11 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import cast as sa_cast
+from sqlalchemy import and_, cast as sa_cast
 from sqlalchemy import func, or_
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
@@ -56,6 +57,36 @@ from .models import InfraAsset, InfraAssetHistory, InfraAssetType, InfraChangeTy
 from .types import INFRA_TYPE_DEFINITIONS
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Result types
+# ============================================================
+
+
+@dataclass
+class BootstrapResult:
+    """Outcome of :meth:`SQLModelInfraRepository.bootstrap_default_types`.
+
+    Attributes:
+        registered: Every type row that was touched during the
+            bootstrap (whether newly inserted or updated in place),
+            in the order declared in
+            :data:`~daemon.repositories.infra.types.INFRA_TYPE_DEFINITIONS`.
+            Useful for callers that need to surface the resulting
+            schemas (e.g. a startup log) without re-querying.
+        new_count: Number of types that were inserted for the
+            first time during this call. ``len(INFRA_TYPE_DEFINITIONS)``
+            on a fresh DB, ``0`` on subsequent calls (the bootstrap
+            is idempotent and upserts via :meth:`register_type`).
+        updated_count: Number of types that already existed and
+            were updated in place. Always equal to
+            ``len(registered) - new_count``.
+    """
+
+    registered: list[InfraAssetType]
+    new_count: int
+    updated_count: int
 
 
 # ============================================================
@@ -317,6 +348,57 @@ class SQLModelInfraRepository:
         """Return current UTC time as ISO-8601 string."""
         return datetime.now(timezone.utc).isoformat()
 
+    @staticmethod
+    def _classify_integrity_error(e: IntegrityError) -> str:
+        """Classify an :class:`IntegrityError` as ``"unique"``,
+        ``"foreign_key"``, or ``"unknown"``.
+
+        ``IntegrityError`` is raised by SQLAlchemy for *any* constraint
+        violation — UNIQUE, FOREIGN KEY, CHECK, NOT NULL — not just
+        UNIQUE. The previous behavior of ``create_asset`` was to
+        assume UNIQUE and surface an ``"already exists"`` message,
+        which was misleading for FK violations (e.g. a non-existent
+        ``project_id`` or ``parent_asset_id``).
+
+        The classification is dialect-aware:
+
+        * PostgreSQL — uses the ``pgcode`` attribute on
+          :class:`sqlalchemy.exc.DBAPIError`. ``"23505"`` is
+          ``unique_violation``, ``"23503"`` is
+          ``foreign_key_violation``.
+        * SQLite — parses the error message. SQLite embeds the
+          constraint kind as ``"UNIQUE constraint failed: ..."`` or
+          ``"FOREIGN KEY constraint failed"`` in ``str(orig)``.
+        * Fallback — ``"unknown"`` for dialects that expose neither
+          a SQLSTATE code nor a parseable message.
+
+        Args:
+            e: The :class:`IntegrityError` to classify.
+
+        Returns:
+            One of ``"unique"``, ``"foreign_key"``, or ``"unknown"``.
+        """
+        orig = getattr(e, "orig", None)
+        if orig is None:
+            return "unknown"
+
+        # PostgreSQL: pgcode is the SQLSTATE.
+        pgcode = getattr(orig, "pgcode", None)
+        if pgcode == "23505":
+            return "unique"
+        if pgcode == "23503":
+            return "foreign_key"
+
+        # SQLite / generic: inspect the error message. SQLite uses
+        # "UNIQUE constraint failed" and "FOREIGN KEY constraint failed".
+        msg = str(orig).upper()
+        if "UNIQUE CONSTRAINT" in msg:
+            return "unique"
+        if "FOREIGN KEY" in msg:
+            return "foreign_key"
+
+        return "unknown"
+
     # --------------------------------------------------------
     # ASSET CRUD (with auto-history)
     # --------------------------------------------------------
@@ -361,9 +443,19 @@ class SQLModelInfraRepository:
             The newly created :class:`InfraAsset` instance.
 
         Raises:
-            ValueError: If an asset with the same
-                ``(project_id, type, name)`` already exists
-                (the unique constraint trips).
+            ValueError: If the row violates a database constraint.
+                The message is differentiated by constraint kind:
+
+                * UNIQUE (project_id, type, name) duplicate →
+                  ``"An asset with type=... and name=... already
+                  exists in project ..."``
+                * FOREIGN KEY violation (invalid ``project_id`` or
+                  ``parent_asset_id``) →
+                  ``"Invalid reference (project_id=... or
+                  parent_asset_id=... does not exist)"``
+                * Other / unknown → ``"Failed to create asset
+                  (constraint violation: ...)"`` so the original
+                  cause is still visible to operators.
         """
         attributes = dict(attributes) if attributes else {}
         relationships = dict(relationships) if relationships else {}
@@ -389,9 +481,30 @@ class SQLModelInfraRepository:
                 session.flush()
             except IntegrityError as e:
                 session.rollback()
+                # Differentiate UNIQUE vs FK vs unknown — see
+                # :meth:`_classify_integrity_error`. A non-existent
+                # ``project_id`` or ``parent_asset_id`` is the most
+                # common FK violation here; both deserve a clearer
+                # message than the previous catch-all "already exists".
+                kind = self._classify_integrity_error(e)
+                if kind == "unique":
+                    raise ValueError(
+                        f"An asset with type={type!r} and "
+                        f"name={name!r} already exists "
+                        f"in project {project_id!r}"
+                    ) from e
+                if kind == "foreign_key":
+                    raise ValueError(
+                        f"Invalid reference (project_id={project_id!r} "
+                        f"or parent_asset_id={parent_asset_id!r} "
+                        f"does not exist)"
+                    ) from e
+                # Unknown / other constraint (CHECK, NOT NULL, ...).
+                # Surface the original error so operators can debug,
+                # but use a generic prefix so the tool layer can
+                # safely echo this to the agent.
                 raise ValueError(
-                    f"Asset with (project_id={project_id!r}, "
-                    f"type={type!r}, name={name!r}) already exists"
+                    f"Failed to create asset (constraint violation: {e})"
                 ) from e
 
             # History row for the create.
@@ -502,6 +615,7 @@ class SQLModelInfraRepository:
     def update_asset(
         self,
         asset_id: str,
+        project_id: str | None = None,
         updated_by: str | None = None,
         **updates: Any,
     ) -> InfraAsset | None:
@@ -513,6 +627,15 @@ class SQLModelInfraRepository:
 
         Args:
             asset_id: The asset to update.
+            project_id: Optional project ID for project-isolation.
+                When supplied, the asset is verified to belong to
+                this project before the update is applied — a
+                mismatch yields ``None`` (the same return as
+                "asset not found") rather than mutating a
+                cross-project row. C2 fix: the previous
+                implementation silently operated on any asset
+                regardless of project_id, which is a security
+                hole.
             updated_by: Optional ``instance_id`` of the agent
                 making the change; recorded on the row and on
                 the history entry.
@@ -525,7 +648,9 @@ class SQLModelInfraRepository:
 
         Returns:
             The updated :class:`InfraAsset` instance, or
-            ``None`` if no asset with that ID exists.
+            ``None`` if no asset with that ID exists, **or** if
+            ``project_id`` was supplied and the asset belongs
+            to a different project.
 
         Raises:
             AttributeError: If any ``updates`` key is neither a
@@ -547,6 +672,17 @@ class SQLModelInfraRepository:
             if asset is None:
                 logger.warning(
                     f"Infra asset not found for update: id={asset_id}"
+                )
+                return None
+            # C2 fix: enforce project isolation. A mismatched
+            # project_id must behave identically to "asset not
+            # found" so callers cannot probe for asset IDs
+            # belonging to other projects.
+            if project_id is not None and asset.project_id != project_id:
+                logger.warning(
+                    f"Infra asset {asset_id} belongs to project "
+                    f"{asset.project_id!r}, not {project_id!r} — "
+                    f"refusing update"
                 )
                 return None
 
@@ -627,6 +763,7 @@ class SQLModelInfraRepository:
     def delete_asset(
         self,
         asset_id: str,
+        project_id: str | None = None,
         deleted_by: str | None = None,
     ) -> bool:
         """Delete an asset and record a ``deleted`` history row.
@@ -643,18 +780,40 @@ class SQLModelInfraRepository:
 
         Args:
             asset_id: The asset to delete.
+            project_id: Optional project ID for project-isolation.
+                When supplied, the asset is verified to belong to
+                this project before the delete is applied — a
+                mismatch yields ``False`` (the same return as
+                "asset not found") rather than mutating a
+                cross-project row. C2 fix: the previous
+                implementation silently deleted any asset
+                regardless of project_id, which is a security
+                hole.
             deleted_by: Optional ``instance_id`` of the agent
                 performing the delete.
 
         Returns:
             ``True`` if a row was deleted, ``False`` if no asset
-            with that ID existed.
+            with that ID existed, **or** if ``project_id`` was
+            supplied and the asset belongs to a different
+            project.
         """
         with Session(self.engine) as session:
             asset = session.get(InfraAsset, asset_id)
             if asset is None:
                 logger.warning(
                     f"Infra asset not found for delete: id={asset_id}"
+                )
+                return False
+            # C2 fix: enforce project isolation on delete. A
+            # mismatched project_id must behave identically to
+            # "asset not found" so callers cannot delete assets
+            # belonging to other projects.
+            if project_id is not None and asset.project_id != project_id:
+                logger.warning(
+                    f"Infra asset {asset_id} belongs to project "
+                    f"{asset.project_id!r}, not {project_id!r} — "
+                    f"refusing delete"
                 )
                 return False
 
@@ -861,21 +1020,36 @@ class SQLModelInfraRepository:
             stmt = select(InfraAssetType).order_by(col(InfraAssetType.name).asc())
             return list(session.exec(stmt))
 
-    def bootstrap_default_types(self) -> list[InfraAssetType]:
+    def bootstrap_default_types(self) -> BootstrapResult:
         """Upsert the seed type definitions from
         :data:`INFRA_TYPE_DEFINITIONS`.
 
         Idempotent. Safe to call on every daemon startup. Each
-        built-in type (``server``, ``k8s_cluster``,
-        ``datacenter``) is upserted with its declared
-        ``schema_doc`` and description; the
-        ``register_type`` call bumps ``updated_at`` even when
-        nothing changed, so the timestamps reflect the last
-        bootstrap run.
+        built-in type (``datacenter``, ``server``, ``rack``,
+        ``k8s_cluster``, ``k8s_node``, ``network``,
+        ``load_balancer``, ``database``, ``storage``) is upserted
+        with its declared ``schema_doc`` and description via
+        :meth:`register_type`; existing rows are updated in place
+        (and ``updated_at`` is bumped) so schema changes between
+        daemon versions propagate on the next startup.
+
+        ``new_count`` and ``updated_count`` are derived by
+        snapshotting the registry with :meth:`list_types` *before*
+        the upsert loop runs and comparing the result row-by-row.
+        The extra round-trip is acceptable here because the
+        registry is tiny (9 rows) and bootstrap is a startup-only
+        path.
 
         Returns:
-            The list of registered types after the bootstrap.
+            A :class:`BootstrapResult` with the touched rows and
+            the new / updated counts. On a fresh database
+            ``new_count`` equals ``len(INFRA_TYPE_DEFINITIONS)``;
+            on subsequent startups ``new_count`` is ``0`` and
+            ``updated_count`` reflects the number of schemas that
+            drifted from the seed.
         """
+        existing_names = {t.name for t in self.list_types()}
+
         registered: list[InfraAssetType] = []
         for defn in INFRA_TYPE_DEFINITIONS:
             row = self.register_type(
@@ -884,10 +1058,18 @@ class SQLModelInfraRepository:
                 description=defn.description,
             )
             registered.append(row)
+
+        new_count = sum(1 for row in registered if row.name not in existing_names)
+        updated_count = len(registered) - new_count
         logger.info(
-            f"Bootstrapped {len(registered)} default infra asset types"
+            f"Bootstrapped infra asset types: "
+            f"{len(registered)} total, {new_count} new, {updated_count} updated"
         )
-        return registered
+        return BootstrapResult(
+            registered=registered,
+            new_count=new_count,
+            updated_count=updated_count,
+        )
 
     # --------------------------------------------------------
     # HISTORY / VERSIONING
@@ -896,6 +1078,7 @@ class SQLModelInfraRepository:
     def get_history(
         self,
         asset_id: str,
+        project_id: str | None = None,
         limit: int = 20,
         offset: int = 0,
     ) -> list[InfraAssetHistory]:
@@ -914,13 +1097,22 @@ class SQLModelInfraRepository:
                 a live asset ID or the ID of a previously
                 deleted asset (the snapshot is used as the
                 fallback lookup).
+            project_id: Optional project ID for project-isolation.
+                When supplied, only history rows whose
+                ``project_id`` matches are returned. The
+                ``project_id`` is denormalized on history rows,
+                so this filter does not need a join. C2 fix:
+                the previous implementation returned history
+                for any project matching the asset_id, which
+                is a security hole.
             limit: Maximum number of rows to return.
             offset: Number of rows to skip.
 
         Returns:
             List of :class:`InfraAssetHistory` instances
             ordered by ``timestamp`` descending. Empty list if
-            no history exists.
+            no history exists, or if ``project_id`` was
+            supplied and no history row matches it.
         """
         with Session(self.engine) as session:
             # Match by ``asset_id`` OR by the snapshot's
@@ -928,21 +1120,48 @@ class SQLModelInfraRepository:
             # this query work for the ``deleted`` history row
             # of a now-removed asset (its ``asset_id`` is NULL
             # but the snapshot still has the original ID).
+            #
+            # C2 fix: the match expression is parenthesized
+            # before being ANDed with the optional
+            # ``project_id`` filter. Without the explicit
+            # parenthesization, SQL ``AND`` has higher
+            # precedence than ``OR`` and the filter would be
+            # silently dropped (it would attach to the
+            # snapshot branch only).
             snapshot_id_predicate = self._json_eq_predicate(
                 InfraAssetHistory.snapshot, "id", asset_id
             )
-            stmt = (
-                select(InfraAssetHistory)
-                .where(
-                    or_(
-                        InfraAssetHistory.asset_id == asset_id,
-                        snapshot_id_predicate,
-                    )
-                )
-                .order_by(col(InfraAssetHistory.timestamp).desc())
-                .offset(offset)
-                .limit(limit)
+            asset_match = or_(
+                InfraAssetHistory.asset_id == asset_id,
+                snapshot_id_predicate,
             )
+            if project_id is not None:
+                # C2 fix: filter history rows by project_id
+                # when supplied. The ``project_id`` column on
+                # ``infra_asset_history`` is denormalized from
+                # the asset at write time (see
+                # InfraAssetHistory model), so no join is
+                # required.
+                stmt = (
+                    select(InfraAssetHistory)
+                    .where(
+                        and_(
+                            asset_match,
+                            InfraAssetHistory.project_id == project_id,
+                        )
+                    )
+                    .order_by(col(InfraAssetHistory.timestamp).desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
+            else:
+                stmt = (
+                    select(InfraAssetHistory)
+                    .where(asset_match)
+                    .order_by(col(InfraAssetHistory.timestamp).desc())
+                    .offset(offset)
+                    .limit(limit)
+                )
             return list(session.exec(stmt))
 
     def record_change(

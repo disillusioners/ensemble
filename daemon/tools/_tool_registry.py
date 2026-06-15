@@ -199,6 +199,7 @@ CATEGORY_MODULES: dict[str, str | list[str]] = {
     "external_opencode": "daemon.tools.external_opencode",
     "context": "daemon.tools.context_tools",
     "db": "daemon.tools.db_tools",
+    "infra": "daemon.tools.infra",
 }
 
 
