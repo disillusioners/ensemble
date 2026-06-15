@@ -306,18 +306,34 @@ class TestUpdateAsset:
     def test_update_asset_protected_fields_ignored(
         self, infra_repository, seed_projects, project_id, caplog
     ):
-        """Protected fields (id, created_at, created_by) are ignored.
+        """Protected fields are silently dropped with a warning.
 
-        C2 fix: ``project_id`` is no longer a ``**updates``
-        kwarg — it is now a named parameter on
+        The protected set in :meth:`SQLModelInfraRepository.update_asset`
+        prevents callers from injecting values into audit / identity
+        columns. It currently covers ``id``, ``created_at``,
+        ``created_by``, ``updated_at`` and ``updated_by``. The latter
+        two were added in W1 — ``updated_at`` is owned by the
+        repository (set internally to ``self._now_iso()`` after the
+        mutation loop).
+
+        Note on ``updated_by``: it is a NAMED parameter of
+        ``update_asset`` (not a ``**updates`` kwarg), so the only way
+        to set the audit identity is the explicit keyword argument.
+        The protected-set membership is defensive — if a future
+        refactor moves ``updated_by`` into ``**updates`` the
+        protection is already in place. We test ``updated_at`` here
+        because it IS reachable through ``**updates``.
+
+        C2 fix: ``project_id`` is no longer a ``**updates`` kwarg —
+        it is now a named parameter on
         :meth:`SQLModelInfraRepository.update_asset` for
-        project-isolation enforcement. The protected set
-        therefore no longer includes ``project_id`` (the
-        isolation check happens BEFORE the ``**updates`` loop
-        and acts as a gate, not a silent drop). The test
-        passes ``project_id=project_id`` (the asset's actual
-        project) so the isolation check passes and the
-        remaining protected fields can be verified.
+        project-isolation enforcement. The protected set therefore
+        no longer includes ``project_id`` (the isolation check
+        happens BEFORE the ``**updates`` loop and acts as a gate,
+        not a silent drop). The test passes
+        ``project_id=project_id`` (the asset's actual project) so
+        the isolation check passes and the remaining protected
+        fields can be verified.
         """
         asset = infra_repository.create_asset(
             project_id=project_id,
@@ -325,17 +341,44 @@ class TestUpdateAsset:
             name="web-01",
         )
 
-        updated = infra_repository.update_asset(
-            asset.id,
-            project_id=project_id,  # C2 fix: explicit isolation param
-            id="new-id-ignored",
-            created_at="2020-01-01",
-            created_by="someone-ignored",
-        )
+        with caplog.at_level("WARNING"):
+            updated = infra_repository.update_asset(
+                asset.id,
+                project_id=project_id,  # C2 fix: explicit isolation param
+                # W1 fix verification: ``updated_at`` must be
+                # dropped by the protected set when passed via
+                # ``**updates``.
+                updated_at="1999-12-31T00:00:00+00:00",
+                id="new-id-ignored",
+                created_at="2020-01-01",
+                created_by="someone-ignored",
+                # Include a real, allowed update so the mutation
+                # actually commits and we can observe the
+                # post-update state of the protected fields.
+                name="web-01-renamed",
+            )
 
         assert updated is not None
         assert updated.id == asset.id
         assert updated.project_id == project_id
+        # The protected fields must reflect the repository's own
+        # values, not the caller's injected ones.
+        assert updated.created_at == asset.created_at
+        assert updated.created_by == asset.created_by
+        # W1 fix: the caller's ``updated_at`` injection was dropped
+        # — the actual value is the repository's ``_now_iso()``.
+        assert updated.updated_at != "1999-12-31T00:00:00+00:00"
+        # The name update DID land (it's a real allowed field).
+        assert updated.name == "web-01-renamed"
+        # Each protected field that was attempted must have been
+        # warned about. ``caplog.records`` carries the level + msg
+        # for every logging call inside the ``with`` block.
+        warned_fields = {
+            rec.getMessage().split("field=")[-1]
+            for rec in caplog.records
+            if "Ignoring protected field" in rec.getMessage()
+        }
+        assert {"id", "created_at", "created_by", "updated_at"} <= warned_fields
 
     def test_update_asset_project_id_isolation(
         self, infra_repository, seed_projects, project_id, other_project_id

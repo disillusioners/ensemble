@@ -643,8 +643,12 @@ class SQLModelInfraRepository:
                 keys: ``name``, ``type``, ``parent_asset_id``,
                 ``attributes``, ``relationships``. Protected
                 keys (``id``, ``project_id``, ``created_at``,
-                ``created_by``) are silently dropped with a
-                warning.
+                ``created_by``, ``updated_at``, ``updated_by``)
+                are silently dropped with a warning. W1 fix:
+                ``updated_at`` / ``updated_by`` are owned by
+                the repository — ``updated_by`` is passed as
+                a named argument and the timestamp is set
+                internally to ``self._now_iso()``.
 
         Returns:
             The updated :class:`InfraAsset` instance, or
@@ -661,7 +665,22 @@ class SQLModelInfraRepository:
                 (i.e. caller is renaming / retyping into a
                 name that's already taken).
         """
-        protected = {"id", "project_id", "created_at", "created_by"}
+        protected = {
+            "id",
+            "project_id",
+            "created_at",
+            "created_by",
+            # W1 fix: ``updated_at`` / ``updated_by`` are owned
+            # by the repository — the caller passes the
+            # ``updated_by`` audit value as a NAMED arg (not via
+            # ``**updates``) and the timestamp is set internally
+            # to ``self._now_iso()`` after the mutation loop.
+            # Silently dropping these here prevents a caller
+            # from injecting a stale timestamp or spoofing the
+            # audit identity on the row.
+            "updated_at",
+            "updated_by",
+        }
         # JSON column names that need ``flag_modified`` after
         # in-place mutation (no-op when the caller replaces the
         # whole dict).

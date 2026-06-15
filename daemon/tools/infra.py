@@ -287,9 +287,15 @@ def create_infra_tools(
                 "infra_asset_create failed for project=%s type=%s name=%s: %s",
                 project_id, type, name, exc,
             )
+            # C1 fix: use ``exc.__class__.__name__`` instead of
+            # ``type(exc).__name__``. The ``type`` parameter above
+            # shadows the Python builtin, so ``type(exc)`` would
+            # raise ``TypeError: 'str' object is not callable``
+            # before producing the class name. ``__class__`` is
+            # safe and idiomatic.
             return (
                 f"ERROR: Failed to create infra asset "
-                f"({type(exc).__name__})."
+                f"({exc.__class__.__name__})."
             )
 
     infra_asset_create._full_doc_ = """Create a new infrastructure asset.
@@ -401,7 +407,9 @@ def create_infra_tools(
             logger.warning(
                 "infra_asset_list failed: project=%s: %s", project_id, exc
             )
-            return f"ERROR: Failed to list infra assets ({type(exc).__name__})."
+            # C1 fix: use ``exc.__class__.__name__`` (the ``type``
+            # parameter above shadows the builtin ``type``).
+            return f"ERROR: Failed to list infra assets ({exc.__class__.__name__})."
 
     infra_asset_list._full_doc_ = """List infrastructure assets in a project with optional filters.
 
@@ -474,7 +482,9 @@ def create_infra_tools(
                 "infra_asset_search failed: project=%s query=%s: %s",
                 project_id, query, exc,
             )
-            return f"ERROR: Failed to search infra assets ({type(exc).__name__})."
+            # C1 fix: use ``exc.__class__.__name__`` (the ``type``
+            # parameter above shadows the builtin ``type``).
+            return f"ERROR: Failed to search infra assets ({exc.__class__.__name__})."
 
     infra_asset_search._full_doc_ = """Search infrastructure assets by name substring and optional type.
 

@@ -1588,6 +1588,20 @@ class InstanceManager:
         - idx_task_running_heartbeat: partial index used by the
           recovery predicate; keeps stale-task lookups O(log n)
           even as completed/old rows accumulate.
+        - idx_infra_assets_attributes_gin /
+          idx_infra_assets_relationships_gin: GIN indexes on the
+          JSONB ``attributes`` and ``relationships`` columns of
+          ``infra_assets``. Defined in
+          ``daemon/repositories/infra/models.py`` via
+          ``Index(..., postgresql_using='gin')`` in
+          ``__table_args__``, so they are created on fresh Postgres
+          databases by ``SQLModel.metadata.create_all``. They are
+          NOT created on existing Postgres databases (because
+          ``create_all`` is a no-op for tables that already exist
+          and the migration runner is SQLite-only), so we create
+          them here for parity. SQLite does not support GIN and
+          is never routed through this method (gated by the
+          ``is_postgres`` check at the call site).
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -1637,6 +1651,24 @@ class InstanceManager:
             (
                 "CREATE INDEX IF NOT EXISTS idx_lease_holder_kind "
                 "ON instance_execution_leases(holder_kind)"
+            ),
+            # GIN indexes on infra_assets JSONB columns. These are
+            # declared on the model via ``Index(..., postgresql_using='gin')``
+            # in ``__table_args__`` and are emitted by
+            # ``SQLModel.metadata.create_all`` on fresh databases. On
+            # existing Postgres databases the tables are already
+            # present so ``create_all`` is a no-op for them; we create
+            # the indexes here so production Postgres gets the same
+            # JSONB containment / path-query performance as fresh
+            # databases. The model index names match these exactly;
+            # see ``daemon/repositories/infra/models.py``.
+            (
+                "CREATE INDEX IF NOT EXISTS idx_infra_assets_attributes_gin "
+                "ON infra_assets USING gin (attributes)"
+            ),
+            (
+                "CREATE INDEX IF NOT EXISTS idx_infra_assets_relationships_gin "
+                "ON infra_assets USING gin (relationships)"
             ),
         ]
         with self._engine.begin() as conn:

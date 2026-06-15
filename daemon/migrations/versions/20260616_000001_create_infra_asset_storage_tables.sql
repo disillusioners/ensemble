@@ -32,6 +32,14 @@
 --   part of this raw SQL migration (dialect-specific and not needed
 --   for the SQLite baseline).
 --
+--   For production Postgres, ``SQLModel.metadata.create_all`` emits
+--   those GIN indexes on a fresh database, but is a no-op on an
+--   existing one (tables already present). The Postgres startup hook
+--   in ``daemon/manager.py::_ensure_postgres_columns`` therefore
+--   creates them idempotently with ``CREATE INDEX IF NOT EXISTS``
+--   on every boot, gated by an ``is_postgres`` check. SQLite is
+--   never routed through that hook and has no GIN support.
+--
 --   Schema mirrors daemon/repositories/infra/{models.py} (Phase 1).
 
 -- UP

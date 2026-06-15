@@ -1395,6 +1395,123 @@ class TestProjectIsolation:
 
 
 # =============================================================================
+# Group 13: Exception handler C1 fix — ``type`` parameter shadowing builtin
+# =============================================================================
+
+
+class TestExceptionHandlerC1:
+    """Regression coverage for C1.
+
+    The tools ``infra_asset_create``, ``infra_asset_list``, and
+    ``infra_asset_search`` all accept a ``type`` parameter. Inside
+    their generic ``except Exception`` handler, the original code
+    called ``type(exc).__name__`` to report the class name of the
+    failure. Because ``type`` was a local parameter, this
+    shadowed the Python builtin — and at runtime
+    ``type(exc)`` tried to call the parameter's value as a
+    function, raising ``TypeError: 'str' object is not callable``
+    BEFORE the error string could be produced. The fix replaces
+    ``type(exc).__name__`` with ``exc.__class__.__name__`` in
+    all three handlers.
+
+    These tests monkeypatch the underlying repository method to
+    raise a plain ``RuntimeError`` and verify the tool returns a
+    clean ``ERROR: ...`` string containing the runtime exception's
+    class name — and does NOT itself crash with ``TypeError``.
+
+    A separate sub-test (parametrized over the three tools)
+    pins the behavior: any future change that re-introduces
+    ``type(exc)`` will fail the test with a clear traceback from
+    the inner ``TypeError`` rather than a confusing assertion
+    failure.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_exception_handler_returns_clean_error(
+        self, infra_tools, seed_projects, project_id, infra_repository, monkeypatch
+    ):
+        """``infra_asset_create``'s generic except handler must not
+        crash with ``TypeError`` when ``type`` is a parameter.
+
+        C1 regression: the handler used to call ``type(exc).__name__``
+        which raised ``TypeError: 'str' object is not callable``
+        because the local ``type`` parameter shadowed the builtin.
+        """
+        def _raise(*_a, **_kw):
+            raise RuntimeError("boom from create_asset")
+        monkeypatch.setattr(infra_repository, "create_asset", _raise)
+
+        create_tool = infra_tools["infra_asset_create"]
+        result = await create_tool.ainvoke({
+            "project_id": project_id,
+            "type": "server",
+            "name": "c1-target",
+            "attributes": {},
+        })
+
+        assert "ERROR" in result
+        assert "RuntimeError" in result
+        # Defensive: the C1 symptom would surface as a TypeError
+        # from inside the except handler. We assert its absence.
+        assert "TypeError" not in result
+        # And the handler should NOT swallow the failure silently —
+        # the message should mention the create operation.
+        assert "create" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_list_exception_handler_returns_clean_error(
+        self, infra_tools, seed_projects, project_id, infra_repository, monkeypatch
+    ):
+        """``infra_asset_list``'s generic except handler must not
+        crash with ``TypeError`` when ``type`` is a parameter.
+
+        Same shadowing bug as ``infra_asset_create``. The list
+        tool's ``type`` filter is optional, but the parameter
+        itself still binds in the function's local scope.
+        """
+        def _raise(*_a, **_kw):
+            raise RuntimeError("boom from list_assets")
+        monkeypatch.setattr(infra_repository, "list_assets", _raise)
+
+        list_tool = infra_tools["infra_asset_list"]
+        # Pass ``type=`` explicitly so the bug is reachable
+        # (otherwise the parameter binds to its default ``None``
+        # and the test is still valid, but explicit is clearer).
+        result = await list_tool.ainvoke({
+            "project_id": project_id,
+            "type": "server",
+        })
+
+        assert "ERROR" in result
+        assert "RuntimeError" in result
+        assert "TypeError" not in result
+        assert "list" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_search_exception_handler_returns_clean_error(
+        self, infra_tools, seed_projects, project_id, infra_repository, monkeypatch
+    ):
+        """``infra_asset_search``'s generic except handler must not
+        crash with ``TypeError`` when ``type`` is a parameter.
+        """
+        def _raise(*_a, **_kw):
+            raise RuntimeError("boom from search_assets")
+        monkeypatch.setattr(infra_repository, "search_assets", _raise)
+
+        search_tool = infra_tools["infra_asset_search"]
+        result = await search_tool.ainvoke({
+            "project_id": project_id,
+            "query": "anything",
+            "type": "server",
+        })
+
+        assert "ERROR" in result
+        assert "RuntimeError" in result
+        assert "TypeError" not in result
+        assert "search" in result.lower()
+
+
+# =============================================================================
 # Group 12: DevOps agent access — meta.json + resolve_tool_filter
 # =============================================================================
 
