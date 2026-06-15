@@ -41,6 +41,11 @@ from .event.models import Event, EventKind
 from .db_connection.repository import DbConnectionRepository
 from .db_connection.models import DbConnectionConfig
 
+# Infra asset repository (Phase 1 of the infra info storage design)
+from .infra.repository import SQLModelInfraRepository
+from .infra.models import InfraAsset, InfraAssetType, InfraAssetHistory, InfraChangeType
+from .infra.types import JSONBType, InfraTypeDefinition, INFRA_TYPE_DEFINITIONS
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -54,6 +59,7 @@ from .factory import (
     create_mcp_server_repository,
     create_execution_lease_repository,
     create_db_connection_repository,
+    create_infra_repository,
     run_migrations,
 )
 
@@ -105,6 +111,15 @@ __all__ = [
     # Database connection
     "DbConnectionRepository",
     "DbConnectionConfig",
+    # Infra asset (Phase 1)
+    "SQLModelInfraRepository",
+    "InfraAsset",
+    "InfraAssetType",
+    "InfraAssetHistory",
+    "InfraChangeType",
+    "JSONBType",
+    "InfraTypeDefinition",
+    "INFRA_TYPE_DEFINITIONS",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",
@@ -117,5 +132,6 @@ __all__ = [
     "create_mcp_server_repository",
     "create_execution_lease_repository",
     "create_db_connection_repository",
+    "create_infra_repository",
     "run_migrations",
 ]

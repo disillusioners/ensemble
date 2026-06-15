@@ -19,6 +19,7 @@ from .job_queue.queue_repository import JobQueueRepository
 from .mcp_server.repository import SQLModelMcpServerRepository
 from .execution_lease.repository import ExecutionLeaseRepository
 from .db_connection.repository import DbConnectionRepository
+from .infra.repository import SQLModelInfraRepository
 
 if TYPE_CHECKING:
     from daemon.ensemble_config import EnsembleConfig
@@ -580,6 +581,53 @@ def create_execution_lease_repository(
     return ExecutionLeaseRepository(engine)
 
 
+def create_infra_repository(
+    config: DatabaseConfig | None = None,
+    engine: Engine | None = None,
+    create_tables: bool = True,
+) -> SQLModelInfraRepository:
+    """Create an InfraRepository from configuration or shared engine.
+
+    Persistence layer for the infrastructure asset storage
+    (Phase 1 of the infra info storage design). Three tables
+    are created on first use:
+
+    * ``infra_asset_types`` — global type-registry (no
+      ``project_id``).
+    * ``infra_assets`` — per-project asset storage with
+      ``UNIQUE(project_id, type, name)`` and JSONB columns
+      for ``attributes`` and ``relationships``.
+    * ``infra_asset_history`` — built-in audit trail.
+
+    The JSONB columns are typed via the
+    :class:`~daemon.repositories.infra.types.JSONBType`
+    TypeDecorator, which maps to ``JSONB`` on PostgreSQL and
+    ``JSON`` on SQLite so the same schema works on both
+    drivers. GIN indexes for the JSONB columns are declared
+    in SQLAlchemy ``__table_args__`` with
+    ``postgresql_using="gin"`` — SQLAlchemy emits them on
+    PostgreSQL and silently skips them on SQLite (which has
+    no GIN equivalent).
+
+    Args:
+        config: Database configuration (required if engine not provided).
+        engine: Shared engine instance (recommended for avoiding lock contention).
+        create_tables: If True, create tables if they don't exist.
+
+    Returns:
+        Configured :class:`SQLModelInfraRepository` instance.
+    """
+    if engine is None:
+        if config is None:
+            raise ValueError("Either config or engine must be provided")
+        engine = create_engine_from_config(config)
+
+    if create_tables:
+        SQLModel.metadata.create_all(engine)
+
+    return SQLModelInfraRepository(engine)
+
+
 # Backward compatibility alias
 create_task_repository = create_job_repository
 
@@ -596,5 +644,6 @@ __all__ = [
     "create_job_queue_repository",
     "create_mcp_server_repository",
     "create_execution_lease_repository",
+    "create_infra_repository",
     "run_migrations",
 ]
