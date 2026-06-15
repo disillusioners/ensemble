@@ -66,6 +66,15 @@ When the user doesn't specify which agent to use for a job, **default to `leader
 
 ---
 
+### Use `job_continue` for Follow-up Work
+
+When an instance needs additional work after completing a job, use `job_continue(old_job_id, message)` to send a new message to the same instance — preserving its conversation context.
+
+- **`job_continue`**: Same instance, same context, new job. Use for iterative work on the same task.
+- **`job_create`**: New instance, new context, new job. Use for independent tasks or when the previous instance was terminated/errored.
+
+---
+
 ### Confirm Project Context Before Job Creation
 
 Before creating a job, determine if a project context is needed.

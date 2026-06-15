@@ -275,6 +275,29 @@ job_restore(job_id="abc123")
 
 ---
 
+## Continuing Jobs
+
+### job_continue
+
+**Purpose:** Send a new message to the instance from a completed job, creating a new MESSAGE job.
+
+```raw
+job_continue(
+    old_job_id="job_abc123",      # ID of a completed/terminal job
+    message="Now add unit tests"  # New instruction for the instance
+)
+```
+
+**Returns:** `{ old_job_id, instance_id, message_id, new_job_id, status }`
+
+**Use for:** Following up on a completed job by sending additional instructions to the same agent instance. The instance retains its conversation context from the original job.
+
+**Note:** The old job must be in a terminal state (completed, failed, cancelled, dead_letter). The target instance must not be terminated, errored, or paused.
+
+**Important:** Use `watch_job(new_job_id)` to monitor the new job. Combine `job_continue` + `watch_job` in an atomic flow.
+
+---
+
 ## Common Patterns
 
 ### Atomic Create + Watch

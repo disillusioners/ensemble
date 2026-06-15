@@ -378,6 +378,22 @@ Receive → Create job → Wait → Fail? → Retry (< 3) → Wait → ... → R
 
 ---
 
+## Continuing Completed Jobs
+
+When an old job is done and you need to send follow-up work to the same instance:
+
+```raw
+1. job was completed and you need to send follow-up work
+2. call job_continue(old_job_id=<id>, message=<new instructions>)
+3. extract new_job_id from result
+4. watch_job(new_job_id) to monitor the continuation
+5. when [JOB_EVENT] fires, react per Phase 4 framework
+```
+
+Use this when the instance's context (conversation history, partial work in progress) is valuable and you want to keep iterating. If the old instance is terminated/errored/paused, use `job_create` instead to spawn a fresh instance.
+
+---
+
 ## Job Stuck Handling
 
 If a job has been running longer than expected:

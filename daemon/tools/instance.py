@@ -409,6 +409,7 @@ def create_job_tools_if_available(manager, current_instance_id: str, agent_id: s
         current_instance_id=current_instance_id,
         agent_id=agent_id,
         watcher_repo=watcher_repo,
+        manager=manager,
     )
 
 

@@ -433,6 +433,7 @@ class AsyncMessageResult:
     message_id: str
     instance_id: str
     status: str = "queued"
+    job_id: str | None = None  # job_id of the enqueued MESSAGE job (None for non-JQ paths)
 
 
 class InstanceManager:

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
     from daemon.services.dead_letter_service import DeadLetterService
     from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
+    from daemon.manager import InstanceManager
 
 CATEGORY_NAME = "Job Queue"
 CATEGORY_DOC = """\
@@ -197,6 +198,26 @@ Args:
 
 Returns:
     Summary of watches registered and immediate notifications sent.""",
+
+    "job_continue": """Continue a completed/terminal job by sending a new message to its instance.
+
+Looks up the instance_id from the old (terminal) job, validates that the
+instance is healthy (not terminated/errored/paused), and enqueues a new
+MESSAGE job to the same instance via the JobQueue path. The instance
+retains its conversation context from the original job.
+
+Args:
+    old_job_id: Job ID of a terminal job to continue from. Required.
+    message: New message/instruction to send to the instance. Required.
+
+Returns:
+    Dictionary with old_job_id, instance_id, message_id, new_job_id, status.
+
+Example:
+    job_continue(
+        old_job_id="job_abc123",
+        message="Now add unit tests for the login flow"
+    )""",
 }
 
 
@@ -207,9 +228,10 @@ def create_job_tools(
     current_instance_id: str = "",
     agent_id: str = "",
     watcher_repo: "JobWatcherRepository | None" = None,
+    manager: "InstanceManager | None" = None,
 ):
     """Create job queue management tools with injected services.
-    
+
     Args:
         job_service: JobQueueService instance for job operations.
         queue_mgmt_service: JobQueueMgmtService instance for queue management.
@@ -217,7 +239,8 @@ def create_job_tools(
         current_instance_id: The current instance ID.
         agent_id: The current agent ID.
         watcher_repo: JobWatcherRepository instance for watch functionality. Optional.
-    
+        manager: InstanceManager for tools that need access to instance/messaging APIs (e.g., job_continue). Optional.
+
     Returns:
         List of tool functions for job queue management.
     """
@@ -373,6 +396,77 @@ def create_job_tools(
         except Exception as e:
             return f"ERROR: Failed to restore job {job_id}: {str(e)}"
     job_restore._full_doc_ = _FULL_DOCS["job_restore"]
+
+    class JobContinueInput(BaseModel):
+        """Input schema for job_continue tool."""
+        old_job_id: Annotated[str, Field(description="Job ID of a terminal job to continue from")]
+        message: Annotated[str, Field(description="New message/instruction to send to the instance")]
+
+    @register_tool_category("job")
+    @tool(args_schema=JobContinueInput)
+    async def job_continue(
+        old_job_id: Annotated[str, Field(description="Job ID of a terminal job to continue from")],
+        message: Annotated[str, Field(description="New message/instruction to send to the instance")],
+    ) -> dict:
+        """Continue a completed job by sending a new message to its instance.
+
+        Use tool_help("job_continue") for details."""
+        try:
+            # 1. Look up old job
+            old_job = await job_service.get_job(old_job_id)
+            if old_job is None:
+                return {"error": f"Job {old_job_id} not found"}
+
+            # 2. Validate the job is in a terminal state
+            #    Valid terminal job states: completed, failed, cancelled, dead_letter
+            #    (from ALL_TERMINAL_STATES in daemon/repositories/job_queue/watcher_models.py:12)
+            #    NOTE: "terminated" is an InstanceStatus, NOT a JobStatus — do not include.
+            if old_job.status not in TERMINAL_STATES:
+                return {
+                    "error": (
+                        f"Job {old_job_id} is not in a terminal state (current: {old_job.status}). "
+                        "Only completed/failed/cancelled/dead_letter jobs can be continued."
+                    )
+                }
+
+            # 3. Extract instance_id
+            if not old_job.instance_id:
+                return {"error": f"Job {old_job_id} has no associated instance_id"}
+
+            instance_id = old_job.instance_id
+
+            # 4. Check manager is available
+            if manager is None:
+                return {"error": "Instance manager not available — job_continue requires manager access"}
+
+            # 5. Pre-check instance status (enqueue_message_via_jq silently enqueues
+            #    for terminated/error/paused instances, so guard explicitly here).
+            instance_meta = manager._instance_repository.get(instance_id)
+            if instance_meta is None:
+                return {"error": f"Instance {instance_id} not found"}
+            if instance_meta.status in ("terminated", "error"):
+                return {"error": f"Instance is {instance_meta.status} — spawn a new instance instead"}
+            if instance_meta.status == "paused":
+                return {"error": "Instance is paused — unpause it first"}
+
+            # 6. Send message via the JobQueue path (same as FE "send message")
+            result = await manager.enqueue_message_via_jq(
+                instance_id=instance_id,
+                message=message,
+                source=f"agent:{caller_agent_id}" if caller_agent_id else "api",
+            )
+
+            # 7. Return new job_id (provided by AsyncMessageResult)
+            return {
+                "old_job_id": old_job_id,
+                "instance_id": instance_id,
+                "message_id": result.message_id,
+                "new_job_id": result.job_id,
+                "status": result.status,
+            }
+        except Exception as e:
+            return {"error": f"Failed to continue job: {str(e)}"}
+    job_continue._full_doc_ = _FULL_DOCS["job_continue"]
 
     @register_tool_category("job")
     @tool
@@ -626,7 +720,7 @@ def create_job_tools(
 
     return [
         job_create, job_get, job_list, job_cancel, job_retry,
-        job_delete, job_restore, queue_list, queue_create,
+        job_delete, job_restore, job_continue, queue_list, queue_create,
         queue_update, dlq_list, dlq_replay,
         watch_job, unwatch_job, list_watched_jobs, watch_jobs,
     ]

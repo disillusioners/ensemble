@@ -1496,4 +1496,5 @@ class InstanceMessagingService:
             message_id=message_id,
             instance_id=instance_id,
             status="queued",
+            job_id=job.job_id,
         )
