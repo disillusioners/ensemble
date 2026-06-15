@@ -13,9 +13,16 @@ Tests cover the 6 distinct code paths the feature touches:
 4. JobQueueService.notify_watchers() — only cleans up watches on terminal states
 5. MessageJobHandler.handle() — emits in_progress when skip_complete=True
 6. Watcher filter — in_progress is opt-in via watch_events list
+
+Reviewer fixes also covered:
+7. JobProcessor._emit_in_progress_if_children_pending() — throttle/dedup, escape
+   hatch, terminal lifecycle (tests added in TestJobProcessorInProgressGuardReviewFixes)
+8. ChildReportsService cascade — ERROR status preserved when all children finish
+   (test added in TestCascadePreservesErrorOnChildComplete)
 """
 
 import asyncio
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -844,3 +851,416 @@ class TestAllWatchableEventsConstant:
 
     def test_watchable_is_terminal_plus_in_progress(self):
         assert set(ALL_WATCHABLE_EVENTS) == set(ALL_TERMINAL_STATES) | {"in_progress"}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. Reviewer fixes: throttle/dedup, escape hatch, terminal lifecycle
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestJobProcessorInProgressGuardReviewFixes:
+    """Tests for the throttle/dedup, escape hatch, and terminal lifecycle
+    in ``JobProcessor._emit_in_progress_if_children_pending()``.
+
+    These cover the safety nets the original 6 inline blocks did not have:
+
+    * **Throttle/dedup** — within a 300s window, skip re-emit when ``waiting_for``
+      count is unchanged, so a hot poll loop cannot spam watchers.
+    * **Escape hatch** — if a job has been sitting in the guard for more than
+      ``_child_timeout_seconds``, force-complete it as FAILED so a stuck child
+      never permanently blocks the job.
+    * **Terminal lifecycle** — once ``waiting_for`` drops to 0, the guard
+      returns ``False`` so the caller runs the normal terminal path; the
+      helper itself does not emit a second notification for the terminal.
+    """
+
+    def _build_processor(self):
+        """Construct a JobProcessor with mocked collaborators.
+
+        Only ``_queue_service.notify_watchers`` and ``_queue_service.complete_job``
+        are interesting here — every other collaborator is a MagicMock.
+        """
+        mock_project_repo = MagicMock()
+        mock_project_repo.list_projects = MagicMock(return_value=[])
+        mock_queue_repo = MagicMock()
+        mock_queue_repo.list_by_project = MagicMock(return_value=[])
+
+        mock_queue_service = MagicMock()
+        mock_queue_service._repository = MagicMock()
+        mock_queue_service.notify_watchers = AsyncMock(return_value=0)
+        mock_queue_service.complete_job = AsyncMock(return_value=None)
+
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(
+            return_value="partial work"
+        )
+
+        processor = JobProcessor(
+            queue_service=mock_queue_service,
+            instance_manager=mock_instance_manager,
+            project_repo=mock_project_repo,
+            queue_repo=mock_queue_repo,
+            poll_interval=0.1,
+        )
+        return processor, mock_queue_service
+
+    @staticmethod
+    def _make_instance_meta(waiting_for: int = 2) -> MagicMock:
+        return make_instance_meta(
+            instance_id="inst-test-12345678",
+            status="completed",
+            waiting_for=waiting_for,
+        )
+
+    @staticmethod
+    def _make_proc_job(job_id: str = "job-throttle-001") -> MagicMock:
+        job = MagicMock()
+        job.job_id = job_id
+        job.job_type = "task"
+        job.agent_id = "coder"
+        return job
+
+    @pytest.mark.asyncio
+    async def test_notification_throttle_dedups_within_window(self):
+        """Test 1: Two calls within the 300s throttle window with the same
+        ``waiting_for`` count must result in a single ``notify_watchers``
+        invocation. The second call still returns ``True`` (guard fired) so
+        the caller continues to defer the terminal notification.
+        """
+        processor, mock_qs = self._build_processor()
+        instance_meta = self._make_instance_meta(waiting_for=2)
+        proc_job = self._make_proc_job(job_id="job-throttle-001")
+
+        # First call: should emit in_progress and return True.
+        first = await processor._emit_in_progress_if_children_pending(
+            instance_meta, proc_job, "TASK", "completed"
+        )
+        assert first is True
+        mock_qs.notify_watchers.assert_called_once()
+        assert mock_qs.notify_watchers.call_args.kwargs.get("status") == "in_progress"
+        assert mock_qs.notify_watchers.call_args.kwargs.get("waiting_for") == 2
+
+        # Second call in quick succession with same waiting_for: throttled.
+        # It must still return True (the guard is still "fired" — caller
+        # should defer), but notify_watchers must NOT be called again.
+        second = await processor._emit_in_progress_if_children_pending(
+            instance_meta, proc_job, "TASK", "completed"
+        )
+        assert second is True
+        # CRITICAL: still exactly one notification.
+        assert mock_qs.notify_watchers.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_throttle_window_expiry_re_emits(self):
+        """Test 2: After advancing past the 300s throttle window, the
+        second notification IS emitted. The test manually rewinds
+        ``_last_in_progress`` so the time-based check fires deterministically.
+        """
+        processor, mock_qs = self._build_processor()
+        instance_meta = self._make_instance_meta(waiting_for=2)
+        proc_job = self._make_proc_job(job_id="job-throttle-002")
+
+        # First call: emits notification, populates _last_in_progress.
+        first = await processor._emit_in_progress_if_children_pending(
+            instance_meta, proc_job, "TASK", "completed"
+        )
+        assert first is True
+        assert mock_qs.notify_watchers.call_count == 1
+        assert proc_job.job_id in processor._last_in_progress
+
+        # Rewind the throttle window to > 300s in the past so the next call
+        # is treated as a fresh emit.
+        old_timestamp, old_wf = processor._last_in_progress[proc_job.job_id]
+        processor._last_in_progress[proc_job.job_id] = (
+            time.time() - 400.0,
+            old_wf,
+        )
+
+        # Second call: throttle window expired → notify_watchers fires again.
+        second = await processor._emit_in_progress_if_children_pending(
+            instance_meta, proc_job, "TASK", "completed"
+        )
+        assert second is True
+        assert mock_qs.notify_watchers.call_count == 2
+        # And the new entry has a fresh timestamp.
+        ts, wf = processor._last_in_progress[proc_job.job_id]
+        assert wf == 2
+        # Timestamp must be near "now" (not the rewound value).
+        assert (time.time() - ts) < 5
+
+    @pytest.mark.asyncio
+    async def test_escape_hatch_force_fails_stuck_job(self):
+        """Test 3: A job that has been waiting for children longer than
+        ``_child_timeout_seconds`` is force-completed as FAILED with a
+        timeout message, and the in-progress tracking dicts are cleaned up.
+        """
+        processor, mock_qs = self._build_processor()
+        # Tighten the timeout to 1s so the test can rewind the clock.
+        processor._child_timeout_seconds = 1
+
+        instance_meta = self._make_instance_meta(waiting_for=2)
+        proc_job = self._make_proc_job(job_id="job-escape-003")
+
+        # Seed: the job has been in the guard for 100s, well past the 1s timeout.
+        processor._in_progress_since[proc_job.job_id] = time.time() - 100.0
+        # (No _last_in_progress entry needed for the escape-hatch path.)
+
+        result = await processor._emit_in_progress_if_children_pending(
+            instance_meta, proc_job, "TASK", "completed"
+        )
+
+        # Guard "fired" — caller should defer/return.
+        assert result is True
+
+        # complete_job must have been called with FAILED + timeout error.
+        mock_qs.complete_job.assert_called_once()
+        kwargs = mock_qs.complete_job.call_args.kwargs
+        assert kwargs["demand_state"] == DemandState.FAILED
+        assert "timeout" in (kwargs.get("error") or "").lower()
+
+        # The escape-hatch path is a terminal — it must NOT emit an
+        # in_progress notification, and the tracking dicts must be cleaned
+        # up so the next guard visit starts a fresh window.
+        mock_qs.notify_watchers.assert_not_called()
+        assert proc_job.job_id not in processor._in_progress_since
+        assert proc_job.job_id not in processor._last_in_progress
+
+    @pytest.mark.asyncio
+    async def test_terminal_lifecycle_after_in_progress(self):
+        """Test 4: Lifecycle. First call (waiting_for=2) emits in_progress.
+        After the child reports, waiting_for drops to 0 and the next call
+        returns ``False`` (caller runs the normal terminal path) without
+        emitting a second notification from the helper.
+        """
+        processor, mock_qs = self._build_processor()
+        proc_job = self._make_proc_job(job_id="job-lifecycle-004")
+
+        # Phase 1: 2 children still pending.
+        instance_meta_pending = self._make_instance_meta(waiting_for=2)
+        first = await processor._emit_in_progress_if_children_pending(
+            instance_meta_pending, proc_job, "TASK", "completed"
+        )
+        assert first is True, "Guard must fire while children pending"
+        mock_qs.notify_watchers.assert_called_once()
+        assert mock_qs.notify_watchers.call_args.kwargs.get("status") == "in_progress"
+
+        # Phase 2: simulate child reports — waiting_for drops to 0.
+        instance_meta_done = self._make_instance_meta(waiting_for=0)
+        second = await processor._emit_in_progress_if_children_pending(
+            instance_meta_done, proc_job, "TASK", "completed"
+        )
+        # Guard does NOT fire — caller should run the normal terminal
+        # completion path (which will emit the "completed" notification
+        # in its own code, not via this helper).
+        assert second is False, (
+            "Guard must return False when waiting_for=0 so the caller "
+            "runs the normal terminal completion path"
+        )
+        # And the helper itself must not have emitted a second notification.
+        # (The single notify_watchers call is from the first (in_progress) call.)
+        assert mock_qs.notify_watchers.call_count == 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. ChildReportsService cascade — ERROR status preserved (W1 fix)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestCascadePreservesErrorOnChildComplete:
+    """W1 fix: a parent whose last child completed successfully should
+    remain in ERROR if it errored first — its state is more useful for
+    diagnostics than overwriting it with COMPLETED.
+
+    Covers the new ``parent.status != InstanceStatus.ERROR.value`` guard
+    in ``ChildReportsService._update_parent_on_child_complete`` around
+    line 478–482 of ``daemon/services/child_reports.py``.
+    """
+
+    def _make_parent(
+        self,
+        status: str,
+        waiting_for: int,
+        parent_id: str = "parent-W1",
+    ) -> MagicMock:
+        parent = MagicMock()
+        parent.instance_id = parent_id
+        parent.parent_id = None
+        parent.status = status
+        parent.waiting_for = waiting_for
+        parent.children = "[]"
+        parent.instance_metadata = {}
+        parent.last_activity_at = None
+        parent.version = 1
+        return parent
+
+    def _make_child(self, parent_id: str = "parent-W1") -> MagicMock:
+        child = MagicMock()
+        child.instance_id = "child-W1"
+        child.parent_id = parent_id
+        child.status = "completed"
+        child.instance_metadata = {}
+        child.children = "[]"
+        child.waiting_for = 0
+        child.last_activity_at = None
+        child.version = 1
+        return child
+
+    @staticmethod
+    def _setup_cascade_session(parent: MagicMock, child: MagicMock) -> MagicMock:
+        """Build a mock session that simulates the atomic UPDATE returning
+        ``new_waiting=0`` and the post-expiry parent re-read.
+
+        Mirrors the SQLAlchemy calls in
+        ``ChildReportsService._update_parent_on_child_complete``:
+
+        * ``session.get(Instance, child.parent_id)`` → ``parent`` (initial)
+        * ``session.execute(text("UPDATE instances SET waiting_for = ... RETURNING waiting_for"))``
+          → row with new value 0
+        * ``session.expire(parent)``
+        * ``session.get(Instance, parent.instance_id)`` → ``parent`` (re-read
+          with the post-decrement ``waiting_for=0`` and the original status,
+          which the test sets explicitly)
+        * ``session.exec(select(func.count()).select_from(MessageQueue)...)``
+          → scalar_one() == 0 (no pending messages)
+        """
+        session = MagicMock()
+        # First session.get → parent (initial lookup at line 397).
+        # Second session.get → parent (re-read after session.expire at line 444).
+        # The mock just returns the same object for both — the test sets
+        # waiting_for manually before the cascade call.
+        session.get = MagicMock(return_value=parent)
+        # SQL UPDATE … RETURNING waiting_for — return the new (decremented) value.
+        update_result = MagicMock()
+        update_result.first = MagicMock(return_value=(0,))
+        session.execute = MagicMock(return_value=update_result)
+        # Pending-message count check (line 484-493) — return 0 so the
+        # cascade is not deferred to WAITING_CHILDREN.
+        pending_result = MagicMock()
+        pending_result.scalar_one = MagicMock(return_value=0)
+        session.exec = MagicMock(return_value=pending_result)
+        return session
+
+    @pytest.mark.asyncio
+    async def test_error_status_not_overwritten_to_completed(self):
+        """Root scenario: parent is in ERROR, last child completes.
+        Parent MUST stay in ERROR (not get flipped to COMPLETED).
+        """
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        # Arrange: parent is in ERROR with one child still pending.
+        parent = self._make_parent(
+            status=InstanceStatus.ERROR.value,
+            waiting_for=1,  # will be decremented to 0 by the cascade
+        )
+        child = self._make_child()
+        session = self._setup_cascade_session(parent, child)
+
+        # Minimal manager mock — the cascade only touches the session.
+        mock_manager = MagicMock()
+        mock_manager._live_hub = None
+        mock_manager._checkpointer = None
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm = MagicMock()
+
+        service = ChildReportsService(manager=mock_manager)
+
+        # Pre-condition: parent is in ERROR and has 1 child pending.
+        assert parent.status == InstanceStatus.ERROR.value
+        assert parent.waiting_for == 1
+
+        # The cascade reads `parent.waiting_for` after session.expire, so we
+        # patch the post-decrement value via a property-like side effect:
+        # since the mock returns the same object on session.get, we set
+        # waiting_for=0 on the same object just before the cascade check.
+        # The simplest approach: pre-set the "post-decrement" value here,
+        # matching what the SQL UPDATE RETURNING (0,) signals to the cascade.
+        parent.waiting_for = 0  # the new value the cascade observes
+
+        # Act: call the cascade.
+        transitioned, completed_parent_id, completed_parent_parent_id = (
+            await service._update_parent_on_child_complete(session, child)
+        )
+
+        # Assert: the guard at line 478-482 must have skipped the
+        # COMPLETED transition because parent.status == ERROR.
+        assert transitioned is False, (
+            "Parent with ERROR status must NOT transition to RUNNING — "
+            "the cascade is a no-op for ERROR parents."
+        )
+        assert completed_parent_id is None, (
+            "Parent must NOT be reported as 'completed' — that would "
+            "tell downstream listeners to overwrite ERROR with COMPLETED."
+        )
+        assert completed_parent_parent_id is None
+        # Parent's status MUST be untouched.
+        assert parent.status == InstanceStatus.ERROR.value, (
+            f"Parent status was overwritten to {parent.status!r}; "
+            f"expected it to stay {InstanceStatus.ERROR.value!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_completed_status_not_overwritten_by_cascade(self):
+        """Negative control: a parent already in COMPLETED must not be
+        transitioned again by the cascade (the existing
+        ``!= InstanceStatus.COMPLETED.value`` guard).
+        """
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        parent = self._make_parent(
+            status=InstanceStatus.COMPLETED.value,
+            waiting_for=0,
+        )
+        child = self._make_child()
+        session = self._setup_cascade_session(parent, child)
+
+        mock_manager = MagicMock()
+        mock_manager._live_hub = None
+        mock_manager._checkpointer = None
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm = MagicMock()
+
+        service = ChildReportsService(manager=mock_manager)
+
+        transitioned, completed_parent_id, _ = (
+            await service._update_parent_on_child_complete(session, child)
+        )
+
+        assert transitioned is False
+        assert completed_parent_id is None
+        assert parent.status == InstanceStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    async def test_running_parent_transitions_to_completed_normally(self):
+        """Sanity / regression: with the W1 fix in place, a parent in
+        RUNNING (the common case) must STILL transition to COMPLETED
+        when its last child finishes — only ERROR is preserved.
+        """
+        from daemon.services.child_reports import ChildReportsService
+        from daemon.repositories.instance.models import InstanceStatus
+
+        parent = self._make_parent(
+            status=InstanceStatus.RUNNING.value,
+            waiting_for=0,
+        )
+        child = self._make_child()
+        session = self._setup_cascade_session(parent, child)
+
+        mock_manager = MagicMock()
+        mock_manager._live_hub = None
+        mock_manager._checkpointer = None
+        mock_manager.config = MagicMock()
+        mock_manager.config.llm = MagicMock()
+
+        service = ChildReportsService(manager=mock_manager)
+
+        transitioned, completed_parent_id, _ = (
+            await service._update_parent_on_child_complete(session, child)
+        )
+
+        # RUNNING → COMPLETED is the normal happy path; the W1 fix
+        # must not have broken it.
+        assert transitioned is False
+        assert completed_parent_id == parent.instance_id
+        assert parent.status == InstanceStatus.COMPLETED.value

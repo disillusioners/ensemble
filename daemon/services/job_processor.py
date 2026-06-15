@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -84,6 +85,15 @@ class JobProcessor:
         self._jobs_dispatched_immediately = 0
         self._jobs_dispatched_polling = 0
         self._message_job_handler: MessageJobHandler | None = None
+        # Throttle/dedup state for in_progress notifications.
+        # Keyed by job_id. ``_last_in_progress`` records (timestamp, waiting_for) of
+        # the most recent in_progress emit so we can skip re-emit when nothing has
+        # changed. ``_in_progress_since`` records the FIRST time we saw this job in
+        # the guard, so the escape-hatch timer (``_child_timeout_seconds``) measures
+        # total stuck-children wall time, not time since last emit.
+        self._last_in_progress: dict[str, tuple[float, int]] = {}
+        self._in_progress_since: dict[str, float] = {}
+        self._child_timeout_seconds: int = 3600  # 1 hour default — force-fail stuck jobs
 
     def setup_message_job_handler(self) -> None:
         """Set up the MessageJobHandler after all services are initialized.
@@ -108,7 +118,125 @@ class JobProcessor:
             except Exception as e:
                 logger.warning(f"Failed to get result_summary for {job_type_label} job {job_id[:8]}...: {e}")
         return result_summary
-    
+
+    def _cleanup_in_progress_tracking(self, job_id: str) -> None:
+        """Drop in-progress tracking state for a job that reached a terminal state.
+
+        Called from the normal (non-guard) ``complete_job`` paths so the throttle
+        and escape-hatch timers do not leak across job lifetimes. Idempotent.
+        """
+        self._last_in_progress.pop(job_id, None)
+        self._in_progress_since.pop(job_id, None)
+
+    async def _emit_in_progress_if_children_pending(
+        self,
+        instance_meta,
+        proc_job,
+        job_type_label: str,
+        status_display: str,
+    ) -> bool:
+        """Centralized guard for the 6 in_progress-emit call sites.
+
+        If the job's instance is in a would-be terminal state but still has
+        ``waiting_for > 0`` (child agent reports outstanding), emit an
+        ``in_progress`` notification instead of completing the job.
+
+        Adds two safety nets that the original 6 inline blocks did not have:
+        * **Throttle/dedup** — within a 300s window we skip re-emitting when
+          ``waiting_for`` count is unchanged, so a hot poll loop cannot spam
+          watchers.
+        * **Escape hatch** — if a job has been sitting in the guard for more
+          than ``_child_timeout_seconds`` (default 1h), force-complete it as
+          FAILED so a stuck child never permanently blocks the job.
+
+        Args:
+            instance_meta: The Instance metadata (must expose ``waiting_for``).
+            proc_job: The JobItem (must expose ``job_id``).
+            job_type_label: Human label for logs, e.g. ``"MESSAGE"`` or ``"TASK"``.
+            status_display: Human-readable instance status for the log line
+                (e.g. ``"completed"``, ``"terminated"``, ``"errored"``).
+
+        Returns:
+            ``True`` if the guard fired (caller should ``continue`` / skip normal
+            processing). ``False`` if normal processing should proceed.
+        """
+        # Defensive int conversion — handles None, strings, or any odd DB type.
+        wf = int(getattr(instance_meta, "waiting_for", 0) or 0)
+        if wf <= 0:
+            return False
+
+        job_id = proc_job.job_id
+        now = time.time()
+
+        # --- Escape hatch: force-fail jobs stuck waiting for children ---
+        if job_id in self._in_progress_since:
+            elapsed = now - self._in_progress_since[job_id]
+            if elapsed > self._child_timeout_seconds:
+                logger.warning(
+                    f"JobProcessor: {job_type_label} job {job_id[:8]}... has been waiting "
+                    f"{int(elapsed)}s for {wf} child agent(s); forcing FAILED"
+                )
+                try:
+                    progress_text = await self._capture_result_summary(
+                        instance_meta.instance_id, job_id, job_type_label
+                    )
+                except Exception:
+                    progress_text = None
+                try:
+                    await self._queue_service.complete_job(
+                        job_id,
+                        demand_state=DemandState.FAILED,
+                        error=f"Children did not report within timeout ({int(elapsed)}s)",
+                        result_summary=progress_text,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"JobProcessor: failed to force-fail stuck {job_type_label} job "
+                        f"{job_id[:8]}... after {int(elapsed)}s: {e}"
+                    )
+                # Cleanup so next guard visit starts a fresh window.
+                self._in_progress_since.pop(job_id, None)
+                self._last_in_progress.pop(job_id, None)
+                return True
+        else:
+            # First time we see this job_id in the guard — start the clock.
+            self._in_progress_since[job_id] = now
+
+        # --- Throttle/dedup: skip re-emit within 300s if waiting_for unchanged ---
+        last = self._last_in_progress.get(job_id)
+        if last is not None:
+            last_ts, last_wf = last
+            if (now - last_ts) < 300 and last_wf == wf:
+                # Same state, within throttle window — consume this poll silently.
+                return True
+        self._last_in_progress[job_id] = (now, wf)
+
+        # --- Emit the in_progress notification (failures are non-fatal) ---
+        try:
+            progress_text = await self._capture_result_summary(
+                instance_meta.instance_id, job_id, job_type_label
+            )
+        except Exception:
+            progress_text = None
+        try:
+            await self._queue_service.notify_watchers(
+                job_id,
+                status="in_progress",
+                progress=progress_text,
+                waiting_for=wf,
+            )
+        except Exception as e:
+            logger.warning(
+                f"JobProcessor: failed to emit in_progress for {job_type_label} job "
+                f"{job_id[:8]}...: {e}"
+            )
+        logger.info(
+            f"JobProcessor: {job_type_label} job {job_id[:8]}... instance "
+            f"{getattr(instance_meta, 'instance_id', '?')[:8]}... "
+            f"emitted '{status_display}' but has {wf} pending child agent(s); deferring"
+        )
+        return True
+
     async def start(self) -> None:
         """Start the background processing loop."""
         if self._running:
@@ -256,26 +384,9 @@ class JobProcessor:
                                     )
                                     # Instance exists — check if it's still alive or finished
                                     if instance_meta.status == InstanceStatus.COMPLETED:
-                                        # Guard: don't auto-complete if children are still pending
-                                        wf = getattr(instance_meta, "waiting_for", None) or 0
-                                        if wf > 0:
-                                            logger.info(
-                                                f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... instance "
-                                                f"{instance_meta.instance_id[:8]}... completed but has {wf} pending children, skipping"
-                                            )
-                                            # Emit in_progress notification
-                                            try:
-                                                progress = await self._capture_result_summary(
-                                                    proc_job.instance_id, proc_job.job_id, "MESSAGE"
-                                                )
-                                                await self._queue_service.notify_watchers(
-                                                    proc_job.job_id,
-                                                    status="in_progress",
-                                                    progress=progress,
-                                                    waiting_for=wf,
-                                                )
-                                            except Exception as e:
-                                                logger.warning(f"JobProcessor: failed to emit in_progress notification: {e}")
+                                        if await self._emit_in_progress_if_children_pending(
+                                            instance_meta, proc_job, "MESSAGE", "completed"
+                                        ):
                                             continue
                                         # Instance finished its work — complete the job (not orphan).
                                         # The JobFeedbackObserver event may have missed firing due to
@@ -296,28 +407,12 @@ class JobProcessor:
                                             demand_state=DemandState.COMPLETED,
                                             result_summary=result_summary,
                                         )
+                                        self._cleanup_in_progress_tracking(proc_job.job_id)
                                         continue
                                     elif instance_meta.status == InstanceStatus.TERMINATED:
-                                        # Guard: don't auto-complete if children are still pending
-                                        wf = getattr(instance_meta, "waiting_for", None) or 0
-                                        if wf > 0:
-                                            logger.info(
-                                                f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... instance "
-                                                f"{instance_meta.instance_id[:8]}... terminated but has {wf} pending children, skipping"
-                                            )
-                                            # Emit in_progress notification
-                                            try:
-                                                progress = await self._capture_result_summary(
-                                                    proc_job.instance_id, proc_job.job_id, "MESSAGE"
-                                                )
-                                                await self._queue_service.notify_watchers(
-                                                    proc_job.job_id,
-                                                    status="in_progress",
-                                                    progress=progress,
-                                                    waiting_for=wf,
-                                                )
-                                            except Exception as e:
-                                                logger.warning(f"JobProcessor: failed to emit in_progress notification: {e}")
+                                        if await self._emit_in_progress_if_children_pending(
+                                            instance_meta, proc_job, "MESSAGE", "terminated"
+                                        ):
                                             continue
                                         # Instance was terminated — complete the job as CANCELLED
                                         logger.info(
@@ -329,28 +424,12 @@ class JobProcessor:
                                             demand_state=DemandState.CANCELLED,
                                             error="Instance terminated during message processing",
                                         )
+                                        self._cleanup_in_progress_tracking(proc_job.job_id)
                                         continue
                                     elif instance_meta.status == InstanceStatus.ERROR:
-                                        # Guard: don't auto-complete if children are still pending
-                                        wf = getattr(instance_meta, "waiting_for", None) or 0
-                                        if wf > 0:
-                                            logger.info(
-                                                f"JobProcessor: MESSAGE job {proc_job.job_id[:8]}... instance "
-                                                f"{instance_meta.instance_id[:8]}... errored but has {wf} pending children, skipping"
-                                            )
-                                            # Emit in_progress notification
-                                            try:
-                                                progress = await self._capture_result_summary(
-                                                    proc_job.instance_id, proc_job.job_id, "MESSAGE"
-                                                )
-                                                await self._queue_service.notify_watchers(
-                                                    proc_job.job_id,
-                                                    status="in_progress",
-                                                    progress=progress,
-                                                    waiting_for=wf,
-                                                )
-                                            except Exception as e:
-                                                logger.warning(f"JobProcessor: failed to emit in_progress notification: {e}")
+                                        if await self._emit_in_progress_if_children_pending(
+                                            instance_meta, proc_job, "MESSAGE", "errored"
+                                        ):
                                             continue
                                         # Instance errored — the message may not have been fully processed.
                                         # Fail the job rather than orphan it.
@@ -363,6 +442,7 @@ class JobProcessor:
                                             demand_state=DemandState.FAILED,
                                             error="Instance errored during message processing",
                                         )
+                                        self._cleanup_in_progress_tracking(proc_job.job_id)
                                         continue
                                     # Instance is alive and processing — not orphaned
                                     continue
@@ -395,6 +475,7 @@ class JobProcessor:
                                 demand_state=DemandState.FAILED,
                                 error="Instance gone or unreachable, message job orphaned",
                             )
+                            self._cleanup_in_progress_tracking(proc_job.job_id)
                             continue
                         # <<< END FIRST GUARD >>>
 
@@ -421,26 +502,9 @@ class JobProcessor:
                                         if instance_meta is not None:
                                             # Instance exists in DB — check its status
                                             if instance_meta.status == InstanceStatus.COMPLETED:
-                                                # Guard: don't auto-complete if children are still pending
-                                                wf = getattr(instance_meta, "waiting_for", None) or 0
-                                                if wf > 0:
-                                                    logger.info(
-                                                        f"JobProcessor: TASK job {proc_job.job_id[:8]}... instance "
-                                                        f"{instance_meta.instance_id[:8]}... completed but has {wf} pending children, skipping"
-                                                    )
-                                                    # Emit in_progress notification
-                                                    try:
-                                                        progress = await self._capture_result_summary(
-                                                            proc_job.instance_id, proc_job.job_id, "TASK"
-                                                        )
-                                                        await self._queue_service.notify_watchers(
-                                                            proc_job.job_id,
-                                                            status="in_progress",
-                                                            progress=progress,
-                                                            waiting_for=wf,
-                                                        )
-                                                    except Exception as e:
-                                                        logger.warning(f"JobProcessor: failed to emit in_progress notification: {e}")
+                                                if await self._emit_in_progress_if_children_pending(
+                                                    instance_meta, proc_job, "TASK", "completed"
+                                                ):
                                                     continue
                                                 logger.info(
                                                     f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
@@ -455,31 +519,14 @@ class JobProcessor:
                                                     demand_state=DemandState.COMPLETED,
                                                     result_summary=result_summary,
                                                 )
+                                                self._cleanup_in_progress_tracking(proc_job.job_id)
                                                 continue
                                             elif instance_meta.status in TERMINAL_CANCEL_STATUSES:
-                                                # Guard: don't auto-complete if children are still pending
-                                                wf = getattr(instance_meta, "waiting_for", None) or 0
-                                                if wf > 0:
-                                                    status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
-                                                    logger.info(
-                                                        f"JobProcessor: TASK job {proc_job.job_id[:8]}... instance "
-                                                        f"{instance_meta.instance_id[:8]}... is {status_display} but has {wf} pending children, skipping"
-                                                    )
-                                                    # Emit in_progress notification
-                                                    try:
-                                                        progress = await self._capture_result_summary(
-                                                            proc_job.instance_id, proc_job.job_id, "TASK"
-                                                        )
-                                                        await self._queue_service.notify_watchers(
-                                                            proc_job.job_id,
-                                                            status="in_progress",
-                                                            progress=progress,
-                                                            waiting_for=wf,
-                                                        )
-                                                    except Exception as e:
-                                                        logger.warning(f"JobProcessor: failed to emit in_progress notification: {e}")
-                                                    continue
                                                 status_display = instance_meta.status.value if hasattr(instance_meta.status, 'value') else instance_meta.status
+                                                if await self._emit_in_progress_if_children_pending(
+                                                    instance_meta, proc_job, "TASK", status_display
+                                                ):
+                                                    continue
                                                 logger.info(
                                                     f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
                                                     f"instance {proc_job.instance_id[:8]}... is {status_display}, "
@@ -490,28 +537,12 @@ class JobProcessor:
                                                     demand_state=DemandState.CANCELLED,
                                                     error=f"Instance is {status_display}",
                                                 )
+                                                self._cleanup_in_progress_tracking(proc_job.job_id)
                                                 continue
                                             elif instance_meta.status == InstanceStatus.ERROR:
-                                                # Guard: don't auto-complete if children are still pending
-                                                wf = getattr(instance_meta, "waiting_for", None) or 0
-                                                if wf > 0:
-                                                    logger.info(
-                                                        f"JobProcessor: TASK job {proc_job.job_id[:8]}... instance "
-                                                        f"{instance_meta.instance_id[:8]}... errored but has {wf} pending children, skipping"
-                                                    )
-                                                    # Emit in_progress notification
-                                                    try:
-                                                        progress = await self._capture_result_summary(
-                                                            proc_job.instance_id, proc_job.job_id, "TASK"
-                                                        )
-                                                        await self._queue_service.notify_watchers(
-                                                            proc_job.job_id,
-                                                            status="in_progress",
-                                                            progress=progress,
-                                                            waiting_for=wf,
-                                                        )
-                                                    except Exception as e:
-                                                        logger.warning(f"JobProcessor: failed to emit in_progress notification: {e}")
+                                                if await self._emit_in_progress_if_children_pending(
+                                                    instance_meta, proc_job, "TASK", "errored"
+                                                ):
                                                     continue
                                                 logger.warning(
                                                     f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
@@ -522,6 +553,7 @@ class JobProcessor:
                                                     demand_state=DemandState.FAILED,
                                                     error="Instance errored",
                                                 )
+                                                self._cleanup_in_progress_tracking(proc_job.job_id)
                                                 continue
                                             elif instance_meta.status == InstanceStatus.PAUSED:
                                                 logger.debug(
@@ -567,6 +599,7 @@ class JobProcessor:
                                     await self._queue_service.complete_job(
                                         proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                                     )
+                                    self._cleanup_in_progress_tracking(proc_job.job_id)
                                     continue
                             except Exception as e:
                                 logger.warning(
@@ -603,6 +636,7 @@ class JobProcessor:
                             await self._queue_service.complete_job(
                                 proc_job.job_id, demand_state=DemandState.FAILED, error=str(e)
                             )
+                            self._cleanup_in_progress_tracking(proc_job.job_id)
                     continue
 
                 job = pending[0]
@@ -675,6 +709,7 @@ class JobProcessor:
                         await self._queue_service.complete_job(
                             job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
+                        self._cleanup_in_progress_tracking(job.job_id)
                         continue
 
                     # Send the job message to the instance
@@ -689,6 +724,7 @@ class JobProcessor:
                         await self._queue_service.complete_job(
                             job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
+                        self._cleanup_in_progress_tracking(job.job_id)
                         continue
 
                     logger.info(
@@ -701,6 +737,7 @@ class JobProcessor:
                         await self._queue_service.complete_job(
                             job.job_id, demand_state=DemandState.FAILED, error=str(e)
                         )
+                        self._cleanup_in_progress_tracking(job.job_id)
                     except Exception:
                         pass
 

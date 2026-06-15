@@ -472,7 +472,14 @@ Provide a concise summary:"""
         # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
         # regardless of current status (e.g., RUNNING from previous cascade). This ensures
         # parent waits for ALL children before completing, not just the first batch.
-        if parent.waiting_for == 0 and parent.status != InstanceStatus.COMPLETED.value:
+        # W1 FIX: Also preserve ERROR status during cascade — a parent whose last child
+        # completed successfully should still report as ERROR (it errored first, and that
+        # state is more useful for diagnostics than overwriting it with COMPLETED).
+        if (
+            parent.waiting_for == 0
+            and parent.status != InstanceStatus.COMPLETED.value
+            and parent.status != InstanceStatus.ERROR.value
+        ):
             # Check if parent has any pending messages
             parent_pending = session.exec(
                 select(func.count())
