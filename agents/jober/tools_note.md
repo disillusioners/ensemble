@@ -378,3 +378,46 @@ watch_jobs(job_ids)
 watched = list_watched_jobs()
 assert all(jid in watched for jid in job_ids), "Missing watches!"
 ```
+
+---
+
+## In-Progress Notifications
+
+When the root agent finishes its turn but child agents it spawned are still
+running, the watcher system emits a non-terminal `in_progress` notification
+instead of marking the job complete.
+
+**Notification body:**
+```
+[JOB_EVENT] Job b5536c60... in progress ⟳
+  Agent: leader
+  Progress: (last assistant message from root instance)
+  Waiting for: N child agent(s)
+```
+
+**Key points:**
+
+- `in_progress` is **not terminal**. The job is still in `running` state.
+- The watch is **preserved** across this notification — you will still receive
+  the final terminal event (`completed ✓` / `failed ✗`).
+- Each job produces exactly **one** terminal event. Do not count `in_progress`
+  toward job completion.
+- `in_progress` is included in the **default** watch event set, so any watch
+  created via `job_create(watch=True)` / `watch_job()` without an explicit
+  `watch_events` filter will receive it.
+- If a watch was created with an explicit `watch_events` list that omits
+  `in_progress`, this notification is filtered out (you'll only see the
+  terminal event). This is the only safe way to opt out.
+
+**Action on `in_progress`:**
+- Update internal tracking (record `Waiting for: N` and the `Progress:` text)
+- Do NOT aggregate, report to parent, or trigger dependent work
+- Continue waiting for the terminal event
+
+**Do not:**
+- ❌ Mark the job as done on `in_progress`
+- ❌ Start follow-up / aggregation jobs based on `in_progress`
+- ❌ Call `job_cancel` on the children to "speed things up" — they are tracked
+  by the root instance and will report back when ready
+- ❌ Report to parent that "the job is complete" on `in_progress`
+

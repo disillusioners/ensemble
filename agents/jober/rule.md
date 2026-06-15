@@ -144,6 +144,97 @@ Final Result: [summary of what was accomplished]
 
 ---
 
+### 🚨 CRITICAL: Verify Completed Jobs Match the Goal
+
+A `completed ✓` notification means the agent **finished**, not that the work
+**succeeded in meeting the defined goal**. Always evaluate the result against
+the original request before reporting success or moving on.
+
+**If the completed result does NOT match the goal** — for example:
+- The agent's `Result:` text is off-topic, vague, or does not address the task
+- The agent says "I couldn't..." or "I don't have access to..." but still
+  emitted `completed`
+- The output is structurally broken (empty, truncated, wrong format, wrong
+  target file/branch)
+- Tests/lint/build did not actually run, or reports contradict the summary
+- The result seems plausible but is suspiciously thin for the work requested
+
+**Do NOT auto-proceed. Do NOT silently mark it as success.** Instead:
+
+1. **Stop the orchestration pipeline** for that job
+2. **Propose a solution** to the user with clear options, e.g.:
+   ```
+   ⚠️ Job [id] completed but the result may not match the goal.
+
+   Expected: [what the user asked for]
+   Got:      [what the agent actually produced]
+   Mismatch: [specific gap or concern]
+
+   Options:
+   a) Retry with refined instructions (suggest: <tweak>)
+   b) Reject and report as failure to parent
+   c) Accept as-is (you confirm it actually meets the goal)
+   d) Cancel any dependent jobs
+   ```
+3. **Wait for explicit user confirmation** before doing any of the following:
+   - Calling `job_retry()` to retry
+   - Treating the job as successful and moving to Phase 5 report
+   - Creating dependent / aggregation jobs
+   - Sending the final report to parent
+4. If the user picks **retry**, use the refined instructions on the retry
+   (do not just blindly re-run with the same task)
+
+**When the user is not available** (e.g., jober was spawned by a parent
+instance and there is no interactive user in the loop):
+- Do **NOT** silently accept a doubtful result
+- Do **NOT** retry on your own authority
+- Surface the concern in the report to the **parent** (via `send_message`)
+  with the same Options list, and let the parent decide. The parent's
+  decision is the terminal authority in that chain.
+
+**This applies symmetrically:**
+- `completed` but result is wrong → ask before proceeding (this rule)
+- `failed` → retry up to 3 times, then ask if you should keep retrying
+  or report (existing failure handling)
+- `in_progress` → keep waiting, do not act (existing rule)
+
+**Anti-patterns:**
+- ❌ "Status is `completed` → must be success → moving on"
+- ❌ Reporting a doubtful result as ✅ to parent without flagging it
+- ❌ Calling `job_retry()` on your own because the result "looks off"
+- ❌ Inventing a plausible interpretation of a vague `Result:` and acting on it
+- ❌ Asking the user, getting an answer, then ignoring it
+
+**Why this matters:** The watcher system is a transport — it reports what the
+agent emitted. It does not verify quality. Treating `completed` as a
+guarantee of success is the most common silent-failure mode for orchestrators.
+
+---
+
+### 🚨 CRITICAL: `in_progress` is NOT a Terminal Event
+
+When the root instance of a job finishes its turn but child agents are still
+running, the watcher system emits a non-terminal `in_progress` notification
+(`in progress ⟳`). This is a **progress checkpoint, not completion**.
+
+**Contract:**
+- `in_progress` is **not terminal** — do NOT treat as completion
+- The job remains in `running` state and the watch stays registered
+- Continue waiting for the real terminal event (`completed ✓` / `failed ✗`)
+- Do NOT trigger dependent jobs, aggregation, or parent report on `in_progress`
+- Each job produces exactly **one** terminal event; `in_progress` is a separate
+  intermediate signal
+
+**When does this happen?** Whenever the assigned agent spawns child agents
+(invoke_agent_and_wait / fan-out patterns) and the root instance reaches a
+lifecycle completion while `waiting_for > 0`. The system defers the final
+job transition until all children have reported back.
+
+See `workflow.md` Phase 4 (IN_PROGRESS branch) and `tools_note.md`
+"In-Progress Notifications" for the full handling pattern.
+
+---
+
 ### Parse Notifications Correctly
 
 When I receive a `[JOB_EVENT]` notification, the body is plain text with this structure:

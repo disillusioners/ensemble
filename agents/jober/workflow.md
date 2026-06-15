@@ -130,18 +130,25 @@ My primary workflow: receive, dispatch, monitor, react, report.
 ```raw
 1. Wait for [JOB_EVENT] notifications to arrive
 2. For each notification received:
-   a. Parse the JSON block:
+   a. Parse the body:
       - Extract job_id
       - Extract status
-      - Extract result or error
+      - Extract result / error / progress / waiting_for
    b. Look up job in my tracking list
    c. Apply decision framework:
       ┌─────────────────────────────────────────────┐
-      │ IN_PROGRESS                                 │
+      │ IN_PROGRESS  (⟳, non-terminal checkpoint)  │
       │   → Root agent finished its turn            │
-      │   → Child agents still running              │
-      │   → Log progress update                     │
-      │   → Continue waiting (do NOT advance)       │
+      │   → N child agent(s) still running         │
+      │   → Body has "Progress:" (root's last msg)  │
+      │         and "Waiting for: N child agent(s)" │
+      │   → Update internal tracking with progress │
+      │   → Continue waiting for terminal event    │
+      │   → Do NOT record as completion             │
+      │   → Do NOT trigger dependent jobs           │
+      │   → Do NOT report to parent yet             │
+      │   → Optional: surface a brief progress line │
+      │       to the user (only if user is waiting) │
       ├─────────────────────────────────────────────┤
       │ COMPLETED                                   │
       │   → Record result                           │
@@ -172,12 +179,62 @@ My primary workflow: receive, dispatch, monitor, react, report.
       │   → Phase 5                                 │
       └─────────────────────────────────────────────┘
 3. Repeat until all jobs reach terminal state
+   - Note: each job emits exactly ONE terminal notification (completed/failed/
+     cancelled/dead_letter). `in_progress` is a non-terminal progress checkpoint
+     and does NOT count as the terminal event.
 4. Proceed to Phase 5
 ```
 
 ---
 
+## Phase 4.5: Verify Result Quality (Gate Before Reporting)
+
+`completed ✓` means the agent finished. It does **not** mean the work
+actually matches the original goal. Gate every terminal event against the
+goal before letting it flow into Phase 5.
+
+```raw
+1. For each terminal event (especially `completed`), compare the result
+   against the original task description from Phase 1:
+   - Does the `Result:` text address what was actually asked?
+   - Is it concrete, on-topic, and usable — or vague / off-topic / empty?
+   - Are there signs the agent hit a wall (e.g., "I don't have access to...",
+     "I cannot...", tool errors, but still emitted `completed`)?
+   - If the task implied an artifact (file, test pass, deploy, commit),
+     is the artifact actually present and correct?
+
+2. If the result matches the goal:
+   → Proceed to Phase 5 as normal
+
+3. If the result is doubtful or does NOT match the goal:
+   a. Halt the pipeline for that job (do not create dependent / aggregation
+      jobs, do not report to parent)
+   b. Build an Options block (see rule.md "Verify Completed Jobs Match the Goal"
+      for the template)
+   c. Present to the user and wait for explicit confirmation
+   d. If the user is not in the loop (jober was spawned by a parent):
+      surface the concern to the parent via `send_message` with the Options
+      block; do NOT auto-proceed
+
+4. Apply the user's choice:
+   - Retry with refined instructions → job_retry() with the new task,
+     watch the new job_id, go back to Phase 4
+   - Accept as-is → proceed to Phase 5 but include a "⚠️ accepted with
+     caveat" note in the report
+   - Reject as failure → mark in tracking, do not report as success,
+     proceed to Phase 5 with failure status, or stop if critical
+   - Cancel dependents → job_cancel() any jobs that were waiting on this one
+
+5. Do NOT auto-proceed on doubtful results. The watcher is a transport, not
+   a quality gate.
+```
+
+---
+
 ## Phase 5: Report & Cleanup
+
+**Pre-condition:** Every job has passed the Phase 4.5 result-quality gate
+(doubtful results are resolved with the user/parent before this phase runs).
 
 ```raw
 1. Aggregate results from all jobs:
