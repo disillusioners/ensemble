@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 110 packs
-- Unit: 95 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 111 packs
+- Unit: 96 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -26,6 +26,7 @@
 | job_queue_unit_test | test/packs/job_queue_unit_test.sh | Job queue full suite + Phase 1-5 + DLQ retry + replay-all + project_id injection + soft delete + 42 tool pack tests | 2 min | 2026-06-01 | ✅ PASS (1178/1179, 19 skipped, 1 pre-existing env failure, feature/job-report-format, 0 regressions) |
 | jober_watch_integration_test | tests/job_queue/test_jober_watch_integration.py | Phase 3 jober watch: 7 terminal paths, 13 edge cases, notification format (5 tests), tool registration, agent definition, crash recovery | 2 min | 2026-06-01 | ✅ PASS (42/42 format tests, feature/job-report-format, 0 regressions) |
 | in_progress_guard_unit_test | tests/job_queue/test_in_progress_guard.py | Job Event Progress Label: JobFeedbackObserver guard, JobProcessor orphan watchdog guard, notify_watchers formatting (in_progress/completed/failed), cleanup preservation, watcher opt-in filter, 6 code paths | 2 min | 2026-06-15 | ✅ PASS (20/20, feature/job-event-progress-label, 0 failures) |
+| status_alias_mapping_unit_test | tests/job_queue/test_status_alias_mapping.py | Job status alias mapping: normalize_statuses() unit tests (alias, case-insensitive, canonical, multiple, unknown, None/empty) + service integration (list_jobs with alias) + HTTP endpoint (GET /api/jobs?status=running) | 2 min | 2026-06-15 | ✅ PASS (24/24, fix/job-status-alias-mapping, commit b429057, 0 failures) |
 | frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD, dialog template pills + JSON editor, **test connection button + SSRF**, **notification.service WAV/audio unlock/cleanup**, **defer queue visibility**, **scroll preservation + refresh button**, **mergeInstances sort order (new at top)**, **sortByCreatedAtDesc utility (9 tests)**, **ensureSystemQueues service method (2 tests)**, **notification sound exclusion (7 tests)**, **jobs page remember project (11+ tests)**, **pause/resume toggle visibility**, **project-aware URL routing (77 tests)**, **instance_created SSE queue + KB filtering**) | 2 min | 2026-05-30 | ✅ PASS (800/800, instance_created SSE feature, 0 regressions) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-23 | ✅ PASS (14 passed, Phase 6 no regression) |
 | db_connection_repository_unit_test | tests/test_db_connection_repository.py | DbConnectionRepository: model, CRUD, credential isolation, unique constraint, factory | 2 min | 2026-06-14 | ✅ PASS (33/33, feature/db-tools, 0 failures) |
