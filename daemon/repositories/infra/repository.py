@@ -110,7 +110,7 @@ class SQLModelInfraRepository:
         """
         if self._is_postgres():
             return column[key].astext
-        return func.cast(func.json_extract(column, f"$.{key}"), String)
+        return sa_cast(func.json_extract(column, f"$.{key}"), String)
 
     def _json_path_numeric(self, column: Any, key: str) -> Any:
         """Build a dialect-aware expression for a JSON value
@@ -129,7 +129,7 @@ class SQLModelInfraRepository:
         """
         if self._is_postgres():
             return sa_cast(column[key].astext, Float)
-        return func.cast(func.json_extract(column, f"$.{key}"), Float)
+        return sa_cast(func.json_extract(column, f"$.{key}"), Float)
 
     def _json_contains_predicate(self, column: Any, key: str, value: Any) -> Any:
         """Build a dialect-aware predicate for "the value at
@@ -156,20 +156,21 @@ class SQLModelInfraRepository:
         works correctly because the caller is expected to
         supply the same type the JSON stored.
 
-        Booleans get a dedicated branch: SQLite's
-        ``json_extract`` returns ``1`` / ``0`` for JSON
-        booleans, while ``str(True) == "True"`` and
-        ``str(False) == "False"`` — so the default
-        ``str(value)`` comparison would never match. PostgreSQL's
-        ``->>`` returns the literal text ``"true"`` /
-        ``"false"``, so we explicitly use ``"1"`` / ``"0"`` for
-        SQLite and rely on the caller-side type hint to
-        disambiguate the two backends in the PostgreSQL case
-        (callers normally pass a string-typed value to this
-        method on PostgreSQL, see :meth:`_json_ineq_predicate`
-        for the numeric path).
+        Booleans need a dialect branch because the two backends
+        serialize them differently when extracted to text:
+
+        * PostgreSQL ``->>`` returns the literal text
+          ``"true"`` / ``"false"``.
+        * SQLite ``json_extract`` returns ``1`` / ``0``.
+
+        Comparing against ``str(True)`` (``"True"``) or
+        ``str(False)`` (``"False"``) would never match on
+        either backend — hence the explicit handling here.
         """
         if isinstance(value, bool):
+            if self._is_postgres():
+                # PostgreSQL ->> returns the literal text "true" / "false".
+                return self._json_path_text(column, key) == ("true" if value else "false")
             # SQLite json_extract returns 1/0 for JSON booleans.
             return self._json_path_text(column, key) == ("1" if value else "0")
         return self._json_path_text(column, key) == str(value)
@@ -250,13 +251,35 @@ class SQLModelInfraRepository:
                     elif op == "$contains":
                         predicates.append(self._json_contains_predicate(column, key, value))
                     elif op == "$exists":
-                        # "Key exists" — both backends: the
-                        # extracted value is non-NULL.
-                        path = self._json_path_text(column, key)
-                        if value:
-                            predicates.append(path.isnot(None))
+                        # "Key exists". The two backends have
+                        # different strengths here:
+                        #
+                        # * PostgreSQL JSONB has a real
+                        #   "key exists" operator (``?``) that
+                        #   distinguishes "key missing" from
+                        #   "key present with null value".
+                        # * SQLite's ``json_extract`` collapses
+                        #   both into ``NULL`` — so the SQLite
+                        #   branch is necessarily the
+                        #   "non-NULL" check, which conflates
+                        #   the two cases. This is an accepted
+                        #   limitation documented in the method
+                        #   docstring.
+                        if self._is_postgres():
+                            # The column is already cast to
+                            # JSONB upstream in
+                            # :meth:`search_assets` so the ``?``
+                            # operator is available.
+                            if value:
+                                predicates.append(column.op("?")(key))
+                            else:
+                                predicates.append(~column.op("?")(key))
                         else:
-                            predicates.append(path.is_(None))
+                            path = self._json_path_text(column, key)
+                            if value:
+                                predicates.append(path.isnot(None))
+                            else:
+                                predicates.append(path.is_(None))
                     else:
                         raise ValueError(f"Unsupported operator: {op!r}")
             else:
@@ -366,18 +389,33 @@ class SQLModelInfraRepository:
             )
             return asset
 
-    def get_asset(self, asset_id: str) -> InfraAsset | None:
+    def get_asset(
+        self, asset_id: str, project_id: str | None = None
+    ) -> InfraAsset | None:
         """Fetch a single asset by its primary key.
 
         Args:
             asset_id: The asset's UUID4 ID.
+            project_id: Optional project ID. When provided, the
+                returned asset is verified to belong to that
+                project — mismatches yield ``None`` instead of
+                the asset. This lets call-sites enforce
+                project isolation when they have a project
+                context but should never see assets belonging
+                to other projects.
 
         Returns:
             The :class:`InfraAsset` instance, or ``None`` if no
-            row matches.
+            row matches, or if ``project_id`` was supplied and
+            the asset belongs to a different project.
         """
         with Session(self.engine) as session:
-            return session.get(InfraAsset, asset_id)
+            asset = session.get(InfraAsset, asset_id)
+            if asset is None:
+                return None
+            if project_id is not None and asset.project_id != project_id:
+                return None
+            return asset
 
     def list_assets(
         self,
@@ -395,11 +433,20 @@ class SQLModelInfraRepository:
         Args:
             project_id: The project to list assets for.
             type: Optional type filter (exact match).
-            parent_asset_id: Optional parent filter. Pass
-                ``""`` or ``None`` to also match unparented
-                assets (this method treats both the same: it
-                only matches rows where ``parent_asset_id IS
-                NULL`` if you pass ``None``).
+            parent_asset_id: Optional parent filter. Behavior:
+
+                * ``None`` (default) — return ONLY unparented
+                  assets (``parent_asset_id IS NULL``). This
+                  is the "top level" / "roots" view.
+                * A string ID — return only children whose
+                  ``parent_asset_id`` matches the supplied ID.
+
+                To list every asset regardless of parent,
+                callers should use :meth:`search_assets` with
+                no ``parent_asset_id`` filter (which is a no-op
+                on ``search_assets`` and returns the full set),
+                or supply the parent's ID to get just its
+                descendants.
             limit: Maximum number of rows to return.
             offset: Number of rows to skip.
 
@@ -411,7 +458,13 @@ class SQLModelInfraRepository:
             stmt = select(InfraAsset).where(InfraAsset.project_id == project_id)
             if type is not None:
                 stmt = stmt.where(InfraAsset.type == type)
-            if parent_asset_id is not None:
+            if parent_asset_id is None:
+                # None means "unparented only" — the roots of
+                # the parent/child hierarchy. Callers wanting
+                # the full set should use ``search_assets``
+                # without a ``parent_asset_id`` filter.
+                stmt = stmt.where(InfraAsset.parent_asset_id.is_(None))
+            else:
                 stmt = stmt.where(InfraAsset.parent_asset_id == parent_asset_id)
             stmt = (
                 stmt.order_by(col(InfraAsset.updated_at).desc())
@@ -471,6 +524,17 @@ class SQLModelInfraRepository:
                 )
                 return None
 
+            # Capture the PRE-update snapshot BEFORE the
+            # mutation loop runs. The history row's
+            # ``snapshot`` column must reflect the asset's
+            # state at the time of the change — i.e. the
+            # state *before* the update applied. Reading
+            # ``to_dict()`` after ``setattr`` would yield the
+            # post-update state, making the snapshot
+            # redundant with ``new_values`` and losing the
+            # audit trail of the prior state.
+            pre_update_snapshot = asset.to_dict()
+
             old_values: dict[str, Any] = {}
             new_values: dict[str, Any] = {}
             changed_fields: list[str] = []
@@ -510,7 +574,7 @@ class SQLModelInfraRepository:
                     asset_id=asset.id,
                     project_id=asset.project_id,
                     change_type=InfraChangeType.UPDATED.value,
-                    snapshot=asset.to_dict(),
+                    snapshot=pre_update_snapshot,
                     changed_fields=sorted(changed_fields),
                     old_values=old_values,
                     new_values=new_values,
@@ -542,8 +606,14 @@ class SQLModelInfraRepository:
         """Delete an asset and record a ``deleted`` history row.
 
         The history row is written *before* the delete so the
-        ``ON DELETE CASCADE`` on the history FK does not wipe
-        the audit trail.
+        ``ON DELETE SET NULL`` on the history FK does not wipe
+        the audit trail. (The FK is SET NULL, not CASCADE — see
+        :class:`InfraAssetHistory` — so the history row would
+        survive the asset's removal regardless, but writing
+        the row explicitly *before* the delete also keeps the
+        ``asset_id`` column populated on the new row, which
+        is what :meth:`get_history` matches against as its
+        primary lookup.)
 
         Args:
             asset_id: The asset to delete.

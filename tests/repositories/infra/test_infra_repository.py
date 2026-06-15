@@ -1553,3 +1553,328 @@ class TestEdgeCases:
         fetched = infra_repository.get_asset(asset.id)
         assert fetched.attributes == {}
         assert fetched.relationships == {}
+
+
+# =============================================================================
+# Group 11: T1 - Boolean attribute roundtrip (SQLite)
+# =============================================================================
+
+
+class TestBooleanAttributeSearch:
+    """T1: ``$eq`` searches on boolean attributes return correct matches.
+
+    SQLite's ``json_extract`` returns ``1`` / ``0`` for JSON
+    booleans, so the repository must compare against the
+    ``"1"`` / ``"0"`` text representation on that backend.
+    """
+
+    def test_boolean_eq_true(self, infra_repository, seed_projects, project_id):
+        """Store boolean attribute, search with $eq: True — verify it works."""
+        infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="web-01",
+            attributes={"active": True, "cpu_cores": 8},
+        )
+        infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="web-02",
+            attributes={"active": False, "cpu_cores": 4},
+        )
+
+        results = infra_repository.search_assets(
+            project_id, {"attributes": {"active": {"$eq": True}}}
+        )
+        assert len(results) == 1
+        assert results[0].name == "web-01"
+
+        results_false = infra_repository.search_assets(
+            project_id, {"attributes": {"active": {"$eq": False}}}
+        )
+        assert len(results_false) == 1
+        assert results_false[0].name == "web-02"
+
+
+# =============================================================================
+# Group 12: T2 - Pre-update snapshot verification
+# =============================================================================
+
+
+class TestPreUpdateSnapshot:
+    """T2: ``update_asset`` history ``snapshot`` reflects PRE-update state.
+
+    The snapshot column on the ``updated`` history row is the
+    audit anchor — it must capture the asset's state *before*
+    the update applied, not after. Otherwise it would be
+    redundant with ``new_values`` and the prior state would
+    be lost from the audit trail.
+    """
+
+    def test_snapshot_is_pre_update(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """Verify update history snapshot matches the PRE-update state."""
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="web-01",
+            attributes={"cpu_cores": 4},
+        )
+        original_cpu = asset.attributes["cpu_cores"]
+
+        infra_repository.update_asset(
+            asset.id,
+            updated_by="test",
+            attributes={"cpu_cores": 16},
+        )
+
+        history = infra_repository.get_history(asset.id)
+        update_entries = [h for h in history if h.change_type == "updated"]
+        assert len(update_entries) == 1
+
+        snapshot = update_entries[0].snapshot
+        # Snapshot should show PRE-update value (4), not post-update (16).
+        assert snapshot["attributes"]["cpu_cores"] == original_cpu
+        # Sanity: name and id are unchanged pre vs post.
+        assert snapshot["name"] == "web-01"
+        assert snapshot["id"] == asset.id
+
+
+# =============================================================================
+# Group 13: T3 - list_assets parent_asset_id=None returns unparented only
+# =============================================================================
+
+
+class TestListAssetsParentFilter:
+    """T3: ``list_assets(parent_asset_id=None)`` returns only unparented rows.
+
+    Old behavior treated ``None`` as "no parent filter" and
+    returned every asset in the project. The new contract is
+    that ``None`` is the "roots" view — only assets with
+    ``parent_asset_id IS NULL``. To get the full set, callers
+    use ``search_assets`` without a parent filter.
+    """
+
+    def test_none_returns_unparented_only(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """parent_asset_id=None returns ONLY unparented assets."""
+        # Create unparented
+        infra_repository.create_asset(project_id, "datacenter", "dc-1")
+        infra_repository.create_asset(project_id, "datacenter", "dc-2")
+
+        # Create parented
+        parent = infra_repository.create_asset(project_id, "rack", "rack-1")
+        infra_repository.create_asset(
+            project_id, "server", "srv-1", parent_asset_id=parent.id
+        )
+
+        # None should return only unparented
+        unparented = infra_repository.list_assets(project_id, parent_asset_id=None)
+        names = {a.name for a in unparented}
+        assert "dc-1" in names
+        assert "dc-2" in names
+        assert "srv-1" not in names
+        # The parent itself is unparented → included.
+        assert "rack-1" in names
+
+    def test_specific_parent_returns_children(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """parent_asset_id=<id> returns only children of that parent."""
+        parent = infra_repository.create_asset(project_id, "rack", "rack-1")
+        infra_repository.create_asset(
+            project_id, "server", "srv-1", parent_asset_id=parent.id
+        )
+        infra_repository.create_asset(
+            project_id, "server", "srv-2", parent_asset_id=parent.id
+        )
+        infra_repository.create_asset(project_id, "server", "srv-3")  # unparented
+
+        children = infra_repository.list_assets(project_id, parent_asset_id=parent.id)
+        names = {a.name for a in children}
+        assert names == {"srv-1", "srv-2"}
+
+    def test_default_arg_is_unparented_only(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """Omitting the parent_asset_id argument is equivalent to None."""
+        # Three unparented, one parented
+        for i in range(3):
+            infra_repository.create_asset(project_id, "server", f"top-{i}")
+        parent = infra_repository.create_asset(project_id, "rack", "rack")
+        infra_repository.create_asset(
+            project_id, "server", "child", parent_asset_id=parent.id
+        )
+
+        # Default — no parent_asset_id kwarg passed.
+        results = infra_repository.list_assets(project_id)
+        names = {a.name for a in results}
+        assert "top-0" in names
+        assert "top-1" in names
+        assert "top-2" in names
+        assert "rack" in names
+        assert "child" not in names
+
+
+# =============================================================================
+# Group 14: T4 - Post-deletion history retrieval
+# =============================================================================
+
+
+class TestPostDeletionHistory:
+    """T4: History is accessible after the asset row is gone.
+
+    The history FK is ``ON DELETE SET NULL`` — the row
+    survives the asset's removal, with ``asset_id`` set to
+    ``NULL``. ``get_history`` matches on either the live
+    ``asset_id`` or the snapshot's preserved ``id``, so the
+    audit trail remains queryable.
+    """
+
+    def test_history_accessible_after_delete(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """History remains accessible after asset deletion (SET NULL FK)."""
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="web-01",
+        )
+        asset_id = asset.id
+
+        infra_repository.delete_asset(asset_id)
+
+        # History should still be accessible
+        history = infra_repository.get_history(asset_id)
+        # Should have: created + deleted
+        change_types = [h.change_type for h in history]
+        assert "created" in change_types
+        assert "deleted" in change_types
+
+
+# =============================================================================
+# Group 15: T5 - $exists: false distinction (SQLite limitation documented)
+# =============================================================================
+
+
+class TestExistsOperator:
+    """T5: ``$exists: false`` matches assets that lack the key.
+
+    On SQLite, ``json_extract`` collapses "key missing" and
+    "key present with null value" into the same ``NULL``
+    result, so the test exercises the documented
+    limitation. PostgreSQL gets a real key-existence check
+    via the ``?`` operator (see :meth:`search_assets`).
+    """
+
+    def test_exists_false_missing_key(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """$exists: false matches assets WITHOUT the key."""
+        infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="with-ip",
+            attributes={"ip": "10.0.0.1"},
+        )
+        infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="without-ip",
+            attributes={"cpu": 4},
+        )
+
+        results = infra_repository.search_assets(
+            project_id, {"attributes": {"ip": {"$exists": False}}}
+        )
+        names = {r.name for r in results}
+        assert "without-ip" in names
+        assert "with-ip" not in names
+
+    def test_exists_true_present_key(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """$exists: true matches assets that HAVE the key."""
+        infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="with-ip",
+            attributes={"ip": "10.0.0.1"},
+        )
+        infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="without-ip",
+            attributes={"cpu": 4},
+        )
+
+        results = infra_repository.search_assets(
+            project_id, {"attributes": {"ip": {"$exists": True}}}
+        )
+        names = {r.name for r in results}
+        assert "with-ip" in names
+        assert "without-ip" not in names
+
+
+# =============================================================================
+# Group 16: W1 - get_asset(project_id=) project isolation
+# =============================================================================
+
+
+class TestGetAssetProjectIsolation:
+    """W1: ``get_asset(asset_id, project_id=...)`` enforces project isolation.
+
+    The optional ``project_id`` kwarg, when supplied, must
+    cause a cross-project asset lookup to return ``None``
+    rather than leaking the row to a caller that shouldn't
+    see it. Backward compatible: when ``project_id`` is
+    omitted, the original behavior is preserved.
+    """
+
+    def test_get_asset_with_matching_project_id(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """get_asset returns the asset when project_id matches."""
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="p1-asset",
+        )
+        fetched = infra_repository.get_asset(asset.id, project_id=project_id)
+        assert fetched is not None
+        assert fetched.id == asset.id
+
+    def test_get_asset_with_mismatched_project_id(
+        self,
+        infra_repository,
+        seed_projects,
+        project_id,
+        other_project_id,
+    ):
+        """get_asset returns None when project_id doesn't match."""
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="p1-only",
+        )
+        # The asset exists, but the caller is asking for it
+        # from the wrong project's context — must NOT leak.
+        fetched = infra_repository.get_asset(asset.id, project_id=other_project_id)
+        assert fetched is None
+
+    def test_get_asset_without_project_id_still_works(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """get_asset without project_id kwarg preserves the old behavior."""
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="p1-asset",
+        )
+        # No project_id — works the same as before.
+        fetched = infra_repository.get_asset(asset.id)
+        assert fetched is not None
+        assert fetched.id == asset.id
+
