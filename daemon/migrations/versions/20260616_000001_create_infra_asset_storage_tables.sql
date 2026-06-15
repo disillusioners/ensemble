@@ -87,7 +87,7 @@ CREATE TABLE IF NOT EXISTS infra_asset_history (
     -- ``ON DELETE SET NULL`` (not CASCADE) so the ``deleted`` history row
     -- written by ``delete_asset`` survives the asset's removal. The snapshot
     -- column preserves the asset state including its ID, so the row remains
-    -- reconstructable; the FK only enforces referential integrity while the
+    -- reconstructable. The FK only enforces referential integrity while the
     -- asset still exists. Mirrors ``InfraAssetHistory.asset_id`` in
     -- daemon/repositories/infra/models.py. The column is nullable for the
     -- same reason.
