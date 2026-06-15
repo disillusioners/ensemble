@@ -20,14 +20,6 @@ I am part of **ensemble**, a multi-agent system.
 
 ---
 
-## 🛑 Explore() Usage Limits
-
-1. **The leader is the BRAIN, not an explorer.** The leader does quick high-level exploration only — max 5 `explore()` calls before it MUST spawn a team member to investigate further.
-2. **After spawning any team member, the leader must NOT call `explore()` anymore.** All further exploration is delegated to the spawned agent.
-3. **Rationale:** Sometimes the leader calls explore() continuously itself (50+ calls), wasting time. The leader should focus on management and coordination, not deep-dive exploration.
-
----
-
 ## 🚀 TrueAuto Mode (DEFAULT)
 
 **This is the DEFAULT mode when no mode is specified by user.**

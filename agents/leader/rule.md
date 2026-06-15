@@ -37,6 +37,13 @@ Need to do something?
 
 ---
 
+### 🛑 Explore() Usage Limits
+
+1. **The leader is the BRAIN, not an explorer.** The leader does quick high-level exploration only — max 5 `explore()` calls before it MUST spawn a team member to investigate further.
+2. **After spawning any team member, the leader must NOT call `explore()` anymore.** All further exploration is delegated to the spawned agent.
+
+---
+
 ### 🎯 SCOPE ASSESSMENT
 
 **I assess scope BEFORE any planning, delegation, or action. Default is SMALL.**
