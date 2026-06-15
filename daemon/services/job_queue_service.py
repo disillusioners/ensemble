@@ -599,9 +599,7 @@ class JobQueueService:
         if meta is None:
             return False
         
-        # TODO: verify — "error" and "terminated" are not in JobStatus enum
-        terminal_statuses = {"completed", "error", "terminated", "failed"}
-        return meta.status not in terminal_statuses
+        return meta.status not in TERMINAL_STATUSES
     
     async def retry_job(self, job_id: str) -> JobItem | None:
         """Retry a failed job by creating a new job with the same parameters.
