@@ -61,8 +61,26 @@ def _extract_slug_from_filename(filename: str) -> str:
     return slug
 
 
-def _extract_preview(file_path: Path, max_lines: int = _PREVIEW_MAX_LINES, max_chars: int = _PREVIEW_MAX_CHARS) -> str:
-    """Build a multi-line preview of a context file.
+def _read_context_file_text(file_path: Path) -> str:
+    """Read a context file's full body as a single UTF-8 string.
+
+    Single source of truth for both preview extraction and body search.
+    Returns an empty string on any read error (caller treats as "no content
+    matched" rather than raising).
+    """
+    try:
+        return file_path.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        logger.debug("list_context_files: read failed for %s: %s", file_path, e)
+        return ""
+
+
+def _extract_preview(
+    content: str,
+    max_lines: int = _PREVIEW_MAX_LINES,
+    max_chars: int = _PREVIEW_MAX_CHARS,
+) -> str:
+    """Build a multi-line preview from already-read file content.
 
     The preview collects up to ``max_lines`` non-empty lines (preserving order,
     so the title heading — if present — comes first followed by real content
@@ -70,7 +88,7 @@ def _extract_preview(file_path: Path, max_lines: int = _PREVIEW_MAX_LINES, max_c
     with an ellipsis suffix when longer.
 
     Args:
-        file_path: Path to the file to read.
+        content: The full file body (already read by the caller).
         max_lines: Maximum number of non-empty lines to include.
         max_chars: Maximum total character length of the returned preview.
 
@@ -78,18 +96,13 @@ def _extract_preview(file_path: Path, max_lines: int = _PREVIEW_MAX_LINES, max_c
         A multi-line string suitable for ``concise_preview``. Empty when the
         file has no readable content. Never raises.
     """
-    try:
-        with file_path.open("r", encoding="utf-8", errors="replace") as fh:
-            lines: list[str] = []
-            for raw in fh:
-                if len(lines) >= max_lines:
-                    break
-                stripped = raw.strip()
-                if stripped:
-                    lines.append(stripped)
-    except Exception as e:
-        logger.debug("list_context_files: failed to read preview of %s: %s", file_path, e)
-        return ""
+    lines: list[str] = []
+    for raw in content.splitlines():
+        if len(lines) >= max_lines:
+            break
+        stripped = raw.strip()
+        if stripped:
+            lines.append(stripped)
 
     if not lines:
         return ""
@@ -98,32 +111,6 @@ def _extract_preview(file_path: Path, max_lines: int = _PREVIEW_MAX_LINES, max_c
     if len(preview) > max_chars:
         preview = preview[: max_chars - 3] + "..."
     return preview
-
-
-def _file_content_matches(file_path: Path, needle: str) -> bool:
-    """Check whether ``needle`` (already lower-cased) occurs in the file body.
-
-    Used as a fallback when the metadata-only filter (filename / slug /
-    preview) does not match, so that callers can still find content that
-    only appears later in the file.
-
-    Args:
-        file_path: Path to the file to read.
-        needle: Lower-cased query string.
-
-    Returns:
-        ``True`` if ``needle`` appears anywhere in the file. ``False`` on any
-        read error (caller should treat unknown matches as "no match" rather
-        than raising).
-    """
-    try:
-        with file_path.open("r", encoding="utf-8", errors="replace") as fh:
-            for chunk in iter(lambda: fh.read(8192), ""):
-                if needle in chunk.lower():
-                    return True
-    except Exception as e:
-        logger.debug("list_context_files: content search failed for %s: %s", file_path, e)
-    return False
 
 
 def list_context_files(context_key: str, query: str = "") -> list[dict[str, Any]]:
@@ -163,7 +150,10 @@ def list_context_files(context_key: str, query: str = "") -> list[dict[str, Any]
                     ).isoformat()
                 except Exception:
                     modified_at = ""
-                preview = _extract_preview(file_path)
+                # Read the file body exactly once; derive both the preview
+                # and any later body search from the same string.
+                content = _read_context_file_text(file_path)
+                preview = _extract_preview(content)
 
                 results.append({
                     "filename": file_path.name,
@@ -171,6 +161,7 @@ def list_context_files(context_key: str, query: str = "") -> list[dict[str, Any]
                     "size_bytes": int(stat.st_size),
                     "modified_at": modified_at,
                     "concise_preview": preview,
+                    "_content": content,
                 })
             except Exception as e:
                 logger.debug("list_context_files: skipping %s: %s", file_path, e)
@@ -180,6 +171,9 @@ def list_context_files(context_key: str, query: str = "") -> list[dict[str, Any]
         return []
 
     if not query:
+        # No filtering: strip the internal-only "_content" key from output.
+        for entry in results:
+            entry.pop("_content", None)
         return results
 
     # Filter by case-insensitive substring match against metadata first, then
@@ -194,10 +188,12 @@ def list_context_files(context_key: str, query: str = "") -> list[dict[str, Any]
         ):
             filtered.append(entry)
             continue
-        # Fallback: search the file body in chunks (handles large files).
-        file_path = context_dir / entry["filename"]
-        if _file_content_matches(file_path, needle):
+        # Fallback: search the already-read body in-memory (no extra I/O).
+        if needle in entry["_content"].lower():
             filtered.append(entry)
+    # Strip the internal-only "_content" key from the final payload.
+    for entry in filtered:
+        entry.pop("_content", None)
     return filtered
 
 

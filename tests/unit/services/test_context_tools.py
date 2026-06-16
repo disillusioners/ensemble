@@ -381,3 +381,150 @@ class TestListContextFilesQuery:
         with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
             result = list_context_files("ctx-q", query="2026")
         assert len(result) == 3
+
+    def test_body_search_is_case_insensitive(self, tmp_path):
+        """S1: The BODY content (not just metadata) is searched case-insensitively.
+
+        A file whose body contains 'The API uses OAuth Tokens' should match
+        queries in any case (e.g. 'oauth tokens', 'OAUTH TOKENS', 'oAuth TokenS').
+        This guards against regressions where body search is re-introduced
+        with `in` against the original-case content.
+        """
+        context_dir = _make_context_dir(tmp_path, "ctx-bsci")
+        # Five non-empty preview lines, then the body term far below.
+        (context_dir / "spec_20260601_000000.md").write_text(
+            "Line 1.\nLine 2.\nLine 3.\nLine 4.\nLine 5.\n"
+            "The API uses OAuth Tokens for service-to-service calls.\n"
+            "Tokens are short-lived and rotated daily.\n"
+        )
+
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            # Lowercase query against mixed-case body
+            result = list_context_files("ctx-bsci", query="oauth tokens")
+            assert [r["filename"] for r in result] == ["spec_20260601_000000.md"]
+
+            # All-uppercase query
+            result = list_context_files("ctx-bsci", query="OAUTH TOKENS")
+            assert [r["filename"] for r in result] == ["spec_20260601_000000.md"]
+
+            # Mixed-case query
+            result = list_context_files("ctx-bsci", query="oAuth TokenS")
+            assert [r["filename"] for r in result] == ["spec_20260601_000000.md"]
+
+    def test_query_with_regex_metacharacters_is_literal(self, tmp_path):
+        """S2: Regex metacharacters in queries are treated as literal characters.
+
+        The matcher uses Python's `in` operator (substring), NOT a regex engine.
+        Queries like '.*', '[', '(' must match literal occurrences in the body
+        and must not raise or match every file.
+        """
+        context_dir = _make_context_dir(tmp_path, "ctx-regex")
+        # File 1: contains ONLY the literal ".*" token
+        (context_dir / "literal-dotstar_20260601_000000.md").write_text(
+            "Doc body.\nThe pattern is .* a placeholder.\nMore content.\n"
+        )
+        # File 2: contains ONLY literal square brackets
+        (context_dir / "literal-brackets_20260602_000000.md").write_text(
+            "Doc body.\nIndexed like [first] for the head item.\nMore.\n"
+        )
+        # File 3: contains ONLY literal parentheses
+        (context_dir / "literal-paren_20260603_000000.md").write_text(
+            "Doc body.\nCall foo(bar) to compute the value.\nMore.\n"
+        )
+        # File 4: a control file that should NOT match any of the queries
+        (context_dir / "unrelated_20260604_000000.md").write_text(
+            "Unrelated content.\nNothing special here.\nMore.\n"
+        )
+
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            # `.*` must match the literal ".*" only — not act as a wildcard.
+            result = list_context_files("ctx-regex", query=".*")
+            assert {r["filename"] for r in result} == {"literal-dotstar_20260601_000000.md"}
+
+            # `[` should match the literal bracket only.
+            result = list_context_files("ctx-regex", query="[")
+            assert {r["filename"] for r in result} == {"literal-brackets_20260602_000000.md"}
+
+            # `(` should match the literal parenthesis only.
+            result = list_context_files("ctx-regex", query="(")
+            assert {r["filename"] for r in result} == {"literal-paren_20260603_000000.md"}
+
+    def test_unicode_content_in_preview_and_body_search(self, tmp_path):
+        """S3: Unicode (non-ASCII) content round-trips through preview and body search.
+
+        Both the preview extraction AND the body search must work correctly
+        with multi-byte UTF-8 characters. Tests with both CJK and accented
+        Latin characters.
+        """
+        context_dir = _make_context_dir(tmp_path, "ctx-uni")
+        # File 1: Japanese content (CJK, 3-byte UTF-8 chars)
+        (context_dir / "japanese_20260601_000000.md").write_text(
+            "# 日本語タイトル\n"
+            "\n"
+            "これは日本語のテストです。\n"
+            "ファイルの本文に日本語のテキストが含まれます。\n"
+            "OAuth トークンの説明もここにあります。\n"
+        )
+        # File 2: French accented content (2-byte UTF-8 chars)
+        (context_dir / "french_20260602_000000.md").write_text(
+            "# Café résumé\n"
+            "\n"
+            "Le naïveté de l'approche est discutable.\n"
+        )
+
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-uni")
+
+        by_name = {r["filename"]: r for r in result}
+        assert len(by_name) == 2
+
+        # Preview round-trips Unicode unchanged.
+        jp_preview = by_name["japanese_20260601_000000.md"]["concise_preview"]
+        assert "日本語タイトル" in jp_preview
+        assert "これは日本語のテストです。" in jp_preview
+
+        fr_preview = by_name["french_20260602_000000.md"]["concise_preview"]
+        assert "Café résumé" in fr_preview
+        assert "naïveté" in fr_preview
+
+        # Body search matches Unicode queries (case-insensitive).
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            # Japanese term found in body (not just preview)
+            result = list_context_files("ctx-uni", query="OAuth トークン")
+            assert {r["filename"] for r in result} == {"japanese_20260601_000000.md"}
+
+            # Accented Latin term
+            result = list_context_files("ctx-uni", query="naïveté")
+            assert {r["filename"] for r in result} == {"french_20260602_000000.md"}
+
+            # Case-insensitive Unicode search
+            result = list_context_files("ctx-uni", query="CAFÉ")
+            assert {r["filename"] for r in result} == {"french_20260602_000000.md"}
+
+    def test_file_with_only_blank_lines(self, tmp_path):
+        """S4: A file containing only whitespace/blank lines is handled gracefully.
+
+        Different from an empty file (which is already covered by
+        `test_empty_file_has_no_preview`): this file has content (newlines,
+        spaces, tabs) but no real non-empty lines. Preview extraction must
+        return an empty string, not crash on a join of zero lines.
+        """
+        context_dir = _make_context_dir(tmp_path, "ctx-blankonly")
+        # Five lines, all whitespace — must not crash, preview must be empty.
+        (context_dir / "blank_20260601_000000.md").write_text("\n\n   \n\t\n   \t  \n")
+
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-blankonly")
+
+        assert len(result) == 1
+        entry = result[0]
+        # Preview is empty because every line was blank/whitespace.
+        assert entry["concise_preview"] == ""
+        # Internal _content must NOT leak into the public output.
+        assert "_content" not in entry
+        # And a query for a term in the body still works (file is read once
+        # and stored as a string, even if its preview is empty).
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-blankonly", query="anything")
+        # No real content in the file → no match.
+        assert result == []

@@ -243,6 +243,25 @@ class TestListContextTool:
         assert "query" in list_tool.description
         assert "multi-line" in list_tool.description or "preview" in list_tool.description.lower()
 
+    @pytest.mark.asyncio
+    async def test_empty_context_key_returns_error_string(self, tool_by_name):
+        """W2: empty / whitespace-only context_key short-circuits to a plain error string.
+
+        Matches the `read_context` error convention ("Error: ...") and the MCP tool.
+        Avoids the wasted filesystem call to resolve a context dir under ''.
+        """
+        list_tool = tool_by_name["list_context"]
+        # Empty string
+        result = await list_tool.ainvoke({"context_key": ""})
+        assert isinstance(result, str)
+        assert result.startswith("Error:")
+        assert "context_key" in result
+
+        # Whitespace-only
+        result = await list_tool.ainvoke({"context_key": "   "})
+        assert isinstance(result, str)
+        assert result.startswith("Error:")
+
 
 # ─── read_context ──────────────────────────────────────────────────────────────
 

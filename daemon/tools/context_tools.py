@@ -75,6 +75,8 @@ def create_context_tools(manager: "InstanceManager", current_instance_id: str) -
             concise_preview}. Returns "[]" if no files exist or the filter
             matches nothing.
         """
+        if not context_key or not context_key.strip():
+            return "Error: context_key is required."
         try:
             files = await asyncio.to_thread(list_context_files, context_key, query)
             return json.dumps(files, indent=2)

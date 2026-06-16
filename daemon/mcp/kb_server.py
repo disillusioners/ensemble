@@ -461,21 +461,27 @@ def create_kb_mcp_server() -> FastMCP:
             return "Error: Failed to search projects."
 
     @mcp.tool()
-    async def ensemble_context_list(context_key: str) -> str:
+    async def ensemble_context_list(context_key: str, query: str = "") -> str:
         """List .md files in the shared context directory for a context_key.
 
         Args:
             context_key: The CONTEXT_KEY (tree-root instance id) of the session
                 whose context you want to inspect.
+            query: Optional case-insensitive filter. When non-empty, only files
+                whose filename, slug, concise_preview, or full content contains
+                the query are returned. When empty (default), all files are
+                returned. Use this to narrow down a long list to the files
+                relevant to your task.
 
         Returns:
             JSON string: list of {filename, slug, size_bytes, modified_at,
-            concise_preview}. Returns "[]" if no files exist.
+            concise_preview}. Returns "[]" if no files exist or the filter
+            matches nothing.
         """
         if not context_key or not context_key.strip():
             return "Error: context_key is required."
         try:
-            files = await asyncio.to_thread(list_context_files, context_key)
+            files = await asyncio.to_thread(list_context_files, context_key, query)
             return json.dumps(files, indent=2)
         except Exception as e:
             logger.error("ensemble_context_list failed: %s", e, exc_info=True)

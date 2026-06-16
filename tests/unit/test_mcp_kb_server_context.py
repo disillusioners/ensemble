@@ -189,6 +189,55 @@ class TestEnsembleContextList:
         assert first_call.args[0].__name__ == "list_context_files"
         assert first_call.args[1] == "any"
 
+    @pytest.mark.asyncio
+    async def test_query_param_passes_through_to_service(self, kb_server_with_context_tools):
+        """C2: `query` flows from MCP tool signature to the service layer."""
+        import asyncio
+
+        list_tool = kb_server_with_context_tools["list_tool"]
+
+        with patch(
+            "daemon.mcp.kb_server.asyncio.to_thread",
+            wraps=asyncio.to_thread,
+        ) as mock_to_thread:
+            await list_tool.fn(context_key="any", query="oauth")
+
+        first_call = mock_to_thread.call_args
+        assert first_call.args[0].__name__ == "list_context_files"
+        assert first_call.args[1] == "any"
+        assert first_call.args[2] == "oauth"
+
+    @pytest.mark.asyncio
+    async def test_default_query_is_empty_string(self, kb_server_with_context_tools):
+        """C2: omitting `query` should default to "" (backward compatible)."""
+        import asyncio
+
+        list_tool = kb_server_with_context_tools["list_tool"]
+
+        with patch(
+            "daemon.mcp.kb_server.asyncio.to_thread",
+            wraps=asyncio.to_thread,
+        ) as mock_to_thread:
+            await list_tool.fn(context_key="any")
+
+        first_call = mock_to_thread.call_args
+        assert first_call.args[2] == ""
+
+    @pytest.mark.asyncio
+    async def test_query_actually_filters_files(self, kb_server_with_context_tools, tmp_path):
+        """C2 end-to-end: a non-empty `query` filters the returned files."""
+        context_dir = tmp_path / "ensemble" / "context" / "ctx-mcp-q"
+        context_dir.mkdir(parents=True)
+        (context_dir / "auth_20260601_000000.md").write_text("# Auth\nlogin flow")
+        (context_dir / "billing_20260602_000000.md").write_text("# Billing\ninvoices")
+
+        list_tool = kb_server_with_context_tools["list_tool"]
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = await list_tool.fn(context_key="ctx-mcp-q", query="billing")
+
+        decoded = json.loads(result)
+        assert [d["filename"] for d in decoded] == ["billing_20260602_000000.md"]
+
 
 # ─── ensemble_context_read ────────────────────────────────────────────────────
 
