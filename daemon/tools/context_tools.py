@@ -54,19 +54,29 @@ def create_context_tools(manager: "InstanceManager", current_instance_id: str) -
 
     @register_tool_category("context")
     @tool
-    async def list_context(context_key: str) -> str:
+    async def list_context(context_key: str, query: str = "") -> str:
         """List all .md files in the shared context directory for `context_key`.
+
+        Each entry includes a multi-line `concise_preview` (up to ~300 chars)
+        that combines the title heading (if any) with a few content lines, so
+        you can see what the file is about without reading it in full.
 
         Args:
             context_key: The context key (CONTEXT_KEY from your system prompt,
                 or the tree-root instance id). Required.
+            query: Optional case-insensitive filter. When non-empty, only files
+                whose filename, slug, concise_preview, or full content contains
+                the query are returned. When empty (default), all files are
+                returned. Use this to narrow down a long list to the files
+                relevant to your task.
 
         Returns:
             JSON string: list of {filename, slug, size_bytes, modified_at,
-            concise_preview}. Returns "[]" if no files exist.
+            concise_preview}. Returns "[]" if no files exist or the filter
+            matches nothing.
         """
         try:
-            files = await asyncio.to_thread(list_context_files, context_key)
+            files = await asyncio.to_thread(list_context_files, context_key, query)
             return json.dumps(files, indent=2)
         except Exception as e:
             logger.warning("list_context failed for %s: %s", context_key, e)
@@ -76,6 +86,9 @@ def create_context_tools(manager: "InstanceManager", current_instance_id: str) -
     @tool
     async def read_context(context_key: str, filename: str) -> str:
         """Read a specific context file by filename.
+
+        Use this to fetch the full body of a file you found via
+        :func:`list_context` — pass the exact `filename` from that listing.
 
         Args:
             context_key: The context key. Required.

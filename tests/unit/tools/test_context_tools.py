@@ -27,11 +27,10 @@ def tools():
     return create_context_tools(manager, "current-instance-id")
 
 
-def _find_tool(tools, name):
-    for t in tools:
-        if t.name == name:
-            return t
-    raise AssertionError(f"Tool {name!r} not found in {[t.name for t in tools]}")
+@pytest.fixture
+def tool_by_name(tools):
+    """Name-based tool lookup — preferred over positional indices for stability."""
+    return {t.name: t for t in tools}
 
 
 # ─── Factory shape ────────────────────────────────────────────────────────────
@@ -53,13 +52,13 @@ class TestContextToolsFactory:
 
 class TestListContextTool:
     @pytest.mark.asyncio
-    async def test_returns_json_array(self, tools, tmp_path):
+    async def test_returns_json_array(self, tool_by_name, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "ctx-list"
         context_dir.mkdir(parents=True)
         (context_dir / "first_20260601_000000.md").write_text("alpha")
         (context_dir / "second_20260602_000000.md").write_text("beta")
 
-        list_tool = _find_tool(tools, "list_context")
+        list_tool = tool_by_name["list_context"]
         with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
             result = await list_tool.ainvoke({"context_key": "ctx-list"})
 
@@ -74,8 +73,8 @@ class TestListContextTool:
         assert {d["slug"] for d in decoded} == {"first", "second"}
 
     @pytest.mark.asyncio
-    async def test_returns_empty_json_array_for_missing_dir(self, tools, tmp_path):
-        list_tool = _find_tool(tools, "list_context")
+    async def test_returns_empty_json_array_for_missing_dir(self, tool_by_name, tmp_path):
+        list_tool = tool_by_name["list_context"]
         with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
             result = await list_tool.ainvoke({"context_key": "no-such-key"})
 
@@ -83,8 +82,8 @@ class TestListContextTool:
         assert json.loads(result) == []
 
     @pytest.mark.asyncio
-    async def test_uses_asyncio_to_thread(self, tools, tmp_path):
-        list_tool = _find_tool(tools, "list_context")
+    async def test_uses_asyncio_to_thread(self, tool_by_name, tmp_path):
+        list_tool = tool_by_name["list_context"]
 
         with patch(
             "daemon.tools.context_tools.asyncio.to_thread",
@@ -101,6 +100,148 @@ class TestListContextTool:
         first_call = mock_to_thread.call_args
         assert first_call.args[0].__name__ == "list_context_files"
         assert first_call.args[1] == "any"
+        # Default query is "" — kept positional for backward compatibility.
+        assert first_call.args[2] == ""
+
+    @pytest.mark.asyncio
+    async def test_passes_query_through_to_service(self, tool_by_name, tmp_path):
+        """The `query` argument flows from the tool into the service layer."""
+        list_tool = tool_by_name["list_context"]
+
+        with patch(
+            "daemon.tools.context_tools.asyncio.to_thread",
+            wraps=asyncio.to_thread,
+        ) as mock_to_thread:
+            with patch(
+                "daemon.services.context_tools.tempfile.gettempdir",
+                return_value=str(tmp_path),
+            ):
+                await list_tool.ainvoke({
+                    "context_key": "any",
+                    "query": "auth",
+                })
+
+        first_call = mock_to_thread.call_args
+        assert first_call.args[0].__name__ == "list_context_files"
+        assert first_call.args[1] == "any"
+        assert first_call.args[2] == "auth"
+
+    @pytest.mark.asyncio
+    async def test_rich_preview_includes_multiple_lines(self, tool_by_name, tmp_path):
+        """Tool returns a multi-line concise_preview, not just one line."""
+        context_dir = tmp_path / "ensemble" / "context" / "ctx-rich"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text(
+            "# Auth Flow\n\n"
+            "How users authenticate via OAuth.\n"
+            "Tokens last 24h and refresh on use.\n"
+        )
+
+        list_tool = tool_by_name["list_context"]
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = await list_tool.ainvoke({"context_key": "ctx-rich"})
+
+        decoded = json.loads(result)
+        assert len(decoded) == 1
+        preview = decoded[0]["concise_preview"]
+        # Title heading AND real content lines are both present.
+        assert "# Auth Flow" in preview
+        assert "How users authenticate via OAuth." in preview
+        assert "Tokens last 24h and refresh on use." in preview
+        # Blank lines are skipped, so we see at most 5 non-empty lines.
+        assert preview.count("\n") >= 1
+        assert preview.count("\n") <= 4
+        # Newlines in the preview make it readable in raw form.
+        assert "\n" in preview
+
+    @pytest.mark.asyncio
+    async def test_rich_preview_truncated_to_300_chars(self, tool_by_name, tmp_path):
+        """Rich preview is capped at ~300 chars (with "..." when truncated)."""
+        context_dir = tmp_path / "ensemble" / "context" / "ctx-cap"
+        context_dir.mkdir(parents=True)
+        (context_dir / "long_20260601_000000.md").write_text(
+            "a" * 100 + "\n" + "b" * 100 + "\n" + "c" * 100 + "\n" + "d" * 100 + "\n"
+        )
+
+        list_tool = tool_by_name["list_context"]
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = await list_tool.ainvoke({"context_key": "ctx-cap"})
+
+        preview = json.loads(result)[0]["concise_preview"]
+        assert len(preview) == 300
+        assert preview.endswith("...")
+
+    @pytest.mark.asyncio
+    async def test_query_filters_results_at_tool_layer(self, tool_by_name, tmp_path):
+        """Passing `query` filters the files returned by the tool."""
+        context_dir = tmp_path / "ensemble" / "context" / "ctx-q"
+        context_dir.mkdir(parents=True)
+        (context_dir / "auth_20260601_000000.md").write_text("# Auth\nlogin flow")
+        (context_dir / "billing_20260602_000000.md").write_text("# Billing\ninvoices")
+        (context_dir / "deployment_20260603_000000.md").write_text("# Deploy\nrunbook")
+
+        list_tool = tool_by_name["list_context"]
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = await list_tool.ainvoke({
+                "context_key": "ctx-q",
+                "query": "billing",
+            })
+
+        decoded = json.loads(result)
+        assert [d["filename"] for d in decoded] == ["billing_20260602_000000.md"]
+
+    @pytest.mark.asyncio
+    async def test_query_case_insensitive(self, tool_by_name, tmp_path):
+        context_dir = tmp_path / "ensemble" / "context" / "ctx-qci"
+        context_dir.mkdir(parents=True)
+        (context_dir / "auth-flow_20260601_000000.md").write_text("# Auth\nlogin")
+
+        list_tool = tool_by_name["list_context"]
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = await list_tool.ainvoke({
+                "context_key": "ctx-qci",
+                "query": "AUTH-FLOW",
+            })
+
+        decoded = json.loads(result)
+        assert [d["filename"] for d in decoded] == ["auth-flow_20260601_000000.md"]
+
+    @pytest.mark.asyncio
+    async def test_query_no_match_returns_empty(self, tool_by_name, tmp_path):
+        context_dir = tmp_path / "ensemble" / "context" / "ctx-qnm"
+        context_dir.mkdir(parents=True)
+        (context_dir / "doc_20260601_000000.md").write_text("hello world")
+
+        list_tool = tool_by_name["list_context"]
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = await list_tool.ainvoke({
+                "context_key": "ctx-qnm",
+                "query": "absolutely-not-here",
+            })
+
+        assert json.loads(result) == []
+
+    @pytest.mark.asyncio
+    async def test_no_query_arg_returns_all_files(self, tool_by_name, tmp_path):
+        """Backward compatibility: omitting `query` returns all files."""
+        context_dir = tmp_path / "ensemble" / "context" / "ctx-all"
+        context_dir.mkdir(parents=True)
+        (context_dir / "a_20260601_000000.md").write_text("alpha")
+        (context_dir / "b_20260602_000000.md").write_text("beta")
+
+        list_tool = tool_by_name["list_context"]
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = await list_tool.ainvoke({"context_key": "ctx-all"})
+
+        decoded = json.loads(result)
+        assert len(decoded) == 2
+
+    @pytest.mark.asyncio
+    async def test_tool_docstring_documents_query(self, tool_by_name):
+        """The tool's docstring should mention the new `query` param."""
+        list_tool = tool_by_name["list_context"]
+        assert "query" in list_tool.description
+        assert "multi-line" in list_tool.description or "preview" in list_tool.description.lower()
 
 
 # ─── read_context ──────────────────────────────────────────────────────────────
@@ -108,12 +249,12 @@ class TestListContextTool:
 
 class TestReadContextTool:
     @pytest.mark.asyncio
-    async def test_returns_file_contents(self, tools, tmp_path):
+    async def test_returns_file_contents(self, tool_by_name, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "ctx-read"
         context_dir.mkdir(parents=True)
         (context_dir / "doc.md").write_text("hello world")
 
-        read_tool = _find_tool(tools, "read_context")
+        read_tool = tool_by_name["read_context"]
         with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
             result = await read_tool.ainvoke({
                 "context_key": "ctx-read",
@@ -123,11 +264,11 @@ class TestReadContextTool:
         assert result == "hello world"
 
     @pytest.mark.asyncio
-    async def test_missing_file_returns_error(self, tools, tmp_path):
+    async def test_missing_file_returns_error(self, tool_by_name, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "ctx-missing"
         context_dir.mkdir(parents=True)
 
-        read_tool = _find_tool(tools, "read_context")
+        read_tool = tool_by_name["read_context"]
         with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
             result = await read_tool.ainvoke({
                 "context_key": "ctx-missing",
@@ -138,12 +279,12 @@ class TestReadContextTool:
         assert "nope.md" in result
 
     @pytest.mark.asyncio
-    async def test_path_traversal_returns_error(self, tools, tmp_path):
+    async def test_path_traversal_returns_error(self, tool_by_name, tmp_path):
         context_dir = tmp_path / "ensemble" / "context" / "ctx-trav"
         context_dir.mkdir(parents=True)
         (context_dir / "real.md").write_text("real")
 
-        read_tool = _find_tool(tools, "read_context")
+        read_tool = tool_by_name["read_context"]
         with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
             result = await read_tool.ainvoke({
                 "context_key": "ctx-trav",
@@ -153,8 +294,8 @@ class TestReadContextTool:
         assert result.startswith("Error:")
 
     @pytest.mark.asyncio
-    async def test_uses_asyncio_to_thread(self, tools, tmp_path):
-        read_tool = _find_tool(tools, "read_context")
+    async def test_uses_asyncio_to_thread(self, tool_by_name, tmp_path):
+        read_tool = tool_by_name["read_context"]
 
         with patch(
             "daemon.tools.context_tools.asyncio.to_thread",

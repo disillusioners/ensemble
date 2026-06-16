@@ -41,6 +41,10 @@ def resolve_context_dir(context_key: str | None) -> Path:
 
 _TIMESTAMP_PATTERN = re.compile(r"_\d{8}_\d{6}\.md$")
 
+# Preview extraction tuning knobs.
+_PREVIEW_MAX_LINES = 5
+_PREVIEW_MAX_CHARS = 300
+
 
 def _extract_slug_from_filename(filename: str) -> str:
     """Strip the ``_YYYYMMDD_HHMMSS.md`` suffix from a context filename.
@@ -57,7 +61,72 @@ def _extract_slug_from_filename(filename: str) -> str:
     return slug
 
 
-def list_context_files(context_key: str) -> list[dict[str, Any]]:
+def _extract_preview(file_path: Path, max_lines: int = _PREVIEW_MAX_LINES, max_chars: int = _PREVIEW_MAX_CHARS) -> str:
+    """Build a multi-line preview of a context file.
+
+    The preview collects up to ``max_lines`` non-empty lines (preserving order,
+    so the title heading — if present — comes first followed by real content
+    lines), joins them with ``\\n``, and truncates to ``max_chars`` characters
+    with an ellipsis suffix when longer.
+
+    Args:
+        file_path: Path to the file to read.
+        max_lines: Maximum number of non-empty lines to include.
+        max_chars: Maximum total character length of the returned preview.
+
+    Returns:
+        A multi-line string suitable for ``concise_preview``. Empty when the
+        file has no readable content. Never raises.
+    """
+    try:
+        with file_path.open("r", encoding="utf-8", errors="replace") as fh:
+            lines: list[str] = []
+            for raw in fh:
+                if len(lines) >= max_lines:
+                    break
+                stripped = raw.strip()
+                if stripped:
+                    lines.append(stripped)
+    except Exception as e:
+        logger.debug("list_context_files: failed to read preview of %s: %s", file_path, e)
+        return ""
+
+    if not lines:
+        return ""
+
+    preview = "\n".join(lines)
+    if len(preview) > max_chars:
+        preview = preview[: max_chars - 3] + "..."
+    return preview
+
+
+def _file_content_matches(file_path: Path, needle: str) -> bool:
+    """Check whether ``needle`` (already lower-cased) occurs in the file body.
+
+    Used as a fallback when the metadata-only filter (filename / slug /
+    preview) does not match, so that callers can still find content that
+    only appears later in the file.
+
+    Args:
+        file_path: Path to the file to read.
+        needle: Lower-cased query string.
+
+    Returns:
+        ``True`` if ``needle`` appears anywhere in the file. ``False`` on any
+        read error (caller should treat unknown matches as "no match" rather
+        than raising).
+    """
+    try:
+        with file_path.open("r", encoding="utf-8", errors="replace") as fh:
+            for chunk in iter(lambda: fh.read(8192), ""):
+                if needle in chunk.lower():
+                    return True
+    except Exception as e:
+        logger.debug("list_context_files: content search failed for %s: %s", file_path, e)
+    return False
+
+
+def list_context_files(context_key: str, query: str = "") -> list[dict[str, Any]]:
     """List ``.md`` files in the shared context directory for ``context_key``.
 
     Each entry contains:
@@ -65,10 +134,17 @@ def list_context_files(context_key: str) -> list[dict[str, Any]]:
     - ``slug``: filename with the timestamp suffix and ``.md`` stripped.
     - ``size_bytes``: file size on disk.
     - ``modified_at``: ISO 8601 modification timestamp (UTC).
-    - ``concise_preview``: first non-empty line of the file, truncated to 120 chars.
+    - ``concise_preview``: multi-line preview (up to ~300 chars) made of the
+      first few non-empty lines, joined with ``\\n``. Useful for showing
+      both the title heading and a sentence or two of real content.
 
-    Returns an empty list if the directory does not exist or cannot be read.
-    Never raises — errors are logged and an empty list is returned.
+    When ``query`` is non-empty, results are filtered to files whose
+    ``filename``, ``slug``, ``concise_preview``, or full content contains the
+    query (case-insensitive). When ``query`` is empty, all files are returned.
+
+    Returns an empty list if the directory does not exist, cannot be read, or
+    the filter matches nothing. Never raises — errors are logged and an empty
+    list is returned.
     """
     context_dir = resolve_context_dir(context_key)
     if not context_dir.is_dir():
@@ -87,16 +163,7 @@ def list_context_files(context_key: str) -> list[dict[str, Any]]:
                     ).isoformat()
                 except Exception:
                     modified_at = ""
-                preview = ""
-                try:
-                    with file_path.open("r", encoding="utf-8", errors="replace") as fh:
-                        for line in fh:
-                            stripped = line.strip()
-                            if stripped:
-                                preview = stripped[:120]
-                                break
-                except Exception as e:
-                    logger.debug("list_context_files: failed to read preview of %s: %s", file_path, e)
+                preview = _extract_preview(file_path)
 
                 results.append({
                     "filename": file_path.name,
@@ -112,7 +179,26 @@ def list_context_files(context_key: str) -> list[dict[str, Any]]:
         logger.debug("list_context_files: failed to list %s: %s", context_dir, e)
         return []
 
-    return results
+    if not query:
+        return results
+
+    # Filter by case-insensitive substring match against metadata first, then
+    # fall back to a full file-body scan for files whose metadata did not match.
+    needle = query.lower()
+    filtered: list[dict[str, Any]] = []
+    for entry in results:
+        if (
+            needle in entry["filename"].lower()
+            or needle in entry["slug"].lower()
+            or needle in entry["concise_preview"].lower()
+        ):
+            filtered.append(entry)
+            continue
+        # Fallback: search the file body in chunks (handles large files).
+        file_path = context_dir / entry["filename"]
+        if _file_content_matches(file_path, needle):
+            filtered.append(entry)
+    return filtered
 
 
 def read_context_file(context_key: str, filename: str) -> str | None:

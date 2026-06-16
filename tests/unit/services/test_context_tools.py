@@ -75,9 +75,10 @@ class TestListContextFiles:
         assert isinstance(first["size_bytes"], int)
         assert first["size_bytes"] > 0
         assert first["modified_at"]  # ISO 8601 timestamp, non-empty
-        assert first["concise_preview"] == "First line of the file."
+        # Multi-line preview: first 2 non-empty lines joined with "\n"
+        assert first["concise_preview"] == "First line of the file.\nMore content."
 
-        # One-liner file — preview is the first non-empty line, truncated to 120
+        # One-liner file — preview is just that single line.
         assert result[1]["slug"] == "notes"
         assert result[1]["concise_preview"] == "Just a one-liner."
 
@@ -127,16 +128,81 @@ class TestListContextFiles:
         assert by_name["good.md"]["concise_preview"] == "ok"
         assert by_name["bad.md"]["concise_preview"] == ""
 
-    def test_preview_truncated_to_120_chars(self, tmp_path):
+    def test_preview_truncated_to_300_chars(self, tmp_path):
+        """Rich preview is truncated to ~300 chars with an ellipsis suffix."""
         context_dir = _make_context_dir(tmp_path, "ctx-trunc")
-        long_line = "x" * 500
-        (context_dir / "long.md").write_text(long_line + "\n")
+        # Build content where the joined first-5 non-empty lines exceed 300 chars.
+        long_line_a = "a" * 80
+        long_line_b = "b" * 80
+        long_line_c = "c" * 80
+        long_line_d = "d" * 80
+        (context_dir / "long.md").write_text(
+            f"{long_line_a}\n{long_line_b}\n{long_line_c}\n{long_line_d}\n"
+        )
 
         with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
             result = list_context_files("ctx-trunc")
 
         assert len(result) == 1
-        assert len(result[0]["concise_preview"]) == 120
+        preview = result[0]["concise_preview"]
+        # Truncated to max 300 chars including the trailing "..." suffix.
+        assert len(preview) == 300
+        assert preview.endswith("...")
+
+    def test_preview_includes_heading_and_content_lines(self, tmp_path):
+        """The first heading is kept and followed by real content lines."""
+        context_dir = _make_context_dir(tmp_path, "ctx-heading")
+        (context_dir / "doc.md").write_text(
+            "# Auth Flow\n"
+            "\n"
+            "How users log in and renew sessions.\n"
+            "Token expiry is 24h.\n"
+            "Refresh uses a sliding window.\n"
+            "Logout clears the cookie.\n"
+        )
+
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-heading")
+
+        preview = result[0]["concise_preview"]
+        # Heading is preserved, then the first few content lines.
+        assert preview.startswith("# Auth Flow")
+        assert "How users log in and renew sessions." in preview
+        assert "Token expiry is 24h." in preview
+        # Blank lines are skipped, headings are kept as content lines.
+        lines = preview.split("\n")
+        assert "# Auth Flow" in lines
+        assert len(lines) <= 5
+
+    def test_preview_skips_blank_lines(self, tmp_path):
+        """Blank/whitespace-only lines are stripped before joining."""
+        context_dir = _make_context_dir(tmp_path, "ctx-blank")
+        (context_dir / "doc.md").write_text(
+            "First real line.\n"
+            "\n"
+            "   \n"
+            "Second real line.\n"
+            "\n"
+        )
+
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-blank")
+
+        preview = result[0]["concise_preview"]
+        assert preview == "First real line.\nSecond real line."
+
+    def test_preview_caps_at_five_lines(self, tmp_path):
+        """At most 5 non-empty lines are included regardless of file length."""
+        context_dir = _make_context_dir(tmp_path, "ctx-cap")
+        (context_dir / "doc.md").write_text(
+            "line-1\nline-2\nline-3\nline-4\nline-5\nline-6\nline-7\n"
+        )
+
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-cap")
+
+        preview = result[0]["concise_preview"]
+        assert preview == "line-1\nline-2\nline-3\nline-4\nline-5"
 
     def test_empty_file_has_no_preview(self, tmp_path):
         context_dir = _make_context_dir(tmp_path, "ctx-empty-file")
@@ -222,3 +288,96 @@ class TestReadContextFile:
         decoded = json.loads(json.dumps(result))
         assert isinstance(decoded, list)
         assert len(decoded) == 2
+
+
+# ─── list_context_files query/filter ───────────────────────────────────────────
+
+
+class TestListContextFilesQuery:
+    """Tests for the optional ``query`` filter on :func:`list_context_files`."""
+
+    def _make_populated_dir(self, tmp_path: Path) -> Path:
+        context_dir = _make_context_dir(tmp_path, "ctx-q")
+        (context_dir / "auth-flow_20260601_120000.md").write_text(
+            "# Auth Flow\n\nHow users log in.\n"
+        )
+        (context_dir / "notes_20260602_130000.md").write_text(
+            "Meeting notes from last week.\nThe team decided to migrate to Postgres.\n"
+        )
+        (context_dir / "deployment_20260603_090000.md").write_text(
+            "Production deployment guide.\nUse the runbook in the wiki.\n"
+        )
+        return context_dir
+
+    def test_empty_query_returns_all_files(self, tmp_path):
+        self._make_populated_dir(tmp_path)
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q", query="")
+        assert len(result) == 3
+        assert {r["filename"] for r in result} == {
+            "auth-flow_20260601_120000.md",
+            "notes_20260602_130000.md",
+            "deployment_20260603_090000.md",
+        }
+
+    def test_no_query_arg_returns_all_files(self, tmp_path):
+        """Backward compatibility: omitting ``query`` returns all files."""
+        self._make_populated_dir(tmp_path)
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q")
+        assert len(result) == 3
+
+    def test_query_matches_filename(self, tmp_path):
+        self._make_populated_dir(tmp_path)
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q", query="deployment")
+        assert [r["filename"] for r in result] == ["deployment_20260603_090000.md"]
+
+    def test_query_matches_slug(self, tmp_path):
+        """Match against the slug (filename minus timestamp and extension)."""
+        self._make_populated_dir(tmp_path)
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q", query="auth-flow")
+        assert [r["filename"] for r in result] == ["auth-flow_20260601_120000.md"]
+
+    def test_query_matches_preview_content(self, tmp_path):
+        """Match against the concise_preview text."""
+        self._make_populated_dir(tmp_path)
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q", query="migrate")
+        assert [r["filename"] for r in result] == ["notes_20260602_130000.md"]
+
+    def test_query_matches_file_body_beyond_preview(self, tmp_path):
+        """Terms that appear only after the 5-line preview still match."""
+        context_dir = _make_context_dir(tmp_path, "ctx-body")
+        (context_dir / "spec_20260601_000000.md").write_text(
+            "Line 1.\nLine 2.\nLine 3.\nLine 4.\nLine 5.\n"
+            "Line 6 — contains the rare token zorblax.\nLine 7.\n"
+        )
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-body", query="zorblax")
+        assert [r["filename"] for r in result] == ["spec_20260601_000000.md"]
+
+    def test_query_no_match_returns_empty(self, tmp_path):
+        self._make_populated_dir(tmp_path)
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q", query="no-such-token-anywhere")
+        assert result == []
+
+    def test_query_is_case_insensitive(self, tmp_path):
+        self._make_populated_dir(tmp_path)
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q", query="AUTH-FLOW")
+        assert [r["filename"] for r in result] == ["auth-flow_20260601_120000.md"]
+
+    def test_query_filters_against_nonexistent_dir(self, tmp_path):
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("does-not-exist", query="anything")
+        assert result == []
+
+    def test_query_with_multiple_matches(self, tmp_path):
+        self._make_populated_dir(tmp_path)
+        # "2026" appears in every filename.
+        with patch("daemon.services.context_tools.tempfile.gettempdir", return_value=str(tmp_path)):
+            result = list_context_files("ctx-q", query="2026")
+        assert len(result) == 3
