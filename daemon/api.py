@@ -114,8 +114,8 @@ async def lifespan(app: FastAPI):
     from daemon.services.job_processor import JobProcessor
     from daemon.services.job_feedback_observer import JobFeedbackObserver
     from daemon.services.correlation_manager import (
-        CorrelationManager,
-        set_correlation_manager,
+        init_correlation_manager,
+        shutdown_correlation_manager,
     )
     from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
     from daemon.services.dead_letter_service import DeadLetterService
@@ -333,32 +333,10 @@ async def lifespan(app: FastAPI):
     logger.info("JobFeedbackObserver started")
 
     # Initialize and start CorrelationManager (Phase 1: shadow mode).
-    # The CM observes the existing waiting_for counter without affecting
-    # any control flow. It must NEVER block daemon startup — a CM failure
-    # is logged at WARNING and the daemon continues without it. The shadow
-    # completion_callback only logs; it does not invoke any cascade logic.
-    async def _shadow_completion_callback(parent_id: str, terminal_status: str) -> None:
-        logger.info(
-            f"CM shadow: correlation.complete(parent={parent_id[:8]}..., "
-            f"status={terminal_status})"
-        )
-
-    try:
-        correlation_manager = CorrelationManager(
-            instance_repository=manager._instance_repository,
-            message_queue_repository=manager._queue_repository,
-            completion_callback=_shadow_completion_callback,
-            event_bus=manager._event_bus,
-        )
-        set_correlation_manager(correlation_manager)
-        await correlation_manager.start()
-        app.state._correlation_manager = correlation_manager
-        logger.info("CorrelationManager started (shadow mode)")
-    except Exception as e:
-        logger.warning(
-            f"Failed to start CorrelationManager (shadow, continuing without it): {e}"
-        )
-        set_correlation_manager(None)
+    # See init_correlation_manager() — CM is best-effort and never blocks
+    # daemon startup. Must run BEFORE JobProcessor.start() so the CM's
+    # EventBus subscription is live when jobs begin flowing.
+    await init_correlation_manager(app, manager)
 
     # Bootstrap system default project (Phase 1 of system_default_project feature)
     # This ensures the system project exists and has its queues provisioned
@@ -467,14 +445,9 @@ async def lifespan(app: FastAPI):
         await app.state._job_feedback_observer.stop()
 
     # Stop CorrelationManager (shadow observer). Must stop BEFORE
-    # manager.shutdown() — manager.shutdown() tears down the EventBus
-    # (step: shutdown_event_bus), and CM holds a subscription on it.
-    if hasattr(app.state, '_correlation_manager') and app.state._correlation_manager:
-        try:
-            await app.state._correlation_manager.stop()
-        except Exception as e:
-            logger.warning(f"Error stopping CorrelationManager: {e}")
-        set_correlation_manager(None)
+    # manager.shutdown() — manager.shutdown() tears down the EventBus, and
+    # CM holds a subscription on it.
+    await shutdown_correlation_manager(app)
 
     # Stop JobProcessor
     if hasattr(app.state, 'job_processor') and app.state.job_processor:

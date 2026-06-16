@@ -744,3 +744,64 @@ async def notify_corr_resolve(
             f"(parent={parent_id[:8]}, child={child_id[:8]}, msg={message_id[:8]}, "
             f"status={status}): {e}"
         )
+
+
+# -------------------------------------------------------------------------
+# FastAPI lifespan helpers
+# -------------------------------------------------------------------------
+#
+# These helpers encapsulate the CorrelationManager startup/shutdown logic so
+# that daemon/api.py does not need to inline the wiring. A CM failure must
+# NEVER block daemon startup — it is logged at WARNING and the daemon
+# continues without it. Phase 1 runs in shadow mode (logging only).
+
+
+async def init_correlation_manager(app, manager) -> None:
+    """Initialize and start the CorrelationManager (Phase 1: shadow mode).
+
+    The CM observes the existing waiting_for counter without affecting any
+    control flow. A CM failure is logged at WARNING and the daemon continues
+    without it.
+
+    Args:
+        app: The FastAPI app (used to stash the instance on app.state for
+            later shutdown).
+        manager: The InstanceManager (provides repositories and EventBus).
+    """
+    async def _shadow_completion_callback(parent_id: str, terminal_status: str) -> None:
+        logger.info(
+            f"CM shadow: correlation.complete(parent={parent_id[:8]}..., "
+            f"status={terminal_status})"
+        )
+
+    try:
+        correlation_manager = CorrelationManager(
+            instance_repository=manager._instance_repository,
+            message_queue_repository=manager._queue_repository,
+            completion_callback=_shadow_completion_callback,
+            event_bus=manager._event_bus,
+        )
+        set_correlation_manager(correlation_manager)
+        await correlation_manager.start()
+        app.state._correlation_manager = correlation_manager
+        logger.info("CorrelationManager started (shadow mode)")
+    except Exception as e:
+        logger.warning(
+            f"Failed to start CorrelationManager (shadow, continuing without it): {e}"
+        )
+        set_correlation_manager(None)
+
+
+async def shutdown_correlation_manager(app) -> None:
+    """Stop the CorrelationManager (shadow observer).
+
+    Must run BEFORE manager.shutdown() — manager.shutdown() tears down the
+    EventBus, and CM holds a subscription on it. A stop failure is logged at
+    WARNING and swallowed so the rest of the shutdown sequence proceeds.
+    """
+    if hasattr(app.state, '_correlation_manager') and app.state._correlation_manager:
+        try:
+            await app.state._correlation_manager.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping CorrelationManager: {e}")
+        set_correlation_manager(None)
