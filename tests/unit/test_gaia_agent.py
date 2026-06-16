@@ -475,7 +475,7 @@ class TestGaiaToolFiltering:
         tools_config = meta.get("tools")
         tool_filter = ToolFilter.model_validate(tools_config)
 
-        assert tool_filter.allow == ["bash", "filesystem", "help", "mcp"]
+        assert tool_filter.allow == ["bash", "filesystem", "help", "mcp", "context"]
         assert tool_filter.deny is None
 
 
