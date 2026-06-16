@@ -259,7 +259,7 @@ def create_infra_tools(
                 )
             if "Invalid reference" in msg:
                 # FOREIGN KEY constraint violation.
-                logger.warning(
+                logger.exception(
                     "infra_asset_create FK violation: "
                     "project=%s type=%s name=%s parent=%s err=%s",
                     project_id, type, name, parent_asset_id, exc,
@@ -272,7 +272,7 @@ def create_infra_tools(
             # Other / unknown constraint violation (CHECK, NOT NULL, ...).
             # Truncate to 200 chars to prevent context-window overflow.
             truncated = msg[:200]
-            logger.warning(
+            logger.exception(
                 "infra_asset_create constraint error: "
                 "project=%s type=%s name=%s: %s",
                 project_id, type, name, exc,
@@ -283,7 +283,7 @@ def create_infra_tools(
             # class name to the agent. ``str(exc)`` is unsafe because the
             # infra repository error text may echo user-supplied values
             # in a way that could be used for context-window overflow.
-            logger.warning(
+            logger.exception(
                 "infra_asset_create failed for project=%s type=%s name=%s: %s",
                 project_id, type, name, exc,
             )
@@ -341,7 +341,7 @@ def create_infra_tools(
                 )
             return json.dumps(asset.to_dict(), indent=2, default=str)
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "infra_asset_get failed: asset_id=%s project=%s: %s",
                 asset_id, project_id, exc,
             )
@@ -404,7 +404,7 @@ def create_infra_tools(
                 lines.append(_format_asset_row(asset))
             return "\n".join(lines)
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "infra_asset_list failed: project=%s: %s", project_id, exc
             )
             # C1 fix: use ``exc.__class__.__name__`` (the ``type``
@@ -478,7 +478,7 @@ def create_infra_tools(
                 lines.append(_format_asset_row(asset))
             return "\n".join(lines)
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "infra_asset_search failed: project=%s query=%s: %s",
                 project_id, query, exc,
             )
@@ -562,20 +562,20 @@ def create_infra_tools(
             # (update would create a duplicate (project_id, type, name)).
             # Truncate to 200 chars to prevent context-window overflow.
             msg = str(exc)[:200]
-            logger.warning(
+            logger.exception(
                 "infra_asset_update constraint error: asset_id=%s: %s",
                 asset_id, exc,
             )
             return f"ERROR: Update violates unique (project_id, type, name) constraint: {msg}"
         except AttributeError as exc:
             # Repo raises AttributeError for unknown column names.
-            logger.warning(
+            logger.exception(
                 "infra_asset_update invalid field: asset_id=%s: %s",
                 asset_id, exc,
             )
             return f"ERROR: Invalid update field: {exc}"
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "infra_asset_update failed: asset_id=%s: %s",
                 asset_id, exc,
             )
@@ -636,7 +636,7 @@ def create_infra_tools(
                 f"Deleted infra asset: id={asset_id} (project={project_id})."
             )
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "infra_asset_delete failed: asset_id=%s: %s",
                 asset_id, exc,
             )
@@ -698,7 +698,7 @@ def create_infra_tools(
                 f"{json.dumps(type_row.to_dict(), indent=2, default=str)}"
             )
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "infra_type_register failed: name=%s: %s", name, exc
             )
             return (
@@ -756,7 +756,7 @@ def create_infra_tools(
                 lines.append(_format_type_row(t))
             return "\n".join(lines)
         except Exception as exc:
-            logger.warning("infra_type_list failed: %s", exc)
+            logger.exception("infra_type_list failed: %s", exc)
             return (
                 f"ERROR: Failed to list infra types "
                 f"({type(exc).__name__})."
@@ -814,7 +814,7 @@ def create_infra_tools(
                 lines.append(_format_history_row(row))
             return "\n".join(lines)
         except Exception as exc:
-            logger.warning(
+            logger.exception(
                 "infra_history_get failed: asset_id=%s: %s",
                 asset_id, exc,
             )
