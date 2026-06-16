@@ -301,3 +301,49 @@ aws configure import --csv file://credentials.csv
 ```
 
 And never `echo $SECRET` — that prints to logs, history, and potentially other processes' stdout.
+
+---
+
+## Infrastructure Tools (Asset Inventory)
+
+The `infra` tools track the infrastructure I'm operating on — datacenters, servers, K8s clusters, networks, databases, load balancers, etc. The bash / Docker / kubectl / Terraform sections above actually *touch* infrastructure; these tools record what's there so context survives across sessions, handoffs, and audit reviews.
+
+### When to use
+
+- **First encounter with an environment** — `infra_asset_search` to discover what's already registered before assuming something is unmanaged
+- **After provisioning via bash / Terraform** — `infra_asset_create` to record what was just built
+- **Before destructive operations** — `infra_asset_get` to confirm the exact ID, name, parent, and current attributes
+- **After config changes** — `infra_asset_update` to keep the inventory in sync (auto-versions into history)
+- **Audit / rollback / drift review** — `infra_history_get` to see who changed what, when
+- **When you need a new asset type** — `infra_type_register` (GLOBAL, shared across all projects)
+
+### Quick reference
+
+Asset CRUD (project-scoped — always pass `project_id`):
+
+- `infra_asset_create` — register a new asset (`project_id`, `type`, `name`, `attributes` JSON, optional `parent_asset_id`, optional `relationships`)
+- `infra_asset_search` — find assets by name substring (case-insensitive) and optional `type` filter
+- `infra_asset_list` — list assets; filter by `type` and/or `parent_asset_id` (passing `parent_asset_id=None` returns only root-level assets)
+- `infra_asset_get` — full JSON of one asset by ID
+- `infra_asset_update` — replace `attributes` / `name` / `parent_asset_id` / `relationships` (auto-records history)
+- `infra_asset_delete` — soft delete; the `deleted` history row is preserved for audit
+
+Type registry (GLOBAL — no `project_id`):
+
+- `infra_type_register` — register or upsert a type definition (`name`, `schema_def`, `description`)
+- `infra_type_list` — list all registered types across all projects
+
+History:
+
+- `infra_history_get` — change log for one asset (newest first), works for deleted assets too
+
+### Guidelines
+
+- **Always pass `project_id`** — assets are project-scoped; isolation is enforced at the repository layer. Cross-project reads/writes return `not found` rather than leaking
+- **SEARCH before CREATE** — `(project_id, type, name)` is unique. A duplicate returns `ERROR: ... already exists` — search the existing set first
+- **Types are GLOBAL** — registered once, shared across all projects. Don't re-register a type per project; one definition, many consumers
+- **Use `attributes` for rich metadata** — IPs, specs, region, instance type, tags, etc. It's a JSONB column, store structured data
+- **Use `parent_asset_id` for hierarchy** — e.g. server → rack → datacenter → region. `infra_asset_list(parent_asset_id=None)` lists only roots
+- **Use `relationships` for cross-entity links** — dict of `{entity_type: [id, ...]}`, e.g. `{"load_balancer": ["lb-uuid-1"]}`
+- **Delete is soft** — the row is removed, but a `deleted` history row with the pre-delete snapshot is retained
+- **Updates auto-version** — every `infra_asset_update` writes a history snapshot with old / new values and the calling instance as `changed_by`
