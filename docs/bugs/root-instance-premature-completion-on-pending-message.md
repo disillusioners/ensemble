@@ -117,7 +117,7 @@ The orchestrator (jobber) instance `8d71f05f` is a root instance (no parent). Th
 The race:
 
 1. 17:28:00 — Giter child `fc251a1d` completes message `35e751ff` → triggers `_process_child_completion_and_notify_parent(fc251a1d, 35e751ff)`.
-2. 17:28:00 — Cascade in `_update_parent_on_child_complete` decrements `8d71f05f.waiting_for` from 1 to 0. Jobber has 2 pending messages (`e46e1d87` was already in queue, and `806da3d3` is just enqueued). Jobber transitions to `WAITING_CHILDREN`.
+2. 17:28:00 — Cascade in `_update_parent_on_child_complete` decrements `8d71f05f.waiting_for` from 1 to 0. Jobber has 2 pending messages (`e46e1d87` was already in queue, and `806da3d3` is just enqueued). Jobber transitions to `WAITING_CHILDREN` — **this log line is emitted by the cascade at `_update_parent_on_child_complete:513-517`, not by the root branch in the bug site**.
 3. 17:28:00–17:28:17 — Task 2216 (processing `806da3d3`) experiences lease contention (8 retries within 17s — visible at log lines 175-182).
 4. 17:28:17 — Concurrently, message `e46e1d87` (the jobber's own `job_continue` continuation) finishes LLM processing. `message_queue.complete(e46e1d87)` is called. Then `_process_child_completion_and_notify_parent(8d71f05f, e46e1d87)` is invoked.
 5. 17:28:17 — Inside the function, `instance.waiting_for == 0` (correctly decremented at 17:28:00). `pending_count == 1` (correctly counting `806da3d3` which is still `READY` — its LLM processing has not yet completed). The asymmetric `elif` branch fires, logs the warning, and **falls through to COMPLETED**.
@@ -181,7 +181,7 @@ if instance.parent_id is None:
         select(func.count())
         .select_from(MessageQueue)
         .where(MessageQueue.instance_id == instance_id)
-        .where(MessageQueue.message_id != completed_message_id)  # ← see Caveat 2
+        .where(MessageQueue.message_id != completed_message_id)
         .where(MessageQueue.status.in_([
             MessageStatus.READY.value,
             MessageStatus.PROCESSING.value,
@@ -217,11 +217,14 @@ The simple agent does not get stuck, but the actual reason is subtler than the o
 
 **The cited reactivation at `instance_messaging.py:783, 1409` does NOT fire for the self-continuation case.** `enqueue_message_via_jq` transitions `WAITING_CHILDREN → RUNNING` only on **new** enqueue. The self-continuation scenario is: the agent enqueues its own next message *during* the current turn (→ reactivated to `RUNNING` while still `RUNNING`), the turn completes, the completion function sets status back to `WAITING_CHILDREN` (with `pending_count=1`). The next message is now a pre-existing `READY` — there is no new enqueue, so the reactivation never runs again.
 
-**Observable side effect (must be documented):** because nothing emits a `status_change → RUNNING` SSE during the processing of queued self-continuation messages, the frontend/live_hub sees the instance as `waiting_children` (greyed/idle) while it is actively streaming an LLM turn. The only `status = RUNNING.value` assignments in the services layer are `instance_messaging.py:784, :1410` (new enqueue path) and `instance_lifecycle.py:817` (spawn). None are on the `MessageJobHandler` pickup path.
+**Observable side effect (decision required, see I4):** because nothing emits a `status_change → RUNNING` SSE during the processing of queued self-continuation messages, the frontend/live_hub sees the instance as `waiting_children` (greyed/idle) while it is actively streaming an LLM turn. The only `status = RUNNING.value` assignments in the services layer are `instance_messaging.py:784, :1410` (new enqueue path) and `instance_lifecycle.py:817` (spawn). None are on the `MessageJobHandler` pickup path.
 
-This is a **UX/observability regression relative to the pre-`3b8fa746` behavior**, not a liveness bug. Two options:
-- **Accept it** — instance shows `waiting_children` while processing self-continuations. Document as a known consequence. The doc's Test #2 (see "Tests to Add" below) must still assert the instance reaches `COMPLETED` after the queue drains.
-- **Fix it (recommended for strict parity with pre-regression behavior):** add a `status = RUNNING` transition + SSE emit on the `MessageJobHandler` pickup path (around `message_job_handler.py:185-200` where the message is about to be processed). This makes Approach 1 strictly better than the pre-regression code, and removes the implicit "WAITING_CHILDREN not in blocking set" liveness dependency.
+This is a **UX/observability regression relative to the pre-`3b8fa746` behavior**, not a liveness bug. The fix must **bind a decision** before merging — silently shipping a new UX regression is unacceptable for a High-severity concurrency bug fix.
+
+- **Option A (recommended): take the RUNNING-transition fix in the same change.** Add a `status = RUNNING` transition + SSE emit on the `MessageJobHandler` pickup path (around `message_job_handler.py:185-200` where the message is about to be processed). This makes Approach 1 strictly better than the pre-regression code, removes the implicit "WAITING_CHILDREN not in blocking set" liveness dependency, and surfaces the implicit invariant as an explicit status transition.
+- **Option B: explicitly defer with a follow-up ticket.** Document the observability gap as a known consequence of the fix; link the follow-up ticket in this doc and in the PR description. The doc's Test #2 (see "Tests to Add" below) must still assert the instance reaches `COMPLETED` after the queue drains, and the test must assert *which* status is observed during processing so the follow-up is well-defined.
+
+Whichever option is chosen, **do not merge the fix without one of them bound** — leaving it as "accept it or fix it" is what enables the silent observability gap to ship.
 
 **Risk if the implicit invariants break:**
 - (a) Someone adds `WAITING_CHILDREN` to a blocking set in `_process_next_job` → pending messages are skipped, instance never reactivates.
@@ -268,7 +271,15 @@ The root-branch query at line 681-690 and the report-path query at line 270-279 
 1. **Double-count hazard.** The root query relies on `message_queue.complete()` having already committed the just-finished message to `COMPLETED` before this query runs. If any future code path calls `_process_child_completion_and_notify_parent` before the queue commit (or in the same uncommitted transaction), `pending_count` double-counts the finished message and the instance is **wedged in WAITING_CHILDREN forever**. The `_should_send_completion_report` path protects against this by excluding by ID — the root path should too.
 2. **Semantics disagreement.** The two queries use different status sets (`READY` is in one, not the other) and different exclusion rules. They will disagree on what "pending" means for the same instance at the same instant.
 
-**Required:** apply the same `MessageQueue.message_id != completed_message_id` exclusion to the root-branch query when `completed_message_id` is non-None, mirroring lines 270-279. The status set can remain `READY/PROCESSING/RETRYING` (the report path's narrower set excludes `READY` for its own reasons — it counts only "actively being worked on" messages, not queued ones). Document why the two queries differ, or unify on the wider set.
+**Required:** apply the same `MessageQueue.message_id != completed_message_id` exclusion to the root-branch query, mirroring lines 270-279. **At this call site, the exclusion is unconditional** — the function signature is `completed_message_id: str` (not `str | None`) at `child_reports.py:627`, and all three verified callers pass a real message id:
+
+- `daemon/services/message_job_handler.py:274` — passes `message_id` from `job.job_metadata`
+- `daemon/services/task_processor.py:389` — passes `task.message_id`
+- `daemon/manager.py:2743` — passes `message_id` from `_resume_processing_background` parameters
+
+The `is non-None` guard is only needed in `_should_send_completion_report` (line 228) because *that* function's signature is `completed_message_id: str | None` (added by `e7e9f0d9` for the W1 defensive guard against a different code path). The root-branch function does not share that None-allowed shape.
+
+The status set can remain `READY/PROCESSING/RETRYING` (the report path's narrower set excludes `READY` for its own reasons — it counts only "actively being worked on" messages, not queued ones). Document why the two queries differ, or unify on the wider set.
 
 This fix is **independent of Approach 1 vs 2** and should be applied alongside whichever approach is chosen.
 
@@ -279,7 +290,7 @@ Add a new `tests/unit/test_root_instance_completion.py` (the existing `test_read
 1. **Test the regression case (the bug):** root instance with `waiting_for == 0` and `pending_count == 1` (e.g., a child completion report still in queue) should transition to `WAITING_CHILDREN`, not `COMPLETED`. Asserts the fix is in place.
 2. **Test the simple-agent happy path (the merge gate for Findings 2 and 5):** a root instance in `WAITING_CHILDREN` with a `READY` self-continuation in its queue reaches `COMPLETED` after the worker picks it up. Asserts the original "simple agent stuck" bug does not re-surface and that the implicit liveness invariants (Finding 5.1-5.3) hold. **Also assert the correct status *during* processing** — this will surface the observability gap (Finding 5.3) as a test decision rather than a silent behavior change. If the observability fix is taken, the assertion is "status == RUNNING during turn"; if not, document "status stays WAITING_CHILDREN during turn, transitions to COMPLETED after".
 3. **Test the original "all children done" cascade:** root instance with `waiting_for == 0`, `pending_count > 0` from child reports, then `pending_count` drops to 0 after each child reports — should transition to `COMPLETED` after the last one.
-4. **Test the ID-exclusion fix:** if `_process_child_completion_and_notify_parent` is called before `message_queue.complete()` (simulated by leaving the just-completed message at status `COMPLETED` in the queue and asserting it is still excluded), the `pending_count` should not double-count it.
+4. **Test the ID-exclusion fix (Finding 1's actual hazard):** seed the just-completed message at status `PROCESSING` (or `READY`) in the `message_queue` table — **not** at `COMPLETED` — and assert it is still excluded by ID from the `pending_count` query. A `COMPLETED` row would already be filtered out by the status set (`READY/PROCESSING/RETRYING`) and would not exercise the race Finding 1 guards against (the uncommitted-transaction case where the just-finished message is still at a non-terminal status). The test must demonstrate that the ID exclusion works even when the status filter would otherwise include the message — otherwise the test passes under the buggy query and provides a false sense of safety.
 
 ---
 
@@ -287,7 +298,7 @@ Add a new `tests/unit/test_root_instance_completion.py` (the existing `test_read
 
 1. **Don't just add a `return` in the `elif` branch** without changing the status to `WAITING_CHILDREN` — that would leave the instance in its current state (likely `running` or `waiting_children`) but skip emitting the SSE event and the `CompletionRegistry.complete()` call. The completion path is correct; only the *transition* is wrong.
 
-2. **Fix the `pending_count` query semantics (required, not optional — see "Required Companion Fix" above).** The root-branch query at line 681-690 does not exclude the just-completed `message_id` (unlike `_should_send_completion_report` at line 270-279 which does). For the `e46e1d87` case, this didn't matter because `message_queue.complete()` was called before the function ran. But if there's any race where the message is not yet committed as `completed` in `message_queue` when this function queries, it could double-count. Add `MessageQueue.message_id != completed_message_id` to the root query when `completed_message_id` is non-None.
+2. **Fix the `pending_count` query semantics (required, not optional — see "Required Companion Fix" above).** The root-branch query at line 681-690 does not exclude the just-completed `message_id` (unlike `_should_send_completion_report` at line 270-279 which does). For the `e46e1d87` case, this didn't matter because `message_queue.complete()` was called before the function ran. But if there's any race where the message is not yet committed as `completed` in `message_queue` when this function queries, it could double-count. Add `MessageQueue.message_id != completed_message_id` to the root query — the exclusion is unconditional at this call site (the function signature is `completed_message_id: str`, not `str | None`).
 
 3. **The dead condition (Finding 3 from review).** Within the root-instance branch (line 692), the `if instance.waiting_for > 0 and pending_count > 0` condition is **unreachable** — by line 692, `waiting_for` is guaranteed 0 (the early return at line 660-676 handled all `waiting_for > 0` cases). The `waiting_for` split is a red herring. Use the single guard `if pending_count > 0:`.
 
