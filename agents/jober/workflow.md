@@ -121,6 +121,12 @@ My primary workflow: receive, dispatch, monitor, react, report.
    list_watched_jobs() → confirm all job_ids present
 
 5. Proceed to Phase 4
+
+> **Note:** For follow-up work on a **terminal** job's instance (refinement,
+> correction, iteration on prior work) — use `job_continue` instead of
+> `job_create`. It sends a new message to the same instance and returns a
+> new `job_id` to watch. See "Continuing Completed Jobs" below for full
+> usage, constraints, and the `job_create` vs `job_continue` comparison.
 ```
 
 ---
@@ -155,6 +161,9 @@ My primary workflow: receive, dispatch, monitor, react, report.
       │   → If last job → Phase 5                   │
       │   → If sequential → Create next job         │
       │   → If parallel → Continue waiting          │
+      │   → If user wants follow-up on same instance│
+      │     → job_continue() + watch_job()          │
+      │     (see "Continuing Completed Jobs")       │
       ├─────────────────────────────────────────────┤
       │ FAILED                                      │
       │   → Check error type                        │
@@ -378,19 +387,69 @@ Receive → Create job → Wait → Fail? → Retry (< 3) → Wait → ... → R
 
 ---
 
-## Continuing Completed Jobs
+## Continuing Completed Jobs (job_continue)
 
-When an old job is done and you need to send follow-up work to the same instance:
+When a job has reached a **terminal** state (completed/failed/cancelled/dead_letter)
+and you need to send follow-up work to the SAME instance — preserving its
+conversation history and context — use `job_continue` instead of `job_create`.
 
-```raw
-1. job was completed and you need to send follow-up work
-2. call job_continue(old_job_id=<id>, message=<new instructions>)
-3. extract new_job_id from result
-4. watch_job(new_job_id) to monitor the continuation
-5. when [JOB_EVENT] fires, react per Phase 4 framework
+### What it does
+- Sends a new message to the root instance of a terminal job.
+- Returns a **new `job_id`** for the continuation (the old job_id is unchanged).
+- The instance and its context are preserved — **no new instance is spawned**.
+
+### When to use
+- Refining or correcting a completed job ("now also do X", "fix Y", "expand Z").
+- Follow-up questions on finished work where the prior answer is the starting point.
+- Iterating on partial work where the instance's history is valuable.
+- Fall back to `job_create` (fresh instance) if you need a clean slate or the
+  old instance is dead — see "Key constraints" below.
+
+### Key constraints
+- Old job **MUST** be terminal: `completed`, `failed`, `cancelled`, `dead_letter`.
+- Instance **MUST** be healthy: NOT `terminated`, `paused`, `error`, or `not_found`.
+- No active (zombie) PROCESSING message job may exist for the instance —
+  wait for any in-flight job to terminate first.
+- The old job must not be soft-deleted (`deleted_at` set).
+
+If any constraint fails, `job_continue` returns an error and the agent should
+either wait/retry or fall back to `job_create`.
+
+### Usage pattern
+
+```python
+result = job_continue(
+    old_job_id="job_xxx",
+    message="Follow-up instruction here"
+)
+watch_job(result["new_job_id"])  # Always watch immediately — no orphan
 ```
 
-Use this when the instance's context (conversation history, partial work in progress) is valuable and you want to keep iterating. If the old instance is terminated/errored/paused, use `job_create` instead to spawn a fresh instance.
+### Workflow
+
+```raw
+1. Job is terminal AND user/parent wants follow-up on the same instance
+2. Verify the instance is healthy (Phase 4 events give instance_id; no need
+   to re-fetch unless status looks bad)
+3. job_continue(old_job_id=<id>, message=<new instructions>)
+4. Extract new_job_id from result["new_job_id"]
+5. watch_job(new_job_id) — immediately, to avoid orphan
+6. React to [JOB_EVENT] per Phase 4 framework
+7. The new_job_id is itself terminal-eligible → can be continued again
+   in a future turn if more follow-ups are needed
+```
+
+### vs job_create
+
+| Aspect        | `job_create`                       | `job_continue`                                |
+|---------------|------------------------------------|-----------------------------------------------|
+| Instance      | NEW (fresh context)                | SAME (preserves context)                      |
+| Use case      | New task, fresh start              | Follow-up on existing work                    |
+| Return shape  | `job_id`                           | `{old_job_id, instance_id, new_job_id, ...}`  |
+| Watch pattern | `job_create(watch=True)` (atomic)  | `job_continue(...)` → `watch_job(new_job_id)` |
+
+If the old instance is `terminated` / `error` / `paused`, `job_continue` will
+reject — use `job_create` to spawn a fresh instance.
 
 ---
 
