@@ -45,6 +45,7 @@ import pytest
 
 from daemon.manager import InstanceManager
 from daemon.config import Config
+from daemon.cancellation import CancellationTokenSource
 from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.execution_gate import (
@@ -140,10 +141,21 @@ def _make_manager(gate: MagicMock) -> InstanceManager:
     # on a bare MagicMock; the real-looking object avoids that.
     instance_repository.get = MagicMock(return_value=MockInstanceMeta())
 
+    # Real CancellationTokenSource so we can verify the token
+    # threaded through ``_process_message_with_tracking`` is the
+    # same instance the registry returned. ``register`` returns the
+    # source; ``unregister`` is a no-op mock.
+    request_registry = MagicMock()
+    request_registry.register = MagicMock(
+        return_value=CancellationTokenSource()
+    )
+    request_registry.unregister = MagicMock()
+
     manager = InstanceManager.__new__(InstanceManager)
     manager._job_queue_service = job_queue_service
     manager._instance_repository = instance_repository
     manager._execution_gate = gate
+    manager._request_registry = request_registry
     manager._process_message_with_tracking = AsyncMock(
         return_value=MockMessageResult()
     )
@@ -294,11 +306,16 @@ class TestResumeGateWrapping:
           times (3 retries, then the 4th attempt is the final fall-back
           decision — but the final attempt's ``gate.run`` call
           *returns* the LeaseContention, after which we fall back).
+        - W2: ``complete_job`` is called on the ``old_job_id`` with
+          ``DemandState.CANCELLED`` so the original PROCESSING job does
+          not sit orphaned. The error message identifies the source
+          (``resume_exhausted fallback``).
         - ``enqueue_message`` is called exactly once with
           ``source="resume_exhausted"``.
-        - The original job is NOT completed as COMPLETED (we
-          abandoned the in-process path).
         - The instance is NOT marked ERROR (we recovered via enqueue).
+        - W1: ``enqueue_message`` carries ``resume_mode: True`` in the
+          metadata so the LLM treats the message as a checkpoint
+          resume, not a fresh prompt.
         """
         contention = _make_contention(
             holder_kind=LeaseHolderKind.TASK.value,
@@ -328,16 +345,26 @@ class TestResumeGateWrapping:
         # attempt doesn't sleep because it falls back immediately.
         assert mock_sleep.await_count == manager.MAX_RESUME_RETRIES
 
+        # W2: old_job_id is marked CANCELLED before the fallback enqueue.
+        # ``complete_job`` is awaited once with the right args.
+        manager._job_queue_service.complete_job.assert_awaited_once()
+        cj_args = manager._job_queue_service.complete_job.await_args.args
+        cj_kwargs = manager._job_queue_service.complete_job.await_args.kwargs
+        assert cj_args[0] == "job-exhaust"
+        assert cj_args[1] == DemandState.CANCELLED
+        assert "resume_exhausted" in cj_kwargs["error"].lower()
+
         # Fallback: enqueue_message called once with source=resume_exhausted.
         manager.enqueue_message.assert_awaited_once()
         em_kwargs = manager.enqueue_message.await_args.kwargs
         assert em_kwargs["instance_id"] == "inst-exhaust"
         assert em_kwargs["message"] == "resume"
         assert em_kwargs["source"] == "resume_exhausted"
+        # W1: resume_mode metadata must be present so the LLM path
+        # treats this as a checkpoint resume (not a fresh prompt).
+        assert em_kwargs["metadata"] == {"resume_mode": True, "silent": False}
 
-        # We abandoned the in-process path: job NOT completed as
-        # COMPLETED, instance NOT marked ERROR.
-        manager._job_queue_service.complete_job.assert_not_awaited()
+        # Instance NOT marked ERROR (we recovered via enqueue).
         manager._instance_repository.update_instance.assert_not_called()
 
     @pytest.mark.asyncio
@@ -683,3 +710,255 @@ class TestResumeGraphTaskTracking:
         # by the caller. We just verify the task ran to completion.
         assert bg_task.done()
         manager._job_queue_service.complete_job.assert_awaited_once()
+
+
+class TestResumeCleanupAndCancellation:
+    """Verify the resume path's per-instance cleanup (W3) and
+    cancellation-token threading (W4) work end-to-end.
+
+    W3: ``_graph_tasks[instance_id]`` is popped in the outermost
+    ``finally`` block so the entry does not leak across fallback,
+    lease-lost, exception, or normal completion paths.
+
+    W4: A ``CancellationToken`` passed to
+    ``_resume_processing_background`` is propagated to
+    ``_process_message_with_tracking`` so ``pause_instance_cascade``
+    can cooperatively interrupt LLM streaming via the token rather
+    than abruptly via ``task.cancel()``. The message_id is
+    unregistered from ``_request_registry`` in the finally block.
+    """
+
+    @pytest.mark.asyncio
+    async def test_graph_tasks_entry_popped_after_fallback(self):
+        """W3: After the fallback path (lease contention exhausted),
+        ``_graph_tasks[instance_id]`` is popped in the outermost
+        finally. Without this, the next resume call would
+        short-circuit to ``"already_resuming"`` because the previous
+        task entry would still be present (and not done).
+        """
+        contention = _make_contention(
+            holder_kind=LeaseHolderKind.TASK.value,
+            holder_id="task:stuck",
+        )
+        # 4 contentions: 3 retries + the final one that triggers fallback.
+        gate = _make_fake_gate(side_effects=[contention] * 4)
+        manager = _make_manager(gate)
+        manager._graph_tasks["inst-cleanup-fb"] = "sentinel"
+
+        with patch("daemon.manager.asyncio.sleep", new=AsyncMock()):
+            await manager._resume_processing_background(
+                instance_id="inst-cleanup-fb",
+                message="resume",
+                message_id=str(uuid.uuid4()),
+                old_job_id="job-cleanup-fb",
+                silent=False,
+                images=None,
+            )
+
+        assert "inst-cleanup-fb" not in manager._graph_tasks
+
+    @pytest.mark.asyncio
+    async def test_graph_tasks_entry_popped_on_happy_path(self):
+        """W3: cleanup also runs on the happy path (lease free, resume
+        completes successfully). The pre-existing tests verify the
+        processing logic but did not pin this — the outer call
+        previously relied on ``pause_instance_cascade`` to pop the
+        entry, which left a window where stale entries blocked the
+        next resume.
+        """
+        gate = _make_fake_gate(side_effects=[MockMessageResult()])
+        manager = _make_manager(gate)
+        manager._graph_tasks["inst-cleanup-happy"] = "sentinel"
+
+        await manager._resume_processing_background(
+            instance_id="inst-cleanup-happy",
+            message="resume",
+            message_id=str(uuid.uuid4()),
+            old_job_id="job-cleanup-happy",
+            silent=False,
+            images=None,
+        )
+
+        assert "inst-cleanup-happy" not in manager._graph_tasks
+
+    @pytest.mark.asyncio
+    async def test_graph_tasks_entry_popped_on_lease_lost(self):
+        """W3: cleanup also runs after ``LeaseLostError`` — a fatal
+        path that previously left the ``_graph_tasks`` entry behind.
+        """
+        gate = _make_fake_gate(
+            raise_after=(LeaseLostError, "row cleared by another process")
+        )
+        manager = _make_manager(gate)
+        manager._graph_tasks["inst-cleanup-ll"] = "sentinel"
+
+        await manager._resume_processing_background(
+            instance_id="inst-cleanup-ll",
+            message="resume",
+            message_id=str(uuid.uuid4()),
+            old_job_id="job-cleanup-ll",
+            silent=False,
+            images=None,
+        )
+
+        assert "inst-cleanup-ll" not in manager._graph_tasks
+
+    @pytest.mark.asyncio
+    async def test_graph_tasks_entry_popped_after_retry_chain(self):
+        """W3: when contention triggers retry recursion, the
+        intermediate (recursive) calls' finally blocks are no-ops
+        (``_retry_attempt != 0``); only the outermost call's finally
+        actually pops the entry. After the full retry chain resolves
+        (whether success or fallback), the entry is gone exactly
+        once.
+        """
+        contention = _make_contention(
+            holder_kind=LeaseHolderKind.TASK.value,
+            holder_id="task:retry",
+        )
+        # 1 contention → 1 retry → success on the second attempt.
+        gate = _make_fake_gate(side_effects=[contention, MockMessageResult()])
+        manager = _make_manager(gate)
+        manager._graph_tasks["inst-cleanup-retry"] = "sentinel"
+
+        with patch("daemon.manager.asyncio.sleep", new=AsyncMock()):
+            await manager._resume_processing_background(
+                instance_id="inst-cleanup-retry",
+                message="resume",
+                message_id=str(uuid.uuid4()),
+                old_job_id="job-cleanup-retry",
+                silent=False,
+                images=None,
+            )
+
+        # Popped exactly once by the outermost finally; the recursive
+        # call's finally is a no-op so the entry survives the recursion
+        # and is only removed by the outermost cleanup.
+        assert "inst-cleanup-retry" not in manager._graph_tasks
+
+    @pytest.mark.asyncio
+    async def test_cancellation_token_passed_to_process_message_with_tracking(self):
+        """W4: a ``CancellationToken`` passed to
+        ``_resume_processing_background`` is propagated by identity to
+        ``_process_message_with_tracking`` so the LLM streaming
+        callback can raise ``OperationCancelledError`` cooperatively
+        on pause.
+
+        Unlike the gate-wrapping tests above (which use a fake
+        ``gate.run`` that returns a ``MockMessageResult`` without
+        invoking ``work_fn``), this test uses a gate that actually
+        calls ``work_fn`` so the closure body — where the
+        ``cancellation_token`` is passed to
+        ``_process_message_with_tracking`` — runs for real.
+        """
+        gate = MagicMock()
+
+        async def gate_run(instance_id, holder_id, holder_kind, work_fn):
+            # Invoke the closure; the gate then propagates the return value.
+            return await work_fn()
+
+        gate.run = gate_run
+        manager = _make_manager(gate)
+
+        cts = CancellationTokenSource()
+        token = cts.token
+
+        await manager._resume_processing_background(
+            instance_id="inst-ct",
+            message="resume",
+            message_id=str(uuid.uuid4()),
+            old_job_id="job-ct",
+            silent=False,
+            images=None,
+            cancellation_token=token,
+        )
+
+        manager._process_message_with_tracking.assert_awaited_once()
+        kwargs = manager._process_message_with_tracking.await_args.kwargs
+        # Identity check (``is``): the exact same token object must
+        # be threaded through so cancelling it propagates to the
+        # streaming callback.
+        assert kwargs["cancellation_token"] is token
+
+    @pytest.mark.asyncio
+    async def test_cancellation_token_default_is_none(self):
+        """W4: when ``_resume_processing_background`` is called
+        without a token (legacy callers that have not been migrated),
+        ``_process_message_with_tracking`` receives ``None``. The
+        default-parameter contract is preserved.
+
+        Same gate shape as ``test_cancellation_token_passed_to_...``
+        — invoke ``work_fn`` so the closure body runs and the
+        default ``cancellation_token=None`` is observable.
+        """
+        gate = MagicMock()
+
+        async def gate_run(instance_id, holder_id, holder_kind, work_fn):
+            return await work_fn()
+
+        gate.run = gate_run
+        manager = _make_manager(gate)
+
+        await manager._resume_processing_background(
+            instance_id="inst-no-ct",
+            message="resume",
+            message_id=str(uuid.uuid4()),
+            old_job_id="job-no-ct",
+            silent=False,
+            images=None,
+        )
+
+        manager._process_message_with_tracking.assert_awaited_once()
+        kwargs = manager._process_message_with_tracking.await_args.kwargs
+        assert kwargs["cancellation_token"] is None
+
+    @pytest.mark.asyncio
+    async def test_request_registry_unregister_called_in_finally(self):
+        """W4: the outermost finally block calls
+        ``_request_registry.unregister(message_id)`` so the CTS that
+        ``resume_processing_job`` registered is released. This test
+        verifies the contract directly: any caller passing a
+        ``message_id`` should see ``unregister`` invoked exactly once
+        in the finally block on every exit path (success, exception,
+        fallback, lease-lost).
+        """
+        gate = _make_fake_gate(side_effects=[MockMessageResult()])
+        manager = _make_manager(gate)
+
+        message_id = str(uuid.uuid4())
+        await manager._resume_processing_background(
+            instance_id="inst-unreg",
+            message="resume",
+            message_id=message_id,
+            old_job_id="job-unreg",
+            silent=False,
+            images=None,
+        )
+
+        manager._request_registry.unregister.assert_called_once_with(message_id)
+
+    @pytest.mark.asyncio
+    async def test_request_registry_unregister_called_on_fallback(self):
+        """W4: ``unregister`` is called on the fallback path too
+        (lease contention exhausted). Without this, the CTS would
+        leak until the registry's garbage collection picks it up.
+        """
+        contention = _make_contention(
+            holder_kind=LeaseHolderKind.TASK.value,
+            holder_id="task:fb",
+        )
+        gate = _make_fake_gate(side_effects=[contention] * 4)
+        manager = _make_manager(gate)
+
+        message_id = str(uuid.uuid4())
+        with patch("daemon.manager.asyncio.sleep", new=AsyncMock()):
+            await manager._resume_processing_background(
+                instance_id="inst-unreg-fb",
+                message="resume",
+                message_id=message_id,
+                old_job_id="job-unreg-fb",
+                silent=False,
+                images=None,
+            )
+
+        manager._request_registry.unregister.assert_called_once_with(message_id)

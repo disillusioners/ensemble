@@ -14,6 +14,8 @@ import uuid
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
+from daemon.request_registry import ActiveRequestRegistry
+
 
 class MockJob:
     """Mock job object for testing resume_processing_job."""
@@ -89,6 +91,10 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     # Mock _process_child_completion_and_notify_parent
     manager._process_child_completion_and_notify_parent = AsyncMock()
     manager._graph_tasks = {}
+    # W4: real registry so register()/unregister() return real
+    # CancellationTokenSource. See test_resume_waiting_children for
+    # the rationale.
+    manager._request_registry = ActiveRequestRegistry()
     return manager
 
 
@@ -107,6 +113,7 @@ def instance_manager(mock_manager):
     manager._process_message_with_tracking = mock_manager._process_message_with_tracking
     manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
     manager._graph_tasks = {}
+    manager._request_registry = mock_manager._request_registry
     return manager
 
 

@@ -2683,6 +2683,17 @@ class InstanceManager:
 
         # Create background task for processing and job completion
         # Store in _graph_tasks so it can be cancelled by pause_instance_cascade
+        # W4: Register with the request registry BEFORE creating the task so
+        # ``pause_instance_cascade`` (which calls
+        # ``_request_registry.cancel_by_instance`` cooperatively) can
+        # interrupt the in-flight LLM streaming via the CancellationToken
+        # rather than killing the asyncio task abruptly. The registry
+        # returns a CancellationTokenSource; we thread ``.token`` into the
+        # background task and unregister in the outermost finally block.
+        cancellation_source = self._request_registry.register(
+            message_id=message_id,
+            instance_id=instance_id,
+        )
         task = asyncio.create_task(self._resume_processing_background(
             instance_id=instance_id,
             message=message if not silent else "",
@@ -2690,6 +2701,7 @@ class InstanceManager:
             old_job_id=old_job.job_id,
             silent=silent,
             images=images,
+            cancellation_token=cancellation_source.token,
         ))
         self._graph_tasks[instance_id] = task
 
@@ -2719,6 +2731,7 @@ class InstanceManager:
         old_job_id: str,
         silent: bool,
         images: list[str] | None,
+        cancellation_token: CancellationToken | None = None,
         _retry_attempt: int = 0,
     ) -> None:
         """Background task for resumed processing.
@@ -2745,204 +2758,289 @@ class InstanceManager:
             old_job_id: The JobQueue job ID to complete.
             silent: If True, resume from checkpoint without injecting a new message.
             images: Optional list of base64-encoded images for multimodal content.
+            cancellation_token: Optional token for cooperative cancellation.
+                Passed through to ``_process_message_with_tracking`` so
+                ``pause_instance_cascade`` (via ``_request_registry``)
+                can interrupt LLM streaming cooperatively rather than
+                abruptly via ``task.cancel()``. See W4.
             _retry_attempt: Internal recursion counter for ``LeaseContention``
                 backoff. Callers from outside should leave this at 0.
         """
         from .services.job_queue_service import DemandState
 
-        # 1. Acquire ExecutionGate lease before driving graph.astream.
-        #    Race #5 fix: without this, a concurrent /resume call (or a
-        #    WorkerPool / JobQueue dispatch) would race on the langgraph
-        #    checkpoint and corrupt it.
-        async def _do_process():
-            return await self._process_message_with_tracking(
-                instance_id=instance_id,
-                message=message,
-                message_id=message_id,
-                is_retry=True,  # Triggers checkpoint resume
-                retry_count=0,
-                message_source="cascade_resume",
-                silent=silent,  # Pass through silent flag
-                images=images,
-            )
-
-        gate_outcome: Any = None
-        gate_raised: BaseException | None = None
+        # W3: Wrap the entire body in try/finally so the per-instance
+        # cleanup (``_graph_tasks`` + ``_request_registry.unregister``)
+        # runs on EVERY exit path: clean completion, LeaseLostError,
+        # LeaseContention fallback, or unhandled exception. The
+        # recursive retry path (``_retry_attempt > 0``) has its own
+        # try/finally but its finally is a no-op — only the outermost
+        # call (``_retry_attempt == 0``) actually performs cleanup, so
+        # a long retry chain does not pop the entry repeatedly.
         try:
-            gate_outcome = await self._execution_gate.run(
-                instance_id=instance_id,
-                holder_id=f"resume:{message_id}",
-                # Reuse MESSAGE_JOB kind: the resume path is semantically
-                # a message-driven execution and MESSAGE_JOB is the kind
-                # the other dispatcher paths use. Avoids adding a new
-                # enum value for a single caller.
-                holder_kind=LeaseHolderKind.MESSAGE_JOB.value,
-                work_fn=_do_process,
-            )
-        except BaseException as e:  # noqa: BLE001 - LeaseLostError handled below
-            gate_raised = e
-
-        # 2. Handle LeaseLostError: the in-flight lease row was cleared
-        #    (e.g. by ``recover_stale_leases`` on another node). The
-        #    gate cancelled ``_do_process``; treat as a fatal resume
-        #    error: transition the instance to ERROR and fail the job.
-        if isinstance(gate_raised, LeaseLostError):
-            logger.error(
-                f"[RESUME] instance={instance_id[:8]}... lease lost "
-                f"mid-resume: {gate_raised} — marking instance ERROR and "
-                f"job FAILED"
-            )
-            try:
-                await self._job_queue_service.complete_job(
-                    old_job_id,
-                    DemandState.FAILED,
-                    error=f"Resume lease lost: {gate_raised}",
-                )
-            except Exception as e2:
-                logger.warning(
-                    f"Failed to mark job {old_job_id[:8]}... FAILED on "
-                    f"lease loss: {e2}"
-                )
-            try:
-                self._instance_repository.update_instance(
-                    instance_id,
-                    status=InstanceStatus.ERROR.value,
-                )
-            except Exception as e2:
-                logger.warning(
-                    f"Failed to mark instance {instance_id[:8]}... ERROR "
-                    f"on lease loss: {e2}"
-                )
-            return
-
-        # 3. Handle LeaseContention: another dispatcher (WorkerPool task
-        #    or MESSAGE job) holds the lease. Bounded retry with
-        #    exponential backoff; after MAX_RESUME_RETRIES failed
-        #    attempts, fall back to enqueue_message so the message lands
-        #    in a queue and the WorkerPool eventually picks it up once
-        #    the lease holder releases.
-        if gate_raised is None and isinstance(gate_outcome, LeaseContention):
-            if _retry_attempt < self.MAX_RESUME_RETRIES:
-                delay = self.RESUME_BACKOFF_DELAYS[
-                    min(_retry_attempt, len(self.RESUME_BACKOFF_DELAYS) - 1)
-                ]
-                logger.warning(
-                    f"resume_processing_job: instance "
-                    f"{instance_id[:8]}... lease held by "
-                    f"{gate_outcome.holder_kind}:"
-                    f"{gate_outcome.holder_id[:8]}... — "
-                    f"retry {_retry_attempt + 1}/"
-                    f"{self.MAX_RESUME_RETRIES} after {delay}s"
-                )
-                await asyncio.sleep(delay)
-                # Recursive retry with incremented attempt counter
-                await self._resume_processing_background(
+            # 1. Acquire ExecutionGate lease before driving graph.astream.
+            #    Race #5 fix: without this, a concurrent /resume call (or a
+            #    WorkerPool / JobQueue dispatch) would race on the langgraph
+            #    checkpoint and corrupt it.
+            async def _do_process():
+                return await self._process_message_with_tracking(
                     instance_id=instance_id,
                     message=message,
                     message_id=message_id,
-                    old_job_id=old_job_id,
-                    silent=silent,
+                    cancellation_token=cancellation_token,  # W4: enables cooperative pause
+                    is_retry=True,  # Triggers checkpoint resume
+                    retry_count=0,
+                    message_source="cascade_resume",
+                    silent=silent,  # Pass through silent flag
                     images=images,
-                    _retry_attempt=_retry_attempt + 1,
                 )
-            else:
+
+            gate_outcome: Any = None
+            gate_raised: BaseException | None = None
+            try:
+                gate_outcome = await self._execution_gate.run(
+                    instance_id=instance_id,
+                    holder_id=f"resume:{message_id}",
+                    # Reuse MESSAGE_JOB kind: the resume path is semantically
+                    # a message-driven execution and MESSAGE_JOB is the kind
+                    # the other dispatcher paths use. Avoids adding a new
+                    # enum value for a single caller.
+                    holder_kind=LeaseHolderKind.MESSAGE_JOB.value,
+                    work_fn=_do_process,
+                )
+            except BaseException as e:  # noqa: BLE001 - LeaseLostError handled below
+                gate_raised = e
+
+            # 2. Handle LeaseLostError: the in-flight lease row was cleared
+            #    (e.g. by ``recover_stale_leases`` on another node). The
+            #    gate cancelled ``_do_process``; treat as a fatal resume
+            #    error: transition the instance to ERROR and fail the job.
+            if isinstance(gate_raised, LeaseLostError):
                 logger.error(
-                    f"resume_processing_job: instance "
-                    f"{instance_id[:8]}... lease contention after "
-                    f"{self.MAX_RESUME_RETRIES} retries — falling back "
-                    f"to enqueue (source=resume_exhausted)"
+                    f"[RESUME] instance={instance_id[:8]}... lease lost "
+                    f"mid-resume: {gate_raised} — marking instance ERROR and "
+                    f"job FAILED"
                 )
-                # Final fallback: enqueue for WorkerPool to pick up
-                # later. The WorkerPool path will re-enter
-                # _process_message_with_tracking through its own gate
-                # acquire, so this is safe — the message will eventually
-                # be processed once the lease holder releases.
                 try:
-                    await self.enqueue_message(
-                        instance_id=instance_id,
-                        message=message,
-                        source="resume_exhausted",
-                        images=images,
+                    await self._job_queue_service.complete_job(
+                        old_job_id,
+                        DemandState.FAILED,
+                        error=f"Resume lease lost: {gate_raised}",
                     )
                 except Exception as e2:
-                    logger.error(
-                        f"[RESUME] enqueue_message fallback failed for "
-                        f"{instance_id[:8]}...: {type(e2).__name__}: {e2}"
+                    logger.warning(
+                        f"Failed to mark job {old_job_id[:8]}... FAILED on "
+                        f"lease loss: {e2}"
                     )
-            return
-
-        # 4. From here on, the gate either returned a clean result
-        #    (``gate_outcome`` is a MessageResult) or raised a
-        #    non-LeaseLostError exception. The original error
-        #    handler (job FAILED, instance ERROR) must run for the
-        #    latter; the easiest way is to re-raise inside the
-        #    existing try/except block below.
-        result = gate_outcome
-
-        try:
-            # Re-raise the gate exception so the existing error
-            # handler catches it. Only triggered when gate_raised is
-            # set (i.e. NOT LeaseLostError, which was handled above,
-            # and NOT a clean result).
-            if gate_raised is not None:
-                raise gate_raised
-
-            logger.info(f"[RESUME] instance={instance_id[:8]} background processing completed successfully")
-
-            # 2. Process child completion and notify parent
-            try:
-                await self._process_child_completion_and_notify_parent(instance_id, message_id)
-            except Exception as e:
-                logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
-
-            # 3. Check waiting_for > 0 — if still waiting for children, don't complete the job
-            skip_complete = False
-            try:
-                instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
-                if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
-                    skip_complete = True
-                elif instance and (getattr(instance, 'waiting_for', None) or 0) > 0:
-                    skip_complete = True
-            except Exception as e:
-                logger.warning(f"Failed to check instance status for completion: {e}")
-                skip_complete = True  # Safe: don't complete if we can't verify
-
-            if skip_complete:
-                logger.info(f"[RESUME] instance={instance_id[:8]} still waiting for children, job stays PROCESSING")
+                try:
+                    self._instance_repository.update_instance(
+                        instance_id,
+                        status=InstanceStatus.ERROR.value,
+                    )
+                except Exception as e2:
+                    logger.warning(
+                        f"Failed to mark instance {instance_id[:8]}... ERROR "
+                        f"on lease loss: {e2}"
+                    )
                 return
 
-            # 4. Complete the existing job (same job, not a new one!)
+            # 3. Handle LeaseContention: another dispatcher (WorkerPool task
+            #    or MESSAGE job) holds the lease. Bounded retry with
+            #    exponential backoff; after MAX_RESUME_RETRIES failed
+            #    attempts, fall back to enqueue_message so the message lands
+            #    in a queue and the WorkerPool eventually picks it up once
+            #    the lease holder releases.
+            if gate_raised is None and isinstance(gate_outcome, LeaseContention):
+                if _retry_attempt < self.MAX_RESUME_RETRIES:
+                    delay = self.RESUME_BACKOFF_DELAYS[
+                        min(_retry_attempt, len(self.RESUME_BACKOFF_DELAYS) - 1)
+                    ]
+                    logger.warning(
+                        f"resume_processing_job: instance "
+                        f"{instance_id[:8]}... lease held by "
+                        f"{gate_outcome.holder_kind}:"
+                        f"{gate_outcome.holder_id[:8]}... — "
+                        f"retry {_retry_attempt + 1}/"
+                        f"{self.MAX_RESUME_RETRIES} after {delay}s"
+                    )
+                    await asyncio.sleep(delay)
+                    # Recursive retry with incremented attempt counter.
+                    # The inner call's finally is a no-op (it only acts
+                    # on _retry_attempt == 0) — cleanup happens once,
+                    # in the outermost call's finally below.
+                    await self._resume_processing_background(
+                        instance_id=instance_id,
+                        message=message,
+                        message_id=message_id,
+                        old_job_id=old_job_id,
+                        silent=silent,
+                        images=images,
+                        cancellation_token=cancellation_token,
+                        _retry_attempt=_retry_attempt + 1,
+                    )
+                else:
+                    logger.error(
+                        f"resume_processing_job: instance "
+                        f"{instance_id[:8]}... lease contention after "
+                        f"{self.MAX_RESUME_RETRIES} retries — falling back "
+                        f"to enqueue (source=resume_exhausted)"
+                    )
+                    # W2: Mark the original PROCESSING job as CANCELLED
+                    # BEFORE the fallback enqueue so it does not sit
+                    # orphaned in PROCESSING state. Best-effort: any
+                    # failure here logs a warning and lets the
+                    # StaleTaskRecovery path clean up the row, rather
+                    # than crashing the resume path. Mirrors the
+                    # pattern used at line ~2644 for multiple-PROCESSING
+                    # jobs in resume_processing_job itself.
+                    try:
+                        await self._job_queue_service.complete_job(
+                            old_job_id,
+                            DemandState.CANCELLED,
+                            error="Superseded by resume_exhausted fallback",
+                        )
+                    except Exception as cancel_err:
+                        logger.warning(
+                            f"[RESUME] failed to mark old_job "
+                            f"{old_job_id[:8]}... as CANCELLED before "
+                            f"fallback enqueue: "
+                            f"{type(cancel_err).__name__}: {cancel_err}"
+                        )
+                    # Final fallback: enqueue for WorkerPool to pick up
+                    # later. The WorkerPool path will re-enter
+                    # _process_message_with_tracking through its own gate
+                    # acquire, so this is safe — the message will eventually
+                    # be processed once the lease holder releases.
+                    # W1: Include ``resume_mode=True`` in the metadata so
+                    # ``task_processor.py`` treats the message as a
+                    # checkpoint resume (``is_retry=True``) instead of a
+                    # fresh user prompt. Without this the LLM sees the
+                    # resume content as a brand-new user message — a
+                    # silent semantic regression.
+                    try:
+                        await self.enqueue_message(
+                            instance_id=instance_id,
+                            message=message,
+                            source="resume_exhausted",
+                            images=images,
+                            metadata={"resume_mode": True, "silent": silent},
+                        )
+                    except Exception as e2:
+                        logger.error(
+                            f"[RESUME] enqueue_message fallback failed for "
+                            f"{instance_id[:8]}...: {type(e2).__name__}: {e2}"
+                        )
+                return
+
+            # 4. From here on, the gate either returned a clean result
+            #    (``gate_outcome`` is a MessageResult) or raised a
+            #    non-LeaseLostError exception. The original error
+            #    handler (job FAILED, instance ERROR) must run for the
+            #    latter; the easiest way is to re-raise inside the
+            #    existing try/except block below.
+            result = gate_outcome
+
             try:
-                await self._job_queue_service.complete_job(
-                    old_job_id,
-                    DemandState.COMPLETED,
-                    result_summary=result.content if result else None,
-                )
-                logger.info(f"[RESUME] instance={instance_id[:8]} job {old_job_id[:8]}... marked COMPLETED")
+                # Re-raise the gate exception so the existing error
+                # handler catches it. Only triggered when gate_raised is
+                # set (i.e. NOT LeaseLostError, which was handled above,
+                # and NOT a clean result).
+                if gate_raised is not None:
+                    raise gate_raised
+
+                logger.info(f"[RESUME] instance={instance_id[:8]} background processing completed successfully")
+
+                # 2. Process child completion and notify parent
+                try:
+                    await self._process_child_completion_and_notify_parent(instance_id, message_id)
+                except Exception as e:
+                    logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
+
+                # 3. Check waiting_for > 0 — if still waiting for children, don't complete the job
+                skip_complete = False
+                try:
+                    instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
+                    if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
+                        skip_complete = True
+                    elif instance and (getattr(instance, 'waiting_for', None) or 0) > 0:
+                        skip_complete = True
+                except Exception as e:
+                    logger.warning(f"Failed to check instance status for completion: {e}")
+                    skip_complete = True  # Safe: don't complete if we can't verify
+
+                if skip_complete:
+                    logger.info(f"[RESUME] instance={instance_id[:8]} still waiting for children, job stays PROCESSING")
+                    return
+
+                # 4. Complete the existing job (same job, not a new one!)
+                try:
+                    await self._job_queue_service.complete_job(
+                        old_job_id,
+                        DemandState.COMPLETED,
+                        result_summary=result.content if result else None,
+                    )
+                    logger.info(f"[RESUME] instance={instance_id[:8]} job {old_job_id[:8]}... marked COMPLETED")
+                except Exception as e:
+                    logger.warning(f"Job {old_job_id[:8]}... already transitioned: {e}")
+
             except Exception as e:
-                logger.warning(f"Job {old_job_id[:8]}... already transitioned: {e}")
+                logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")
+                # Mark the job as FAILED on failure
+                try:
+                    await self._job_queue_service.complete_job(
+                        old_job_id,
+                        DemandState.FAILED,
+                        error=f"Resume failed: {e}"
+                    )
+                except Exception:
+                    pass
 
-        except Exception as e:
-            logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")
-            # Mark the job as FAILED on failure
-            try:
-                await self._job_queue_service.complete_job(
-                    old_job_id,
-                    DemandState.FAILED,
-                    error=f"Resume failed: {e}"
-                )
-            except Exception:
-                pass
-
-            # Update instance status to ERROR
-            try:
-                self._instance_repository.update_instance(
-                    instance_id,
-                    status=InstanceStatus.ERROR.value,
-                )
-                logger.info(f"[RESUME] instance={instance_id[:8]} status set to ERROR")
-            except Exception:
-                pass
+                # Update instance status to ERROR
+                try:
+                    self._instance_repository.update_instance(
+                        instance_id,
+                        status=InstanceStatus.ERROR.value,
+                    )
+                    logger.info(f"[RESUME] instance={instance_id[:8]} status set to ERROR")
+                except Exception:
+                    pass
+        finally:
+            # W3: Per-instance cleanup runs exactly once — on the
+            # outermost call. Recursive retry calls (handled by the
+            # ``_retry_attempt + 1`` recursion above) also have this
+            # finally, but their ``_retry_attempt`` is non-zero so the
+            # block is a no-op for them. Only the outermost call
+            # (``_retry_attempt == 0``) actually drops the
+            # ``_graph_tasks`` entry and unregisters the request.
+            #
+            # Without this the fallback / lease-lost / exception paths
+            # leave a stale ``_graph_tasks[instance_id]`` entry behind,
+            # blocking the next resume call (which short-circuits to
+            # ``"already_resuming"`` because ``existing_task`` is not
+            # done).
+            if _retry_attempt == 0:
+                try:
+                    self._graph_tasks.pop(instance_id, None)
+                except Exception as cleanup_err:
+                    logger.warning(
+                        f"[RESUME] failed to pop _graph_tasks entry for "
+                        f"{instance_id[:8]}...: {type(cleanup_err).__name__}: "
+                        f"{cleanup_err}"
+                    )
+                # W4: Unregister from the request registry so the CTS
+                # created by ``resume_processing_job`` is released. If
+                # the registry isn't present (some test doubles skip
+                # it), swallow the AttributeError so the cleanup path
+                # never raises.
+                try:
+                    self._request_registry.unregister(message_id)
+                except AttributeError:
+                    pass
+                except Exception as unreg_err:
+                    logger.warning(
+                        f"[RESUME] failed to unregister request "
+                        f"{message_id[:8]}...: "
+                        f"{type(unreg_err).__name__}: {unreg_err}"
+                    )
 
     async def _publish_instance_lifecycle_event(
         self,

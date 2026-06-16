@@ -15,6 +15,7 @@ import logging
 from daemon.manager import InstanceManager
 from daemon.config import Config
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.request_registry import ActiveRequestRegistry
 from daemon.services.job_queue_service import DemandState
 
 
@@ -95,6 +96,11 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     # Mock _process_child_completion_and_notify_parent
     manager._process_child_completion_and_notify_parent = AsyncMock()
     manager._graph_tasks = {}
+    # W4: real registry so register()/unregister() return real
+    # CancellationTokenSource. ``resume_processing_job`` calls
+    # ``register`` and the resume background task calls ``unregister``
+    # in its finally block.
+    manager._request_registry = ActiveRequestRegistry()
     return manager
 
 
@@ -110,6 +116,7 @@ def instance_manager(mock_manager):
     manager._process_message_with_tracking = mock_manager._process_message_with_tracking
     manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
     manager._graph_tasks = {}
+    manager._request_registry = mock_manager._request_registry
     return manager
 
 
