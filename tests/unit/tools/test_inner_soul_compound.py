@@ -575,10 +575,10 @@ class TestShouldRedirectToRagCompound:
         classification = {"type": "identity", "targets": ["soul"]}
         assert _should_redirect_to_rag(["soul"], classification, explicit_target=False) is False
 
-    def test_knowledge_with_memory_redirects(self, rag_enabled):
-        """Knowledge classification with memory target should redirect."""
-        classification = {"type": "knowledge", "targets": ["memory"]}
-        assert _should_redirect_to_rag(["memory"], classification, explicit_target=False) is True
+    def test_pattern_with_memory_redirects(self, rag_enabled):
+        """Pattern classification with memory target should redirect (Phase 3: 'knowledge' removed)."""
+        classification = {"type": "pattern", "targets": ["memories"]}
+        assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
     def test_project_knowledge_always_redirects(self, rag_enabled):
         """Project knowledge always redirects (special case)."""

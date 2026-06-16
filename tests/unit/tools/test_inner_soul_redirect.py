@@ -40,7 +40,8 @@ class TestRAGRedirectConstants:
 
     def test_knowledge_classifications_contains_expected_types(self):
         """Verify _KNOWLEDGE_CLASSIFICATIONS contains all knowledge-oriented types."""
-        expected = {"knowledge", "pattern", "event", "skill", "mistake", "project_knowledge"}
+        # Phase 3: 'knowledge' category was removed; 'pattern'/'event'/'skill'/'mistake' cover the use cases
+        expected = {"pattern", "event", "skill", "mistake", "project_knowledge"}
         assert _KNOWLEDGE_CLASSIFICATIONS == expected
 
 
@@ -123,14 +124,14 @@ class TestShouldRedirectToRag:
     # Should redirect (knowledge-oriented with RAG targets)
     # -------------------------------------------------------------------------
 
-    def test_knowledge_classification_with_memory_target_redirects(self, rag_enabled):
-        """knowledge classification with memory target should redirect."""
-        classification = {"type": "knowledge", "targets": ["memory"]}
-        assert _should_redirect_to_rag(["memory"], classification, explicit_target=False) is True
+    def test_pattern_classification_with_memory_target_redirects(self, rag_enabled):
+        """pattern classification with memory target should redirect (Phase 3: 'knowledge' removed)."""
+        classification = {"type": "pattern", "targets": ["memories"]}
+        assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
-    def test_knowledge_classification_with_memories_target_redirects(self, rag_enabled):
-        """knowledge classification with memories target should redirect."""
-        classification = {"type": "knowledge", "targets": ["memories"]}
+    def test_skill_classification_with_memory_target_redirects(self, rag_enabled):
+        """skill classification with memory target should redirect (Phase 3: 'knowledge' removed)."""
+        classification = {"type": "skill", "targets": ["memories"]}
         assert _should_redirect_to_rag(["memories"], classification, explicit_target=False) is True
 
     def test_pattern_classification_with_memories_target_redirects(self, rag_enabled):
@@ -218,8 +219,8 @@ class TestShouldRedirectToRag:
         assert _should_redirect_to_rag(["workflow", "memories"], classification, explicit_target=False) is False
 
     def test_reject_filtered_out_with_only_rag_targets_redirects(self, rag_enabled):
-        """After REJECT is filtered out, only RAG targets remain -> redirect."""
-        classification = {"type": "knowledge", "targets": ["memories", "REJECT"]}
+        """After REJECT is filtered out, only RAG targets remain -> redirect (Phase 3: 'knowledge' removed)."""
+        classification = {"type": "pattern", "targets": ["memories", "REJECT"]}
         # REJECT gets filtered, leaving only "memories"
         assert _should_redirect_to_rag(["memories", "REJECT"], classification, explicit_target=False) is True
 
@@ -253,11 +254,11 @@ class TestShouldRedirectToRag:
 class TestClassifyRequest:
     """Tests for the _classify_request() function."""
 
-    def test_knowledge_classification_i_learned_that(self):
-        """Request with 'I learned that' should be classified as knowledge."""
+    def test_learned_that_classification_falls_to_event(self):
+        """Request with 'I learned that' is no longer 'knowledge' (Phase 3); falls to event/mistake/pattern via persona exemption."""
         result = _classify_request("I learned that early testing catches bugs")
-        assert result["type"] == "knowledge"
-        assert "memory" in result["targets"] or "memories" in result["targets"]
+        assert result["type"] in ("mistake", "pattern", "event")
+        assert "memories" in result["targets"]
 
     def test_identity_classification_my_name_is(self):
         """Request with 'my name is' should be classified as identity."""
@@ -289,8 +290,8 @@ class TestClassifyRequest:
         assert "user" in result["targets"]
 
     def test_pattern_classification_pattern_colon(self):
-        """Request with 'Pattern:' should be classified as pattern."""
-        result = _classify_request("Pattern: always when we use k8s")
+        """Request with 'Pattern:' should be classified as pattern (Phase 3: input avoids project terms)."""
+        result = _classify_request("Pattern: always when we rush, we make mistakes")
         assert result["type"] == "pattern"
         assert "memories" in result["targets"]
 
@@ -311,8 +312,8 @@ class TestClassifyRequest:
         assert result["type"] == "event"
 
     def test_skill_classification_i_can_now(self):
-        """Request with 'I can now' should be classified as skill."""
-        result = _classify_request("I can now do Docker deployments")
+        """Request with 'I can now' should be classified as skill (Phase 3: input avoids project terms)."""
+        result = _classify_request("I can now write async tests")
         assert result["type"] == "skill"
         assert "memories" in result["targets"]
 
@@ -928,10 +929,11 @@ class TestClassifyRequestIntentParameter:
         # No pattern match
         no_match = _classify_request("some random text", intent="remember")
         assert no_match["all_matches"] == []
-        
-        # Pattern match - intent should be ignored
+
+        # Pattern match - intent should be ignored (Phase 3: 'knowledge' removed; falls to 'event'/'memories')
         with_match = _classify_request("Remember that the sky is blue", intent="remember")
-        assert "knowledge" in with_match["type"] or "memory" in with_match["targets"]
+        assert with_match["type"] == "event"
+        assert "memories" in with_match["targets"]
 
     def test_classify_intent_parameter_is_optional(self):
         """Test that _classify_request works without intent parameter (backward compatible)."""
