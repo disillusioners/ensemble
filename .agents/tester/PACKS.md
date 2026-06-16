@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 114 packs
-- Unit: 99 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 116 packs
+- Unit: 101 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -30,6 +30,10 @@
 | infra_bootstrap_unit_test | tests/unit/test_infra_bootstrap.py | Type registry seeding: _bootstrap_infra_types() called on init, 9 types created, idempotent, error-tolerant, correct log levels | 2 min | 2026-06-15 | ✅ PASS (10/10, feature/infra-info, commit 3d3f8b4) |
 | infra_tools_unit_test | tests/unit/test_infra_tools.py | Infra tool layer: all 9 tools (asset CRUD, type register/list, history), audit auto-population, project isolation across all scoped tools, factory returns 9 tools, error handling | 2 min | 2026-06-15 | ✅ PASS (47/47, feature/infra-info, commit 4b4dcd4, 0 bugs found) |
 | status_alias_mapping_unit_test | tests/job_queue/test_status_alias_mapping.py | Job status alias mapping: normalize_statuses() unit tests (alias, case-insensitive, canonical, multiple, unknown, None/empty) + service integration (list_jobs with alias) + HTTP endpoint (GET /api/jobs?status=running) | 2 min | 2026-06-15 | ✅ PASS (24/24, fix/job-status-alias-mapping, commit b429057, 0 failures) |
+| inner_soul_rejection_unit_test | tests/unit/tools/test_inner_soul_rejection.py | Inner_soul Phase 3 rejection: project content REJECTED (git ops, task completion, code changes, tech stack, bare status), classification ordering, _format_project_rejection format, REJECT handler integration (RAG enabled/disabled), compound per-part rejection | 2 min | 2026-06-16 | ✅ PASS (38/38, feature/inner-soul-reform, commit 1307eb25, 0 failures) |
+| inner_soul_persona_preservation_unit_test | tests/unit/tools/test_inner_soul_persona_preservation.py | Inner_soul Phase 3 persona preservation: 25+ legitimate persona reflections NOT rejected (I should..., I am..., I learned..., My approach..., Be more..., User prefers..., etc.) + boundary contrast (persona vs project with same keyword) | 2 min | 2026-06-16 | ✅ PASS (28/28, feature/inner-soul-reform, commit 1307eb25, 0 failures) |
+| inner_soul_redirect_unit_test | tests/unit/tools/test_inner_soul_redirect.py | Inner_soul RAG redirect: _should_redirect_to_rag logic, _classify_request (10 types), _format_rag_redirect format, full tool behavior with redirect, intent parameter, target="memories" routing, memory limit error messages. Phase 3: 8 tests fixed for knowledge category removal | 2 min | 2026-06-16 | ✅ PASS (85/85, feature/inner-soul-reform, commit 38de7523, 0 failures) |
+| inner_soul_compound_unit_test | tests/unit/tools/test_inner_soul_compound.py | Inner_soul compound request: _split_compound_request (AND/semicolon/sentence), compound classification end-to-end, compound+RAG redirect interaction, edge cases (empty, long, target=memories, intent). Phase 3: 1 test fixed for knowledge category removal | 2 min | 2026-06-16 | ✅ PASS (51/51, feature/inner-soul-reform, commit 38de7523, 0 failures) |
 | frontend_unit_test | frontend/jest.config.js | Angular frontend full suite (models, services, SSE, components, message-input image upload, api.service, mcp-server CRUD, dialog template pills + JSON editor, **test connection button + SSRF**, **notification.service WAV/audio unlock/cleanup**, **defer queue visibility**, **scroll preservation + refresh button**, **mergeInstances sort order (new at top)**, **sortByCreatedAtDesc utility (9 tests)**, **ensureSystemQueues service method (2 tests)**, **notification sound exclusion (7 tests)**, **jobs page remember project (11+ tests)**, **pause/resume toggle visibility**, **project-aware URL routing (77 tests)**, **instance_created SSE queue + KB filtering**) | 2 min | 2026-05-30 | ✅ PASS (800/800, instance_created SSE feature, 0 regressions) |
 | worker_notification_test | tests/test_worker_notification.py | Worker notification mechanism, race conditions, lifecycle integration (real threads) | 2 min | 2026-04-23 | ✅ PASS (14 passed, Phase 6 no regression) |
 | db_connection_repository_unit_test | tests/test_db_connection_repository.py | DbConnectionRepository: model, CRUD, credential isolation, unique constraint, factory | 2 min | 2026-06-14 | ✅ PASS (33/33, feature/db-tools, 0 failures) |
