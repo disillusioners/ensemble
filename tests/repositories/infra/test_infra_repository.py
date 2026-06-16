@@ -25,6 +25,7 @@ from daemon.repositories.infra import (
     INFRA_TYPE_DEFINITIONS,
     SQLModelInfraRepository,
 )
+from daemon.repositories.infra.types import JSONBType
 
 
 # =============================================================================
@@ -2153,4 +2154,373 @@ class TestGetAssetProjectIsolation:
         fetched = infra_repository.get_asset(asset.id)
         assert fetched is not None
         assert fetched.id == asset.id
+
+
+# =============================================================================
+# Group 17: Cross-dialect snapshot column regression
+# =============================================================================
+#
+# Bug history
+# ----------
+# The ``snapshot`` column on ``InfraAssetHistory`` was once defined
+# with plain ``Column(JSON)`` (or equivalent), NOT the dialect-aware
+# ``JSONBType`` used by every other JSON column in the file. The
+# repository's ``_json_eq_predicate`` builds a JSON path expression
+# via ``column[key].astext`` (the JSONB ``->>`` operator) — this
+# attribute is provided by ``JSONBType`` (which resolves to
+# ``JSONB`` on PostgreSQL and ``JSON`` on SQLite via the
+# ``load_dialect_impl`` hook in ``daemon/repositories/infra/types.py``).
+#
+# Plain SQLAlchemy ``JSON`` has no ``.astext`` attribute, so the
+# query ``snapshot['id'].astext == 'X'`` raised
+# ``AttributeError: 'JSON' object has no attribute 'astext'`` on
+# the deleted-asset history path (the snapshot-id fallback branch
+# in ``get_history``). The fix was to type the column as
+# ``JSONBType``, matching the other JSON columns. This group pins
+# that fix in place at three levels: schema, query, and result.
+
+
+class TestSnapshotColumnJSONBTypeRegression:
+    """Schema-level guard: ``snapshot`` must use ``JSONBType``.
+
+    Catches a regression where the column is retyped as plain
+    ``Column(JSON)`` (or the imports are silently swapped). The
+    fix is a single line in
+    ``daemon/repositories/infra/models.py`` — the rest of the
+    codebase relies on it.
+    """
+
+    def test_snapshot_column_type_is_jsonb_type(self):
+        """``infra_asset_history.snapshot`` is a ``JSONBType`` column.
+
+        ``JSONBType`` is a ``TypeDecorator`` defined in
+        ``daemon/repositories/infra/types.py`` that maps to
+        ``JSONB`` on PostgreSQL and ``JSON`` on SQLite. Plain
+        SQLAlchemy ``JSON`` would break the
+        ``column[key].astext`` path used by
+        ``_json_eq_predicate`` on the snapshot-id fallback.
+        """
+        column = InfraAssetHistory.__table__.columns["snapshot"]
+        assert isinstance(column.type, JSONBType), (
+            f"InfraAssetHistory.snapshot column type is "
+            f"{type(column.type).__module__}.{type(column.type).__name__}, "
+            f"expected daemon.repositories.infra.types.JSONBType. "
+            f"Plain SQLAlchemy JSON does not implement .astext and "
+            f"breaks the get_history snapshot-id fallback on SQLite."
+        )
+
+    def test_snapshot_column_matches_other_json_columns(self):
+        """``snapshot`` uses the same type as other JSON columns.
+
+        Sanity check: the column type used for ``snapshot`` is the
+        same class as the one used for ``InfraAsset.attributes``,
+        ``InfraAsset.relationships``, and
+        ``InfraAssetType.schema_doc``. If this fails, the column
+        has been retyped inconsistently.
+        """
+        snapshot_type = type(InfraAssetHistory.__table__.columns["snapshot"].type)
+        attributes_type = type(InfraAsset.__table__.columns["attributes"].type)
+        relationships_type = type(InfraAsset.__table__.columns["relationships"].type)
+        schema_doc_type = type(InfraAssetType.__table__.columns["schema_json"].type)
+        assert snapshot_type is attributes_type, (
+            f"snapshot type {snapshot_type.__name__} differs from "
+            f"attributes type {attributes_type.__name__}"
+        )
+        assert snapshot_type is relationships_type
+        assert snapshot_type is schema_doc_type
+
+    def test_history_json_columns_all_use_jsonb_type(self):
+        """All four history JSON columns (snapshot, changed_fields, old_values, new_values) use ``JSONBType``.
+
+        Guards against the same bug class reappearing on the
+        other three history columns.
+        """
+        for col_name in ("snapshot", "changed_fields", "old_values", "new_values"):
+            column = InfraAssetHistory.__table__.columns[col_name]
+            assert isinstance(column.type, JSONBType), (
+                f"InfraAssetHistory.{col_name} column type is "
+                f"{type(column.type).__name__}, expected JSONBType"
+            )
+
+
+class TestGetHistoryDeletedAssetRegression:
+    """Behavior-level guard: ``get_history`` does not raise on deleted assets.
+
+    The deleted-asset path is the only path that exercises the
+    ``snapshot->>'id'`` branch of the query. With a column typed
+    as plain ``JSON`` (the regressed state), this branch raises
+    ``AttributeError: 'JSON' object has no attribute 'astext'`` on
+    SQLite. The tests below wrap the call in an explicit
+    ``try/except`` so a regression fails with a clear message
+    pointing at the snapshot column type, not a generic
+    ``AttributeError`` later in the assertion chain.
+    """
+
+    def test_get_history_after_delete_does_not_raise_attribute_error(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """``get_history`` on a deleted asset must not raise ``AttributeError``.
+
+        Regression guard for the cross-dialect snapshot column
+        bug: the deleted-asset path matches via
+        ``snapshot->>'id'`` (the ``asset_id`` column is NULL
+        after the FK SET NULL fires). If the ``snapshot`` column
+        is not typed as ``JSONBType``, the SQLAlchemy expression
+        ``column['id'].astext`` raises ``AttributeError`` on
+        SQLite (and on PostgreSQL when the column is plain
+        ``JSON`` rather than ``JSONB``).
+        """
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="regression-no-attr-err",
+            attributes={"env": "prod", "cpus": 4},
+        )
+        # Capture the id so the history query can find the
+        # snapshot-id branch's match value (the asset itself
+        # is gone after delete_asset, so the snapshot is the
+        # only surviving identifier).
+        original_id = asset.id
+        infra_repository.delete_asset(original_id)
+
+        # The actual regression check. The bug manifests as
+        # ``AttributeError: 'JSON' object has no attribute
+        # 'astext'`` (or similar) raised from inside
+        # ``session.exec`` when SQLAlchemy compiles the
+        # ``snapshot['id'].astext`` expression against a plain
+        # ``JSON`` column on SQLite.
+        try:
+            history = infra_repository.get_history(original_id)
+        except AttributeError as exc:
+            pytest.fail(
+                f"get_history raised AttributeError on a deleted asset: {exc!r}. "
+                f"This is the cross-dialect snapshot column regression: the "
+                f"``snapshot`` column on InfraAssetHistory must use "
+                f"``JSONBType`` (defined in daemon/repositories/infra/types.py) "
+                f"so that the snapshot-id fallback query path "
+                f"``column['id'].astext == 'X'`` compiles on both PostgreSQL "
+                f"and SQLite."
+            )
+
+        # Sanity: the call returned something — empty would be
+        # the only other failure mode and would mean the
+        # snapshot-id branch was removed.
+        assert len(history) >= 1, (
+            "get_history returned an empty list for a deleted asset "
+            "with a 'created' and a 'deleted' history row. "
+            "The snapshot-id fallback branch is not matching."
+        )
+        change_types = {h.change_type for h in history}
+        assert "created" in change_types
+        assert "deleted" in change_types
+
+    def test_get_history_after_delete_with_project_id_filter_does_not_raise(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """``get_history(asset_id, project_id=...)`` does not raise on a deleted asset.
+
+        Variant of the above that also exercises the
+        project-isolation AND-chain (the ``and_(asset_match,
+        project_id_match)`` branch in the repository) on the
+        snapshot-id path. Both ``snapshot`` and ``project_id``
+        must be present and well-typed for this to compile.
+        """
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="regression-iso-deleted",
+        )
+        infra_repository.delete_asset(asset.id)
+
+        try:
+            history = infra_repository.get_history(
+                asset.id, project_id=project_id
+            )
+        except AttributeError as exc:
+            pytest.fail(
+                f"get_history(asset_id, project_id=...) raised AttributeError "
+                f"on a deleted asset: {exc!r}. The snapshot column is not "
+                f"using JSONBType."
+            )
+
+        assert len(history) >= 1
+        # The project filter is the denormalized column, not
+        # a JOIN — verify it actually filtered (no cross-project
+        # leakage even on the fallback branch).
+        assert all(h.project_id == project_id for h in history)
+
+
+class TestGetHistorySnapshotIdFallbackRegression:
+    """Explicit snapshot-id fallback path coverage.
+
+    The ``get_history`` query is
+    ``WHERE asset_id = X OR snapshot->>'id' = X``. The second
+    branch is what makes the method work for deleted assets:
+    after the FK SET NULL fires, ``asset_id`` is NULL and the
+    only way to find the row is via the snapshot. These tests
+    prove the snapshot branch is exercised (not just that the
+    call doesn't raise) by asserting on the returned rows'
+    ``asset_id is None`` and ``snapshot["id"]`` fields.
+    """
+
+    def test_snapshot_id_fallback_finds_deleted_asset_history(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """After delete, every returned row has ``asset_id is None``.
+
+        If the returned row's ``asset_id`` were not None, the
+        match would have gone through the ``asset_id = X``
+        branch (no fallback). The test then cannot distinguish
+        "fallback works" from "match worked by accident on
+        ``asset_id``". By asserting ``asset_id is None`` on
+        every returned row, the test pins the fallback branch
+        as the *only* path that could have produced the
+        result.
+        """
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="snapshot-fallback-target",
+            attributes={"cpu": 8},
+        )
+        original_id = asset.id
+        infra_repository.delete_asset(original_id)
+
+        history = infra_repository.get_history(original_id)
+
+        # At least one row must exist (the ``deleted`` row);
+        # the ``created`` row is the one the repository writes
+        # *before* the FK SET NULL, so its ``asset_id`` is
+        # the original id, not None.
+        deleted_rows = [h for h in history if h.change_type == "deleted"]
+        assert len(deleted_rows) == 1
+        deleted_row = deleted_rows[0]
+
+        # The SET NULL FK is the only thing that could have
+        # nulled ``asset_id`` here. If this fails, the FK
+        # constraint was changed to CASCADE — which would
+        # cascade-delete the audit row along with the asset.
+        assert deleted_row.asset_id is None, (
+            f"Deleted history row has asset_id={deleted_row.asset_id!r}, "
+            f"expected None. The ON DELETE SET NULL FK on "
+            f"infra_asset_history.asset_id is not firing."
+        )
+
+        # The snapshot branch matches on snapshot->>'id'. This
+        # assertion proves (a) the snapshot stored the
+        # original id and (b) the fallback query is what
+        # located the row.
+        assert deleted_row.snapshot is not None
+        assert deleted_row.snapshot["id"] == original_id, (
+            f"Deleted history row's snapshot.id={deleted_row.snapshot.get('id')!r}, "
+            f"expected {original_id!r}. The snapshot is what carries the "
+            f"asset id once asset_id is NULL."
+        )
+
+    def test_snapshot_id_fallback_finds_orphan_history_row(
+        self, engine, infra_repository, seed_projects, project_id
+    ):
+        """Manually nullify ``asset_id`` and confirm the fallback still finds the row.
+
+        Strongest form of the test: bypass ``delete_asset`` and
+        insert a history row directly with ``asset_id = None``
+        and a synthetic id that no real asset has. The
+        ``asset_id`` branch cannot match (no row has that
+        ``asset_id``); the snapshot branch is the only path
+        that could return anything. This test cannot be
+        satisfied by a regression that drops the snapshot
+        branch from the query, no matter how the rest of the
+        call site is shaped.
+        """
+        import uuid
+        from sqlmodel import Session
+
+        # A synthetic id that no real asset will have. The
+        # ``asset_id`` branch in ``get_history`` (which compares
+        # ``infra_asset_history.asset_id == X``) cannot match
+        # this — no row has that ``asset_id`` — so the snapshot
+        # branch is the only path that could return anything.
+        target_id = str(uuid.uuid4())
+
+        # Insert a history row with ``asset_id = None`` and
+        # ``snapshot.id = target_id``. The FK is nullable, so
+        # an orphaned row is legal at the schema level.
+        # ``InfraAsset`` is never created here, so the FK
+        # target does not exist — the row stands alone, exactly
+        # the shape of a row whose FK was nulled by any means
+        # (the ``ON DELETE SET NULL`` trigger, a manual
+        # migration, an admin query).
+        with Session(engine) as session:
+            session.add(
+                InfraAssetHistory(
+                    asset_id=None,
+                    project_id=project_id,
+                    change_type=InfraChangeType.CREATED.value,
+                    snapshot={
+                        "id": target_id,
+                        "name": "orphan-asset",
+                        "type": "server",
+                        "project_id": project_id,
+                    },
+                )
+            )
+            session.commit()
+
+        # The call must find the row via the snapshot branch
+        # alone.
+        history = infra_repository.get_history(target_id)
+
+        assert len(history) == 1, (
+            f"Expected exactly 1 history row found via snapshot-id "
+            f"fallback, got {len(history)}. The fallback branch "
+            f"``snapshot->>'id' = X`` did not match the synthetic id."
+        )
+        row = history[0]
+        assert row.asset_id is None, (
+            f"Orphan history row has asset_id={row.asset_id!r}, "
+            f"expected None. The test is supposed to exercise the "
+            f"snapshot-id fallback, which is only relevant when "
+            f"asset_id is NULL."
+        )
+        assert row.snapshot["id"] == target_id
+
+    def test_snapshot_id_fallback_handles_null_snapshot_safely(
+        self, engine, infra_repository, seed_projects, project_id
+    ):
+        """A history row with ``snapshot = NULL`` does not crash the snapshot branch.
+
+        Edge case: the model allows ``snapshot`` to be NULL
+        (the column is nullable). When ``asset_id`` is also
+        NULL, the snapshot branch must not crash with a NULL
+        dereference — it should simply not match the row. The
+        ``get_history`` call returns ``[]`` rather than
+        raising.
+        """
+        from sqlmodel import Session
+
+        # Write a row with both asset_id and snapshot NULL.
+        with Session(engine) as session:
+            session.add(
+                InfraAssetHistory(
+                    asset_id=None,
+                    project_id=project_id,
+                    change_type=InfraChangeType.CREATED.value,
+                    snapshot=None,
+                )
+            )
+            session.commit()
+
+        # Querying for any id should not raise, even though
+        # the snapshot branch is exercised against a NULL
+        # snapshot (json_extract on NULL returns NULL, which
+        # is not equal to any string — safe).
+        try:
+            history = infra_repository.get_history("any-id-xyz")
+        except AttributeError as exc:
+            pytest.fail(
+                f"get_history raised AttributeError on a row with "
+                f"NULL snapshot: {exc!r}. The snapshot-id branch must "
+                f"handle NULL snapshots gracefully."
+            )
+        assert history == []
 
