@@ -244,8 +244,4 @@ def read_context_file(context_key: str, filename: str) -> str | None:
     if not target.is_file():
         return None
 
-    try:
-        return target.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        logger.debug("read_context_file: read failed for %s/%s: %s", context_key, filename, e)
-        return None
+    return _read_context_file_text(target)
