@@ -172,25 +172,36 @@ CLASSIFICATION_RULES = {
             r"\b(completed?|finished?|done\s+with|shipped?)\s+(a|the|my)?\s*(task|feature|build|deploy|deploy?ment|release|sprint|milestone)\b",
             r"\bsetup\s+(complete|done|finished)\b",
             # --- NEW: Code changes (compound: change-verb + code-noun) ---
-            r"\b(refactored?|rewrote?|updated?|modified?|fixed|patched?|added?|removed?|deleted?)\s+(the|a|my)?\s*(code|api|endpoint|route|schema|database|table|model|function|class|method|component|service|controller|handler)\b",
+            r"\b(refactored?|rewrote?|updated?|modified?|fixed|patched?|added?|removed?|deleted?)\s+(the|a|my)?\s*(\w+\s+)*?(code|api|endpoint|route|schema|database|table|model|function|class|method|component|service|controller|handler)\b",
             r"\bbug\s*(fix|fixed|fixing)\b",
             r"\b(code|api|database|schema)\s+(change|update|fix|refactor|migration)\b",
             r"\bcreated?\s+(a|the|new)\s+\w+\.(py|js|ts|tsx|jsx|md|json|yaml|yml|toml|sql|go|rs|java)\b",
+            r"\bcreated?\s+(a\s+|the\s+)*new\s+\w+\.(py|js|ts|tsx|jsx|md|json|yaml|yml|toml|sql|go|rs|java)\b",
             # --- NEW: Deployment status (compound: deploy-verb + target) ---
             r"\bdeployed?\s+(to|on|in)\s+\S+",
             r"\bdeployed?\s+(a|the|new)\s+\S+",
             r"\bbuilt?\s+(and\s+)?deployed?\b",
+            # --- NEW: Bare deployment/CI status reports (G1 fix) ---
+            r"\bdeploy\s+(is\s+)?(done|complete|finished|live|successful)\b",
+            r"\b(ci/cd|pipeline)\s+(is\s+)?(green|passing|broken|failing|down|up)\b",
+            r"\bmigration\s+(is\s+)?(done|complete|finished|applied|successful)\b",
+            r"\b(release|deployment)\s+(is\s+)?(done|complete|finished|live|successful)\b",
         ],
         "targets": ["REJECT"],
         "description": "Project-specific knowledge - must NOT enter agent memory"
     },
 }
 
-# Persona-intent prefixes that indicate self-reflection, not project reporting
+# Persona-intent prefixes that indicate self-reflection, not project reporting.
 # When a request starts with one of these patterns, Stage 1 of the 3-stage
-# classification flow will skip the project-knowledge pre-check, preventing
-# false positives like "I should be more careful with deployments" from
-# being rejected as project content.
+# classification flow flags the request as a potential persona statement. This
+# flag does NOT bypass the project-knowledge pre-check (Stage 2 always runs);
+# instead, when both a persona prefix AND a project pattern match, Stage 3 is
+# also evaluated and a persona category match is required to accept the
+# request. This prevents project content from hiding behind a persona prefix
+# (e.g. "I should note that git push succeeded") while still allowing
+# legitimate persona reflections that happen to mention project terms
+# (e.g. "I should be more careful with deployments").
 _PERSONA_INTENT_PREFIXES = [
     r"^\s*i\s+(should|need to|must|ought to|want to|tend to|always|never|usually)\b",
     r"^\s*i\s+(am|'m)\s+(a|an|the)?\s*\w*",  # "I am a DevOps agent"
@@ -600,16 +611,33 @@ def create_inner_soul_tool(
             if len(request_parts) == 1:
                 # Single request - use existing flow
                 classification = _classify_request(actual_request, intent=intent)
-                
+
                 # Determine targets using helper
                 targets = _resolve_targets(target, intent, classification)
-                
-                # Check if this should redirect to RAG
+
+                # RAG redirect FIRST: when RAG is enabled, project_knowledge
+                # and other knowledge-oriented classifications are routed to
+                # experience() via _should_redirect_to_rag(). This must run
+                # before the REJECT check below.
                 if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
                     return _format_rag_redirect(actual_request, classification, targets)
 
-                # Project-knowledge REJECT (only reached when RAG is disabled).
-                # When RAG is enabled, the redirect above catches project_knowledge first.
+                # PRIMARY REJECT check (G2 critical fix): examine the
+                # CLASSIFICATION's targets for "REJECT" rather than the
+                # resolved targets. _resolve_targets() drops the REJECT
+                # sentinel when an explicit `target` or `intent` is
+                # provided — without this check, calls like
+                # `inner_soul(intent="remember", content="git push
+                # succeeded")` or `inner_soul(target="memory", content=
+                # "database migration done")` would write project content
+                # directly to memory.
+                if "REJECT" in classification.get("targets", []):
+                    return _format_project_rejection(actual_request, classification)
+
+                # Secondary safety net: REJECT should already be caught
+                # above (via classification["targets"]), but if a future
+                # change ever reintroduces it in the resolved-targets path,
+                # we still surface a rejection here.
                 if "REJECT" in targets:
                     return _format_project_rejection(actual_request, classification)
 
@@ -642,7 +670,9 @@ def create_inner_soul_tool(
                     # Determine targets for this part using helper
                     targets = _resolve_targets(target, intent, classification)
 
-                    # Check for RAG redirect
+                    # RAG redirect FIRST: must run before the REJECT check
+                    # below, since when RAG is enabled, project_knowledge is
+                    # routed to experience() via _should_redirect_to_rag().
                     if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
                         rag_response = _format_rag_redirect(part, classification, targets)
                         compound_lines.append(f"  Part {idx}: \"{part[:50]}{'...' if len(part) > 50 else ''}\" → {classification['type']}")
@@ -650,7 +680,21 @@ def create_inner_soul_tool(
                         all_results.append({"part": part, "redirected": True, "response": rag_response})
                         continue
 
-                    # Project-knowledge REJECT for this part (RAG-disabled path).
+                    # PRIMARY REJECT check (G2 critical fix): examine the
+                    # CLASSIFICATION's targets rather than the resolved
+                    # targets. _resolve_targets() drops the REJECT sentinel
+                    # when an explicit `target` or `intent` is provided,
+                    # which would otherwise let project content slip into
+                    # memory for this part of a compound request.
+                    if "REJECT" in classification.get("targets", []):
+                        rejection_msg = _format_project_rejection(part, classification)
+                        compound_lines.append(f"  Part {idx}: \"{part[:50]}{'...' if len(part) > 50 else ''}\" → project_knowledge (REJECTED)")
+                        compound_lines.append(f"    {rejection_msg.split(chr(10))[0]}")
+                        all_results.append({"part": part, "rejected": True, "response": rejection_msg})
+                        continue
+
+                    # Secondary safety net: REJECT in resolved targets still
+                    # surfaces a project rejection.
                     if "REJECT" in targets:
                         rejection_msg = _format_project_rejection(part, classification)
                         compound_lines.append(f"  Part {idx}: \"{part[:50]}{'...' if len(part) > 50 else ''}\" → project_knowledge (REJECTED)")
@@ -832,17 +876,23 @@ def _classify_request(request: str, intent: str | None = None) -> dict:
 
     Uses a 3-stage flow:
 
-    Stage 1 — Persona-intent exemption (F1):
+    Stage 1 — Persona-intent detection (F1/G3):
         If the request starts with a self-reflection prefix
-        (e.g., "I should...", "My approach...", "Be more..."), skip the
-        project-knowledge pre-check entirely. This prevents false positives
-        like "I should be more careful with deployments" from being rejected
-        as project content.
+        (e.g., "I should...", "My approach...", "Be more..."), mark the
+        request as having persona intent. This flag changes how Stage 2
+        behaves — it does NOT skip Stage 2 (the blanket exemption was a
+        leak: project content could hide behind a persona prefix).
 
-    Stage 2 — Project-content pre-check:
-        Only run if Stage 1 did not match. Check the `project_knowledge`
-        patterns first; if any match, return a REJECT classification. This
-        ensures project content never enters agent memory.
+    Stage 2 — Project-content pre-check (always runs, G3 fix):
+        Check the `project_knowledge` patterns first. If any match, decide
+        what to do based on persona intent:
+        - No persona intent → REJECT (project content).
+        - Persona intent present → also run Stage 3 to see if a persona
+          category (identity, personality, user_preference, user_identity,
+          workflow) ALSO matches. If yes, the request is a legitimate
+          persona reflection that happens to mention project terms; accept
+          and continue to Stage 3. If no persona category matches, the
+          request is project content hiding behind a persona prefix; REJECT.
 
     Stage 3 — Normal semantic classification:
         Check each non-project classification type and merge targets. Fall
@@ -855,35 +905,76 @@ def _classify_request(request: str, intent: str | None = None) -> dict:
     request_lower = request.lower()
 
     # ========================================
-    # STAGE 1: Persona-intent exemption (F1)
+    # STAGE 1: Persona-intent detection
     # ========================================
-    # If the statement starts with a self-reflection prefix, skip
-    # project-rejection entirely. This prevents false positives like
-    # "I should be more careful with deployments" from being rejected.
+    # If the statement starts with a self-reflection prefix, flag it as a
+    # potential persona request. The flag changes Stage 2 behavior; it does
+    # NOT bypass the project-content check.
     persona_intent_matched = False
     for prefix_pattern in _PERSONA_INTENT_PREFIXES:
         if re.search(prefix_pattern, request_lower, re.IGNORECASE):
-            # Persona intent detected — skip project_knowledge check,
-            # proceed directly to normal semantic classification
             persona_intent_matched = True
             break
 
-    if not persona_intent_matched:
-        # ========================================
-        # STAGE 2: Project-content pre-check (only if NOT persona intent)
-        # ========================================
-        # Check project_knowledge patterns FIRST, before any other classification.
-        # This ensures project content is never accepted into agent memory.
-        project_patterns = CLASSIFICATION_RULES["project_knowledge"]["patterns"]
-        for pattern in project_patterns:
-            if re.search(pattern, request_lower, re.IGNORECASE):
+    # ========================================
+    # STAGE 2: Project-content pre-check (ALWAYS runs — G3 fix)
+    # ========================================
+    # Even persona-prefixed requests must be checked. The old behavior of
+    # skipping Stage 2 on persona match was a leak: a request like
+    # "I should note that git push succeeded" would be accepted as persona
+    # content even though the actual intent is project reporting.
+    project_patterns = CLASSIFICATION_RULES["project_knowledge"]["patterns"]
+    project_pattern_matched = None
+    for pattern in project_patterns:
+        if re.search(pattern, request_lower, re.IGNORECASE):
+            project_pattern_matched = pattern
+            break
+
+    if project_pattern_matched is not None:
+        if persona_intent_matched:
+            # Dual-match: persona prefix AND project pattern both matched.
+            # Run Stage 3 to see if a persona category also matches — that
+            # indicates a legitimate persona reflection that happens to
+            # mention a project term (e.g. "I should be more careful with
+            # deployments" — the persona is "be more careful", not the
+            # deployment). If no persona category matches, treat it as
+            # project content hiding behind a persona prefix.
+            persona_categories = {
+                "identity", "personality", "user_preference",
+                "user_identity", "workflow",
+            }
+            has_persona_category = False
+            for class_type, rules in CLASSIFICATION_RULES.items():
+                if class_type == "project_knowledge":
+                    continue
+                if class_type not in persona_categories:
+                    continue
+                for p in rules["patterns"]:
+                    if re.search(p, request_lower, re.IGNORECASE):
+                        has_persona_category = True
+                        break
+                if has_persona_category:
+                    break
+
+            if not has_persona_category:
+                # Project content hiding behind persona prefix — REJECT.
                 return {
                     "type": "project_knowledge",
                     "targets": ["REJECT"],
                     "description": CLASSIFICATION_RULES["project_knowledge"]["description"],
-                    "pattern_matched": pattern,
+                    "pattern_matched": project_pattern_matched,
                     "all_matches": ["project_knowledge"],
                 }
+            # else: legitimate persona reflection — fall through to Stage 3.
+        else:
+            # No persona intent, project matched — REJECT.
+            return {
+                "type": "project_knowledge",
+                "targets": ["REJECT"],
+                "description": CLASSIFICATION_RULES["project_knowledge"]["description"],
+                "pattern_matched": project_pattern_matched,
+                "all_matches": ["project_knowledge"],
+            }
 
     # ========================================
     # STAGE 3: Normal semantic classification (existing logic)
