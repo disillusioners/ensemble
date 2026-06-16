@@ -253,6 +253,29 @@ class TestClassificationOrdering:
         assert result["type"] == "project_knowledge"
         assert result["targets"] == ["REJECT"]
 
+    def test_dual_match_rescue_workflow_with_deployment(self):
+        """G3 rescue: persona prefix + project pattern + workflow category → ACCEPTED.
+
+        'I should always verify before deployment' — 'I should' matches persona
+        prefix, 'deployment' matches project pattern, but 'always verify' matches
+        workflow category. The workflow category rescues it from rejection.
+        """
+        result = _classify_request("I should always verify before deployment")
+        assert result["type"] != "project_knowledge", \
+            f"Expected rescue (workflow), got project_knowledge: {result}"
+        assert result["type"] == "workflow"
+
+    def test_dual_match_reject_singular_deployment(self):
+        """G3 reject: persona prefix + project pattern + no persona category → REJECTED.
+
+        'I should improve my deployment strategy' — 'I should' matches persona
+        prefix, 'deployment' matches project pattern, but NO persona category
+        matches in Stage 3. Project content hiding behind persona prefix → REJECTED.
+        """
+        result = _classify_request("I should improve my deployment strategy")
+        assert result["type"] == "project_knowledge"
+        assert "REJECT" in result["targets"]
+
 
 # =============================================================================
 # _format_project_rejection() output
@@ -329,7 +352,7 @@ class TestRejectHandlerIntegration:
 
             # Must NOT bubble up the old error
             assert "Unknown target" not in result
-            assert "ERROR" not in result.split("⛔")[0] if "⛔" in result else "ERROR" not in result
+            assert "ERROR" not in result
 
             # Must be a friendly rejection
             assert "Rejected" in result or "⛔" in result
@@ -374,6 +397,56 @@ class TestRejectHandlerIntegration:
 
             after = soul_file.read_text()
             assert before == after, "REJECT must not modify soul.md"
+
+    def test_reject_with_explicit_intent_remember(self, mock_registry, mock_manager, temp_agent):
+        """G2 fix: intent='remember' must not bypass REJECT.
+
+        _resolve_targets(intent='remember') returns ['memories'], dropping the
+        REJECT sentinel. Without the G2 fix at line 634, this would write project
+        content to memories/. This test proves the classification-based REJECT
+        check catches it.
+        """
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
+            memories_dir = temp_agent / "memories"
+            before = set(memories_dir.glob("*.md"))
+            result = tool.invoke({"intent": "remember", "content": "git push origin main"})
+            assert "Reject" in result or "REJECT" in result, f"Expected rejection, got: {result}"
+            # No memory file should be written
+            assert before == set(memories_dir.glob("*.md"))
+
+    def test_reject_with_explicit_target_memory(self, mock_registry, mock_manager, temp_agent):
+        """G2 fix: target='memory' must not bypass REJECT.
+
+        _resolve_targets(target='memory') returns ['memory'], dropping the REJECT
+        sentinel. Without the G2 fix, this would write project content to memory.md.
+        """
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
+            memory_file = temp_agent / "memory.md"
+            before = memory_file.read_text()
+            result = tool.invoke({"target": "memory", "content": "database migration done"})
+            assert "Reject" in result or "REJECT" in result, f"Expected rejection, got: {result}"
+            # memory.md should not be modified
+            assert before == memory_file.read_text()
+
+    def test_reject_with_explicit_intent_learn(self, mock_registry, mock_manager, temp_agent):
+        """G2 fix: intent='learn' must not bypass REJECT.
+
+        _resolve_targets(intent='learn') returns ['memories', 'memory'], dropping
+        the REJECT sentinel. Same vulnerability as intent='remember'.
+        """
+        with patch("daemon.registry.get_registry", return_value=mock_registry):
+            tool = create_inner_soul_tool(mock_manager, "test_agent", "test-instance")
+            memories_dir = temp_agent / "memories"
+            memory_file = temp_agent / "memory.md"
+            before_memories = set(memories_dir.glob("*.md"))
+            before_memory = memory_file.read_text()
+            result = tool.invoke({"intent": "learn", "content": "created a new config.py"})
+            assert "Reject" in result or "REJECT" in result, f"Expected rejection, got: {result}"
+            # No files should be modified
+            assert before_memories == set(memories_dir.glob("*.md"))
+            assert before_memory == memory_file.read_text()
 
 
 # =============================================================================

@@ -257,7 +257,7 @@ class TestClassifyRequest:
     def test_learned_that_classification_falls_to_event(self):
         """Request with 'I learned that' is no longer 'knowledge' (Phase 3); falls to event/mistake/pattern via persona exemption."""
         result = _classify_request("I learned that early testing catches bugs")
-        assert result["type"] in ("mistake", "pattern", "event")
+        assert result["type"] == "event"
         assert "memories" in result["targets"]
 
     def test_identity_classification_my_name_is(self):
