@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 116 packs
-- Unit: 101 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 117 packs
+- Unit: 102 | Integration: 1 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -31,6 +31,7 @@
 | infra_tools_unit_test | tests/unit/test_infra_tools.py | Infra tool layer: all 9 tools (asset CRUD, type register/list, history), audit auto-population, project isolation across all scoped tools, factory returns 9 tools, error handling | 2 min | 2026-06-15 | ✅ PASS (47/47, feature/infra-info, commit 4b4dcd4, 0 bugs found) |
 | status_alias_mapping_unit_test | tests/job_queue/test_status_alias_mapping.py | Job status alias mapping: normalize_statuses() unit tests (alias, case-insensitive, canonical, multiple, unknown, None/empty) + service integration (list_jobs with alias) + HTTP endpoint (GET /api/jobs?status=running) | 2 min | 2026-06-15 | ✅ PASS (24/24, fix/job-status-alias-mapping, commit b429057, 0 failures) |
 | inner_soul_rejection_unit_test | tests/unit/tools/test_inner_soul_rejection.py | Inner_soul Phase 3 rejection: project content REJECTED (git ops, task completion, code changes, tech stack, bare status), classification ordering, _format_project_rejection format, REJECT handler integration (RAG enabled/disabled), compound per-part rejection | 2 min | 2026-06-16 | ✅ PASS (38/38, feature/inner-soul-reform, commit 1307eb25, 0 failures) |
+| context_tools_unit_test | tests/unit/tools/test_context_tools.py + tests/unit/services/test_context_tools.py + tests/unit/test_mcp_kb_server_context.py | Context tools: list_context richer preview (multi-line, 300-char truncation, headings, blank lines), search/filter (query param, case-insensitive, filename/slug/content matching, regex literal), read_context, MCP parity (ensemble_context_list/read), edge cases (empty dir, empty context_key, corrupt files, unicode) | 2 min | 2026-06-16 | ✅ PASS (73/73, feature/list-context-improve, commits d65f3d20 7a3e7bb4 65108673, 0 failures) |
 | inner_soul_persona_preservation_unit_test | tests/unit/tools/test_inner_soul_persona_preservation.py | Inner_soul Phase 3 persona preservation: 25+ legitimate persona reflections NOT rejected (I should..., I am..., I learned..., My approach..., Be more..., User prefers..., etc.) + boundary contrast (persona vs project with same keyword) | 2 min | 2026-06-16 | ✅ PASS (28/28, feature/inner-soul-reform, commit 1307eb25, 0 failures) |
 | inner_soul_redirect_unit_test | tests/unit/tools/test_inner_soul_redirect.py | Inner_soul RAG redirect: _should_redirect_to_rag logic, _classify_request (10 types), _format_rag_redirect format, full tool behavior with redirect, intent parameter, target="memories" routing, memory limit error messages. Phase 3: 8 tests fixed for knowledge category removal | 2 min | 2026-06-16 | ✅ PASS (85/85, feature/inner-soul-reform, commit 38de7523, 0 failures) |
 | inner_soul_compound_unit_test | tests/unit/tools/test_inner_soul_compound.py | Inner_soul compound request: _split_compound_request (AND/semicolon/sentence), compound classification end-to-end, compound+RAG redirect interaction, edge cases (empty, long, target=memories, intent). Phase 3: 1 test fixed for knowledge category removal | 2 min | 2026-06-16 | ✅ PASS (51/51, feature/inner-soul-reform, commit 38de7523, 0 failures) |
