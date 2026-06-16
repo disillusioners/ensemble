@@ -470,6 +470,26 @@ class JobFeedbackObserver:
                 )
                 if not result_summary:
                     result_summary = "Job completed (no agent response captured)"
+                # C1 fix (TOCTOU race introduced by W1): after the LLM fetch
+                # (last await before the transition), re-check the CM pending
+                # count. A concurrent ``register_message_send`` could have
+                # fired during the fetch (parent agent spawned another child
+                # via a tool call while the callback was running). If new
+                # pending correlations appeared, abort the terminal transition
+                # — the CM will fire the callback again when those new
+                # children resolve. The check itself is synchronous and is the
+                # LAST operation before ``atomic_transition`` (no await in
+                # between), so no new registrations can sneak past.
+                cm = get_correlation_manager()
+                if cm is not None:
+                    cm_pending = cm.get_pending_count(instance_id)
+                    if cm_pending > 0:
+                        logger.info(
+                            f"Observer: aborting terminal transition for "
+                            f"{instance_id[:8]}... — {cm_pending} new "
+                            f"pending correlations appeared during callback"
+                        )
+                        return
                 self._job_repo.atomic_transition(
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
@@ -486,6 +506,22 @@ class JobFeedbackObserver:
                 )
             elif terminal_status == "error":
                 error_message = error if error else "Unknown error"
+                # C1 fix (TOCTOU race introduced by W1): same re-check as the
+                # completed branch. New pending correlations may have been
+                # registered during the path between CM callback dispatch and
+                # our arrival here. Abort if so; CM will fire the callback
+                # again when the new children resolve. No ``await`` between
+                # this check and ``atomic_transition``.
+                cm = get_correlation_manager()
+                if cm is not None:
+                    cm_pending = cm.get_pending_count(instance_id)
+                    if cm_pending > 0:
+                        logger.info(
+                            f"Observer: aborting terminal transition for "
+                            f"{instance_id[:8]}... — {cm_pending} new "
+                            f"pending correlations appeared during callback"
+                        )
+                        return
                 self._job_repo.atomic_transition(
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
@@ -522,6 +558,28 @@ class JobFeedbackObserver:
                 f"status={terminal_status}: {e}",
                 exc_info=True,
             )
+            # W3 fix (fail-safe): if finalization failed (e.g., the LLM fetch
+            # raised, the DB write failed), the CM has already deleted
+            # ``_pending[parent_id]`` — the callback will not fire again.
+            # Without a fail-safe, the job would sit in PROCESSING forever.
+            # Transition to FAILED so the queue can advance and watchers see
+            # a terminal state. If even this fails (e.g., job is already in a
+            # terminal state from another actor), swallow silently — there
+            # is nothing more we can do.
+            try:
+                self._job_repo.atomic_transition(
+                    job_id=job.job_id,
+                    from_status=JobStatus.PROCESSING.value,
+                    to_status=JobStatus.FAILED.value,
+                    completed_at=datetime.now(timezone.utc).isoformat(),
+                    error_message=f"Job finalization failed: {e}",
+                )
+                logger.info(
+                    f"Observer: fail-safe transitioned job "
+                    f"{job.job_id[:8]}... to FAILED after finalization error"
+                )
+            except Exception:
+                pass  # atomic_transition itself failed — nothing more we can do
             return
 
         # Release locks held by this instance

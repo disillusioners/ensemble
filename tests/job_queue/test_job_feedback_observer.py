@@ -850,7 +850,13 @@ class TestObserverLifecycleResilience:
 
     @pytest.mark.asyncio
     async def test_atomic_transition_generic_exception_caught(self):
-        """Generic exceptions from atomic_transition are caught within _process_event."""
+        """Generic exceptions from atomic_transition are caught within _process_event.
+
+        W3 behavior: after the first ``atomic_transition`` raises, the
+        fail-safe handler attempts a second ``atomic_transition`` to FAILED
+        so the job doesn't sit in PROCESSING forever. That fail-safe call
+        also fails (same RuntimeError) and is swallowed silently.
+        """
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
@@ -885,15 +891,28 @@ class TestObserverLifecycleResilience:
         except RuntimeError:
             pytest.fail("_process_event should catch RuntimeError from atomic_transition")
 
-        # atomic_transition was called
-        mock_job_repo.atomic_transition.assert_called_once()
+        # W3: atomic_transition was called twice — once for the original
+        # transition (COMPLETED) and once for the fail-safe (FAILED). Both
+        # raise the same RuntimeError; the fail-safe's exception is swallowed.
+        assert mock_job_repo.atomic_transition.call_count == 2
+        # The fail-safe call was to FAILED with a synthesized error_message.
+        fail_safe_call = mock_job_repo.atomic_transition.call_args_list[1]
+        assert fail_safe_call.kwargs["to_status"] == "failed"
+        assert "Job finalization failed" in fail_safe_call.kwargs["error_message"]
 
-        # Lock should NOT be released because transition failed
+        # Lock should NOT be released because transition failed (the
+        # ``except Exception`` handler returns before the lock-release path).
         mock_lock_repo.release_by_instance.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_atomic_transition_exception_does_not_propagate(self):
-        """If atomic_transition raises an unexpected error, _process_event should handle it."""
+        """If atomic_transition raises an unexpected error, _process_event should handle it.
+
+        W3 behavior: the fail-safe handler attempts a second transition to
+        FAILED so the job doesn't sit in PROCESSING forever. Both calls
+        raise the same RuntimeError; both are caught (the fail-safe's
+        exception is swallowed silently).
+        """
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
@@ -928,10 +947,11 @@ class TestObserverLifecycleResilience:
         except Exception as e:
             pytest.fail(f"_process_event should not raise, but got: {e}")
 
-        # Verify atomic_transition was called
-        mock_job_repo.atomic_transition.assert_called_once()
+        # W3: atomic_transition was called twice (original + fail-safe).
+        assert mock_job_repo.atomic_transition.call_count == 2
 
-        # Lock should NOT be released because transition failed
+        # Lock should NOT be released because transition failed (the
+        # ``except Exception`` handler returns before the lock-release path).
         mock_lock_repo.release_by_instance.assert_not_called()
 
 

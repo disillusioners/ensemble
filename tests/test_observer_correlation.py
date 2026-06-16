@@ -45,6 +45,7 @@ from daemon.services.correlation_manager import (
     set_correlation_manager,
 )
 from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.job_state_machine import InvalidTransitionError
 
 logger = logging.getLogger(__name__)
 
@@ -569,4 +570,228 @@ class TestNoDeadlockConstraint:
             )
         finally:
             await real_cm.stop()
+            set_correlation_manager(None)
+
+
+# ─── Test 6 (S1): C1 — register-during-callback aborts terminal transition ─
+
+
+class TestC1RegisterDuringCallback:
+    """C1 regression: a new ``register_message_send`` during the callback's
+    await window MUST abort the terminal transition.
+
+    Race introduced by W1 (callback moved outside the per-parent lock):
+      T1: CM fires ``completion_callback`` → ``handle_correlation_complete``
+          → ``_finalize_job``.
+      T2: ``_finalize_job`` awaits ``_get_last_assistant_message_raw``.
+      T3: During that await, the parent agent fires a tool call → another
+          ``send_message`` → ``cm.register_message_send`` registers a NEW
+          pending correlation for the same parent.
+      T4: The LLM fetch returns.
+      T5 (without C1): ``atomic_transition`` fires anyway → the new child
+          is orphaned in CM (its pending count never reaches 0 from CM's
+          POV, because the parent's job is already terminal).
+      T5 (with C1): the synchronous re-check after the fetch sees
+          ``cm_pending > 0`` → returns without transitioning. CM fires
+          the callback again when the new child resolves.
+    """
+
+    @pytest.mark.asyncio
+    async def test_register_during_llm_fetch_aborts_terminal_transition(self):
+        """A new ``register_message_send`` during the LLM fetch aborts the
+        transition. ``atomic_transition`` is NOT called; the job remains
+        PROCESSING; the new correlation is tracked by CM and will fire
+        the callback when it resolves.
+        """
+        job = make_mock_job(status="processing")
+        observer, mocks = make_observer(job)
+
+        cm = CorrelationManager(
+            instance_repository=make_instance_repo_mock(),
+            message_queue_repository=make_msg_repo_mock(),
+            completion_callback=observer.handle_correlation_complete,
+        )
+        await cm.start()
+        set_correlation_manager(cm)
+        try:
+            parent_id = job.instance_id
+            child_id = "child-1"
+            original_msg = f"msg-{uuid.uuid4().hex[:8]}"
+            new_child = "child-2"
+            new_msg = f"msg-{uuid.uuid4().hex[:8]}"
+
+            # Register the correlation that will trigger the callback.
+            await cm.register_message_send(parent_id, child_id, original_msg)
+            assert cm.get_pending_count(parent_id) == 1
+
+            # Patch the LLM fetch to register a NEW correlation BEFORE
+            # returning. This simulates: the callback is mid-_finalize_job,
+            # awaiting the LLM response; meanwhile the parent agent fires
+            # a tool call that sends another message to a different child.
+            async def llm_fetch_with_concurrent_register(instance_id_arg):
+                await cm.register_message_send(parent_id, new_child, new_msg)
+                return "agent response"
+
+            mocks[
+                "instance_manager"
+            ]._get_last_assistant_message_raw = AsyncMock(
+                side_effect=llm_fetch_with_concurrent_register
+            )
+
+            # Trigger the callback by resolving the only pending correlation.
+            result = await cm.resolve_response(
+                parent_id, child_id, original_msg
+            )
+            assert result is True  # last pending → callback fires
+
+            # C1 invariant: the new correlation is now pending for the
+            # parent. (The original was removed by resolve_response; the
+            # new one was registered by the side_effect above.)
+            assert cm.get_pending_count(parent_id) == 1
+
+            # CRITICAL: atomic_transition was NOT called. The C1 re-check
+            # saw cm_pending > 0 and aborted before the transition.
+            mocks["job_repo"].atomic_transition.assert_not_called()
+
+            # The job remains in PROCESSING (not transitioned).
+            assert job.status == JobStatus.PROCESSING.value
+
+            # Watcher was NOT notified of a terminal state.
+            notify_calls = mocks[
+                "job_queue_service"
+            ].notify_watchers.call_args_list
+            terminal_calls = [
+                c
+                for c in notify_calls
+                if len(c.args) > 1 and c.args[1] in ("completed", "failed")
+            ]
+            assert terminal_calls == [], (
+                f"Expected no terminal watcher notifications, got "
+                f"{terminal_calls}"
+            )
+        finally:
+            await cm.stop()
+            set_correlation_manager(None)
+
+
+# ─── Test 7 (S2): concurrent _finalize_job from both paths ────────────────
+
+
+class TestC2ConcurrentFinalize:
+    """Concurrent ``_finalize_job`` invocations from the lifecycle event
+    handler and the CM callback.
+
+    Scenario: when the parent's ``instance_lifecycle`` event arrives at the
+    same time the last child's response resolves through CM, both paths may
+    reach ``_finalize_job`` concurrently. Both call ``atomic_transition``.
+    The DB-level guard (atomic state machine) ensures only one transition
+    succeeds; the other raises ``InvalidTransitionError`` and is caught
+    silently inside ``_finalize_job``.
+
+    This test verifies the existing guard works under asyncio.gather
+    concurrency — exactly ONE transition happens, the job ends in the
+    correct terminal state, watchers are notified exactly once.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_finalize_only_one_transition_succeeds(self):
+        job = make_mock_job(status="processing")
+        observer, mocks = make_observer(job)
+
+        # Wire CM with NO pending entries for this parent so _process_event
+        # takes the cm_pending == 0 fallthrough path to _finalize_job. The
+        # CM is still wired (get_correlation_manager() returns it), so the
+        # C1 re-check runs but is a no-op (cm_pending stays 0 throughout).
+        cm = CorrelationManager(
+            instance_repository=make_instance_repo_mock(),
+            message_queue_repository=make_msg_repo_mock(),
+        )
+        await cm.start()
+        set_correlation_manager(cm)
+        try:
+            parent_id = job.instance_id
+            assert cm.get_pending_count(parent_id) == 0
+
+            # Simulate DB-level atomic transition guard: first call with
+            # from_status=PROCESSING succeeds and updates job.status;
+            # subsequent calls with from_status=PROCESSING raise
+            # InvalidTransitionError (the DB already moved the row).
+            def atomic_transition_guard(**kwargs):
+                if (
+                    kwargs.get("from_status") == JobStatus.PROCESSING.value
+                    and job.status != JobStatus.PROCESSING.value
+                ):
+                    raise InvalidTransitionError(
+                        job_id=job.job_id,
+                        from_status=kwargs["from_status"],
+                        to_status=kwargs["to_status"],
+                    )
+                job.status = kwargs["to_status"]
+
+            mocks[
+                "job_repo"
+            ].atomic_transition.side_effect = atomic_transition_guard
+
+            lifecycle_event = {
+                "event_type": "instance_lifecycle",
+                "data": {
+                    "instance_id": parent_id,
+                    "status": "completed",
+                    "error": None,
+                },
+            }
+
+            # Fire both terminal-transition paths concurrently. Both call
+            # ``get_job_by_instance`` (returns the same job with status=
+            # PROCESSING at read time), both pass the idempotency guard,
+            # both reach ``_finalize_job``, both call ``atomic_transition``.
+            # Exactly one wins; the other is caught by InvalidTransitionError.
+            await asyncio.gather(
+                observer._process_event(lifecycle_event),
+                observer.handle_correlation_complete(parent_id, "completed"),
+            )
+
+            # The job ends in the correct terminal state.
+            assert job.status == JobStatus.COMPLETED.value
+
+            # ``atomic_transition`` was called from BOTH paths. The mock
+            # does not count attempts (InvalidTransitionError short-circuits
+            # the guard before any mutation), but the second attempt must
+            # have been caught — the job is in COMPLETED, not stuck or
+            # double-transitioned.
+            completed_calls = [
+                c
+                for c in mocks["job_repo"].atomic_transition.call_args_list
+                if c.kwargs.get("to_status") == JobStatus.COMPLETED.value
+            ]
+            assert len(completed_calls) >= 1, (
+                "Expected at least one successful COMPLETED transition; got "
+                f"{mocks['job_repo'].atomic_transition.call_args_list}"
+            )
+
+            # Exactly one terminal "completed" watcher notification.
+            terminal_calls = [
+                c
+                for c in mocks[
+                    "job_queue_service"
+                ].notify_watchers.call_args_list
+                if len(c.args) > 1 and c.args[1] == "completed"
+            ]
+            assert len(terminal_calls) == 1, (
+                f"Expected exactly 1 'completed' notify_watchers call, got "
+                f"{len(terminal_calls)}: "
+                f"{mocks['job_queue_service'].notify_watchers.call_args_list}"
+            )
+
+            # Locks released exactly once (the loser didn't get past the
+            # InvalidTransitionError handler, so the lock release path
+            # below it never ran for the loser).
+            assert (
+                mocks["lock_repo"].release_by_instance.call_count == 1
+            ), (
+                f"Expected exactly 1 lock release, got "
+                f"{mocks['lock_repo'].release_by_instance.call_count}"
+            )
+        finally:
+            await cm.stop()
             set_correlation_manager(None)
