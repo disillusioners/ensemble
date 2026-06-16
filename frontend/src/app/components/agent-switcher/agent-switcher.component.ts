@@ -1,4 +1,4 @@
-import { Component, Input, Output, EventEmitter, signal, computed, HostListener, ElementRef, ViewChild } from '@angular/core';
+import { Component, Input, Output, EventEmitter, signal, computed, HostListener, ElementRef, ViewChild, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -31,6 +31,8 @@ export class AgentSwitcherComponent {
 
   @ViewChild('triggerButton') triggerButton!: ElementRef<HTMLButtonElement>;
   @ViewChild('dropdownMenu') dropdownMenu!: ElementRef<HTMLDivElement>;
+
+  private readonly host = inject(ElementRef<HTMLElement>);
 
   isOpen = signal(false);
   focusedIndex = signal(-1);
@@ -67,6 +69,7 @@ export class AgentSwitcherComponent {
   toggleDropdown(): void {
     this.isOpen.update(v => !v);
     if (this.isOpen()) {
+      this.updateDropdownMaxHeight();
       // When opening, focus the trigger button and set initial focused index
       const agents = this.selectableAgents();
       if (agents.length === 0) {
@@ -80,6 +83,15 @@ export class AgentSwitcherComponent {
     } else {
       this.focusedIndex.set(-1);
     }
+  }
+
+  private updateDropdownMaxHeight(): void {
+    const trigger = this.triggerButton?.nativeElement;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom - 8;
+    const maxHeight = Math.max(120, spaceBelow);
+    this.host.nativeElement.style.setProperty('--dropdown-max-height', `${maxHeight}px`);
   }
 
   selectAgent(agent: Agent): void {
@@ -283,6 +295,13 @@ export class AgentSwitcherComponent {
         this.closeDropdown();
         this.triggerButton?.nativeElement?.focus();
       }
+    }
+  }
+
+  @HostListener('window:resize')
+  onWindowResize(): void {
+    if (this.isOpen()) {
+      this.updateDropdownMaxHeight();
     }
   }
 }

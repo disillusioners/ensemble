@@ -68,6 +68,7 @@
   left: 0;
   margin-top: 4px;
   width: 224px;
+  max-height: var(--dropdown-max-height, calc(100vh - 16px));
   background-color: #1e293b;
   border: 1px solid #334155;
   border-radius: 8px;
@@ -75,6 +76,8 @@
   overflow: hidden;
   z-index: 1000;
   animation: fadeIn 0.15s ease;
+  display: flex;
+  flex-direction: column;
 }
 
 @keyframes fadeIn {
@@ -90,6 +93,10 @@
 
 .menu-content {
   padding: 4px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .menu-item {
@@ -186,6 +193,7 @@
   padding: 8px 12px;
   background-color: #0f172a;
   border-top: 1px solid #334155;
+  flex: 0 0 auto;
 
   p {
     font-size: 12px;
