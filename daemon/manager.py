@@ -52,6 +52,8 @@ from .repositories.message_queue.models import MessageQueue, MessageStatus, Mess
 from .repositories.task.models import Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
+from .repositories.execution_lease.models import LeaseHolderKind
+from .services.execution_gate import LeaseContention, LeaseLostError
 from sqlmodel import Session
 from sqlalchemy import text, select
 from .tools import create_instance_tools
@@ -2698,6 +2700,17 @@ class InstanceManager:
             "status": "resuming",
         }
 
+    # Maximum number of LeaseContention retries before falling back to
+    # ``enqueue_message``. Bounds the recursion in
+    # ``_resume_processing_background`` to prevent infinite re-enqueue
+    # loops when the lease holder never releases.
+    MAX_RESUME_RETRIES = 3
+    # Backoff delays (seconds) for each retry attempt. Indexed by
+    # ``_retry_attempt``; the last entry is reused for any attempt past
+    # the array length so a future bump to ``MAX_RESUME_RETRIES`` does
+    # not crash the backoff lookup.
+    RESUME_BACKOFF_DELAYS = [0.5, 1.0, 2.0]
+
     async def _resume_processing_background(
         self,
         instance_id: str,
@@ -2706,12 +2719,24 @@ class InstanceManager:
         old_job_id: str,
         silent: bool,
         images: list[str] | None,
+        _retry_attempt: int = 0,
     ) -> None:
         """Background task for resumed processing.
 
         Runs _process_message_with_tracking, handles completion/child notification,
         and completes the job. This runs asynchronously after the HTTP response
         has already been sent.
+
+        The ``_process_message_with_tracking`` call is wrapped in the
+        ``ExecutionGate`` so the resume path cannot race with a sibling
+        dispatcher (WorkerPool task or MESSAGE job) on the same
+        checkpoint. On ``LeaseContention`` the resume backs off and
+        retries up to ``MAX_RESUME_RETRIES`` times; after exhausting
+        retries it falls back to ``enqueue_message`` so the
+        ``WorkerPool`` path eventually picks it up. On
+        ``LeaseLostError`` the resume is treated as a fatal error: the
+        instance transitions to ``ERROR`` and the JobQueue job is
+        marked ``FAILED``.
 
         Args:
             instance_id: The instance ID.
@@ -2720,13 +2745,17 @@ class InstanceManager:
             old_job_id: The JobQueue job ID to complete.
             silent: If True, resume from checkpoint without injecting a new message.
             images: Optional list of base64-encoded images for multimodal content.
+            _retry_attempt: Internal recursion counter for ``LeaseContention``
+                backoff. Callers from outside should leave this at 0.
         """
         from .services.job_queue_service import DemandState
 
-        try:
-            # 1. Call _process_message_with_tracking with is_retry=True
-            #    This will resume from checkpoint (graph_input=None when checkpoint exists)
-            result = await self._process_message_with_tracking(
+        # 1. Acquire ExecutionGate lease before driving graph.astream.
+        #    Race #5 fix: without this, a concurrent /resume call (or a
+        #    WorkerPool / JobQueue dispatch) would race on the langgraph
+        #    checkpoint and corrupt it.
+        async def _do_process():
+            return await self._process_message_with_tracking(
                 instance_id=instance_id,
                 message=message,
                 message_id=message_id,
@@ -2736,6 +2765,128 @@ class InstanceManager:
                 silent=silent,  # Pass through silent flag
                 images=images,
             )
+
+        gate_outcome: Any = None
+        gate_raised: BaseException | None = None
+        try:
+            gate_outcome = await self._execution_gate.run(
+                instance_id=instance_id,
+                holder_id=f"resume:{message_id}",
+                # Reuse MESSAGE_JOB kind: the resume path is semantically
+                # a message-driven execution and MESSAGE_JOB is the kind
+                # the other dispatcher paths use. Avoids adding a new
+                # enum value for a single caller.
+                holder_kind=LeaseHolderKind.MESSAGE_JOB.value,
+                work_fn=_do_process,
+            )
+        except BaseException as e:  # noqa: BLE001 - LeaseLostError handled below
+            gate_raised = e
+
+        # 2. Handle LeaseLostError: the in-flight lease row was cleared
+        #    (e.g. by ``recover_stale_leases`` on another node). The
+        #    gate cancelled ``_do_process``; treat as a fatal resume
+        #    error: transition the instance to ERROR and fail the job.
+        if isinstance(gate_raised, LeaseLostError):
+            logger.error(
+                f"[RESUME] instance={instance_id[:8]}... lease lost "
+                f"mid-resume: {gate_raised} — marking instance ERROR and "
+                f"job FAILED"
+            )
+            try:
+                await self._job_queue_service.complete_job(
+                    old_job_id,
+                    DemandState.FAILED,
+                    error=f"Resume lease lost: {gate_raised}",
+                )
+            except Exception as e2:
+                logger.warning(
+                    f"Failed to mark job {old_job_id[:8]}... FAILED on "
+                    f"lease loss: {e2}"
+                )
+            try:
+                self._instance_repository.update_instance(
+                    instance_id,
+                    status=InstanceStatus.ERROR.value,
+                )
+            except Exception as e2:
+                logger.warning(
+                    f"Failed to mark instance {instance_id[:8]}... ERROR "
+                    f"on lease loss: {e2}"
+                )
+            return
+
+        # 3. Handle LeaseContention: another dispatcher (WorkerPool task
+        #    or MESSAGE job) holds the lease. Bounded retry with
+        #    exponential backoff; after MAX_RESUME_RETRIES failed
+        #    attempts, fall back to enqueue_message so the message lands
+        #    in a queue and the WorkerPool eventually picks it up once
+        #    the lease holder releases.
+        if gate_raised is None and isinstance(gate_outcome, LeaseContention):
+            if _retry_attempt < self.MAX_RESUME_RETRIES:
+                delay = self.RESUME_BACKOFF_DELAYS[
+                    min(_retry_attempt, len(self.RESUME_BACKOFF_DELAYS) - 1)
+                ]
+                logger.warning(
+                    f"resume_processing_job: instance "
+                    f"{instance_id[:8]}... lease held by "
+                    f"{gate_outcome.holder_kind}:"
+                    f"{gate_outcome.holder_id[:8]}... — "
+                    f"retry {_retry_attempt + 1}/"
+                    f"{self.MAX_RESUME_RETRIES} after {delay}s"
+                )
+                await asyncio.sleep(delay)
+                # Recursive retry with incremented attempt counter
+                await self._resume_processing_background(
+                    instance_id=instance_id,
+                    message=message,
+                    message_id=message_id,
+                    old_job_id=old_job_id,
+                    silent=silent,
+                    images=images,
+                    _retry_attempt=_retry_attempt + 1,
+                )
+            else:
+                logger.error(
+                    f"resume_processing_job: instance "
+                    f"{instance_id[:8]}... lease contention after "
+                    f"{self.MAX_RESUME_RETRIES} retries — falling back "
+                    f"to enqueue (source=resume_exhausted)"
+                )
+                # Final fallback: enqueue for WorkerPool to pick up
+                # later. The WorkerPool path will re-enter
+                # _process_message_with_tracking through its own gate
+                # acquire, so this is safe — the message will eventually
+                # be processed once the lease holder releases.
+                try:
+                    await self.enqueue_message(
+                        instance_id=instance_id,
+                        message=message,
+                        source="resume_exhausted",
+                        images=images,
+                    )
+                except Exception as e2:
+                    logger.error(
+                        f"[RESUME] enqueue_message fallback failed for "
+                        f"{instance_id[:8]}...: {type(e2).__name__}: {e2}"
+                    )
+            return
+
+        # 4. From here on, the gate either returned a clean result
+        #    (``gate_outcome`` is a MessageResult) or raised a
+        #    non-LeaseLostError exception. The original error
+        #    handler (job FAILED, instance ERROR) must run for the
+        #    latter; the easiest way is to re-raise inside the
+        #    existing try/except block below.
+        result = gate_outcome
+
+        try:
+            # Re-raise the gate exception so the existing error
+            # handler catches it. Only triggered when gate_raised is
+            # set (i.e. NOT LeaseLostError, which was handled above,
+            # and NOT a clean result).
+            if gate_raised is not None:
+                raise gate_raised
+
             logger.info(f"[RESUME] instance={instance_id[:8]} background processing completed successfully")
 
             # 2. Process child completion and notify parent

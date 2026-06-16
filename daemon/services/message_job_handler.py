@@ -13,6 +13,9 @@ from daemon.models.instance import InstanceStatus
 from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.services.execution_gate import LeaseContention, LeaseLostError
 from daemon.services.job_queue_service import DemandState
+from daemon.services.message_processing_errors import (
+    handle_message_processing_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,24 @@ class MessageJobHandler:
         self._job_repo = job_repository
         self._source_dispatcher = source_dispatcher
         self._active_tokens: dict[str, CancellationTokenSource] = {}  # job_id → CTS
+        # Expose the job_queue_service on the manager so the shared
+        # error helper (``handle_message_processing_error``) can find
+        # it via ``instance_manager._job_queue_service``. This mirrors
+        # how ``_events_service`` is always set on the InstanceManager
+        # in ``manager.py`` — every "facade-managed service" lives on
+        # the manager so per-call helpers have a single lookup point.
+        #
+        # We force-set unconditionally because the real InstanceManager
+        # initialises ``_job_queue_service`` to ``None`` (line 688 in
+        # ``manager.py``) and assigns the real service later via
+        # ``set_job_queue_service``. Setting it here is therefore safe
+        # in both the real path (the real service wins) and the test
+        # path (mock managers get the test mock). Tests that pass
+        # ``MagicMock()`` as the manager also benefit — the
+        # auto-generated ``_job_queue_service`` attribute that
+        # ``MagicMock`` would otherwise return is a non-``AsyncMock``
+        # that breaks ``await …complete_job(...)`` inside the helper.
+        manager._job_queue_service = job_queue_service
 
     async def handle(self, job) -> None:
         """Process a MESSAGE job. Called from JobProcessor after start_job() succeeds.
@@ -179,6 +200,20 @@ class MessageJobHandler:
         images = job.job_metadata.get("images") if job.job_metadata else None
         resume_mode = job.job_metadata.get("resume_mode", False) if job.job_metadata else False
         silent = job.job_metadata.get("silent", False) if job.job_metadata else False
+        # Fix Phase-0 Bug #2: retry_count was hardcoded to 0 here, which
+        # meant retried MESSAGE jobs always looked like first attempts
+        # to ``_process_message_with_tracking`` (losing the is_retry
+        # signal). Read from job_metadata (preferred — matches the
+        # pattern used for message_id/source/images above) with a
+        # defensive fallback to the model field for jobs that recorded
+        # retries on the row rather than in metadata.
+        retry_count = 0
+        if job.job_metadata:
+            metadata_retry = job.job_metadata.get("retry_count")
+            if isinstance(metadata_retry, int) and metadata_retry >= 0:
+                retry_count = metadata_retry
+        if retry_count == 0 and getattr(job, "retry_count", 0):
+            retry_count = job.retry_count
 
         async def _do_process() -> "MessageResult":
             return await self._manager._process_message_with_tracking(
@@ -187,7 +222,7 @@ class MessageJobHandler:
                 message_id=message_id,
                 cancellation_token=cts.token,
                 is_retry=resume_mode,
-                retry_count=0,
+                retry_count=retry_count,
                 message_source=message_source,
                 images=images,
                 silent=silent,
@@ -407,12 +442,24 @@ class MessageJobHandler:
                 raise
         except Exception as e:
             logger.error(
-                f"MessageJobHandler: error processing MESSAGE job {job.job_id[:8]}...: {e}"
+                f"MessageJobHandler: error processing MESSAGE job {job.job_id[:8]}...: {e}",
+                exc_info=True,
             )
-            await self._job_service.complete_job(
-                job.job_id,
-                demand_state=DemandState.FAILED,
-                error=str(e),
+            # Phase 0 of CorrelationManager migration: the JobQueue
+            # path now produces the same three error side-effects as
+            # the WorkerPool path (DB error event, lifecycle event
+            # publish, error report to parent) plus its own
+            # ``complete_job(FAILED)`` call. This was previously a
+            # bare ``complete_job(FAILED)`` with the other three
+            # side-effects silently dropped — see
+            # ``.agents/shared/planning/correlation-manager/phase0-critical-bugs.md``
+            # Part B for the cascade bug this caused.
+            await handle_message_processing_error(
+                instance_manager=self._manager,
+                instance_id=instance_id,
+                error=e,
+                message_id=message_id,
+                job_id=job.job_id,
             )
         finally:
             self._active_tokens.pop(job.job_id, None)
