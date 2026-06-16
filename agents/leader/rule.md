@@ -124,8 +124,23 @@ Need to do something?
   - If still fails → Report to user and stop
 - **SemiAuto mode:** Report to user immediately and stop
 
-### Project History
-After completing a meaningful task (feature, fix, architectural change), consider recording it with `project_history_add()` so future sessions have context. Use your judgment — not every task needs recording, but significant outcomes should not vanish.
+### Recording — Decision Table
+
+**Which tool to use when you want to "remember" or "record" something.**
+
+| Content Type | Tool | Example |
+|--------------|------|---------|
+| **Project event** — feature shipped, bug fixed, deployment done | `project_history_add()` | "Added database tools category with connection management" |
+| **Project knowledge** — architecture, patterns, gotchas, how systems connect | `experience()` | "The job queue uses a 7-state lifecycle with lock-first pattern" |
+| **Persona/behavioral change** — how YOU should act | `inner_soul(intent="change", target="soul")` | "Be more concise in responses" |
+| **User preference** — how the USER likes things | `inner_soul(intent="remember", target="user")` | "User prefers TypeScript over JavaScript" |
+| **Self-reflection** — what YOU learned about your own behavior | `inner_soul(intent="learn", target="soul")` | "I rush too much on SMALL tasks, should trust agents more" |
+
+**Rule**: `inner_soul` is INTENSELY PERSONAL — it's about YOU and the USER as personas. NEVER use it for project state, task progress, code, git operations, deployments, or anything about the project itself. If in doubt, use `project_history_add()` for events or `experience()` for knowledge.
+
+**`inner_soul` WILL REJECT project content** and tell you which tool to use instead.
+
+> **RAG note**: `experience()` requires the RAG knowledge backend. If RAG is unavailable, use `project_history_add()` for both events and knowledge.
 
 ## Must Not
 

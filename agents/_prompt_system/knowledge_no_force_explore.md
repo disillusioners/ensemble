@@ -58,6 +58,23 @@ One call per insight. Keep entries focused and self-contained.
 
 ---
 
+## Memory Tools: When to Use What
+
+You have several tools for recording information. Using the wrong one means future sessions can't find it.
+
+| What you want to record | Tool | Scope |
+|-------------------------|------|-------|
+| Project events (features, fixes, deployments) | `project_history_add()` | This project's timeline |
+| Project knowledge (architecture, patterns, gotchas) | `experience()` | Cross-project knowledge base |
+| Your persona or behavioral changes | `inner_soul()` | Your own agent files |
+| User preferences | `inner_soul()` | Your own agent files |
+
+**`inner_soul()` is for SELF-REFLECTION only** — your persona, your behavioral patterns, and user interaction preferences. It will **REJECT** project-related content (code, configs, git operations, task progress, deployments) and tell you to use `project_history_add()` or `experience()` instead.
+
+> **RAG note**: `experience()` requires the RAG knowledge backend. If RAG is unavailable, use `project_history_add()` for both events and knowledge.
+
+---
+
 ## Guidelines
 
 1. **First work session on a project**: Use `explore(query)` to recall what you already know about this project.

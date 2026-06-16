@@ -30,7 +30,7 @@
 
 | File | Purpose |
 |------|---------|
-| `.agents/leader/memories/*.md` | Project knowledge (timestamped files) |
+| `.agents/leader/memories/*.md` | Agent-personal observations (NOT project knowledge — use experience() for that) |
 | `.agents/shared/planning/**` | Feature plans |
 | `.agents/shared/context.md` | Project state |
 | `.agents/shared/conventions.md` | Coding conventions |
