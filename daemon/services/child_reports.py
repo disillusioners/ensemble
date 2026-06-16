@@ -449,10 +449,21 @@ Provide a concise summary:"""
             f"child={instance.instance_id[:8]}...)"
         )
 
-        # SHADOW HOOK (CorrelationManager Phase 1): mirror waiting_for--
-        # in the CM. MUST NOT affect control flow — wrapped in try/except
-        # inside notify_corr_resolve. The CM observes and validates the
-        # waiting_for counter without participating in cascade decisions.
+        # AUTHORITATIVE RESOLUTION HOOK (CorrelationManager Phase 3):
+        # the CM is the single source of truth for parent completion. This
+        # ``notify_corr_resolve`` call decrements the CM's per-parent pending
+        # set; if that drops to zero, the CM synchronously fires
+        # ``handle_correlation_complete`` (registered as
+        # ``completion_callback``), which transitions the parent JOB to
+        # terminal and (Phase 3) the parent INSTANCE to terminal. The
+        # CM's in-memory pending set is authoritative — there is no
+        # ``SELECT COUNT(*)`` fallback, no TOCTOU window (Race #1 / #3
+        # eliminated).
+        #
+        # MUST NOT affect control flow — wrapped in try/except inside
+        # ``notify_corr_resolve``. The inline cascade below this hook is
+        # only reached when ``get_correlation_manager()`` returns ``None``
+        # (graceful degradation / CM disabled).
         #
         # Calling context: this method is called from
         # _process_child_completion_and_notify_parent, which is invoked
@@ -480,7 +491,7 @@ Provide a concise summary:"""
                 # errors, but keep this so a failure in the import path or
                 # argument binding can never break the child-completion path.
                 logger.warning(
-                    f"CM hook: resolve path raised (shadow, ignored) "
+                    f"CM hook: resolve path failed "
                     f"(parent={instance.parent_id[:8] if instance.parent_id else '?'}..., "
                     f"child={instance.instance_id[:8]}...): {hook_err}"
                 )
@@ -525,6 +536,33 @@ Provide a concise summary:"""
             and parent.status != InstanceStatus.COMPLETED.value
             and parent.status != InstanceStatus.ERROR.value
         ):
+            # Phase 3 (Cascade Unification): when CM is active, the inline
+            # cascade + SELECT COUNT(*) + inline status transition are
+            # SKIPPED. The CM's resolve_response (called via the shadow
+            # hook above) already removed the entry from its in-memory
+            # pending set, and if that was the last correlation the CM
+            # callback ``handle_correlation_complete`` is fired
+            # synchronously — which transitions the parent JOB to terminal
+            # via ``_finalize_job``. The CM's in-memory set is the source
+            # of truth (no DB query, no TOCTOU window — Race #3 eliminated).
+            #
+            # When CM is None (graceful degradation), keep the existing
+            # logic with the SELECT COUNT(*) fallback. This path is also
+            # the one exercised by every test that does not wire a CM
+            # fixture (e.g. tests/job_queue/test_in_progress_guard.py).
+            from .correlation_manager import get_correlation_manager
+            cm = get_correlation_manager()
+            if cm is not None:
+                # CM is active — CM callback handles completion.
+                # No count_pending query, no inline status transition,
+                # no inline lifecycle event (the caller at line ~914-931
+                # is also skipped because we return completed_parent_id=None).
+                logger.info(
+                    f"CM-active: skipping inline cascade for parent "
+                    f"{parent.instance_id[:8]}... — CM callback owns completion"
+                )
+                return False, None, None
+
             # Check if parent has any pending messages
             parent_pending = session.exec(
                 select(func.count())
@@ -536,18 +574,18 @@ Provide a concise summary:"""
                     MessageStatus.RETRYING.value,
                 ]))
             ).scalar_one()
-            
+
             if parent_pending == 0:
                 # No pending messages, parent is truly complete
                 # Publish lifecycle event to mark job as completed
                 parent.status = InstanceStatus.COMPLETED.value
                 parent.updated_at = datetime.now(timezone.utc).isoformat()
                 logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
-                
+
                 # Capture parent_id for event publishing (instance will be detached after session closes)
                 completed_parent_id = parent.instance_id
                 completed_parent_parent_id = parent.parent_id
-                
+
                 return False, completed_parent_id, completed_parent_parent_id
             else:
                 # Has pending messages but all children done - transition to WAITING_CHILDREN
@@ -567,7 +605,7 @@ Provide a concise summary:"""
                     except Exception as e:
                         logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
                 return True, None, None
-        
+
         return False, None, None
         
     async def _create_completion_events(
@@ -719,7 +757,43 @@ Provide a concise summary:"""
                         except Exception as e:
                             logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
-                
+
+                # Phase 3 (Cascade Unification — Fix A2): root completion
+                # is NOT a child response, so we MUST NOT call
+                # ``cm.resolve_response`` here (a self-referential
+                # ``(instance_id, message_id)`` key would never match any
+                # registered correlation and would silently no-op).
+                # Instead, we use ``cm.is_complete`` as a read-only check
+                # (Condition 1): are all child responses received?
+                # The CM's in-memory pending set is the authoritative
+                # source — if CM says children are still pending but
+                # ``waiting_for`` happened to read 0 (e.g. a
+                # register/resolve interleaving with our session
+                # snapshot), trust CM. When CM is None (graceful
+                # degradation), skip Condition 1 and fall through to
+                # Condition 2 (the existing pending_count query).
+                from .correlation_manager import get_correlation_manager
+                cm = get_correlation_manager()
+                if cm is not None:
+                    all_children_done = cm.is_complete(instance_id)
+                    if not all_children_done:
+                        # CM still has pending correlations for this
+                        # root. Trust CM (more accurate than the DB
+                        # ``waiting_for`` snapshot — Race #3 adjacent
+                        # window). Stay WAITING_CHILDREN.
+                        instance.status = InstanceStatus.WAITING_CHILDREN.value
+                        session.commit()
+                        logger.info(
+                            f"Instance {instance_id[:8]}... waiting_for=0 but CM has "
+                            f"unresolved child responses, status=WAITING_CHILDREN"
+                        )
+                        if self._manager._live_hub:
+                            try:
+                                await self._manager._live_hub.stream_status_change(instance_id, "waiting_children", agent_id=instance.agent_id)
+                            except Exception as e:
+                                logger.warning(f"Failed to emit status_change for waiting_children: {e}")
+                        return
+
                 # waiting_for == 0, but check for pending messages before completing.
                 # This handles the case where child completion reports are still queued
                 # but waiting_for was already decremented by a previous cascade.
@@ -727,6 +801,13 @@ Provide a concise summary:"""
                 # _should_send_completion_report at line 270-279) to avoid the
                 # double-count hazard when message_queue.complete() has not
                 # committed yet.
+                #
+                # Phase 3: this ``SELECT COUNT(*)`` is RETAINED. It checks
+                # a different concern (root's OWN queue pending work —
+                # messages from external sources like HTTP, scheduler),
+                # not child-response correlation. The CM set does not
+                # track these. Per ADR-012 and the plan, this is NOT
+                # subject to Race #3.
                 pending_count = session.exec(
                     select(func.count())
                     .select_from(MessageQueue)

@@ -582,10 +582,16 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     f"(parent={current_instance_id[:8]}..., child={instance_id[:8]}...)"
                 )
 
-                # SHADOW HOOK (CorrelationManager Phase 1): register the
-                # send_message in the CM so it can validate waiting_for
-                # against its own pending map. MUST NOT affect control flow
-                # — wrapped in try/except inside notify_corr_register.
+                # AUTHORITATIVE RESOLUTION HOOK (CorrelationManager
+                # Phase 3): register the send_message in the CM as a
+                # pending correlation. The CM is the single source of
+                # truth for parent completion — its per-parent pending
+                # set drives the terminal transition via
+                # ``handle_correlation_complete`` once all
+                # registered sends resolve (no ``SELECT COUNT(*)``
+                # fallback, no TOCTOU window). MUST NOT affect control
+                # flow — wrapped in try/except inside
+                # ``notify_corr_register``.
                 #
                 # Calling context: send_message is an async LangChain tool
                 # invoked from the agent's main async run, which executes on
@@ -605,7 +611,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     # failure in the import path or argument binding can
                     # never break send_message.
                     logger.warning(
-                        f"CM hook: register path raised (shadow, ignored) "
+                        f"CM hook: register path failed "
                         f"(parent={current_instance_id[:8]}, child={instance_id[:8]}): {hook_err}"
                     )
         

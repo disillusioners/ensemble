@@ -714,19 +714,27 @@ async def notify_corr_register(
     child_id: str,
     message_id: str,
 ) -> None:
-    """Shadow hook: register a message send in the CM.
+    """Authoritative resolution hook: register a message send in the CM.
 
-    Mirrors the `waiting_for++` side effect of send_message. Must be called
-    from the main asyncio event loop (the CM's per-parent lock is bound to
-    the main loop — N3 constraint).
+    Adds the (child_id, message_id) pair to the CM's per-parent pending
+    set. The CM is the single source of truth for parent completion
+    (Phase 3) — when the matching ``notify_corr_resolve`` brings the
+    pending set to zero, the CM synchronously fires
+    ``handle_correlation_complete`` (registered as
+    ``completion_callback``), which transitions both the parent JOB
+    and the parent INSTANCE to terminal.
 
-    Wraps in try/except so a CM failure NEVER affects the calling control
-    flow (the send_message path must continue even if CM is broken).
+    Wraps in try/except so a CM failure NEVER affects the calling
+    control flow (the send_message path must continue even if CM is
+    broken — the legacy ``waiting_for`` cascade in the inline code
+    below is the graceful-degradation fallback).
 
     Args:
-        parent_id: The parent instance ID (sender).
-        child_id: The child instance ID (receiver).
-        message_id: The message ID being sent.
+        parent_id: The parent instance ID that is waiting for the
+            child response.
+        child_id: The child instance ID the message is being sent to.
+        message_id: The message ID used to correlate the eventual
+            response with this send.
     """
     cm = get_correlation_manager()
     if cm is None:
@@ -735,7 +743,7 @@ async def notify_corr_register(
         await cm.register_message_send(parent_id, child_id, message_id)
     except Exception as e:
         logger.warning(
-            f"CM hook: register_message_send failed (shadow, ignored) "
+            f"CM hook: register_message_send failed "
             f"(parent={parent_id[:8]}, child={child_id[:8]}, msg={message_id[:8]}): {e}"
         )
 
@@ -746,14 +754,23 @@ async def notify_corr_resolve(
     message_id: str,
     status: str = STATUS_RESPONDED,
 ) -> None:
-    """Shadow hook: resolve a message response in the CM.
+    """Authoritative resolution hook: resolve a message response in the CM.
 
-    Mirrors the `waiting_for--` side effect of child completion / error.
+    Removes the (child_id, message_id) entry from the CM's per-parent
+    pending set. The CM is the single source of truth for parent
+    completion (Phase 3) — when the pending set reaches zero, the CM
+    synchronously fires ``handle_correlation_complete`` (registered as
+    ``completion_callback``), which transitions both the parent JOB
+    and the parent INSTANCE to terminal. The chosen ``terminal_status``
+    is "completed" if all resolved correlations had status="responded",
+    otherwise "error" (conservative rule).
+
     Must be called from the main asyncio event loop (N3 constraint).
 
-    Wraps in try/except so a CM failure NEVER affects the calling control
-    flow (the child_reports / error_reporting paths must continue even if
-    CM is broken).
+    Wraps in try/except so a CM failure NEVER affects the calling
+    control flow (the child_reports / error_reporting paths must
+    continue even if CM is broken — the legacy ``waiting_for`` cascade
+    is the graceful-degradation fallback).
 
     Args:
         parent_id: The parent instance ID (waiting for the response).
@@ -768,7 +785,7 @@ async def notify_corr_resolve(
         await cm.resolve_response(parent_id, child_id, message_id, status=status)
     except Exception as e:
         logger.warning(
-            f"CM hook: resolve_response failed (shadow, ignored) "
+            f"CM hook: resolve_response failed "
             f"(parent={parent_id[:8]}, child={child_id[:8]}, msg={message_id[:8]}, "
             f"status={status}): {e}"
         )

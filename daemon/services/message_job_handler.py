@@ -362,6 +362,17 @@ class MessageJobHandler:
                 # Check if this instance should transition (completed, waiting_children, etc.)
                 # If instance is WAITING_CHILDREN, JobFeedbackObserver will complete the job
                 # when all children finish and instance transitions to completed.
+                #
+                # Phase 3 (Cascade Unification): also defer when CM is
+                # active and reports unresolved correlations. The DB
+                # ``waiting_for`` snapshot can race against a concurrent
+                # ``register_message_send`` (the parent agent spawning
+                # another child via a tool call after this job started),
+                # but the CM's in-memory pending set is the authoritative
+                # view inside the per-parent lock. When ``cm.is_complete``
+                # returns False, children are still pending — defer
+                # completion so the CM callback handles the terminal
+                # transition when the last child resolves.
                 skip_complete = False
                 try:
                     instance = await asyncio.to_thread(
@@ -380,6 +391,23 @@ class MessageJobHandler:
                             f"deferring completion for job {job.job_id[:8]}..."
                         )
                         skip_complete = True
+                    else:
+                        # Phase 3: even when status is RUNNING/IDLE and
+                        # waiting_for reads 0, the CM may have a fresher
+                        # view of pending correlations. Defensive check —
+                        # does not change behavior when CM is None or
+                        # reports complete.
+                        from daemon.services.correlation_manager import (
+                            get_correlation_manager,
+                        )
+                        cm = get_correlation_manager()
+                        if cm is not None and not cm.is_complete(instance_id):
+                            logger.info(
+                                f"MessageJobHandler: CM reports unresolved "
+                                f"correlations for instance {instance_id[:8]}..., "
+                                f"deferring completion for job {job.job_id[:8]}..."
+                            )
+                            skip_complete = True
                 except Exception as e:
                     logger.warning(
                         f"MessageJobHandler: failed to check instance status for {instance_id[:8]}..., "

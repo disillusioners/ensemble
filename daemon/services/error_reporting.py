@@ -214,11 +214,27 @@ class ErrorReportingService:
                         f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
                     )
 
-                    # SHADOW HOOK (CorrelationManager Phase 1): mirror
-                    # waiting_for-- in the CM with status="error" so the
-                    # CM can mark the parent correlation as had_error.
+                    # AUTHORITATIVE RESOLUTION HOOK (CorrelationManager
+                    # Phase 3): the CM is the single source of truth for
+                    # parent completion. This ``notify_corr_resolve`` call
+                    # (with ``status="error"``) decrements the CM's
+                    # per-parent pending set AND marks the correlation as
+                    # had_error — so the CM can pick the conservative
+                    # "error" terminal status when the last pending
+                    # correlation resolves. If the pending set drops to
+                    # zero, the CM synchronously fires
+                    # ``handle_correlation_complete``, which transitions
+                    # the parent JOB to terminal and (Phase 3) the parent
+                    # INSTANCE to terminal. The CM's in-memory pending
+                    # set is authoritative — no ``SELECT COUNT(*)``
+                    # fallback, no TOCTOU window (Race #1 / #3
+                    # eliminated).
+                    #
                     # MUST NOT affect control flow — wrapped in
-                    # try/except inside notify_corr_resolve.
+                    # try/except inside notify_corr_resolve. The inline
+                    # cascade below this hook is only reached when
+                    # ``get_correlation_manager()`` returns ``None``
+                    # (graceful degradation / CM disabled).
                     #
                     # Calling context: _send_error_report is an async
                     # method invoked from worker threads via
@@ -249,7 +265,7 @@ class ErrorReportingService:
                             # swallows CM errors, but keep this so a failure in the import path or
                             # argument binding can never break the error-reporting path.
                             logger.warning(
-                                f"CM hook: resolve (error) path raised (shadow, ignored) "
+                                f"CM hook: resolve (error) path failed "
                                 f"(parent={parent_id[:8]}..., child={instance_id[:8]}...): {hook_err}"
                             )
                     else:
@@ -283,63 +299,96 @@ class ErrorReportingService:
                     # g) Cascade: check if parent can complete after all children done/error
                     # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
                     # regardless of current status. Mirrors the fix in _update_parent_on_child_complete.
-                    if parent.waiting_for == 0 and parent.status != InstanceStatus.COMPLETED.value:
-                        # Check if parent has any pending messages
-                        parent_pending = session.exec(
-                            select(func.count())
-                            .select_from(MessageQueue)
-                            .where(MessageQueue.instance_id == parent.instance_id)
-                            .where(MessageQueue.status.in_([
-                                MessageStatus.READY.value,
-                                MessageStatus.PROCESSING.value,
-                                MessageStatus.RETRYING.value,
-                            ]))
-                        ).scalar_one()
-                        
-                        if parent_pending == 0:
-                            # No pending messages, parent is truly complete
-                            parent.status = InstanceStatus.COMPLETED.value
-                            parent.updated_at = datetime.now(timezone.utc).isoformat()
-                            logger.info(f"Parent {parent.instance_id[:8]}... completed after child error")
-                            
-                            # Capture parent_id and agent_id for event publishing (outside transaction)
-                            completed_parent_id = parent.instance_id
-                            completed_parent_agent_id = parent.agent_id
-                            completed_parent_parent_id = parent.parent_id
-                            
-                            session.commit()
-                            
-                            # Emit status_change SSE event for parent completed
-                            if self._manager._live_hub:
-                                try:
-                                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed", agent_id=completed_parent_agent_id)
-                                except Exception as e:
-                                    logger.warning(f"Failed to emit status_change for completed parent: {e}")
-                            
-                            # FIX: Publish lifecycle event so JobFeedbackObserver completes the job
-                            if self._events_service:
-                                await self._events_service._publish_instance_lifecycle_event(
-                                    instance_id=completed_parent_id,
-                                    status="completed",
-                                    error=None,
-                                    parent_id=completed_parent_parent_id,
-                                )
-                        else:
-                            # Has pending messages - transition to WAITING_CHILDREN
-                            # Parent should wait for its message processing to complete
-                            parent.status = InstanceStatus.WAITING_CHILDREN.value
-                            parent.updated_at = datetime.now(timezone.utc).isoformat()
-                            session.commit()  # Commit the WAITING_CHILDREN status change
+                    # Phase 3 (Cascade Unification): the `!= ERROR` guard is added here
+                    # to unify the divergent guard with Site 1A. Previously Site 2 only
+                    # checked `!= COMPLETED`, which would let a parent in ERROR state be
+                    # overwritten to COMPLETED when its last child errored. The unified
+                    # guard preserves ERROR (more useful for diagnostics — W1 fix).
+                    if (
+                        parent.waiting_for == 0
+                        and parent.status != InstanceStatus.COMPLETED.value
+                        and parent.status != InstanceStatus.ERROR.value
+                    ):
+                        # Phase 3 (Cascade Unification): when CM is active, the
+                        # inline cascade + SELECT COUNT(*) + inline status
+                        # transition + inline lifecycle event publication are
+                        # all SKIPPED. The CM's resolve_response (called via
+                        # the authoritative hook above) already removed the entry
+                        # from its in-memory pending set, and if that was the
+                        # last correlation the CM callback fires synchronously
+                        # — which transitions the parent JOB to terminal via
+                        # ``_finalize_job``. No DB query, no TOCTOU window
+                        # (Race #3 eliminated).
+                        from .correlation_manager import get_correlation_manager
+                        cm = get_correlation_manager()
+                        if cm is not None:
+                            # CM is active — CM callback handles completion.
                             logger.info(
-                                f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                                f"pending messages, status=WAITING_CHILDREN after child error"
+                                f"CM-active: skipping inline cascade for parent "
+                                f"{parent.instance_id[:8]}... (error path) — "
+                                f"CM callback owns completion"
                             )
-                            # Emit status_change SSE event for parent waiting_children
-                            if self._manager._live_hub:
-                                try:
-                                    await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children", agent_id=parent.agent_id)
-                                except Exception as e:
-                                    logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
+                        else:
+                            # Graceful degradation: keep the original inline
+                            # logic with SELECT COUNT(*) fallback. This path
+                            # is also the one exercised by tests that do not
+                            # wire a CM fixture.
+                            # Check if parent has any pending messages
+                            parent_pending = session.exec(
+                                select(func.count())
+                                .select_from(MessageQueue)
+                                .where(MessageQueue.instance_id == parent.instance_id)
+                                .where(MessageQueue.status.in_([
+                                    MessageStatus.READY.value,
+                                    MessageStatus.PROCESSING.value,
+                                    MessageStatus.RETRYING.value,
+                                ]))
+                            ).scalar_one()
+
+                            if parent_pending == 0:
+                                # No pending messages, parent is truly complete
+                                parent.status = InstanceStatus.COMPLETED.value
+                                parent.updated_at = datetime.now(timezone.utc).isoformat()
+                                logger.info(f"Parent {parent.instance_id[:8]}... completed after child error")
+
+                                # Capture parent_id and agent_id for event publishing (outside transaction)
+                                completed_parent_id = parent.instance_id
+                                completed_parent_agent_id = parent.agent_id
+                                completed_parent_parent_id = parent.parent_id
+
+                                session.commit()
+
+                                # Emit status_change SSE event for parent completed
+                                if self._manager._live_hub:
+                                    try:
+                                        await self._manager._live_hub.stream_status_change(completed_parent_id, "completed", agent_id=completed_parent_agent_id)
+                                    except Exception as e:
+                                        logger.warning(f"Failed to emit status_change for completed parent: {e}")
+
+                                # FIX: Publish lifecycle event so JobFeedbackObserver completes the job
+                                if self._events_service:
+                                    await self._events_service._publish_instance_lifecycle_event(
+                                        instance_id=completed_parent_id,
+                                        status="completed",
+                                        error=None,
+                                        parent_id=completed_parent_parent_id,
+                                    )
+                            else:
+                                # Has pending messages - transition to WAITING_CHILDREN
+                                # Parent should wait for its message processing to complete
+                                parent.status = InstanceStatus.WAITING_CHILDREN.value
+                                parent.updated_at = datetime.now(timezone.utc).isoformat()
+                                session.commit()  # Commit the WAITING_CHILDREN status change
+                                logger.info(
+                                    f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                                    f"pending messages, status=WAITING_CHILDREN after child error"
+                                )
+                                # Emit status_change SSE event for parent waiting_children
+                                if self._manager._live_hub:
+                                    try:
+                                        await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children", agent_id=parent.agent_id)
+                                    except Exception as e:
+                                        logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
             
             # Signal CompletionRegistry for invoke_agent_and_wait() callers
             # After session commit — instance is in ERROR state in DB

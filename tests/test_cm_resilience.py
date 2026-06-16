@@ -78,14 +78,19 @@ def _make_cm_mock(
 
 
 def _shadow_warning_records(records: list[logging.LogRecord]) -> list[logging.LogRecord]:
-    """Return WARNING records that match the shadow-hook format."""
+    """Return WARNING records that match the CM hook log format.
+
+    Phase 3: the hook helpers are no longer "shadow" (observing only) —
+    they are the authoritative resolution path. The log message keeps
+    the ``"CM hook:"`` prefix as a stable tag for log scraping; the
+    ``shadow`` / ``ignored`` tokens were removed when the hooks became
+    authoritative.
+    """
     return [
         r
         for r in records
         if r.levelno == logging.WARNING
         and "CM hook:" in r.getMessage()
-        and "shadow" in r.getMessage()
-        and "ignored" in r.getMessage()
     ]
 
 

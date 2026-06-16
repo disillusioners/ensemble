@@ -15,6 +15,12 @@ Key behaviors:
   the lifecycle event handler. The lifecycle handler only emits ``in_progress``
   notifications for partial completions; terminal transitions happen via the
   authoritative CM callback (no TOCTOU window — eliminates Race #1).
+- **Phase 3 (Cascade Unification)**: terminal transitions now perform the FULL
+  instance-side fan-out (status update, CompletionRegistry signal, lifecycle
+  event publish, SSE status_change). Without this, instances stay in RUNNING
+  while their jobs show COMPLETED — breaking ``invoke_agent_and_wait()`` callers
+  and orphan-job detection. Mirrors the inline cascade in ``child_reports.py``
+  and ``error_reporting.py`` (CM-disabled path) on the CM-active path.
 
 Architecture (Phase 2):
   - ``handle_correlation_complete(parent_id, terminal_status)`` is registered as
@@ -42,12 +48,16 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from sqlmodel import Session
+
+from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.services.correlation_manager import get_correlation_manager
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
+from daemon.write_pause_guard import WriteGuardSession
 
 if TYPE_CHECKING:
     from daemon.config import JobSystemConfig
@@ -55,6 +65,17 @@ if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
 
 logger = logging.getLogger(__name__)
+
+
+# Terminal instance statuses — instance is no longer active. Mirrors the
+# ``_TERMINAL_INSTANCE_STATUSES`` set in ``daemon.services.job_recovery_service``
+# (kept local to avoid a hard import cycle through the recovery service).
+_TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
+    InstanceStatus.COMPLETED.value,
+    InstanceStatus.ERROR.value,
+    InstanceStatus.TERMINATED.value,
+    InstanceStatus.FAILED.value,
+})
 
 
 class JobFeedbackObserver:
@@ -582,6 +603,22 @@ class JobFeedbackObserver:
                 pass  # atomic_transition itself failed — nothing more we can do
             return
 
+        # Phase 3 (Cascade Unification): perform the FULL instance terminal
+        # transition now that the JOB is terminal. Mirrors the inline cascade
+        # in ``child_reports.py`` and ``error_reporting.py`` (CM-disabled
+        # path) on the CM-active path — sets ``instance.status``, signals
+        # ``CompletionRegistry`` (unblocks ``invoke_agent_and_wait()``),
+        # publishes the lifecycle event, and emits the SSE ``status_change``.
+        # Wrapped in its own try/except so an instance-side failure does NOT
+        # trigger the W3 fail-safe above (the job is already terminal).
+        try:
+            await self._finalize_instance(instance_id, terminal_status, error=error)
+        except Exception as e:
+            logger.warning(
+                f"Observer: instance finalization failed for "
+                f"{instance_id[:8]}...: {e}"
+            )
+
         # Release locks held by this instance
         try:
             released_count = self._lock_repo.release_by_instance(instance_id)
@@ -600,6 +637,177 @@ class JobFeedbackObserver:
         # the JobProcessor polling interval. This ensures zero-delay handoff
         # between consecutive jobs in the same queue.
         await self._trigger_next_job(job)
+
+    async def _finalize_instance(
+        self,
+        instance_id: str,
+        terminal_status: str,
+        error: str | None = None,
+    ) -> None:
+        """Transition the instance to terminal state and fire instance-side side effects.
+
+        Phase 3 (Cascade Unification) fix. The CM callback path (and the
+        lifecycle-event fall-through when ``cm_pending == 0``) transitions
+        the JOB to terminal via ``_finalize_job`` — but until Phase 3, the
+        instance itself was left in RUNNING. That broke:
+
+          * Instance lifecycle SSE stream — no terminal ``status_change``.
+          * ``CompletionRegistry`` signaling — ``invoke_agent_and_wait()``
+            callers hung waiting for an event that never fired.
+          * Orphan MESSAGE job detection in ``job_processor.py`` — the row
+            looks "still alive" until the recovery sweep runs.
+          * Status-change SSE emission on the parent.
+
+        This method mirrors the inline cascade in
+        :class:`ChildReportsService._process_child_completion_and_notify_parent`
+        (CM-disabled path) and :class:`ErrorReportingService._send_error_report`
+        (CM-disabled path), so the CM-active path is now symmetrical with
+        the CM-disabled path.
+
+        Idempotency: if the instance is already in a terminal status
+        (``COMPLETED`` / ``ERROR`` / ``TERMINATED`` / ``FAILED``), the method
+        is a no-op. The CM-disabled inline cascade sets the status before we
+        get here, so re-entry from the lifecycle-event re-publish is safe.
+
+        Side effects on success:
+          1. ``instance.status`` → ``COMPLETED`` (or ``ERROR`` for ``terminal_status="error"``).
+          2. ``instance.updated_at`` / ``instance.last_activity_at`` / ``instance.version`` updated.
+          3. ``session.commit()`` — DB is consistent before we signal external systems.
+          4. SSE ``status_change`` broadcast via the live hub.
+          5. ``CompletionRegistry.complete()`` — unblocks ``invoke_agent_and_wait()`` callers.
+          6. Lifecycle event published via the EventBus — this re-enters the
+             observer via ``_process_event``, but the ``job.status != PROCESSING``
+             idempotency guard there returns early.
+
+        Args:
+            instance_id: The parent instance ID.
+            terminal_status: ``"completed"`` or ``"error"``.
+            error: Optional error message for ``"error"`` transitions.
+        """
+        # Map terminal_status → instance status.
+        if terminal_status == "completed":
+            new_status = InstanceStatus.COMPLETED.value
+        elif terminal_status == "error":
+            new_status = InstanceStatus.ERROR.value
+        else:
+            logger.warning(
+                f"Observer: _finalize_instance called with unknown "
+                f"terminal_status='{terminal_status}' for {instance_id[:8]}..."
+            )
+            return
+
+        # Step 1: DB transition under the write-pause guard. Mirrors the
+        # inline-cascade pattern in ``child_reports.py:720`` /
+        # ``error_reporting.py:160``. Capture ``parent_id`` and ``agent_id``
+        # before the session closes (instance is detached after commit).
+        try:
+            with WriteGuardSession(
+                Session(self._instance_manager.engine),
+                self._instance_manager.write_guard,
+            ) as session:
+                instance = session.get(Instance, instance_id)
+                if instance is None:
+                    logger.debug(
+                        f"Observer: instance {instance_id[:8]}... not found "
+                        f"during finalization, skipping"
+                    )
+                    return
+                # Idempotency: if already in a terminal status, the inline
+                # cascade (CM-disabled path) or a prior callback already
+                # completed the instance. Re-publishing the lifecycle event
+                # would be redundant and could double-signal
+                # ``CompletionRegistry``.
+                if instance.status in _TERMINAL_INSTANCE_STATUSES:
+                    logger.debug(
+                        f"Observer: instance {instance_id[:8]}... already in "
+                        f"terminal status '{instance.status}', skipping "
+                        f"finalization (idempotency)"
+                    )
+                    return
+
+                parent_id = instance.parent_id
+                agent_id = instance.agent_id
+
+                instance.status = new_status
+                instance.updated_at = datetime.now(timezone.utc).isoformat()
+                instance.last_activity_at = datetime.now(timezone.utc)
+                instance.version = (instance.version or 1) + 1
+                session.commit()
+        except Exception as e:
+            # Log and re-raise so the caller (``_finalize_job``) can decide
+            # what to do. The caller wraps this in its own try/except and
+            # logs at WARNING — the job transition is already terminal, so
+            # a missing instance transition is recoverable by the orphan
+            # detector and recovery sweep.
+            logger.error(
+                f"Observer: failed to transition instance "
+                f"{instance_id[:8]}... to {new_status}: {e}",
+                exc_info=True,
+            )
+            raise
+
+        # Step 2: SSE status_change — fire AFTER commit so subscribers see
+        # a state consistent with the DB. Best-effort.
+        live_hub = getattr(self._instance_manager, "_live_hub", None)
+        if live_hub is not None:
+            try:
+                await live_hub.stream_status_change(
+                    instance_id, terminal_status, agent_id=agent_id
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Observer: failed to emit status_change for "
+                    f"{instance_id[:8]}...: {e}"
+                )
+
+        # Step 3: Signal CompletionRegistry. For "error", pass the error
+        # string as the result with ``is_error=True`` (matches
+        # ``error_reporting.py:380-384``). For "completed", pass the last
+        # assistant message raw content (matches ``child_reports.py:855``).
+        try:
+            from .completion_registry import get_completion_registry
+
+            if terminal_status == "error":
+                error_message = error if error else "Unknown error"
+                get_completion_registry().complete(
+                    instance_id,
+                    result=f"Agent error: {error_message}",
+                    is_error=True,
+                )
+            else:
+                last_content = (
+                    await self._instance_manager._get_last_assistant_message_raw(
+                        instance_id
+                    )
+                )
+                get_completion_registry().complete(
+                    instance_id, result=last_content
+                )
+        except Exception as e:
+            logger.warning(
+                f"Observer: failed to signal CompletionRegistry for "
+                f"{instance_id[:8]}...: {e}"
+            )
+
+        # Step 4: Publish lifecycle event. The event bus broadcasts to all
+        # global subscribers — including this observer. The
+        # ``_process_event`` re-entry is caught by the ``job.status !=
+        # PROCESSING`` idempotency guard (the job is already terminal at
+        # this point, set by ``_finalize_job`` immediately before this call).
+        events_service = getattr(self._instance_manager, "_events_service", None)
+        if events_service is not None:
+            try:
+                await events_service._publish_instance_lifecycle_event(
+                    instance_id=instance_id,
+                    status=terminal_status,
+                    error=error,
+                    parent_id=parent_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Observer: failed to publish lifecycle event for "
+                    f"{instance_id[:8]}...: {e}"
+                )
 
     async def _trigger_next_job(self, job) -> None:
         """Admit and spawn the next pending job for the same project.
