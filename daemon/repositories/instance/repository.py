@@ -337,6 +337,21 @@ class SQLModelInstanceRepository:
             instances = list(db_session.exec(stmt))
             return self._enrich_instances(db_session, instances)
 
+    def get_all_with_waiting_for(self) -> list[Instance]:
+        """Get all instances where waiting_for > 0.
+
+        Used by CorrelationManager.rebuild_from_db() to find parents
+        that are waiting for child responses.
+
+        Returns:
+            List of Instance objects whose ``waiting_for`` counter is
+            strictly positive. Results are not enriched with children —
+            callers that need hierarchy data should re-query.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(Instance).where(Instance.waiting_for > 0)
+            return db_session.exec(stmt).all()
+
     # --------------------------------------------------------
     # UPDATE
     # --------------------------------------------------------

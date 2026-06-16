@@ -375,7 +375,7 @@ Provide a concise summary:"""
         
         return report_message, report_task, report_message_id
 
-    async def _update_parent_on_child_complete(self, session, instance) -> tuple[bool, str | None, str | None]:
+    async def _update_parent_on_child_complete(self, session, instance, completed_message_id: str | None = None) -> tuple[bool, str | None, str | None]:
         """Update parent state when child completes.
         
         Handles:
@@ -387,6 +387,7 @@ Provide a concise summary:"""
         Args:
             session: Database session.
             instance: The child Instance object.
+            completed_message_id: The message ID that just completed (for CM hook).
             
         Returns:
             Tuple of (transitioned_to_running, completed_parent_id, completed_parent_parent_id):
@@ -447,6 +448,50 @@ Provide a concise summary:"""
             f"(parent={parent.instance_id[:8] if parent else '?'}..., "
             f"child={instance.instance_id[:8]}...)"
         )
+
+        # SHADOW HOOK (CorrelationManager Phase 1): mirror waiting_for--
+        # in the CM. MUST NOT affect control flow — wrapped in try/except
+        # inside notify_corr_resolve. The CM observes and validates the
+        # waiting_for counter without participating in cascade decisions.
+        #
+        # Calling context: this method is called from
+        # _process_child_completion_and_notify_parent, which is invoked
+        # by MessageJobHandler.process via TaskProcessor.run_task using
+        # MainLoopBridge.run_async — so we are on the main asyncio event
+        # loop. The CM's per-parent lock is bound to the main loop (N3
+        # constraint); a direct await is safe here.
+        #
+        # Skip the hook when message_id is missing/empty: the CM keys
+        # correlations on (child_id, message_id) and cannot resolve a
+        # None/empty message_id against any registered entry. Calling
+        # with message_id="" would silently no-op and the pending entry
+        # would stay forever.
+        if completed_message_id:
+            try:
+                from .correlation_manager import notify_corr_resolve
+                await notify_corr_resolve(
+                    parent_id=instance.parent_id,
+                    child_id=instance.instance_id,
+                    message_id=completed_message_id,
+                    status="responded",
+                )
+            except Exception as hook_err:
+                # Defensive outer guard — the helper already swallows CM
+                # errors, but keep this so a failure in the import path or
+                # argument binding can never break the child-completion path.
+                logger.warning(
+                    f"CM hook: resolve path raised (shadow, ignored) "
+                    f"(parent={instance.parent_id[:8] if instance.parent_id else '?'}..., "
+                    f"child={instance.instance_id[:8]}...): {hook_err}"
+                )
+        else:
+            logger.debug(
+                f"CM hook: skipping resolve for parent="
+                f"{instance.parent_id[:8] if instance.parent_id else '?'}..., "
+                f"child={instance.instance_id[:8]}... "
+                f"(no message_id — child completed without a tracked send)"
+            )
+
         parent.last_activity_at = datetime.now(timezone.utc)
         parent.version = (parent.version or 1) + 1
         
@@ -813,7 +858,7 @@ Provide a concise summary:"""
             )
             
             # Update parent state
-            parent_transitioned_to_running, completed_parent_id, completed_parent_parent_id = await self._update_parent_on_child_complete(session, instance)
+            parent_transitioned_to_running, completed_parent_id, completed_parent_parent_id = await self._update_parent_on_child_complete(session, instance, completed_message_id=completed_message_id)
             
             # Calculate waiting_for remaining for event
             waiting_for_remaining = max(0, (instance.parent_id and session.get(Instance, instance.parent_id).waiting_for) or 0)

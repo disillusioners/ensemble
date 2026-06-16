@@ -213,6 +213,52 @@ class ErrorReportingService:
                         f"waiting_for decremented (error path) -> {new_waiting} "
                         f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
                     )
+
+                    # SHADOW HOOK (CorrelationManager Phase 1): mirror
+                    # waiting_for-- in the CM with status="error" so the
+                    # CM can mark the parent correlation as had_error.
+                    # MUST NOT affect control flow — wrapped in
+                    # try/except inside notify_corr_resolve.
+                    #
+                    # Calling context: _send_error_report is an async
+                    # method invoked from worker threads via
+                    # MainLoopBridge.run_async_no_wait (see
+                    # manager._on_stale_task_permanent_failure and
+                    # worker_pool._notify_parent_of_failure), so we are
+                    # on the main asyncio event loop. The CM's
+                    # per-parent lock is bound to the main loop (N3
+                    # constraint); a direct await is safe here.
+                    #
+                    # Skip the hook when message_id is missing/empty:
+                    # the CM keys correlations on (child_id, message_id)
+                    # and cannot resolve a None/empty message_id against
+                    # any registered entry. Calling with message_id=""
+                    # would silently no-op and the pending entry would
+                    # stay forever.
+                    if message_id:
+                        try:
+                            from .correlation_manager import notify_corr_resolve
+                            await notify_corr_resolve(
+                                parent_id=parent_id,
+                                child_id=instance_id,
+                                message_id=message_id,
+                                status="error",
+                            )
+                        except Exception as hook_err:
+                            # Defensive outer guard — the helper already
+                            # swallows CM errors, but keep this so a failure in the import path or
+                            # argument binding can never break the error-reporting path.
+                            logger.warning(
+                                f"CM hook: resolve (error) path raised (shadow, ignored) "
+                                f"(parent={parent_id[:8]}..., child={instance_id[:8]}...): {hook_err}"
+                            )
+                    else:
+                        logger.debug(
+                            f"CM hook: skipping resolve (error) for parent="
+                            f"{parent_id[:8]}..., child={instance_id[:8]}... "
+                            f"(no message_id — error reported without a tracked send)"
+                        )
+
                     session.expire(parent)
                     parent = session.get(Instance, parent_id)
                     parent.last_activity_at = datetime.now(timezone.utc)

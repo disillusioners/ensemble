@@ -581,6 +581,33 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     f"waiting_for incremented -> {new_val} "
                     f"(parent={current_instance_id[:8]}..., child={instance_id[:8]}...)"
                 )
+
+                # SHADOW HOOK (CorrelationManager Phase 1): register the
+                # send_message in the CM so it can validate waiting_for
+                # against its own pending map. MUST NOT affect control flow
+                # — wrapped in try/except inside notify_corr_register.
+                #
+                # Calling context: send_message is an async LangChain tool
+                # invoked from the agent's main async run, which executes on
+                # the main asyncio event loop. The CM's per-parent lock is
+                # bound to the main loop (N3 constraint), so a direct await
+                # is safe here — no MainLoopBridge marshaling needed.
+                try:
+                    from ..services.correlation_manager import notify_corr_register
+                    await notify_corr_register(
+                        parent_id=current_instance_id,
+                        child_id=instance_id,
+                        message_id=message_id,
+                    )
+                except Exception as hook_err:
+                    # Defensive belt-and-suspenders: the helper already
+                    # swallows CM errors, but keep this outer guard so a
+                    # failure in the import path or argument binding can
+                    # never break send_message.
+                    logger.warning(
+                        f"CM hook: register path raised (shadow, ignored) "
+                        f"(parent={current_instance_id[:8]}, child={instance_id[:8]}): {hook_err}"
+                    )
         
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     

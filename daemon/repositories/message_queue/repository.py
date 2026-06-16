@@ -450,7 +450,7 @@ class SQLModelMessageQueueRepository:
                 (MessageQueue.status == MessageStatus.READY.value)
                 | (MessageQueue.status == MessageStatus.PROCESSING.value)
             )
-            
+
             if instance_id:
                 stmt = stmt.where(MessageQueue.instance_id == instance_id)
 
@@ -458,8 +458,39 @@ class SQLModelMessageQueueRepository:
                 col(MessageQueue.priority).asc(),
                 col(MessageQueue.enqueued_at).asc()
             ).limit(limit)
-            
+
             return list(session.exec(stmt))
+
+    def get_pending_for_instances(
+        self, instance_ids: list[str]
+    ) -> list[tuple[str, str]]:
+        """Get (instance_id, message_id) pairs for pending messages.
+
+        Used by CorrelationManager.rebuild_from_db() to reconstruct
+        correlation keys with real message_id UUIDs.
+
+        Args:
+            instance_ids: Instance IDs to filter by. Empty list returns
+                an empty result.
+
+        Returns:
+            List of (instance_id, message_id) tuples for messages whose
+            status is READY, PROCESSING, or RETRYING.
+        """
+        if not instance_ids:
+            return []
+        with Session(self.engine) as session:
+            stmt = (
+                select(MessageQueue.instance_id, MessageQueue.message_id)
+                .where(MessageQueue.instance_id.in_(instance_ids))
+                .where(MessageQueue.status.in_([
+                    MessageStatus.READY.value,
+                    MessageStatus.PROCESSING.value,
+                    MessageStatus.RETRYING.value,
+                ]))
+            )
+            rows = session.exec(stmt).all()
+            return [(row[0], row[1]) for row in rows]
 
     # --------------------------------------------------------
     # CLEANUP
