@@ -8,8 +8,9 @@ Architecture:
 - Per-parent asyncio.Lock serializes all register/resolve calls for each parent.
 - All lock-protected methods run on the main asyncio event loop (N3 constraint).
 - EventBus subscription uses a large buffer (5000) to mitigate silent-drop risk.
-- completion_callback is called WITHIN the per-parent Lock — it MUST NOT call any
-  CM method for the same parent_id (deadlock risk, N4 constraint).
+- completion_callback is invoked AFTER the per-parent Lock is released (W1).
+  This allows Phase 2 callbacks to perform cascade work (e.g. parent status
+  transitions) that may re-enter CM for the same parent_id without deadlocking.
 """
 
 from __future__ import annotations
@@ -103,8 +104,9 @@ class CorrelationManager:
             message_queue_repository: The message queue repository (for DB queries).
             completion_callback: Async callback called when parent completes.
                 Signature: async def callback(parent_id: str, terminal_status: str) -> None
-                Called WITHIN per-parent lock — MUST NOT call any CM method for the
-                same parent_id (deadlock risk, N4 constraint).
+                Invoked AFTER the per-parent lock is released (W1 fix), so it
+                is safe for the callback to re-enter CM for the same parent_id
+                (e.g. during Phase 2 cascade work) without deadlocking.
             event_bus: Optional EventBus instance for inbound lifecycle subscription.
                 If provided, Phase 1 uses it for shadow validation logging.
         """
@@ -241,6 +243,8 @@ class CorrelationManager:
         # telemetry check; serializing it under the per-parent lock would
         # block other register/resolve operations on the same parent.
         should_validate = False
+        should_complete = False  # W1 fix: defer completion_callback past lock release
+        terminal_status: str | None = None
         async with self._get_lock(parent_id):
             if parent_id not in self._pending:
                 logger.debug(
@@ -280,24 +284,33 @@ class CorrelationManager:
                     f"CM correlation complete: parent={parent_id[:8]}, "
                     f"status={terminal_status}, had_error={parent_state.had_error}"
                 )
-                # Clean up in-memory state
+                # Clean up in-memory state while still holding the lock
                 del self._pending[parent_id]
-
-                # Call completion_callback WITHIN the lock (N4 constraint).
-                # The callback MUST NOT call any CM method for parent_id
-                # (would cause deadlock).
-                if self._completion_callback is not None:
-                    try:
-                        await self._completion_callback(parent_id, terminal_status)
-                    except Exception as e:
-                        logger.error(
-                            f"CM completion_callback failed for parent={parent_id[:8]}: {e}"
-                        )
-
-                return True
+                # W1 fix: defer the completion_callback invocation until AFTER
+                # the per-parent lock is released. In Phase 2 the callback
+                # performs cascade work (parent status transition) that may
+                # call back into CM for the same parent_id — calling it under
+                # the lock would deadlock. The lock is no longer needed once
+                # _pending has been mutated; the callback is safe to await
+                # without it.
+                should_complete = True
             else:
                 # Not complete yet — schedule shadow validation AFTER releasing lock.
                 should_validate = True
+
+        # Lock released. Fire the completion_callback OUTSIDE the per-parent
+        # lock (W1 fix) so Phase 2 cascade work (e.g. status transitions that
+        # re-enter CM) cannot deadlock on _get_lock(parent_id). State mutation
+        # (del _pending[parent_id]) already happened above under the lock.
+        if should_complete:
+            if self._completion_callback is not None:
+                try:
+                    await self._completion_callback(parent_id, terminal_status)
+                except Exception as e:
+                    logger.error(
+                        f"CM completion_callback failed for parent={parent_id[:8]}: {e}"
+                    )
+            return True
 
         # Lock released: do shadow validation outside the per-parent lock
         # to avoid serializing DB reads against register/resolve for the
@@ -358,6 +371,16 @@ class CorrelationManager:
         """
         logger.info("CM rebuild_from_db: starting...")
 
+        # W2 fix: Clear _pending before rebuilding. Previously this method
+        # merged new entries into the existing dict, which could re-add
+        # stale or duplicate entries if a register_message_send landed
+        # between start() and rebuild_from_db(). start() is the only
+        # caller in production and is called before any EventBus traffic,
+        # so replacing the dict is safe; subsequent register/resolve
+        # calls must go through the per-parent lock and will see the
+        # rebuilt state.
+        self._pending = {}
+
         # Step 1: Single query for all parents with waiting_for > 0.
         parents = await asyncio.to_thread(self._instance_repo.get_all_with_waiting_for)
 
@@ -385,9 +408,9 @@ class CorrelationManager:
             # Step 4: Build correlation entries from (child_id, message_id) tuples.
             if pending_pairs:
                 async with self._get_lock(parent_id):
-                    if parent_id not in self._pending:
-                        self._pending[parent_id] = ParentCorrelation(parent_id=parent_id)
-                    parent_state = self._pending[parent_id]
+                    # W2 fix: _pending was cleared above, so this slot is
+                    # always fresh — no need to check for an existing entry.
+                    parent_state = ParentCorrelation(parent_id=parent_id)
                     for child_id, message_id in pending_pairs:
                         correlation_key = f"{child_id}:{message_id}"
                         parent_state.pending[correlation_key] = PendingResponse(
@@ -397,9 +420,14 @@ class CorrelationManager:
                             created_at=time.monotonic(),
                             status=STATUS_PENDING,
                         )
+                    self._pending[parent_id] = parent_state
 
-            # Compare found count with DB waiting_for
-            cm_count = self.get_pending_count(parent_id)
+            # W2 fix: Compare found count with DB waiting_for UNDER the
+            # per-parent lock. Reading self._pending outside the lock was a
+            # TOCTOU hazard (concurrent register_message_send could mutate
+            # pending between rebuild and the count check).
+            async with self._get_lock(parent_id):
+                cm_count = self.get_pending_count(parent_id)
             if cm_count != db_waiting:
                 logger.warning(
                     f"CM rebuild mismatch: parent={parent_id[:8]}, "
@@ -756,17 +784,34 @@ async def notify_corr_resolve(
 # continues without it. Phase 1 runs in shadow mode (logging only).
 
 
-async def init_correlation_manager(app, manager) -> None:
-    """Initialize and start the CorrelationManager (Phase 1: shadow mode).
+async def init_correlation_manager(
+    app, manager, completion_callback=None
+) -> None:
+    """Initialize and start the CorrelationManager.
 
-    The CM observes the existing waiting_for counter without affecting any
-    control flow. A CM failure is logged at WARNING and the daemon continues
-    without it.
+    Phase 1: shadow mode (validation only).
+    Phase 2: the CM fires ``completion_callback`` when all message responses
+    for a parent are resolved. The callback is the authoritative terminal
+    transition path for the ``JobFeedbackObserver`` — it replaces the legacy
+    ``waiting_for``-based check in ``_process_event`` and eliminates Race #1
+    (the TOCTOU window between reading ``waiting_for`` and acting on it).
+
+    If ``completion_callback`` is ``None`` (legacy callers), a shadow logger
+    is used that just records the event. Production must pass the observer's
+    ``handle_correlation_complete`` method to wire Phase 2 end-to-end.
+
+    The CM observes and validates the existing waiting_for counter
+    without affecting any control flow. A CM failure is logged at WARNING
+    and the daemon continues without it.
 
     Args:
         app: The FastAPI app (used to stash the instance on app.state for
             later shutdown).
         manager: The InstanceManager (provides repositories and EventBus).
+        completion_callback: Optional async callback
+            ``async def callback(parent_id, terminal_status) -> None``.
+            When provided, called by CM when a parent's correlations fully
+            resolve. When ``None``, falls back to a shadow logger.
     """
     async def _shadow_completion_callback(parent_id: str, terminal_status: str) -> None:
         logger.info(
@@ -774,20 +819,25 @@ async def init_correlation_manager(app, manager) -> None:
             f"status={terminal_status})"
         )
 
+    # Use the caller-supplied callback (Phase 2) or fall back to the shadow
+    # logger (legacy / tests). Both are safe: the CM swallows callback
+    # exceptions and logs them.
+    cb = completion_callback if completion_callback is not None else _shadow_completion_callback
+
     try:
         correlation_manager = CorrelationManager(
             instance_repository=manager._instance_repository,
             message_queue_repository=manager._queue_repository,
-            completion_callback=_shadow_completion_callback,
+            completion_callback=cb,
             event_bus=manager._event_bus,
         )
         set_correlation_manager(correlation_manager)
         await correlation_manager.start()
         app.state._correlation_manager = correlation_manager
-        logger.info("CorrelationManager started (shadow mode)")
+        logger.info("CorrelationManager started")
     except Exception as e:
         logger.warning(
-            f"Failed to start CorrelationManager (shadow, continuing without it): {e}"
+            f"Failed to start CorrelationManager (continuing without it): {e}"
         )
         set_correlation_manager(None)
 

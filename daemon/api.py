@@ -332,11 +332,19 @@ async def lifespan(app: FastAPI):
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")
 
-    # Initialize and start CorrelationManager (Phase 1: shadow mode).
-    # See init_correlation_manager() — CM is best-effort and never blocks
-    # daemon startup. Must run BEFORE JobProcessor.start() so the CM's
-    # EventBus subscription is live when jobs begin flowing.
-    await init_correlation_manager(app, manager)
+    # Initialize and start CorrelationManager.
+    # Phase 2: wire JobFeedbackObserver.handle_correlation_complete as the
+    # CM completion_callback. This is the authoritative terminal-transition
+    # path for parents with pending children — eliminates Race #1 (the
+    # TOCTOU window in the old waiting_for check). See
+    # .agents/shared/planning/correlation-manager/phase2-observer-switch.md.
+    # Must run AFTER JobFeedbackObserver is created (so the method exists)
+    # and BEFORE JobProcessor.start() so the CM is live when jobs flow.
+    await init_correlation_manager(
+        app,
+        manager,
+        completion_callback=job_feedback_observer.handle_correlation_complete,
+    )
 
     # Bootstrap system default project (Phase 1 of system_default_project feature)
     # This ensures the system project exists and has its queues provisioned
