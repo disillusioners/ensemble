@@ -2524,3 +2524,233 @@ class TestGetHistorySnapshotIdFallbackRegression:
             )
         assert history == []
 
+
+class TestJsonPathTextPostgresPath:
+    """Regression guard: ``_json_path_text`` on the PostgreSQL code path.
+
+    The PostgreSQL branch of ``_json_path_text`` was
+    ``column[key].astext``. ``.astext`` is a property on SQLAlchemy's
+    native ``JSON``/``JSONB`` type comparator, but the ``snapshot``
+    column is declared with ``JSONBType`` (a ``TypeDecorator`` with
+    ``impl=JSON``). Indexing a ``TypeDecorator`` column returns a
+    ``TDComparator`` which does NOT expose ``.astext`` — accessing
+    it raises ``AttributeError: Neither 'BinaryExpression' object
+    nor 'TDComparator' object has an attribute 'astext'``.
+
+    The CI / dev test environment is SQLite (where
+    ``_is_postgres()`` is ``False``), so the bug is masked in the
+    SQLite branch (``func.json_extract`` is used directly, no
+    ``.astext``). The bug surfaces only in production against
+    PostgreSQL, which is why this test patches ``_is_postgres`` to
+    return ``True`` — it forces the PG code path on a SQLite engine
+    so the SQLAlchemy expression construction (not the SQL
+    execution) can be exercised.
+
+    The test asserts:
+
+    1. The PG code path raises ``AttributeError`` (current buggy
+       code) — observed as a ``pytest.fail``.
+    2. The PG code path constructs a valid expression (after the
+       fix) — no exception.
+    3. The SQLite path is unchanged (no regression on the path
+       that real SQLite tests use).
+    """
+
+    def test_get_history_deleted_asset_pg_path_no_attribute_error(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """Deleted asset → ``get_history`` on the PG code path must not raise.
+
+        This is the exact code path described in the bug: create →
+        delete → ``get_history`` on a deleted asset. The PG path is
+        forced by patching ``_is_postgres`` so the
+        ``column[key].astext`` branch in ``_json_path_text`` is
+        taken. With the bug, this raises ``AttributeError``; with
+        the fix, it returns (the rows themselves cannot be
+        returned on a SQLite engine executing PG SQL, but the
+        expression construction must not crash).
+        """
+        from unittest.mock import patch
+
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="pg-path-deleted-asset",
+            attributes={"env": "prod"},
+        )
+        original_id = asset.id
+        infra_repository.delete_asset(original_id)
+
+        # Force the PostgreSQL code path. This is the path that
+        # production takes against a PostgreSQL engine. On a
+        # SQLite engine, ``_is_postgres`` is False and the bug is
+        # masked — patching it to True is the only way to
+        # exercise the buggy branch in this test environment.
+        with patch.object(
+            SQLModelInfraRepository, "_is_postgres", return_value=True
+        ):
+            try:
+                infra_repository.get_history(original_id)
+            except AttributeError as exc:
+                pytest.fail(
+                    f"get_history raised AttributeError on the PG code "
+                    f"path: {exc!r}. The bug is in _json_path_text: "
+                    f"``column[key].astext`` is invalid on a JSONBType "
+                    f"(TypeDecorator) column. The fix should replace "
+                    f".astext with a dialect-aware pattern that does "
+                    f"not rely on the JSON comparator's .astext property."
+                )
+
+    def test_json_path_text_direct_call_pg_path_no_attribute_error(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """Direct unit-level check: ``_json_path_text`` does not raise on PG path.
+
+        Complements the integration test above with a more focused
+        call that directly exercises the buggy line. If
+        ``_json_path_text`` still uses ``column[key].astext`` on
+        the PG branch, this call will raise ``AttributeError``
+        immediately — no DB round-trip needed. The fix is
+        confirmed working when the call returns a Cast object
+        (sa_cast) and the compiled SQL is a valid
+        ``CAST(... AS VARCHAR)`` expression.
+        """
+        from unittest.mock import patch
+        from sqlalchemy.dialects import postgresql
+
+        with patch.object(
+            SQLModelInfraRepository, "_is_postgres", return_value=True
+        ):
+            try:
+                expr = infra_repository._json_path_text(
+                    InfraAssetHistory.snapshot, "id"
+                )
+            except AttributeError as exc:
+                pytest.fail(
+                    f"_json_path_text raised AttributeError on the PG "
+                    f"code path: {exc!r}. The PG branch must not use "
+                    f"column[key].astext on a TypeDecorator column."
+                )
+
+        # The fixed function returns a Cast expression (sa_cast).
+        # Compiling it for PostgreSQL must yield a valid
+        # ``CAST(... AS VARCHAR)`` (or TEXT) — the test asserts
+        # the expression actually IS a Cast and compiles cleanly
+        # so a future regression that returns a broken expression
+        # is caught.
+        compiled = str(expr.compile(dialect=postgresql.dialect()))
+        assert "CAST(" in compiled.upper(), (
+            f"Expected CAST(...) in compiled PG SQL, got: {compiled!r}. "
+            f"The fix should use sa_cast (not .astext) for the PG branch."
+        )
+        # And the original ``.astext`` antipattern must be gone —
+        # an expression that contains ``AS TEXT`` or ``AS VARCHAR``
+        # cast syntax proves we're using CAST, not ``->>``.
+        assert "->>" not in compiled, (
+            f"Compiled SQL still uses the ``->>`` operator: {compiled!r}. "
+            f"``->>`` is the .astext property's compiled form — its "
+            f"presence here means the regression is back."
+        )
+
+    def test_sqlite_path_unaffected_by_fix(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """SQLite path must continue to return rows for a deleted asset.
+
+        Anti-regression for the SQLite branch: the fix only
+        touches the PG code path, but a future careless edit
+        could regress the SQLite branch. This test pins the
+        SQLite path's row-returning behavior on a deleted asset
+        so any such regression fails loudly.
+        """
+        asset = infra_repository.create_asset(
+            project_id=project_id,
+            type="server",
+            name="sqlite-path-still-works",
+        )
+        original_id = asset.id
+        infra_repository.delete_asset(original_id)
+
+        # No patch — real SQLite path. Must return both rows
+        # via the snapshot-id fallback (asset_id is NULL on
+        # both after the FK SET NULL fires).
+        history = infra_repository.get_history(original_id)
+        change_types = {h.change_type for h in history}
+        assert "created" in change_types
+        assert "deleted" in change_types
+
+
+class TestJsonPathNumericPostgresPath:
+    """Regression guard: ``_json_path_numeric`` on the PostgreSQL code path.
+
+    Sibling bug to ``_json_path_text``: the PG branch used
+    ``column[key].astext``, which is invalid on a ``JSONBType``
+    (``TypeDecorator``) column because the resulting
+    ``TDComparator`` does not expose ``.astext``. Accessing
+    ``.astext`` raises
+    ``AttributeError: Neither 'BinaryExpression' object nor
+    'TDComparator' object has an attribute 'astext'``.
+
+    This breaks every numeric search operator (``$gt``,
+    ``$gte``, ``$lt``, ``$lte``) on PostgreSQL. The fix mirrors
+    ``_json_path_text``: replace ``column[key].astext`` with
+    ``column[key]`` and let ``sa_cast(..., Float)`` handle the
+    conversion.
+
+    Like the text test, the CI / dev environment is SQLite, so
+    the bug is masked there. ``_is_postgres`` is patched to
+    ``True`` to force the PG code path on a SQLite engine and
+    exercise the buggy expression construction.
+    """
+
+    def test_json_path_numeric_direct_call_pg_path_no_attribute_error(
+        self, infra_repository, seed_projects, project_id
+    ):
+        """Direct unit-level check: ``_json_path_numeric`` does not raise on PG path.
+
+        Complements the text-path test with a more focused call
+        that directly exercises the buggy line. If
+        ``_json_path_numeric`` still uses ``column[key].astext``
+        on the PG branch, this call will raise ``AttributeError``
+        immediately — no DB round-trip needed. The fix is
+        confirmed working when the call returns a Cast object
+        (``sa_cast``) and the compiled SQL is a valid
+        ``CAST(... AS ...)`` expression.
+        """
+        from unittest.mock import patch
+        from sqlalchemy.dialects import postgresql
+
+        with patch.object(
+            SQLModelInfraRepository, "_is_postgres", return_value=True
+        ):
+            try:
+                expr = infra_repository._json_path_numeric(
+                    InfraAssetHistory.snapshot, "id"
+                )
+            except AttributeError as exc:
+                pytest.fail(
+                    f"_json_path_numeric raised AttributeError on the PG "
+                    f"code path: {exc!r}. The PG branch must not use "
+                    f"column[key].astext on a TypeDecorator column."
+                )
+
+        # The fixed function returns a Cast expression (sa_cast).
+        # Compiling it for PostgreSQL must yield a valid
+        # ``CAST(... AS ... )`` — the test asserts the
+        # expression actually IS a Cast and compiles cleanly so
+        # a future regression that returns a broken expression
+        # is caught.
+        compiled = str(expr.compile(dialect=postgresql.dialect()))
+        assert "CAST(" in compiled.upper(), (
+            f"Expected CAST(...) in compiled PG SQL, got: {compiled!r}. "
+            f"The fix should use sa_cast (not .astext) for the PG branch."
+        )
+        # And the original ``.astext`` antipattern must be gone —
+        # ``->>`` is the ``.astext`` property's compiled form; its
+        # presence here means the regression is back.
+        assert "->>" not in compiled, (
+            f"Compiled SQL still uses the ``->>`` operator: {compiled!r}. "
+            f"``->>`` is the .astext property's compiled form — its "
+            f"presence here means the regression is back."
+        )
+

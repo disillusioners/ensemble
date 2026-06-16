@@ -131,23 +131,40 @@ class SQLModelInfraRepository:
         """Build a dialect-aware expression that returns a JSON
         value cast to TEXT for ``key`` in JSON ``column``.
 
-        * PostgreSQL → ``column->>'key'`` (returns ``text``).
+        * PostgreSQL → ``CAST(column->'key' AS VARCHAR)`` (returns
+          ``text``).
         * SQLite → ``json_extract(column, '$.key')`` cast to TEXT.
 
         The cast is done with ``String`` (the SQLAlchemy
         canonical TEXT type) so the comparison behaves like a
         string compare, which is what we want for ``=`` and
         ``LIKE`` operations on attribute values.
+
+        Implementation note: an earlier version used
+        ``column[key].astext`` on the PostgreSQL branch, which
+        compiles to ``column->>'key'``. ``.astext`` is a property
+        on the native ``JSON``/``JSONB`` type comparator, but the
+        ``snapshot`` / ``attributes`` columns are declared with
+        ``JSONBType`` — a ``TypeDecorator`` whose ``impl=JSON``.
+        Indexing a ``TypeDecorator`` column yields a
+        ``TDComparator`` that does NOT expose ``.astext``, so the
+        call raises ``AttributeError: Neither 'BinaryExpression'
+        object nor 'TDComparator' object has an attribute
+        'astext'``. ``sa_cast(column[key], String)`` is the
+        dialect-agnostic equivalent that does not depend on the
+        JSON comparator's ``.astext`` property — it works on
+        both the native JSON/JSONB types and the ``JSONBType``
+        ``TypeDecorator``.
         """
         if self._is_postgres():
-            return column[key].astext
+            return sa_cast(column[key], String)
         return sa_cast(func.json_extract(column, f"$.{key}"), String)
 
     def _json_path_numeric(self, column: Any, key: str) -> Any:
         """Build a dialect-aware expression for a JSON value
         cast to a SQL numeric type.
 
-        * PostgreSQL → ``column->>'key'`` cast to ``FLOAT`` /
+        * PostgreSQL → ``CAST(column->'key' AS FLOAT)`` /
           ``DOUBLE PRECISION``. (PostgreSQL's ``->>`` already
           returns TEXT, so we have to cast back.)
         * SQLite → ``CAST(json_extract(column, '$.key') AS REAL)``.
@@ -157,9 +174,26 @@ class SQLModelInfraRepository:
         comparing a JSON number against an integer via TEXT
         cast breaks lexicographically (``"16" > "8"`` is
         ``False``).
+
+        Implementation note: an earlier version used
+        ``column[key].astext`` on the PostgreSQL branch, which
+        compiles to ``column->>'key'``. ``.astext`` is a property
+        on the native ``JSON``/``JSONB`` type comparator, but the
+        ``snapshot`` / ``attributes`` columns are declared with
+        ``JSONBType`` — a ``TypeDecorator`` whose ``impl=JSON``.
+        Indexing a ``TypeDecorator`` column yields a
+        ``TDComparator`` that does NOT expose ``.astext``, so the
+        call raises ``AttributeError: Neither 'BinaryExpression'
+        object nor 'TDComparator' object has an attribute
+        'astext'``. ``sa_cast(column[key], Float)`` is the
+        dialect-agnostic equivalent that does not depend on the
+        JSON comparator's ``.astext`` property — it works on
+        both the native JSON/JSONB types and the ``JSONBType``
+        ``TypeDecorator``. (No ``.astext`` — ``TDComparator``
+        does not expose it on ``TypeDecorator`` columns.)
         """
         if self._is_postgres():
-            return sa_cast(column[key].astext, Float)
+            return sa_cast(column[key], Float)
         return sa_cast(func.json_extract(column, f"$.{key}"), Float)
 
     def _json_contains_predicate(self, column: Any, key: str, value: Any) -> Any:
