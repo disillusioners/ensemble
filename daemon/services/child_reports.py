@@ -678,26 +678,34 @@ Provide a concise summary:"""
                 # waiting_for == 0, but check for pending messages before completing.
                 # This handles the case where child completion reports are still queued
                 # but waiting_for was already decremented by a previous cascade.
+                # Exclude the just-completed message by ID (mirrors
+                # _should_send_completion_report at line 270-279) to avoid the
+                # double-count hazard when message_queue.complete() has not
+                # committed yet.
                 pending_count = session.exec(
                     select(func.count())
                     .select_from(MessageQueue)
                     .where(MessageQueue.instance_id == instance_id)
+                    .where(MessageQueue.message_id != completed_message_id)
                     .where(MessageQueue.status.in_([
                         MessageStatus.READY.value,
                         MessageStatus.PROCESSING.value,
                         MessageStatus.RETRYING.value,
                     ]))
                 ).scalar_one()
-                
-                if instance.waiting_for > 0 and pending_count > 0:
-                    # Has explicit children to wait for
+
+                if pending_count > 0:
+                    # By this point waiting_for is guaranteed 0 (the early
+                    # return above handled all waiting_for > 0 cases), so the
+                    # single pending_count guard is sufficient. Do NOT
+                    # transition to COMPLETED — there is queued work that
+                    # the worker must still process.
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     session.commit()
                     logger.info(
-                        f"Instance {instance_id[:8]}... waiting_for={instance.waiting_for}, pending={pending_count}, "
-                        f"status=WAITING_CHILDREN"
+                        f"Instance {instance_id[:8]}... waiting_for=0 but has {pending_count} "
+                        f"pending messages, status=WAITING_CHILDREN"
                     )
-                    logger.info(f"Instance {instance_id[:8]}... has pending messages, deferring notification")
                     # Emit status_change SSE event
                     if self._manager._live_hub:
                         try:
@@ -705,13 +713,7 @@ Provide a concise summary:"""
                         except Exception as e:
                             logger.warning(f"Failed to emit status_change for waiting_children: {e}")
                     return
-                elif pending_count > 0 and instance.waiting_for == 0:
-                    logger.warning(
-                        "Instance %s has pending_count=%d but waiting_for=0 — "
-                        "proceeding to COMPLETED (not waiting_children)",
-                        instance_id[:8], pending_count
-                    )
-                
+
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... no parent, skipping notification")
                 

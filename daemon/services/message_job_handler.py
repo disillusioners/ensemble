@@ -123,6 +123,49 @@ class MessageJobHandler:
         cts = CancellationTokenSource()
         self._active_tokens[job.job_id] = cts
 
+        # Transition the instance to RUNNING before invoking the gate so
+        # observers (live_hub, JobFeedbackObserver) see a status_change
+        # event. The simple-agent self-continuation case relies on
+        # WAITING_CHILDREN → RUNNING being observable: after the previous
+        # turn completed with pending_count > 0, status is set to
+        # WAITING_CHILDREN. When this handler picks up the queued message
+        # we must flip back to RUNNING so the UI/observability is
+        # consistent with the work that is about to happen. This makes
+        # the liveness of the self-continuation path explicit rather than
+        # implicit (see docs/bugs/root-instance-premature-completion-on-pending-message.md
+        # Finding 5.3).
+        #
+        # Use a conditional UPDATE so we do not clobber a concurrent
+        # ERROR/PAUSED/TERMINATED set by another path between the call
+        # site and the DB write. ``transition_status_if`` is a single
+        # atomic statement: if the row is missing or its current status
+        # is not in ``allowed_from``, it returns ``None`` and we skip
+        # the SSE emit. This is the safer replacement for the original
+        # read-then-unconditional-update pattern (which had a TOCTOU
+        # window where a concurrent ``error_reporting`` write could be
+        # overwritten).
+        try:
+            updated = await asyncio.to_thread(
+                self._manager._instance_repository.transition_status_if,
+                instance_id,
+                InstanceStatus.RUNNING.value,
+                (InstanceStatus.WAITING_CHILDREN.value, InstanceStatus.IDLE.value),
+            )
+            if updated is not None and self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, InstanceStatus.RUNNING.value, agent_id=updated.agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"MessageJobHandler: failed to emit status_change → running: {e}"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"MessageJobHandler: pre-pickup status transition to RUNNING "
+                f"failed for {instance_id[:8]}... (non-fatal): {e}"
+            )
+
         # [TRACE] Log before processing
         logger.info(
             f"[TRACE] MessageJobHandler: calling gate.run for "

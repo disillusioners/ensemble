@@ -365,6 +365,43 @@ class SQLModelInstanceRepository:
         """Update instance status."""
         return self.update(instance_id, status=status)
 
+    def transition_status_if(
+        self,
+        instance_id: str,
+        new_status: str,
+        allowed_from: tuple[str, ...],
+    ) -> Instance | None:
+        """Atomically transition an instance's status only if the current
+        status is in ``allowed_from``. Returns the updated instance, or
+        ``None`` if the row was not found OR the precondition was not
+        satisfied (no clobber of a concurrent terminal-state write).
+
+        Use this for status transitions that must not overwrite a
+        concurrent error/pause/terminate from another path.
+        """
+        from sqlmodel import update as sqlmodel_update
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                sqlmodel_update(Instance)
+                .where(Instance.instance_id == instance_id)
+                .where(col(Instance.status).in_(list(allowed_from)))
+                .values(
+                    status=new_status,
+                    updated_at=datetime.now(timezone.utc).isoformat(),
+                )
+            )
+            result = db_session.exec(stmt)
+            db_session.commit()
+            if result.rowcount == 0:
+                # Either instance not found, or current status is not in
+                # allowed_from (e.g. a concurrent writer set it to ERROR
+                # or PAUSED between the caller's read and this update).
+                return None
+            instance = db_session.get(Instance, instance_id)
+            if instance is None:
+                return None
+            return self._enrich_instance(db_session, instance)
+
     def update_waiting_for(self, instance_id: str, waiting_for: int) -> Instance | None:
         """Update instance waiting_for counter.
 
