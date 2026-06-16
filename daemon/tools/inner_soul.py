@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 CATEGORY_NAME = "Self-Modification"
 CATEGORY_DOC = """\
-Remember, learn, or change agent behavior and access memories.
+Reflect on your own persona, behavioral patterns, and user interaction preferences. NOT for project state, task progress, code, or working logs.
 
 **Intent types**: `remember`, `learn`, `change`
 **Target types**: `memory`, `workflow`, `soul`, `user`
@@ -85,19 +85,6 @@ CLASSIFICATION_RULES = {
         ],
         "targets": ["user"],
         "description": "User identity and background"
-    },
-    "knowledge": {
-        "patterns": [
-            r"\bremember that\b",
-            r"\bnote that\b",
-            r"\bimportant (thing|fact|info):?\b",
-            r"\bdon'?t forget\b",
-            r"\bkeep in mind\b",
-            r"\bi learned that\b",
-            r"\bi (now )?know\b",
-        ],
-        "targets": ["memory", "memories"],
-        "description": "Important knowledge to retain"
     },
     "pattern": {
         "patterns": [
@@ -175,18 +162,57 @@ CLASSIFICATION_RULES = {
             # Deployment/infrastructure
             r"\bdeployment\b", r"\bci/cd\b", r"\bgithub\s+actions\b",
             r"\bpipeline\b", r"\bhelm\s+chart\b",
+            # --- NEW: Git operations (compound: verb + git-noun) ---
+            r"\bgit\s+(push|pull|commit|merge|rebase|checkout|clone|init)\b",
+            r"\b(created?|merged?|pushed?|pulled?|checked\s?out|cloned?|rebased?)\s+(a|the|new)?\s*(branch|commit|pr|pull\s+request)\b",
+            r"\bbranch\s+\S+\s+(created|deleted|merged|from)\b",
+            r"\bpull\s+request\s+(created|merged|opened|closed|approved)\b",
+            r"\bcommit(ted)?\s+(to|on|in)\s+\S+",
+            # --- NEW: Task/work completion (compound: completion-verb + work-noun) ---
+            r"\b(completed?|finished?|done\s+with|shipped?)\s+(a|the|my)?\s*(task|feature|build|deploy|deploy?ment|release|sprint|milestone)\b",
+            r"\bsetup\s+(complete|done|finished)\b",
+            # --- NEW: Code changes (compound: change-verb + code-noun) ---
+            r"\b(refactored?|rewrote?|updated?|modified?|fixed|patched?|added?|removed?|deleted?)\s+(the|a|my)?\s*(code|api|endpoint|route|schema|database|table|model|function|class|method|component|service|controller|handler)\b",
+            r"\bbug\s*(fix|fixed|fixing)\b",
+            r"\b(code|api|database|schema)\s+(change|update|fix|refactor|migration)\b",
+            r"\bcreated?\s+(a|the|new)\s+\w+\.(py|js|ts|tsx|jsx|md|json|yaml|yml|toml|sql|go|rs|java)\b",
+            # --- NEW: Deployment status (compound: deploy-verb + target) ---
+            r"\bdeployed?\s+(to|on|in)\s+\S+",
+            r"\bdeployed?\s+(a|the|new)\s+\S+",
+            r"\bbuilt?\s+(and\s+)?deployed?\b",
         ],
         "targets": ["REJECT"],
         "description": "Project-specific knowledge - must NOT enter agent memory"
     },
 }
 
+# Persona-intent prefixes that indicate self-reflection, not project reporting
+# When a request starts with one of these patterns, Stage 1 of the 3-stage
+# classification flow will skip the project-knowledge pre-check, preventing
+# false positives like "I should be more careful with deployments" from
+# being rejected as project content.
+_PERSONA_INTENT_PREFIXES = [
+    r"^\s*i\s+(should|need to|must|ought to|want to|tend to|always|never|usually)\b",
+    r"^\s*i\s+(am|'m)\s+(a|an|the)?\s*\w*",  # "I am a DevOps agent"
+    r"^\s*i\s+(learned|realized|discovered)\s+that\s+(i|my|being|early|the\s+user)",  # persona learning
+    r"^\s*my\s+(approach|style|tone|voice|strategy|tendency|habit|philosophy|strength|weakness)\b",
+    r"^\s*i\s+(value|believe|care\s+about|strive\s+to|aim\s+to)\b",
+    r"^\s*be\s+(more|less|cozy|warm|cold|formal|casual|concise|verbose)\b",
+    r"^\s*user\s+(likes|prefers|wants|needs|always|never)\b",
+    r"^\s*remember\s+(my|your|the\s+user)"  # "remember my name" not "remember that docker..."
+]
+
 # Targets that are handled by the RAG knowledge system
 _RAG_TARGETS = {"memories", "memory"}
 
-# Classification types that are knowledge-oriented (not self-modification)
+# Classification types that are knowledge-oriented (not self-modification).
+# Note: "knowledge" category was removed in Phase 1 of the inner-soul reform —
+# its patterns caused too many false positives where project content leaked
+# into agent memory. Knowledge is now handled by the RAG system via redirect
+# when RAG is enabled, and the project-content pre-check prevents leaks when
+# RAG is disabled.
 _KNOWLEDGE_CLASSIFICATIONS = {
-    "knowledge", "pattern", "event", "skill", "mistake", "project_knowledge"
+    "pattern", "event", "skill", "mistake", "project_knowledge"
 }
 
 
@@ -261,6 +287,34 @@ def _format_rag_redirect(request: str, classification: dict, targets: list[str])
         "→ Use the `explore()` tool to query existing knowledge.",
     ]
 
+    return "\n".join(lines)
+
+
+def _format_project_rejection(request: str, classification: dict) -> str:
+    """Format rejection message for project-related content.
+
+    When content is classified as project_knowledge and RAG is disabled,
+    we can't redirect to experience() — but we still reject with guidance.
+    """
+    truncated = request[:80] + ('...' if len(request) > 80 else '')
+    lines = [
+        f"⛔ Rejected: \"{truncated}\"",
+        f"  Classification: project_knowledge ({classification.get('description', '')})",
+        "",
+        "This looks project-related. inner_soul is for persona/behavioral",
+        "reflection ONLY — not project state, task progress, or code.",
+        "",
+        "→ For project events (features, fixes, deployments):",
+        "  project_history_add(project_id=..., entry_type='feature', summary='...')",
+        "",
+        "→ For project knowledge (architecture, patterns, gotchas):",
+        "  experience(text='...')",
+        "",
+        "→ inner_soul is ONLY for:",
+        "  - Your persona changes ('Be more concise')",
+        "  - User preferences ('User prefers TypeScript')",
+        "  - Self-reflection ('I learned that early feedback improves outcomes')",
+    ]
     return "\n".join(lines)
 
 
@@ -513,7 +567,7 @@ def create_inner_soul_tool(
         intent: Literal["remember", "learn", "change"] | None = None,
         target: Literal["memory", "workflow", "soul", "user", "memories"] | None = None
     ) -> str:
-        """Remember, learn, or change yourself. Use tool_help("inner_soul") for details."""
+        """Reflect on your persona, change behavioral patterns, or remember user interaction preferences. NOT for project state, task progress, code, or working logs. Use tool_help("inner_soul") for details."""
         try:
             # Support both 'request' and 'content' for backward compatibility
             actual_request: str = request or content or ""
@@ -553,7 +607,12 @@ def create_inner_soul_tool(
                 # Check if this should redirect to RAG
                 if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
                     return _format_rag_redirect(actual_request, classification, targets)
-                
+
+                # Project-knowledge REJECT (only reached when RAG is disabled).
+                # When RAG is enabled, the redirect above catches project_knowledge first.
+                if "REJECT" in targets:
+                    return _format_project_rejection(actual_request, classification)
+
                 # Execute updates
                 results = []
                 for t in targets:
@@ -568,7 +627,7 @@ def create_inner_soul_tool(
                         classification=classification
                     )
                     results.append(result)
-                
+
                 # Format response
                 return _format_response(actual_request, results, classification)
             else:
@@ -579,10 +638,10 @@ def create_inner_soul_tool(
                 for idx, part in enumerate(request_parts, 1):
                     # Classify this part independently
                     classification = _classify_request(part, intent=intent)
-                    
+
                     # Determine targets for this part using helper
                     targets = _resolve_targets(target, intent, classification)
-                    
+
                     # Check for RAG redirect
                     if _should_redirect_to_rag(targets, classification, explicit_target=bool(target)):
                         rag_response = _format_rag_redirect(part, classification, targets)
@@ -590,7 +649,15 @@ def create_inner_soul_tool(
                         compound_lines.append(f"    {rag_response.split(chr(10))[0]} (redirected to RAG)")
                         all_results.append({"part": part, "redirected": True, "response": rag_response})
                         continue
-                    
+
+                    # Project-knowledge REJECT for this part (RAG-disabled path).
+                    if "REJECT" in targets:
+                        rejection_msg = _format_project_rejection(part, classification)
+                        compound_lines.append(f"  Part {idx}: \"{part[:50]}{'...' if len(part) > 50 else ''}\" → project_knowledge (REJECTED)")
+                        compound_lines.append(f"    {rejection_msg.split(chr(10))[0]}")
+                        all_results.append({"part": part, "rejected": True, "response": rejection_msg})
+                        continue
+
                     # Execute updates for this part
                     results = []
                     for t in targets:
@@ -630,12 +697,34 @@ This tool understands what you mean, not just what you say.
 It knows which files to update based on the semantic meaning
 of your request.
 
+## ⚠️ What This Tool is NOT For
+
+This tool is **INTENSELY PERSONAL** — it's about YOU (the agent) and the USER as personas.
+
+**DO NOT use inner_soul for:**
+- Project events or task progress → use `project_history_add()`
+- Project knowledge, architecture, code insights → use `experience()`
+- Git operations, branch names, deployment status → use `project_history_add()`
+- Anything about code, configs, infrastructure, or the project itself → use `experience()`
+
+**This tool WILL REJECT project-related content.**
+
+If your content mentions branches, commits, deployments, code, files, configs,
+databases, APIs, or project tasks, it will be rejected with guidance on which
+tool to use instead.
+
 ## Files and Their Purposes:
 - **soul.md** - Who you ARE (identity, personality, core beliefs)
 - **user.md** - Who the USER is (preferences, relationship)
-- **memory.md** - What you KNOW (important knowledge, always kept)
-- **memories/** - What happened (events, observations, timestamped)
+- **memory.md** - Persona insights (NOT project knowledge)
+- **memories/** - Personal observations (NOT task logs)
 - **workflow.md** - HOW you work (processes, rules, steps)
+
+> Note: The `memory` and `memories` target types are kept for backward compatibility
+> but are now deprecated for new content. Knowledge that previously went to
+> `memory.md`/`memories/` should now be routed through the RAG knowledge system
+> via `experience()`. Persona-relevant reflections may still target `memories/`
+> when used in personal-observation contexts.
 
 ## How It Works:
 If you don't specify intent/target, the tool will classify your
@@ -647,6 +736,7 @@ Args:
              language like "My name is Cody" or "User prefers concise responses"
     intent: (Optional) Explicit intent: "remember", "learn", or "change"
     target: (Optional) Explicit target: "memory", "memories", "workflow", "soul", "user"
+             (note: "memory" and "memories" are deprecated — see above)
 
 Returns:
     Confirmation of what was done, or error message
@@ -655,19 +745,19 @@ Examples:
     # Natural language (auto-classified):
     inner_soul(request="My name is Cody")
     # → Updates soul.md (identity)
-    
+
     inner_soul(request="User likes TypeScript")
     # → Updates user.md (user preference)
-    
+
     inner_soul(request="Be cozy with the user")
     # → Updates soul.md + user.md (personality + relationship)
-    
+
     inner_soul(request="Always check for tests before committing")
     # → Updates workflow.md (process)
-    
+
     inner_soul(request="I learned that early testing catches bugs")
-    # → Creates memory file (knowledge)
-    
+    # → Redirected to RAG (project knowledge) — use experience() instead
+
     # Legacy API (backward compatible):
     inner_soul(intent="remember", content="User prefers TypeScript")
     inner_soul(intent="change", target="workflow", content="Add review step")
@@ -739,16 +829,70 @@ def _split_compound_request(request: str) -> list[str]:
 
 def _classify_request(request: str, intent: str | None = None) -> dict:
     """Semantically classify a request to determine appropriate targets.
-    
+
+    Uses a 3-stage flow:
+
+    Stage 1 — Persona-intent exemption (F1):
+        If the request starts with a self-reflection prefix
+        (e.g., "I should...", "My approach...", "Be more..."), skip the
+        project-knowledge pre-check entirely. This prevents false positives
+        like "I should be more careful with deployments" from being rejected
+        as project content.
+
+    Stage 2 — Project-content pre-check:
+        Only run if Stage 1 did not match. Check the `project_knowledge`
+        patterns first; if any match, return a REJECT classification. This
+        ensures project content never enters agent memory.
+
+    Stage 3 — Normal semantic classification:
+        Check each non-project classification type and merge targets. Fall
+        back to event/memories if no pattern matches.
+
     Args:
         request: The user request to classify.
         intent: Optional explicit intent ("remember", "learn", "change").
     """
     request_lower = request.lower()
-    
-    # Check each classification type
+
+    # ========================================
+    # STAGE 1: Persona-intent exemption (F1)
+    # ========================================
+    # If the statement starts with a self-reflection prefix, skip
+    # project-rejection entirely. This prevents false positives like
+    # "I should be more careful with deployments" from being rejected.
+    persona_intent_matched = False
+    for prefix_pattern in _PERSONA_INTENT_PREFIXES:
+        if re.search(prefix_pattern, request_lower, re.IGNORECASE):
+            # Persona intent detected — skip project_knowledge check,
+            # proceed directly to normal semantic classification
+            persona_intent_matched = True
+            break
+
+    if not persona_intent_matched:
+        # ========================================
+        # STAGE 2: Project-content pre-check (only if NOT persona intent)
+        # ========================================
+        # Check project_knowledge patterns FIRST, before any other classification.
+        # This ensures project content is never accepted into agent memory.
+        project_patterns = CLASSIFICATION_RULES["project_knowledge"]["patterns"]
+        for pattern in project_patterns:
+            if re.search(pattern, request_lower, re.IGNORECASE):
+                return {
+                    "type": "project_knowledge",
+                    "targets": ["REJECT"],
+                    "description": CLASSIFICATION_RULES["project_knowledge"]["description"],
+                    "pattern_matched": pattern,
+                    "all_matches": ["project_knowledge"],
+                }
+
+    # ========================================
+    # STAGE 3: Normal semantic classification (existing logic)
+    # ========================================
+    # Check each non-project classification type
     matches = []
     for class_type, rules in CLASSIFICATION_RULES.items():
+        if class_type == "project_knowledge":
+            continue  # Already handled in Stage 2
         for pattern in rules["patterns"]:
             if re.search(pattern, request_lower, re.IGNORECASE):
                 matches.append({
@@ -757,8 +901,8 @@ def _classify_request(request: str, intent: str | None = None) -> dict:
                     "description": rules["description"],
                     "pattern_matched": pattern
                 })
-                break  # One match per type is enough
-    
+                break
+
     if matches:
         # Merge all unique targets
         all_targets = []
@@ -766,35 +910,20 @@ def _classify_request(request: str, intent: str | None = None) -> dict:
             for t in m["targets"]:
                 if t not in all_targets:
                     all_targets.append(t)
-        
-        # Return the best match (first one) with merged targets
+
         best = matches[0]
         best["targets"] = all_targets
         best["all_matches"] = [m["type"] for m in matches]
         return best
-    
-    # Classification failed - determine fallback based on intent
-    # Default fallback: treat as event/observation.
-    # Note: Natural phrasing like "Context7 is built-in MCP server" falls through here
-    # because regex patterns can't match arbitrary factual statements.
-    # Phase 5 will add LLM-based classification fallback to handle these edge cases.
+
+    # Fallback (unchanged)
     if intent == "remember":
-        logger.debug("Classification fell back to memories/ for remember intent")
-        return {
-            "type": "event",
-            "targets": ["memories"],
-            "description": "Event or observation (remember intent fallback)",
-            "all_matches": []
-        }
-    
-    # No pattern matched and no remember intent
-    logger.debug("Classification inconclusive - no pattern matched, defaulting to event/memories")
-    return {
-        "type": "event",
-        "targets": ["memories"],
-        "description": "Event or observation",
-        "all_matches": []
-    }
+        return {"type": "event", "targets": ["memories"],
+                "description": "Event or observation (remember intent fallback)",
+                "all_matches": []}
+
+    return {"type": "event", "targets": ["memories"],
+            "description": "Event or observation", "all_matches": []}
 
 
 def _execute_update(
