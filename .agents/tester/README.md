@@ -60,7 +60,42 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-06-17 phase3-cascade-unification)
+## Test Results (Latest: 2026-06-17 phase5-dual-path-unification)
+
+### Phase 5: Dual-Path Unification — Shared MessageProcessingPipeline (2026-06-17)
+- **Branch**: `feature/correlation-manager` (commit `8f4b46f7` Phase 5, `65058a4d` test fix)
+- **Phase 5 Focused Tests**: ✅ 110/110 PASS (5 files)
+  - test_pipeline_unified.py (1071 lines) — Pipeline parity, 6 stages, callbacks, error handling
+  - test_enqueue_shared.py (993 lines) — Shared enqueue helper, both paths identical records
+  - test_phase5_real_cm_integration.py (783 lines) — Real CM hooks fire from both paths
+  - test_jq_error_reporting.py (modified) — JQ error reporting
+  - test_dispatch_completed_fix.py (modified) — dispatch_completed fix
+  - W1/W2/W3 behavioral changes all verified ✅
+- **Full Regression**: ✅ 0 Phase 5 regressions (7,586 passed, 20 pre-existing failures)
+  - Group A (unit/services/repos/migration): 3,341 passed
+  - Group B (job_queue/api/e2e/opencode): 1,708 passed
+  - Group C1 (integration/mq_redesign): 396 passed, 6 pre-existing failures
+  - Group C2 (top-level test_*.py): 2,141 passed, 14 pre-existing failures
+- **ensure.md**: ✅ PASS (dev.sh stable 30s, exit 124, database=postgres, 0 errors)
+- **Quick Fixes**: 1 (InstanceStatus test for 10-value canonical enum, commit `65058a4d`)
+- **Review Warnings**: 2 (both benign — on_defer dead code, LeaseContention raise quirk)
+- **Status**: ✅ READY FOR MERGE
+
+### Phase 4: Counter Cleanup — Deprecate `waiting_for` Reads (2026-06-17)
+- **Branch**: `feature/correlation-manager` (commits `3b9bf3be` Phase 4, `4f608fc1` verification suite)
+- **Phase 4 Focused Tests**: ✅ 290/290 PASS (16 files)
+  - 5/5 user-defined criteria verified (32 new tests in `verify_phase4.py`)
+  - A: waiting_for read deprecation (12 tests) — CM-first control flow confirmed
+  - B: WAITING_CHILDREN cleanup (7 tests) — not set when CM active, SSE still fires
+  - C: _locks cleanup (2 tests) — pop after pending del, no unbounded growth
+  - D: rebuild_from_db (4 tests) — queries waiting_for > 0, round-trip works
+  - E: Edge cases (3 tests) — 0 children, 75 children, error paths
+- **Full Regression**: ✅ 0 Phase 4 regressions (~6,900+ passed across modules)
+  - Critical paths: 1,286 passed | API/E2E/OpenCode: 2,276 passed | Unit/Services/Repos: 3,341 passed
+  - 22 pre-existing failures (14 known + 8 confirmed at Phase 3, all unrelated)
+- **ensure.md**: ✅ PASS (dev.sh stable 30s, exit 124, CM started, 0 errors)
+- **Quick Fixes**: 0 (no production code changes needed)
+- **Status**: ✅ READY FOR MERGE
 
 ### Phase 3: Cascade Unification — Race #3 Elimination (2026-06-17)
 - **Branch**: `feature/correlation-manager` (commits `6af7b73e` initial, `9598f684` W1/W2 tests)

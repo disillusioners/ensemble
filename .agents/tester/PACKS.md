@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 131 packs
-- Unit: 114 | Integration: 2 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 133 packs
+- Unit: 116 | Integration: 2 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -103,6 +103,8 @@
 | pause_cascade_unit_test | tests/unit/test_pause_instance_cascade.py | Resume cascade: parent→children, idempotency, mixed states, no children, already running | 2 min | 2026-05-26 | ✅ PASS (20/20, feature/fix-pause-job-complete, 0 regressions) |
 | job_processor_pause_test | tests/job_queue/test_job_processor.py | Job processor pause filter + all existing processor tests | 2 min | 2026-05-26 | ✅ PASS (29/29, feature/fix-pause-job-complete, 0 regressions) |
 | instance_termination_cleanup_unit_test | tests/job_queue/test_instance_termination_job_cleanup.py | Instance termination job cleanup: start_job terminal state checks, terminate_instance job sweep, orphan detection, find_jobs_by_instance FAILED status, shared constants | 2 min | 2026-05-26 | ✅ PASS (23/23, feature/fix-pause-job-complete, 0 regressions) |
+| phase4_deprecation_unit_test | tests/test_phase4_deprecation.py | Phase 4 `waiting_for` read deprecation: CM-first control flow, WAITING_CHILDREN cleanup, `_locks` dict cleanup, `rebuild_from_db()` verification, edge cases (0 children, 50+ children, error paths) | 2 min | 2026-06-17 | ✅ PASS (24/24, feature/correlation-manager, commit 3b9bf3be, 0 failures) |
+| phase4_verification_unit_test | tests/verify_phase4.py | Phase 4 verification suite (5 criteria A-E): static analysis of source code (CM checks present, waiting_for writes preserved, no unprotected reads), live DB verification (increment/decrement SQL), rebuild_from_db round-trip, 50+ children edge cases | 2 min | 2026-06-17 | ✅ PASS (32/32, feature/correlation-manager, commit 4f608fc1, 0 failures) |
 | pause_while_processing_unit_test | tests/job_queue/test_pause_while_processing.py | Pause while processing: CancelledError re-raise, pause vs shutdown distinction, concurrent.futures variant, normal completion unaffected | 2 min | 2026-05-26 | ✅ PASS (12/12, feature/fix-pause-job-complete, 0 regressions) |
 | resume_child_notification_test | tests/unit/test_resume_child_notification.py | Child completion notification in resume: WorkerPool path, JobQueue path, no-parent graceful, error handling (both branches) | 2 min | 2026-05-28 | ✅ PASS (9/9, resume-child-notification, 0 regressions) |
 | completion_report_idempotency_test | tests/unit/test_completion_report_idempotency.py | Completion report idempotency fix: force_notify stale delete, idempotency preserved, edge cases (waiting_for=0, multiple children, error handling), manager wrapper | 2 min | 2026-05-28 | ✅ PASS (11/11, P0 cleanup regression, 0 regressions) |
@@ -176,6 +178,11 @@
 
 | terminate_latency_unit_test | tests/services/test_instance_lifecycle_terminate.py | terminate_instance: re-entrancy guard, bounded-await 5s graph-task cancel, parallel cascade via asyncio.gather, dispatch-bus notify_all wakeup, defensive getattr, cascade trigger logging, summary log | 2 min | 2026-06-05 | ✅ PASS (9/9, feature/terminate-pause-latency, mock-path correctness verified) |
 | terminate_regression_unit_test | tests/test_instance_cascade.py + tests/job_queue/test_instance_termination_job_cleanup.py | Regression: FK cascade ordering (5) + job queue cleanup during terminate (29) | 2 min | 2026-06-05 | ✅ PASS (34/34, feature/terminate-pause-latency, no regressions) |
+| phase5_pipeline_unit_test | tests/test_pipeline_unified.py | Phase 5 pipeline parity: 6 shared stages, callbacks, error handling, behavioral equivalence (W1/W2/W3) | 5 min | 2026-06-17 | ✅ PASS (feature/correlation-manager, commit 8f4b46f7) |
+| phase5_enqueue_unit_test | tests/test_enqueue_shared.py | Phase 5 shared enqueue helper: both paths identical MessageQueue records, metadata propagation, edge cases | 5 min | 2026-06-17 | ✅ PASS (feature/correlation-manager, commit 8f4b46f7) |
+| phase5_cm_integration_test | tests/test_phase5_real_cm_integration.py | Phase 5 real CM integration: hooks fire from both paths, retry_count propagation | 5 min | 2026-06-17 | ✅ PASS (feature/correlation-manager, commit 8f4b46f7) |
+| phase5_jq_error_reporting_test | tests/test_jq_error_reporting.py | Phase 5 JQ error reporting | 2 min | 2026-06-17 | ✅ PASS (feature/correlation-manager, commit 8f4b46f7) |
+| phase5_dispatch_completed_test | tests/unit/test_dispatch_completed_fix.py | Phase 5 dispatch_completed fix | 2 min | 2026-06-17 | ✅ PASS (feature/correlation-manager, commit 8f4b46f7) |
 
 ---
 
