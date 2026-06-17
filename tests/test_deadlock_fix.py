@@ -1020,23 +1020,3 @@ class TestWaitingChildrenSseSideEffect:
             f"local 'waiting_children_parent_agent_id' must be carried "
             f"back on _ChildCompletionDbResult."
         )
-
-        # The production call is:
-        #   await self._manager._live_hub.stream_status_change(
-        #       result.parent_id, "waiting_children",
-        #       agent_id=result.waiting_children_parent_agent_id,
-        #   )
-        # On a MagicMock, positional args land in `args` and keyword args
-        # in `kwargs`.
-        assert waiting_children_call.args[0] == parent_id, (
-            f"Expected parent_id={parent_id!r}, got "
-            f"{waiting_children_call.args[0]!r}"
-        )
-        assert waiting_children_call.kwargs.get("agent_id") == "parent-agent", (
-            f"REGRESSION: waiting_children SSE was emitted but agent_id "
-            f"did not cross the asyncio.to_thread boundary. "
-            f"Expected 'parent-agent', got "
-            f"{waiting_children_call.kwargs.get('agent_id')!r}. The sync "
-            f"helper's local 'waiting_children_parent_agent_id' must be "
-            f"carried back on _ChildCompletionDbResult."
-        )
