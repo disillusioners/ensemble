@@ -70,6 +70,31 @@ def append_context_key(
     return system_prompt + context_section
 
 
+def append_current_time(system_prompt: str, now: datetime | None = None) -> str:
+    """Append current time information to a system prompt.
+
+    Args:
+        system_prompt: The base system prompt to append to.
+        now: Optional datetime to use (defaults to current UTC time).
+            Provide a fixed value for deterministic tests.
+
+    Returns:
+        The system prompt with a Current Time section appended.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    iso_time = now.isoformat()
+    weekday = now.strftime("%A")
+    human_time = now.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+    time_section = (
+        f"\n---\n\n## Current Time\n\n"
+        f"ISO: {iso_time}\n"
+        f"Human: {weekday}, {human_time}\n"
+        f"Use the `time` tool for fresh time information when needed."
+    )
+    return system_prompt + time_section
+
+
 class InstanceLifecycleService:
     """Service for managing instance lifecycle (spawn, terminate, restore).
     
@@ -251,6 +276,9 @@ class InstanceLifecycleService:
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=parent_id)
+
+        # Append current time so the agent has temporal context for the conversation
+        system_prompt = append_current_time(system_prompt)
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
@@ -892,6 +920,9 @@ class InstanceLifecycleService:
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=meta.parent_id)
+
+        # Append current time so the agent has temporal context for the conversation
+        system_prompt = append_current_time(system_prompt)
 
         # Create tools with this manager reference
         # Import from manager to pick up test patches
