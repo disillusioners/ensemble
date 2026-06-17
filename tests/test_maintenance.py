@@ -168,7 +168,8 @@ class TestIsDue:
 class TestIsIdle:
     """Tests for idle detection logic."""
 
-    def test_is_idle_no_activity(self):
+    @pytest.mark.asyncio
+    async def test_is_idle_no_activity(self):
         """No active jobs and no active requests should be idle."""
         service = MaintenanceService()
 
@@ -181,9 +182,10 @@ class TestIsIdle:
         # Mock empty request registry
         service.set_request_registry({})
 
-        assert service._is_idle() is True
+        assert await service._is_idle() is True
 
-    def test_is_idle_with_active_jobs(self):
+    @pytest.mark.asyncio
+    async def test_is_idle_with_active_jobs(self):
         """Active jobs in job queue service should NOT be idle."""
         service = MaintenanceService()
 
@@ -198,9 +200,10 @@ class TestIsIdle:
         # Mock empty request registry
         service.set_request_registry({})
 
-        assert service._is_idle() is False
+        assert await service._is_idle() is False
 
-    def test_is_idle_with_active_requests(self):
+    @pytest.mark.asyncio
+    async def test_is_idle_with_active_requests(self):
         """Active requests in registry should NOT be idle."""
         service = MaintenanceService()
 
@@ -213,17 +216,19 @@ class TestIsIdle:
         # Mock non-empty request registry
         service.set_request_registry({"req1": MagicMock(), "req2": MagicMock()})
 
-        assert service._is_idle() is False
+        assert await service._is_idle() is False
 
-    def test_is_idle_no_job_queue_service(self):
+    @pytest.mark.asyncio
+    async def test_is_idle_no_job_queue_service(self):
         """When job queue service is None, check only request registry."""
         service = MaintenanceService()
         service.set_job_queue_service(None)
         service.set_request_registry({})
 
-        assert service._is_idle() is True
+        assert await service._is_idle() is True
 
-    def test_is_idle_no_request_registry(self):
+    @pytest.mark.asyncio
+    async def test_is_idle_no_request_registry(self):
         """When request registry is None, check only job queue service."""
         service = MaintenanceService()
 
@@ -234,7 +239,7 @@ class TestIsIdle:
 
         service.set_request_registry(None)
 
-        assert service._is_idle() is True
+        assert await service._is_idle() is True
 
 
 class TestRunPendingJobs:

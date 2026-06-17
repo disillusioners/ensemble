@@ -179,7 +179,10 @@ class MaintenanceService:
             if not self._is_due(job):
                 continue
 
-            if not self._is_idle():
+            # ``_is_idle`` is async because it wraps a sync ``list_all_pending``
+            # DB call in ``asyncio.to_thread`` to keep the event loop responsive
+            # under SQLite WAL write contention.
+            if not await self._is_idle():
                 logger.debug(f"Skipping {job.name}: system not idle")
                 continue
 
@@ -206,7 +209,7 @@ class MaintenanceService:
         elapsed_hours = (utcnow() - job.last_run).total_seconds() / 3600
         return elapsed_hours >= job.min_interval_hours
 
-    def _is_idle(self) -> bool:
+    async def _is_idle(self) -> bool:
         """Check if the system is idle (no active work).
 
         System is considered idle when:
@@ -216,11 +219,16 @@ class MaintenanceService:
         Returns:
             True if system is idle and can run maintenance tasks.
         """
-        # Check for active jobs in job queue service
+        # Check for active jobs in job queue service.
+        # Wrap the sync DB call in ``asyncio.to_thread`` so SQLite WAL write
+        # contention cannot block the event loop. This loop runs every
+        # ``check_interval_minutes`` (default 15); if a pending query deadlocks
+        # the event loop, the entire daemon freezes — same root cause as
+        # the ``notify_watchers`` / ``enqueue_message`` deadlock chain.
         if self._job_queue_service is not None:
             try:
                 repo = self._job_queue_service._repository
-                pending = repo.list_all_pending()
+                pending = await asyncio.to_thread(repo.list_all_pending)
                 if pending:
                     return False
             except Exception as e:

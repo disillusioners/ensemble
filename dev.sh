@@ -68,4 +68,7 @@ if [ "$LOG_LEVEL" = "debug" ]; then
 fi
 echo ""
 
-$PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT" --reload --log-level "$LOG_LEVEL" --no-access-log
+# --timeout-graceful-shutdown 10 ensures uvicorn forces exit after 10s even
+# if shutdown hangs (e.g., on a sync DB write deadlock). Safety net for the
+# sync-DB-write deadlock chain documented in the experience docs.
+$PYTHON -m uvicorn daemon.api:app --host "$HOST" --port "$PORT" --reload --log-level "$LOG_LEVEL" --no-access-log --timeout-graceful-shutdown 10

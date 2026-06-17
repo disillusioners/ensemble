@@ -214,7 +214,12 @@ class JobQueueService:
             return 0
 
         try:
-            watchers = self._watcher_repo.get_watchers_for_job(job_id)
+            # Wrap the sync DB read in asyncio.to_thread so SQLite WAL write
+            # contention cannot block the event loop. See the deadlock analysis
+            # in the experience docs for the full chain.
+            watchers = await asyncio.to_thread(
+                self._watcher_repo.get_watchers_for_job, job_id
+            )
             if not watchers:
                 return 0
 
@@ -264,7 +269,12 @@ class JobQueueService:
             # Non-terminal events (e.g., in_progress) must keep the watch alive
             # so the watcher receives the final terminal notification later.
             if status in ALL_TERMINAL_STATES:
-                self._watcher_repo.remove_all_watches_for_job(job_id)
+                # Wrap the sync DB write in asyncio.to_thread so SQLite WAL
+                # contention cannot block the event loop. See the deadlock
+                # analysis in the experience docs for the full chain.
+                await asyncio.to_thread(
+                    self._watcher_repo.remove_all_watches_for_job, job_id
+                )
             return notified
             
         except Exception as e:

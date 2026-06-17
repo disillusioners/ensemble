@@ -293,10 +293,18 @@ class InstanceMessagingService:
         adapter = self._manager._checkpointer
         return adapter.raw_saver if adapter is not None else None
 
-    def _get_system_prompt_tokens(self, instance_id: str) -> int:
-        """Get the cached system prompt token count for an instance's agent."""
+    async def _get_system_prompt_tokens(self, instance_id: str) -> int:
+        """Get the cached system prompt token count for an instance's agent.
+
+        Async because the underlying ``_instance_repository.get`` is a sync
+        SQLAlchemy call that, under SQLite WAL write contention, can block
+        the event loop. We offload it to a worker thread via
+        ``asyncio.to_thread`` (see deadlock analysis in experience docs).
+        """
         try:
-            meta = self._manager._instance_repository.get(instance_id)
+            meta = await asyncio.to_thread(
+                self._manager._instance_repository.get, instance_id
+            )
             if not meta:
                 return 0
             # Get cached token count from prompt cache using agent_id + mcp_tool_names
@@ -309,7 +317,7 @@ class InstanceMessagingService:
         except Exception:
             return 0
 
-    def _compute_context_usage(
+    async def _compute_context_usage(
         self,
         instance_id: str,
         messages: list,
@@ -321,6 +329,10 @@ class InstanceMessagingService:
         history tokens + cached system prompt tokens so it matches what
         ``_maybe_compact_context`` measures internally.
 
+        Async because it calls the async ``_get_system_prompt_tokens`` which
+        offloads the sync SQLAlchemy ``_instance_repository.get`` to a worker
+        thread (see deadlock analysis in experience docs).
+
         Args:
             instance_id: The instance to compute usage for.
             messages: The current message list (LangChain BaseMessage objects
@@ -330,7 +342,7 @@ class InstanceMessagingService:
             model_name = self._config.llm.model or ""
             context_window = get_model_context_limit(model_name, self._config.compaction)
             history_tokens = estimate_messages_tokens(messages or [])
-            system_prompt_tokens = self._get_system_prompt_tokens(instance_id)
+            system_prompt_tokens = await self._get_system_prompt_tokens(instance_id)
             return history_tokens + system_prompt_tokens, context_window, model_name
         except Exception as e:
             logger.debug(f"Failed to compute context usage for {instance_id[:8]}...: {e}")
@@ -360,7 +372,7 @@ class InstanceMessagingService:
             messages: The current message list.
             force: If True, skip the dedup check and always broadcast.
         """
-        snapshot = self._compute_context_usage(instance_id, messages)
+        snapshot = await self._compute_context_usage(instance_id, messages)
         if snapshot is None:
             return
         tokens, context_window, model_name = snapshot
@@ -451,7 +463,7 @@ class InstanceMessagingService:
                 return
             
             messages = state.values.get('messages', [])
-            system_prompt_tokens = self._get_system_prompt_tokens(instance_id)
+            system_prompt_tokens = await self._get_system_prompt_tokens(instance_id)
             last_compacted_at = state.values.get('compacted_at')
             
             # Build compaction context
@@ -571,7 +583,12 @@ class InstanceMessagingService:
         
         # Check if this is the first message (instance was IDLE)
         # This determines if we should trigger title generation
-        instance_meta = self._manager._instance_repository.get(instance_id)
+        # Wrap the sync DB read in ``asyncio.to_thread`` so SQLite WAL write
+        # contention cannot block the event loop (the deadlock chain documented
+        # in the experience docs is rooted in sync DB calls on the loop thread).
+        instance_meta = await asyncio.to_thread(
+            self._manager._instance_repository.get, instance_id
+        )
         is_first_message = (
             instance_meta is not None and
             instance_meta.status == InstanceStatus.IDLE.value
@@ -891,7 +908,13 @@ class InstanceMessagingService:
         """
         from ..manager import AsyncMessageResult
 
-        ctx = self._prepare_enqueued_message(
+        # Wrap the sync DB prelude in asyncio.to_thread so the session.commit()
+        # inside `_prepare_enqueued_message` cannot block the event loop. Under
+        # SQLite WAL write contention (busy_timeout=30s) a sync commit on the
+        # event loop thread would wedge the loop completely — Ctrl+C ignored,
+        # all APIs frozen. See the deadlock analysis in the experience docs.
+        ctx = await asyncio.to_thread(
+            self._prepare_enqueued_message,
             instance_id=instance_id,
             message=message,
             source=source,
@@ -1006,8 +1029,12 @@ class InstanceMessagingService:
             )
             if is_internal_report:
                 # This is an internal message (completion report, error report, etc.)
-                # Retrieve the original external source from instance metadata
-                instance_meta = self._manager._instance_repository.get(instance_id)
+                # Retrieve the original external source from instance metadata.
+                # Wrap the sync DB read in ``asyncio.to_thread`` to keep the
+                # event loop responsive (see deadlock analysis in experience docs).
+                instance_meta = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     dispatch_source = instance_meta.instance_metadata.get("original_source")
                 if not dispatch_source:
@@ -1018,19 +1045,31 @@ class InstanceMessagingService:
             else:
                 # This is an external message - store as original source for future internal reports
                 dispatch_source = message_source
-                instance_meta = self._manager._instance_repository.get(instance_id)
+                # Wrap the sync DB read in ``asyncio.to_thread`` for the same
+                # event-loop responsiveness reason as above.
+                instance_meta = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
                 if instance_meta is not None and instance_meta.instance_metadata is not None:
                     current = instance_meta.instance_metadata.get("original_source")
                     if not current and not message_source.startswith("internal_"):
                         logger.debug(f"[DISPATCH] storing original_source: instance={instance_id}, source={message_source}, current={current}")
-                        self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
+                        # Sync DB write — wrap in ``asyncio.to_thread``.
+                        await asyncio.to_thread(
+                            self._manager._instance_repository.set_metadata,
+                            instance_id, "original_source", message_source,
+                        )
                     else:
                         logger.debug(f"[DISPATCH] original_source already set: instance={instance_id}, current={current}, skipping source={message_source}")
                 else:
                     # Instance metadata doesn't exist yet, set it directly
                     if not message_source.startswith("internal_"):
                         logger.debug(f"[DISPATCH] storing original_source: instance={instance_id}, source={message_source}, current=None")
-                        self._manager._instance_repository.set_metadata(instance_id, "original_source", message_source)
+                        # Sync DB write — wrap in ``asyncio.to_thread``.
+                        await asyncio.to_thread(
+                            self._manager._instance_repository.set_metadata,
+                            instance_id, "original_source", message_source,
+                        )
         
         # Project context injection for first message only
         if not is_retry:
@@ -1046,8 +1085,12 @@ class InstanceMessagingService:
                 # Skip project injection for completion/error reports
                 pass
             else:
-                # Check if project was already injected (using metadata flag)
-                instance_meta = self._manager._instance_repository.get(instance_id)
+                # Check if project was already injected (using metadata flag).
+                # Wrap the sync DB read in ``asyncio.to_thread`` (see deadlock
+                # analysis in experience docs).
+                instance_meta = await asyncio.to_thread(
+                    self._manager._instance_repository.get, instance_id
+                )
                 project_already_injected = (
                     instance_meta and 
                     instance_meta.instance_metadata and 
@@ -1063,11 +1106,19 @@ class InstanceMessagingService:
                     injection_succeeded = False
                     
                     if existing_project_id:
-                        # project_id exists (inherited from parent) → inject context using stored project_id
-                        matched_project = self._project_repository.get(existing_project_id)
+                        # project_id exists (inherited from parent) → inject context using stored project_id.
+                        # Wrap the sync project_repo DB read in ``asyncio.to_thread``.
+                        matched_project = await asyncio.to_thread(
+                            self._project_repository.get, existing_project_id
+                        )
                         if matched_project:
                             from ..manager import format_project_context
-                            critical_notes = self._fetch_critical_notes_safe(matched_project.project_id)
+                            # ``_fetch_critical_notes_safe`` is itself a sync
+                            # helper that does DB — wrap the call in a thread.
+                            critical_notes = await asyncio.to_thread(
+                                self._fetch_critical_notes_safe,
+                                matched_project.project_id,
+                            )
                             project_context = format_project_context(matched_project, store=self._manager.project_store, critical_notes=critical_notes)
                             message = project_context + message
                             injection_succeeded = True
@@ -1078,7 +1129,11 @@ class InstanceMessagingService:
                         keywords = extract_project_keywords(message)
                         
                         if keywords:
-                            matched_project = self._project_repository.match_by_keywords(keywords)
+                            # Wrap the sync ``match_by_keywords`` DB read in
+                            # ``asyncio.to_thread``.
+                            matched_project = await asyncio.to_thread(
+                                self._project_repository.match_by_keywords, keywords
+                            )
                             
                             if matched_project:
                                 # Log the match
@@ -1087,8 +1142,12 @@ class InstanceMessagingService:
                                     f"from keywords: {keywords[:5]}..."
                                 )
                                 
-                                # Fetch critical notes from repository
-                                critical_notes = self._fetch_critical_notes_safe(matched_project.project_id)
+                                # Fetch critical notes from repository.
+                                # ``_fetch_critical_notes_safe`` is sync — wrap.
+                                critical_notes = await asyncio.to_thread(
+                                    self._fetch_critical_notes_safe,
+                                    matched_project.project_id,
+                                )
                                 
                                 # Prepend project context to message
                                 from ..manager import format_project_context
@@ -1096,14 +1155,22 @@ class InstanceMessagingService:
                                 message = project_context + message
                                 injection_succeeded = True
                                 
-                                # Update instance metadata with project_id
-                                self._manager._instance_repository.set_metadata(instance_id, "project_id", matched_project.project_id)
+                                # Update instance metadata with project_id.
+                                # Sync DB write — wrap in ``asyncio.to_thread``.
+                                await asyncio.to_thread(
+                                    self._manager._instance_repository.set_metadata,
+                                    instance_id, "project_id", matched_project.project_id,
+                                )
                                 
                                 logger.debug(f"Injected project context for instance {instance_id[:8]}...")
                     
-                    # Mark as injected to prevent re-injection on subsequent messages
+                    # Mark as injected to prevent re-injection on subsequent messages.
+                    # Sync DB write — wrap in ``asyncio.to_thread``.
                     if injection_succeeded:
-                        self._manager._instance_repository.set_metadata(instance_id, "project_injected", True)
+                        await asyncio.to_thread(
+                            self._manager._instance_repository.set_metadata,
+                            instance_id, "project_injected", True,
+                        )
         
         # Build input - on retry with checkpoint, resume from None
         if not is_retry:
@@ -1441,7 +1508,11 @@ class InstanceMessagingService:
         """
         from ..manager import AsyncMessageResult
 
-        ctx = self._prepare_enqueued_message(
+        # Wrap the sync DB prelude in asyncio.to_thread so the session.commit()
+        # inside `_prepare_enqueued_message` cannot block the event loop. See
+        # the deadlock analysis in the experience docs for the full chain.
+        ctx = await asyncio.to_thread(
+            self._prepare_enqueued_message,
             instance_id=instance_id,
             message=message,
             source=source,
@@ -1466,7 +1537,11 @@ class InstanceMessagingService:
 
         # Look up instance metadata for JobQueue enqueue
         #    Use instance repository for agent_id and project_id lookup.
-        instance_meta = self._manager._instance_repository.get(instance_id)
+        #    Wrap the sync DB read in ``asyncio.to_thread`` (see deadlock
+        #    analysis in experience docs).
+        instance_meta = await asyncio.to_thread(
+            self._manager._instance_repository.get, instance_id
+        )
         if instance_meta is None:
             raise ValueError(f"Instance {instance_id} not found")
 

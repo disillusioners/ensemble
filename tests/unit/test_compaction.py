@@ -31,7 +31,6 @@ from daemon.compaction import (
 )
 from daemon.config import CompactionConfig as CompactionConfigModel
 from daemon.loader import estimate_messages_tokens
-from daemon.manager import InstanceManager
 
 
 # =============================================================================
@@ -952,94 +951,6 @@ class TestExtractTextFromContent:
         """Test that unicode content passes through unchanged."""
         content = "Hello 🌍 🎉"
         assert _extract_text_from_content(content) == "Hello 🌍 🎉"
-
-
-class TestCompactionRetrySkip:
-    """Tests for compaction skip behavior on retry."""
-
-    @pytest.mark.asyncio
-    async def test_compaction_skipped_on_retry(self):
-        """Test that compaction is skipped when is_retry=True in process_message.
-        
-        Verifies the manager-level behavior where is_retry=True prevents
-        _maybe_compact_context from being called.
-        """
-        # Create a mock graph with astate method that returns a state with messages
-        mock_state = MagicMock()
-        mock_state.values = {
-            'messages': make_messages(100),
-            'compacted_at': None
-        }
-        
-        mock_graph = AsyncMock()
-        mock_graph.aget_state = AsyncMock(return_value=mock_state)
-        
-        # Create InstanceManager and mock its internals
-        with patch.object(InstanceManager, '__init__', lambda self, **kwargs: None):
-            manager = InstanceManager.__new__(InstanceManager)
-            manager.config = MagicMock()
-            manager.config.llm.model = "gpt-4o"
-            manager.config.llm.base_url = "http://localhost:1234/v1"
-            manager.config.llm.api_key = "test-key"
-            manager.config.llm.temperature = 0.7
-            manager.config.llm.request_timeout = 60
-            manager.config.compaction = make_compaction_config(
-                min_messages_before_compaction=2,
-                threshold=0.01,
-                recent_message_window=2,
-                min_recent_window=1,
-            )
-            manager._compactor = MagicMock()
-            manager._get_system_prompt_tokens = MagicMock(return_value=0)
-            
-            # Create a mock session graph
-            mock_session_graph = MagicMock()
-            mock_session_graph.aget_state = AsyncMock(return_value=mock_state)
-            
-            # Track if compaction was called
-            compaction_called = []
-            async def track_compact(context):
-                compaction_called.append(True)
-                return MagicMock(
-                    replacement_messages=[],
-                    tokens_before=1000,
-                    tokens_after=500,
-                    tokens_saved=500,
-                    messages_before=100,
-                    messages_after=50,
-                    compaction_type="summarization",
-                    compacted_at=datetime.now(timezone.utc).isoformat()
-                )
-            manager._compactor.compact_state = track_compact
-            
-            # Mock _has_checkpoint to return True (simulating retry scenario)
-            manager._has_checkpoint = AsyncMock(return_value=True)
-            
-            # Get a mock session (no-op for this test)
-            manager.sessions = {}
-            
-            # Test: Call process_message with is_retry=False - compaction SHOULD be called
-            manager.get_session = MagicMock(return_value=mock_session_graph)
-            manager._queue_repository = MagicMock()
-            manager._active_activities = {}
-            
-            # Simulate the manager's behavior check
-            is_retry = False
-            if not is_retry:
-                # This is what happens in manager.process_message
-                await manager._maybe_compact_context("test-session", mock_session_graph, {"configurable": {"thread_id": "test"}})
-            
-            assert len(compaction_called) == 1, "Compaction should be called when is_retry=False"
-            
-            # Reset tracking
-            compaction_called.clear()
-            
-            # Test: Call with is_retry=True - compaction should NOT be called
-            is_retry = True
-            if not is_retry:
-                await manager._maybe_compact_context("test-session", mock_session_graph, {"configurable": {"thread_id": "test"}})
-            
-            assert len(compaction_called) == 0, "Compaction should be skipped when is_retry=True"
 
 
 class TestSummarizationLLMStripsModelVision:

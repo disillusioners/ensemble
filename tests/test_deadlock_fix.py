@@ -1,0 +1,495 @@
+"""Verification tests for the ``asyncio.to_thread`` deadlock fix.
+
+Background
+----------
+
+The daemon was hanging on shutdown because synchronous SQLAlchemy writes
+were running directly on the asyncio event loop thread. The full chain is
+documented in the experience docs (search for "synchronous sqlalchemy db
+writes on asyncio event loop"):
+
+    ``JobFeedbackObserver._finalize_job`` → ``notify_watchers`` →
+    ``enqueue_message`` → ``_prepare_enqueued_message`` →
+    ``session.commit()`` — all sync, all on the event loop thread.
+
+Under SQLite WAL + ``busy_timeout=30s``, a single contended write could
+wedge the event loop for up to 30 seconds — long enough to ignore
+SIGINT, freeze every API request, and break shutdown.
+
+This module pins the fix:
+
+  1. ``_prepare_enqueued_message`` is offloaded via ``asyncio.to_thread``
+     inside ``InstanceMessagingService.enqueue_message``.
+  2. ``JobWatcherRepository.get_watchers_for_job`` (and the related
+     cleanup writes) are offloaded via ``asyncio.to_thread`` inside
+     ``JobQueueService.notify_watchers``.
+  3. ``JobFeedbackObserver._finalize_instance_db_sync`` is offloaded via
+     ``asyncio.to_thread`` from ``_finalize_instance``.
+
+Each test verifies the offload two ways:
+
+  * **Thread identity check** — the strongest proof. We wrap the sync
+    function with a spy that records ``threading.get_ident()`` on entry.
+    If the fix is in place, the recorded thread is NOT the event-loop
+    thread (the pytest-asyncio loop runs on a dedicated worker thread).
+    If the fix is missing, the spy fires on the event-loop thread and
+    the assertion fails.
+  * **asyncio.to_thread spy** — verifies the function was specifically
+    offloaded via ``asyncio.to_thread`` (not just ``run_in_executor``
+    or some other indirection).
+
+If both spies pass, the function cannot block the event loop on its
+sync DB calls — which is exactly what the fix is meant to guarantee.
+
+Run with::
+
+    pytest tests/test_deadlock_fix.py -v --tb=short
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import uuid
+from contextlib import contextmanager
+from typing import Any, Callable
+from unittest.mock import MagicMock, patch
+
+import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, Session
+
+# Model imports — required so SQLModel.metadata sees the tables when we
+# create them on the test engine.
+from daemon.repositories.event.models import Event, EventKind  # noqa: F401
+from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.message_queue.models import (  # noqa: F401
+    MessageQueue,
+    MessageStatus,
+    MessageType,
+)
+from daemon.repositories.task.models import Task  # noqa: F401
+from daemon.services.cancellation import CancellationService
+from daemon.services.instance_messaging import InstanceMessagingService
+from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.job_queue_service import JobQueueService
+from daemon.write_pause_guard import WritePauseGuard
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared helpers — kept local so this test file is self-contained and does
+# not depend on private fixtures in test_enqueue_shared.py or
+# test_finalize_instance.py (which have their own Mock(PauseGuard)-vs-Real
+# choices that don't matter here).
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@contextmanager
+def _spy_thread(target: Callable[..., Any]):
+    """Wrap ``target`` so each call records ``threading.get_ident()``.
+
+    Yields a 2-tuple ``(thread_ids, spy)``:
+
+      * ``thread_ids`` is a list mutated in place (one entry per call).
+      * ``spy`` is the wrapper that should be installed in place of
+        ``target``. It preserves the return value of ``target``.
+
+    Use on a bound method (e.g. ``service._prepare_enqueued_message``) by
+    replacing the attribute on the instance for the duration of the
+    ``with`` block.
+    """
+    thread_ids: list[int] = []
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        thread_ids.append(threading.get_ident())
+        return target(*args, **kwargs)
+
+    yield thread_ids, spy
+
+
+@contextmanager
+def _spied_to_thread():
+    """Replace ``asyncio.to_thread`` with a spy that still runs in a thread.
+
+    The real ``asyncio.to_thread`` runs ``func`` in the default
+    ``ThreadPoolExecutor`` and returns a coroutine that resolves to its
+    result. Our spy does the same — it records every ``func`` it is asked
+    to run AND schedules the call on the default executor — so the
+    production code under test continues to work end-to-end.
+
+    Yields a 2-tuple ``(funcs_called, spy_to_thread)``:
+
+      * ``funcs_called`` is a list of the callables that were scheduled
+        (one entry per call to ``to_thread``).
+      * ``spy_to_thread`` is the patched replacement (returned for
+        completeness; the test patches the ``asyncio.to_thread`` symbol
+        with ``side_effect=spy_to_thread``).
+    """
+    funcs_called: list[Callable[..., Any]] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        funcs_called.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    yield funcs_called, spy_to_thread
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Engine + repository fixtures
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def engine() -> Engine:
+    """In-memory SQLite engine (StaticPool for cross-thread safety)."""
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(eng, "connect")
+    def _enable_fk(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+def _seed_instance(
+    engine: Engine,
+    *,
+    instance_id: str | None = None,
+    agent_id: str = "coder",
+    status: str = InstanceStatus.IDLE.value,
+) -> str:
+    """Insert an Instance row. Returns the instance_id used."""
+    iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
+    with Session(engine) as session:
+        inst = Instance(
+            instance_id=iid,
+            agent_id=agent_id,
+            agent_dir="/tmp/agent",
+            status=status,
+            version=1,
+            instance_metadata={},
+            children="[]",
+        )
+        session.add(inst)
+        session.commit()
+    return iid
+
+
+def _build_messaging_manager(engine: Engine, instance_repo: SQLModelInstanceRepository) -> MagicMock:
+    """Build a manager mock matching the contract ``enqueue_message`` uses.
+
+    Mirrors the ``_build_manager`` helper in ``tests/test_enqueue_shared.py``
+    so we don't depend on private test fixtures.
+    """
+    manager = MagicMock()
+    manager.engine = engine
+    manager._instance_repository = instance_repo
+    manager._live_hub = MagicMock()
+    manager._live_hub.stream_status_change = MagicMock()  # sync — not awaited
+    manager._worker_pool = None  # None is fine — code guards on it
+    manager._job_queue_service = MagicMock()
+    manager._job_queue_service.enqueue = MagicMock(
+        return_value=MagicMock(job_id="job-test-123")
+    )
+    return manager
+
+
+def _build_messaging_service(engine: Engine) -> InstanceMessagingService:
+    """Build a real ``InstanceMessagingService`` with mocked manager deps."""
+    instance_repo = SQLModelInstanceRepository(engine)
+    manager = _build_messaging_manager(engine, instance_repo)
+    cancellation = MagicMock(spec=CancellationService)
+    cancellation.is_shutting_down = False
+    return InstanceMessagingService(
+        manager=manager,
+        cancellation_service=cancellation,
+    )
+
+
+def _build_observer(engine: Engine) -> JobFeedbackObserver:
+    """Build a real ``JobFeedbackObserver`` with mocked repos + side deps."""
+    mock_manager = MagicMock(name="InstanceManager")
+    mock_manager.engine = engine
+    mock_manager.write_guard = WritePauseGuard()
+    mock_manager._live_hub = MagicMock()
+    mock_manager._live_hub.stream_status_change = MagicMock()  # sync — not awaited
+    mock_manager._events_service = MagicMock()
+    mock_manager._events_service._publish_instance_lifecycle_event = MagicMock()
+    mock_manager._get_last_assistant_message_raw = MagicMock(
+        return_value="agent response"
+    )
+
+    return JobFeedbackObserver(
+        event_bus=MagicMock(),
+        job_queue_service=MagicMock(),
+        job_repo=MagicMock(),
+        lock_repo=MagicMock(),
+        project_repo=MagicMock(),
+        instance_manager=mock_manager,
+    )
+
+
+def _build_job_queue_service() -> JobQueueService:
+    """Build a real ``JobQueueService`` with mocked repo deps.
+
+    ``notify_watchers`` short-circuits when ``_watcher_repo is None`` or
+    ``_instance_manager is None`` — so both must be set for the test to
+    exercise the ``get_watchers_for_job`` call site.
+    """
+    service = JobQueueService.__new__(JobQueueService)
+    service._watcher_repo = MagicMock(name="JobWatcherRepository")
+    # Default: empty watcher list (covers the early-return path cleanly).
+    service._watcher_repo.get_watchers_for_job = MagicMock(return_value=[])
+    service._watcher_repo.remove_all_watches_for_job = MagicMock(return_value=0)
+    service._repository = MagicMock(name="JobQueueRepository")
+    service._repository.get = MagicMock(return_value=None)
+    service._instance_manager = MagicMock(name="InstanceManager")
+    service._instance_manager.enqueue_message = MagicMock(return_value=None)
+    return service
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Test 1 — `_prepare_enqueued_message` is offloaded via `asyncio.to_thread`
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestPrepareEnqueuedMessageOffloaded:
+    """``enqueue_message`` must run ``_prepare_enqueued_message`` off the loop.
+
+    Before the fix, ``enqueue_message`` called ``self._prepare_enqueued_message(...)``
+    synchronously — which executed ``session.commit()`` on the event loop
+    thread and could wedge the loop on SQLite WAL contention. The fix
+    wraps the call in ``asyncio.to_thread``; these tests pin that.
+
+    Two complementary checks:
+
+      1. The thread the spy runs on is NOT the event-loop thread.
+      2. ``asyncio.to_thread`` was called with ``_prepare_enqueued_message``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_prepare_runs_off_loop_thread(self, engine):
+        """``_prepare_enqueued_message`` must execute on a worker thread,
+        NOT on the event loop thread that pytest-asyncio drives.
+        """
+        service = _build_messaging_service(engine)
+        _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
+
+        with _spy_thread(service._prepare_enqueued_message) as ctx:
+            thread_ids, spy = ctx
+            service._prepare_enqueued_message = spy  # type: ignore[method-assign]
+            await service.enqueue_message(
+                instance_id="inst-1",
+                message="hi",
+                source="api",
+            )
+
+        loop_thread = threading.get_ident()
+        assert thread_ids, "_prepare_enqueued_message was never called"
+        assert all(tid != loop_thread for tid in thread_ids), (
+            "FIX MISSING: _prepare_enqueued_message ran on the event-loop "
+            f"thread (tid={loop_thread}); it MUST run in a worker thread "
+            "via asyncio.to_thread so its session.commit() cannot wedge the loop."
+        )
+
+    @pytest.mark.asyncio
+    async def test_prepare_is_scheduled_via_to_thread(self, engine):
+        """``asyncio.to_thread`` must be called with ``_prepare_enqueued_message``.
+
+        Patches the symbol at the import site (production module) so the
+        call inside ``enqueue_message`` resolves to our spy. The spy still
+        runs the function on a real worker thread — we just additionally
+        record every callable that was scheduled.
+        """
+        service = _build_messaging_service(engine)
+        _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
+
+        # Patch `asyncio.to_thread` AT THE IMPORT SITE used by production code.
+        # The function inside `enqueue_message` does:
+        #     ctx = await asyncio.to_thread(self._prepare_enqueued_message, ...)
+        # `asyncio` is imported at the top of instance_messaging.py, so we
+        # patch the symbol on the daemon.services.instance_messaging module.
+        with _spied_to_thread() as ctx:
+            funcs_called, spy_to_thread = ctx
+            with patch(
+                "daemon.services.instance_messaging.asyncio.to_thread",
+                side_effect=spy_to_thread,
+            ):
+                await service.enqueue_message(
+                    instance_id="inst-1",
+                    message="hi",
+                    source="api",
+                )
+
+        assert funcs_called, "asyncio.to_thread was never called from enqueue_message"
+        assert any(
+            getattr(f, "__name__", "") == "_prepare_enqueued_message"
+            for f in funcs_called
+        ), (
+            f"FIX MISSING: asyncio.to_thread was called with "
+            f"{[getattr(f, '__name__', repr(f)) for f in funcs_called]}, "
+            "expected at least one call to _prepare_enqueued_message."
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Test 2 — `get_watchers_for_job` is offloaded via `asyncio.to_thread`
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestNotifyWatchersOffloaded:
+    """``JobQueueService.notify_watchers`` must offload DB calls to a thread.
+
+    Two sync DB calls inside ``notify_watchers`` must run off the event
+    loop: ``watcher_repo.get_watchers_for_job`` (read) and
+    ``watcher_repo.remove_all_watches_for_job`` (write, only for terminal
+    states). These tests pin both via thread-identity and asyncio.to_thread
+    spies.
+
+    Only ``get_watchers_for_job`` is asserted directly because the
+    ``remove_all_watches_for_job`` write is conditional on
+    ``status in ALL_TERMINAL_STATES`` — and to keep this single test file
+    robust we exercise the terminal path with a non-empty watcher list so
+    the cleanup write also fires.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_watchers_runs_off_loop_thread(self):
+        """``get_watchers_for_job`` must run on a worker thread, not the loop."""
+        service = _build_job_queue_service()
+
+        with _spy_thread(service._watcher_repo.get_watchers_for_job) as ctx:
+            thread_ids, spy = ctx
+            service._watcher_repo.get_watchers_for_job = spy  # type: ignore[method-assign]
+            await service.notify_watchers(
+                job_id="job-1",
+                status="completed",
+            )
+
+        loop_thread = threading.get_ident()
+        assert thread_ids, "get_watchers_for_job was never called"
+        assert all(tid != loop_thread for tid in thread_ids), (
+            "FIX MISSING: watcher_repo.get_watchers_for_job ran on the "
+            f"event-loop thread (tid={loop_thread}); it MUST run in a "
+            "worker thread via asyncio.to_thread."
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_watchers_is_scheduled_via_to_thread(self):
+        """``asyncio.to_thread`` must be invoked with
+        ``watcher_repo.get_watchers_for_job``.
+        """
+        service = _build_job_queue_service()
+        # Bind a stable local reference for the identity check below — we
+        # compare the function passed to to_thread against this exact
+        # bound method (MagicMock-bound ``__name__`` is empty by default,
+        # so identity is the only reliable check).
+        watcher_lookup = service._watcher_repo.get_watchers_for_job
+
+        with _spied_to_thread() as ctx:
+            funcs_called, spy_to_thread = ctx
+            with patch(
+                "daemon.services.job_queue_service.asyncio.to_thread",
+                side_effect=spy_to_thread,
+            ):
+                await service.notify_watchers(
+                    job_id="job-1",
+                    status="completed",
+                )
+
+        assert funcs_called, "asyncio.to_thread was never called from notify_watchers"
+        # Identity check: the watcher lookup is a MagicMock-bound method,
+        # so we compare by reference. Also check `__name__` for the
+        # case where someone replaces the mock with a real bound method.
+        by_identity = any(c is watcher_lookup for c in funcs_called)
+        by_name = any(
+            getattr(f, "__name__", "") == "get_watchers_for_job"
+            for f in funcs_called
+        )
+        assert by_identity or by_name, (
+            f"FIX MISSING: asyncio.to_thread was not invoked with "
+            f"get_watchers_for_job; calls were "
+            f"{[getattr(f, '__name__', repr(f)) for f in funcs_called]}."
+        )
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Test 3 — `_finalize_instance_db_sync` is offloaded via `asyncio.to_thread`
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestFinalizeInstanceDbSyncOffloaded:
+    """``_finalize_instance`` must run ``_finalize_instance_db_sync`` in a thread.
+
+    The DB write half of instance finalization (open session → transition
+    status → commit) was extracted into a sync helper
+    ``_finalize_instance_db_sync`` precisely so it can be offloaded via
+    ``asyncio.to_thread``. The async ``_finalize_instance`` is responsible
+    for invoking that helper off the loop.
+
+    Two checks: thread identity and ``asyncio.to_thread`` spy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_finalize_db_sync_runs_off_loop_thread(self, engine):
+        """``_finalize_instance_db_sync`` must execute on a worker thread."""
+        observer = _build_observer(engine)
+        instance_id = _seed_instance(
+            engine, instance_id="inst-fin-1", status=InstanceStatus.RUNNING.value
+        )
+
+        with _spy_thread(observer._finalize_instance_db_sync) as ctx:
+            thread_ids, spy = ctx
+            observer._finalize_instance_db_sync = spy  # type: ignore[method-assign]
+            await observer._finalize_instance(instance_id, "completed")
+
+        loop_thread = threading.get_ident()
+        assert thread_ids, "_finalize_instance_db_sync was never called"
+        assert all(tid != loop_thread for tid in thread_ids), (
+            "FIX MISSING: _finalize_instance_db_sync ran on the event-loop "
+            f"thread (tid={loop_thread}); the WriteGuardSession + commit "
+            "must run in a worker thread so SQLite WAL contention cannot "
+            "wedge the loop."
+        )
+
+    @pytest.mark.asyncio
+    async def test_finalize_db_sync_is_scheduled_via_to_thread(self, engine):
+        """``asyncio.to_thread`` must be invoked with
+        ``_finalize_instance_db_sync``.
+        """
+        observer = _build_observer(engine)
+        instance_id = _seed_instance(
+            engine, instance_id="inst-fin-2", status=InstanceStatus.RUNNING.value
+        )
+
+        with _spied_to_thread() as ctx:
+            funcs_called, spy_to_thread = ctx
+            with patch(
+                "daemon.services.job_feedback_observer.asyncio.to_thread",
+                side_effect=spy_to_thread,
+            ):
+                await observer._finalize_instance(instance_id, "completed")
+
+        assert funcs_called, "asyncio.to_thread was never called from _finalize_instance"
+        assert any(
+            getattr(f, "__name__", "") == "_finalize_instance_db_sync"
+            for f in funcs_called
+        ), (
+            f"FIX MISSING: asyncio.to_thread was not invoked with "
+            f"_finalize_instance_db_sync; calls were "
+            f"{[getattr(f, '__name__', repr(f)) for f in funcs_called]}."
+        )

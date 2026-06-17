@@ -126,7 +126,7 @@ class TestEmitContextUsageDedup:
         service._manager.config = MagicMock()
         service._manager.config.llm.model = "gpt-4o"
         service._manager.config.compaction = MagicMock()
-        service._get_system_prompt_tokens = MagicMock(return_value=system_tokens)
+        service._get_system_prompt_tokens = AsyncMock(return_value=system_tokens)
         return service
 
     @pytest.mark.asyncio
@@ -205,7 +205,7 @@ class TestEmitContextUsageForInstance:
         service._manager.config = MagicMock()
         service._manager.config.llm.model = "gpt-4o"
         service._manager.config.compaction = MagicMock()
-        service._get_system_prompt_tokens = MagicMock(return_value=0)
+        service._get_system_prompt_tokens = AsyncMock(return_value=0)
         return service
 
     @pytest.mark.asyncio

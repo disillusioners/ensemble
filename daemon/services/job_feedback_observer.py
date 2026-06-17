@@ -46,7 +46,7 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from sqlmodel import Session
 
@@ -76,6 +76,24 @@ _TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
     InstanceStatus.TERMINATED.value,
     InstanceStatus.FAILED.value,
 })
+
+
+class _InstanceFinalizeResult(NamedTuple):
+    """Result of the sync DB half of ``_finalize_instance``.
+
+    Carries the values the async caller needs after the WriteGuardSession
+    block has run on a worker thread (via ``asyncio.to_thread``):
+
+    * ``skip`` — when True, the caller should return early without firing
+      the post-commit side effects (SSE / CompletionRegistry / lifecycle
+      event). Set when the instance row is missing or already terminal.
+    * ``parent_id`` / ``agent_id`` — captured from the instance row before
+      the session closes (the instance is detached after commit).
+    """
+
+    skip: bool
+    parent_id: str | None
+    agent_id: str | None
 
 
 class JobFeedbackObserver:
@@ -525,6 +543,17 @@ class JobFeedbackObserver:
                     completed_at=now,
                     result_summary=result_summary,
                 )
+                # NOTE: ``atomic_transition`` above is intentionally NOT
+                # wrapped in ``asyncio.to_thread`` because the C1 TOCTOU
+                # comment block above requires it to be the LAST operation
+                # before the notification — no ``await`` between the CM
+                # re-check and the write. Wrapping the write in a thread
+                # would re-introduce a window where new ``register_message_send``
+                # calls can sneak past. The C1 invariant is the trade-off;
+                # this single sync write is a fast indexed UPDATE and has not
+                # been observed to deadlock in practice (the deadlock chain
+                # documented in the experience docs is the WriteGuardSession
+                # commit in ``_finalize_instance``, which IS wrapped).
                 logger.info(
                     f"Observer: completed job {job.job_id[:8]}... "
                     f"for instance {instance_id[:8]}..."
@@ -595,7 +624,16 @@ class JobFeedbackObserver:
             # terminal state from another actor), swallow silently — there
             # is nothing more we can do.
             try:
-                self._job_repo.atomic_transition(
+                # Wrap this fail-safe write in ``asyncio.to_thread`` — unlike
+                # the COMPLETED/FAILED happy-path writes above, the C1 TOCTOU
+                # invariant does NOT apply here: the primary finalization has
+                # already failed and the CM has deleted ``_pending[parent_id]``,
+                # so there is no ``register_message_send`` race to defend
+                # against. Under SQLite WAL write contention this recovery
+                # write would otherwise wedge the event loop on the same
+                # deadlock chain documented for the happy paths.
+                await asyncio.to_thread(
+                    self._job_repo.atomic_transition,
                     job_id=job.job_id,
                     from_status=JobStatus.PROCESSING.value,
                     to_status=JobStatus.FAILED.value,
@@ -626,9 +664,14 @@ class JobFeedbackObserver:
                 f"{instance_id[:8]}...: {e}"
             )
 
-        # Release locks held by this instance
+        # Release locks held by this instance. Wrap the sync DB write in
+        # ``asyncio.to_thread`` so SQLite WAL write contention cannot block
+        # the event loop (the deadlock chain documented in the experience
+        # docs is rooted in sync writes on the loop thread).
         try:
-            released_count = self._lock_repo.release_by_instance(instance_id)
+            released_count = await asyncio.to_thread(
+                self._lock_repo.release_by_instance, instance_id
+            )
             if released_count > 0:
                 logger.debug(
                     f"Released {released_count} lock(s) for instance "
@@ -707,39 +750,27 @@ class JobFeedbackObserver:
         # inline-cascade pattern in ``child_reports.py:720`` /
         # ``error_reporting.py:160``. Capture ``parent_id`` and ``agent_id``
         # before the session closes (instance is detached after commit).
+        #
+        # The WriteGuardSession block + ``session.commit()`` runs on a worker
+        # thread via ``asyncio.to_thread`` so a sync SQLAlchemy commit cannot
+        # block the event loop. Under SQLite WAL write contention
+        # (busy_timeout=30s) a sync commit on the loop thread wedges the
+        # loop completely — Ctrl+C ignored, all APIs frozen. The extracted
+        # helper is a sync ``def`` so it runs cleanly on the worker thread.
         try:
-            with WriteGuardSession(
-                Session(self._instance_manager.engine),
-                self._instance_manager.write_guard,
-            ) as session:
-                instance = session.get(Instance, instance_id)
-                if instance is None:
-                    logger.debug(
-                        f"Observer: instance {instance_id[:8]}... not found "
-                        f"during finalization, skipping"
-                    )
-                    return
-                # Idempotency: if already in a terminal status, the inline
-                # cascade (CM-disabled path) or a prior callback already
-                # completed the instance. Re-publishing the lifecycle event
-                # would be redundant and could double-signal
-                # ``CompletionRegistry``.
-                if instance.status in _TERMINAL_INSTANCE_STATUSES:
-                    logger.debug(
-                        f"Observer: instance {instance_id[:8]}... already in "
-                        f"terminal status '{instance.status}', skipping "
-                        f"finalization (idempotency)"
-                    )
-                    return
-
-                parent_id = instance.parent_id
-                agent_id = instance.agent_id
-
-                instance.status = new_status
-                instance.updated_at = datetime.now(timezone.utc).isoformat()
-                instance.last_activity_at = datetime.now(timezone.utc)
-                instance.version = (instance.version or 1) + 1
-                session.commit()
+            result = await asyncio.to_thread(
+                self._finalize_instance_db_sync,
+                instance_id,
+                new_status,
+            )
+            if result.skip:
+                # Either the instance row is missing or it's already terminal.
+                # The helper already logged at DEBUG; just return without
+                # firing the post-commit side effects (SSE / CompletionRegistry
+                # / lifecycle event).
+                return
+            parent_id = result.parent_id
+            agent_id = result.agent_id
         except Exception as e:
             # Log and re-raise so the caller (``_finalize_job``) can decide
             # what to do. The caller wraps this in its own try/except and
@@ -815,6 +846,79 @@ class JobFeedbackObserver:
                     f"Observer: failed to publish lifecycle event for "
                     f"{instance_id[:8]}...: {e}"
                 )
+
+    def _finalize_instance_db_sync(
+        self,
+        instance_id: str,
+        new_status: str,
+    ) -> _InstanceFinalizeResult:
+        """Sync DB half of ``_finalize_instance``.
+
+        Opens a ``WriteGuardSession``, applies the terminal status transition
+        + bookkeeping fields, and commits. Returns the values the async
+        caller needs (``parent_id``, ``agent_id``) without doing any
+        post-commit fan-out (SSE / CompletionRegistry / lifecycle event) —
+        those remain on the event loop so they can use ``await``.
+
+        Runs on a worker thread via ``asyncio.to_thread`` from
+        ``_finalize_instance``. This keeps ``session.commit()`` off the
+        event loop so SQLite WAL write contention cannot deadlock the
+        daemon (see the deadlock analysis in the experience docs).
+
+        Idempotency: if the instance row is missing OR already in a
+        terminal status, returns ``skip=True`` and the caller short-circuits
+        without firing the post-commit side effects. Re-entry from the
+        lifecycle-event re-publish is therefore safe.
+
+        Args:
+            instance_id: The parent instance ID.
+            new_status: The canonical terminal status to apply
+                (``COMPLETED.value`` or ``ERROR.value``).
+
+        Returns:
+            ``_InstanceFinalizeResult`` carrying either ``skip=True`` (no
+            row / already terminal — caller short-circuits) or
+            ``skip=False`` with the captured ``parent_id`` / ``agent_id``.
+        """
+        with WriteGuardSession(
+            Session(self._instance_manager.engine),
+            self._instance_manager.write_guard,
+        ) as session:
+            instance = session.get(Instance, instance_id)
+            if instance is None:
+                logger.debug(
+                    f"Observer: instance {instance_id[:8]}... not found "
+                    f"during finalization, skipping"
+                )
+                return _InstanceFinalizeResult(
+                    skip=True, parent_id=None, agent_id=None
+                )
+            # Idempotency: if already in a terminal status, the inline
+            # cascade (CM-disabled path) or a prior callback already
+            # completed the instance. Re-publishing the lifecycle event
+            # would be redundant and could double-signal
+            # ``CompletionRegistry``.
+            if instance.status in _TERMINAL_INSTANCE_STATUSES:
+                logger.debug(
+                    f"Observer: instance {instance_id[:8]}... already in "
+                    f"terminal status '{instance.status}', skipping "
+                    f"finalization (idempotency)"
+                )
+                return _InstanceFinalizeResult(
+                    skip=True, parent_id=None, agent_id=None
+                )
+
+            parent_id = instance.parent_id
+            agent_id = instance.agent_id
+
+            instance.status = new_status
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
+            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.version = (instance.version or 1) + 1
+            session.commit()
+            return _InstanceFinalizeResult(
+                skip=False, parent_id=parent_id, agent_id=agent_id
+            )
 
     async def _trigger_next_job(self, job) -> None:
         """Admit and spawn the next pending job for the same project.

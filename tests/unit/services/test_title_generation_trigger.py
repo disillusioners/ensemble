@@ -579,7 +579,6 @@ class TestInstanceMessagingTriggerTitleGeneration:
         manager.config.limits.graph_recursion_limit = 50
         # These are async methods that need to be mocked as AsyncMock
         manager.ensure_mcp_preloaded = AsyncMock()
-        manager._maybe_compact_context = AsyncMock()
         manager.get_instance = AsyncMock()
         return manager
 
