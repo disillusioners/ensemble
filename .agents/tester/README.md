@@ -60,7 +60,21 @@ tests/
 - `ContextCompactor._merge_summaries(partial_summaries, context) -> SystemMessage`
 - `ContextCompactor._call_summarization_llm(prompt, context) -> str`
 
-## Test Results (Latest: 2026-06-04 phase4-frontend-migration)
+## Test Results (Latest: 2026-06-17 phase3-cascade-unification)
+
+### Phase 3: Cascade Unification — Race #3 Elimination (2026-06-17)
+- **Branch**: `feature/correlation-manager` (commits `6af7b73e` initial, `9598f684` W1/W2 tests)
+- **Phase 3 Focused Tests**: ✅ 242/242 PASS (15 files)
+  - W1 `_finalize_instance`: 19/19 — status transition, SSE, CompletionRegistry, lifecycle event, idempotency, stuck RUNNING rescue, error isolation
+  - W2 Cascade Site Bypass: 8/8 — Site 1A/2 CM-active (no inline cascade, no DB count), CM=None (legacy cascade)
+  - Race #3 Elimination: 7 tests — no SELECT COUNT(*) in CM-active path, pure set ops
+  - Cascade Concurrency: 9 tests — per-parent lock serialization
+- **Full Regression**: ✅ ~4,927 passed, 14 pre-existing failures, 0 Phase 3 regressions
+  - Job queue: 1230 passed | Cascade/CM/Observer: 171 passed | DB: 153 passed | OpenCode: 469 passed
+  - All 14 failures pre-existing (test_config, innate_skills, memory_integration, spawn_limit fixture)
+- **ensure.md**: ✅ PASS (dev.sh stable 30s, CM started correctly, database=postgres)
+- **Quick Fixes**: 0 (no modifications needed)
+- **Status**: ✅ READY FOR MERGE
 
 ### Phase 4: Frontend Migration UI (2026-06-04)
 - **Branch**: `feature/database-migration` (commits `aaae375` initial, `ec99a80` warning fixes)

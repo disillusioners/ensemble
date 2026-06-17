@@ -199,16 +199,17 @@ Any code that checks for `WAITING_CHILDREN`:
 ## Verification Strategy
 
 ### Deprecation Phase (Part A + C)
-1. **Full test suite**: All tests pass with `waiting_for` no longer written
+1. **Full test suite**: All tests pass with `waiting_for` no longer READ for control flow (writes continue as rebuild cache)
 2. **Log monitoring**: Zero `waiting_for` deprecation warnings after 24h soak
 3. **Shadow mode**: CM shadow mode (from Phase 1) still shows zero mismatches — now CM is the only source
 4. **Manual testing**: Spawn children, complete them, verify parent transitions correctly without `waiting_for`
 
-### Removal Phase (Part B + D)
-1. **Migration test**: Run migration on both SQLite and PostgreSQL test databases
-2. **Full test suite**: All tests pass with column/enum removed
-3. **Negative test**: Attempt to query `waiting_for` column → verify it no longer exists
-4. **Negative test**: Attempt to set `status = WAITING_CHILDREN` → verify it's rejected
+### Removal Phase (Part B + D) — Deferred Indefinitely per ADR-011
+**⚠️ Part B (column drop) and Part D (enum removal) are deferred indefinitely.** Per ADR-011, the `waiting_for` column is permanently retained as a write-only rebuild cache, and the `WAITING_CHILDREN` enum value is retained for API backward compatibility. No migration test, negative schema test, or rejection test is performed because no schema change is planned.
+
+1. **No migration test** — there is no column-drop migration. The `waiting_for` column remains in the schema indefinitely.
+2. **No negative-schema test** — querying the `waiting_for` column is expected to succeed; it is the rebuild cache source.
+3. **No enum-rejection test** — `status = WAITING_CHILDREN` is still accepted by the enum and required for API backward compatibility. (Internal callers must not SET this status; external API responses may still INCLUDE it.)
 
 ## Rollback Plan
 

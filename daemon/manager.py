@@ -61,6 +61,7 @@ from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.live_event_hub import LiveEventHub
 from .services.event_bus import EventBus
 from .services.job_queue_service import DemandState
+from .services.correlation_manager import get_correlation_manager
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
 from .services.child_reports import ChildReportsService
@@ -2955,16 +2956,27 @@ class InstanceManager:
                 except Exception as e:
                     logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
 
-                # 3. Check waiting_for > 0 — if still waiting for children, don't complete the job
+                # 3. Check whether the instance is still waiting for children.
+                # Phase 4: control-flow decision now consults the
+                # CorrelationManager (authoritative in-memory pending set) when
+                # available. The ``WAITING_CHILDREN`` status check is removed —
+                # instances stay ``PROCESSING`` while children resolve, and the
+                # CM tracks correlation state. ``waiting_for`` is retained only
+                # as a fallback for graceful degradation (CM is None / disabled)
+                # and as the rebuild cache for ``rebuild_from_db()`` (ADR-011).
                 skip_complete = False
                 try:
                     instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
-                    if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
-                        skip_complete = True
-                    elif instance and (getattr(instance, 'waiting_for', None) or 0) > 0:
-                        skip_complete = True
+                    if instance is not None:
+                        cm = get_correlation_manager()
+                        if cm is not None:
+                            pending = cm.get_pending_count(instance_id)
+                        else:
+                            pending = getattr(instance, 'waiting_for', None) or 0
+                        if pending > 0:
+                            skip_complete = True
                 except Exception as e:
-                    logger.warning(f"Failed to check instance status for completion: {e}")
+                    logger.warning(f"Failed to check pending children for completion: {e}")
                     skip_complete = True  # Safe: don't complete if we can't verify
 
                 if skip_complete:

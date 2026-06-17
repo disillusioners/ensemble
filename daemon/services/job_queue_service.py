@@ -201,6 +201,14 @@ class JobQueueService:
         Returns number of watchers notified.
         Safe to call even if no watchers exist (returns 0).
         If watching instance is not running, message queues in DB for later delivery.
+
+        Phase 4: ``waiting_for`` is a DISPLAY-ONLY parameter. The function
+        formats it into the in_progress notification message but does not
+        use it for any control-flow decision. Callers should derive
+        ``waiting_for`` from the CorrelationManager (``cm.get_pending_count()``)
+        when available, falling back to the ``waiting_for`` DB column when
+        CM is None / disabled. The callers (message_job_handler.py,
+        job_processor.py, job_feedback_observer.py) own this derivation.
         """
         if self._watcher_repo is None or self._instance_manager is None:
             return 0

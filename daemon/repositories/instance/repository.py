@@ -338,15 +338,13 @@ class SQLModelInstanceRepository:
             return self._enrich_instances(db_session, instances)
 
     def get_all_with_waiting_for(self) -> list[Instance]:
-        """Get all instances where waiting_for > 0.
+        """Return all instances with a non-zero ``waiting_for`` counter.
 
-        Used by CorrelationManager.rebuild_from_db() to find parents
-        that are waiting for child responses.
-
-        Returns:
-            List of Instance objects whose ``waiting_for`` counter is
-            strictly positive. Results are not enriched with children —
-            callers that need hierarchy data should re-query.
+        Phase 4: this is a REBUILD query for ``rebuild_from_db()`` —
+        it reconstructs the CorrelationManager's in-memory pending set
+        on daemon startup. ``waiting_for`` is the rebuild cache per
+        ADR-011, not a control-flow signal. Do NOT replace with a CM
+        call; the CM is empty at this point in the lifecycle.
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = select(Instance).where(Instance.waiting_for > 0)

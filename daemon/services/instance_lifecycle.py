@@ -18,6 +18,7 @@ from ..registry import get_registry
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
+from .correlation_manager import get_correlation_manager
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
 from .project_normalizer import normalize_project_id
@@ -707,9 +708,24 @@ class InstanceLifecycleService:
 
             # 3. Update DB status to paused
             # Reset waiting_for to 0 if instance was waiting for children
-            # to prevent deadlock on resume (children are paused too)
+            # to prevent deadlock on resume (children are paused too).
+            #
+            # Phase 4: the pending-children decision now consults the
+            # CorrelationManager (authoritative in-memory pending set) when
+            # available. ``waiting_for`` is the rebuild cache (ADR-011) and
+            # the graceful-degradation fallback. Resetting the cache to 0 on
+            # pause is still required for crash recovery consistency — the
+            # CM is cleared on daemon restart, so the cache must reflect a
+            # safe "no pending children" state until resume re-registers them.
             paused_at = datetime.now(timezone.utc).isoformat()
-            if meta.waiting_for and meta.waiting_for > 0:
+            cm = get_correlation_manager()
+            if cm is not None:
+                has_pending_children = cm.get_pending_count(target_id) > 0
+            else:
+                has_pending_children = bool(
+                    getattr(meta, "waiting_for", None) and meta.waiting_for > 0
+                )
+            if has_pending_children:
                 repo.update(
                     target_id,
                     status=InstanceStatus.PAUSED.value,
@@ -805,6 +821,13 @@ class InstanceLifecycleService:
                 # Determine waiting_for value:
                 # - If resuming from root/parent: waiting_for stays 0 for all nodes
                 # - If resuming from child: only ANCESTORS get waiting_for = 1
+                #
+                # Phase 4: this is a WRITE — the rebuild cache (ADR-011) is
+                # being re-initialized on resume. The CM is re-populated by
+                # the registration paths elsewhere (not here); this sets the
+                # initial DB cache so ``rebuild_from_db()`` can recover the
+                # parent/child relationship after a restart. Intentionally
+                # retained — DO NOT route through the CM API.
                 if is_root_resume:
                     waiting_for_value = 0
                 else:

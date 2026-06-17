@@ -373,41 +373,53 @@ class MessageJobHandler:
                 # returns False, children are still pending — defer
                 # completion so the CM callback handles the terminal
                 # transition when the last child resolves.
+                #
+                # Phase 4: control-flow decision now consults the
+                # CorrelationManager (in-memory pending set) when wired up.
+                # The ``WAITING_CHILDREN`` status check is removed — instances
+                # stay ``PROCESSING`` while children resolve, and the CM
+                # tracks correlation state. ``waiting_for`` is retained only
+                # as a fallback for graceful degradation (CM is None /
+                # disabled) and as the rebuild cache for ``rebuild_from_db()``
+                # (ADR-011).
                 skip_complete = False
+                wf = 0
+                cm = None
                 try:
-                    instance = await asyncio.to_thread(
-                        self._manager._instance_repository.get, instance_id
-                    )
-                    if instance and instance.status == InstanceStatus.WAITING_CHILDREN.value:
-                        logger.info(
-                            f"MessageJobHandler: instance {instance_id[:8]}... is WAITING_CHILDREN, "
-                            f"deferring job completion for {job.job_id[:8]}..."
-                        )
-                        skip_complete = True
-                    elif instance and (instance.waiting_for or 0) > 0:
-                        logger.info(
-                            f"MessageJobHandler: instance {instance_id[:8]}... has "
-                            f"waiting_for={instance.waiting_for} (status={instance.status}), "
-                            f"deferring completion for job {job.job_id[:8]}..."
-                        )
-                        skip_complete = True
-                    else:
-                        # Phase 3: even when status is RUNNING/IDLE and
-                        # waiting_for reads 0, the CM may have a fresher
-                        # view of pending correlations. Defensive check —
-                        # does not change behavior when CM is None or
-                        # reports complete.
+                    # Try CM first (authoritative) before hitting the DB.
+                    try:
                         from daemon.services.correlation_manager import (
                             get_correlation_manager,
                         )
                         cm = get_correlation_manager()
-                        if cm is not None and not cm.is_complete(instance_id):
+                    except Exception:
+                        cm = None
+
+                    if cm is not None:
+                        wf = cm.get_pending_count(instance_id)
+                        if wf > 0:
                             logger.info(
-                                f"MessageJobHandler: CM reports unresolved "
-                                f"correlations for instance {instance_id[:8]}..., "
+                                f"MessageJobHandler: CM reports "
+                                f"{wf} unresolved child correlation(s) "
+                                f"for instance {instance_id[:8]}..., "
                                 f"deferring completion for job {job.job_id[:8]}..."
                             )
                             skip_complete = True
+                    else:
+                        # Graceful degradation: legacy ``waiting_for`` DB read.
+                        instance = await asyncio.to_thread(
+                            self._manager._instance_repository.get, instance_id
+                        )
+                        if instance is not None:
+                            wf = getattr(instance, "waiting_for", None) or 0
+                            if wf > 0:
+                                logger.info(
+                                    f"MessageJobHandler: instance "
+                                    f"{instance_id[:8]}... has waiting_for={wf} "
+                                    f"(status={instance.status}), "
+                                    f"deferring completion for job {job.job_id[:8]}..."
+                                )
+                                skip_complete = True
                 except Exception as e:
                     logger.warning(
                         f"MessageJobHandler: failed to check instance status for {instance_id[:8]}..., "
@@ -416,8 +428,8 @@ class MessageJobHandler:
 
                 if skip_complete:
                     # Emit in_progress notification so watchers know the instance finished
-                    # its turn but child agents are still pending
-                    wf = (instance.waiting_for or 0) if instance else 0
+                    # its turn but child agents are still pending. ``wf`` is derived from
+                    # CM above when available, otherwise from the ``waiting_for`` DB column.
                     if wf > 0:
                         try:
                             await self._job_service.notify_watchers(

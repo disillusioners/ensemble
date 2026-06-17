@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 124 packs
-- Unit: 109 | Integration: 2 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 131 packs
+- Unit: 114 | Integration: 2 | Mock: 6 | E2E: 8 | Manual: 1
 
 ## Unit Test Packs
 
@@ -66,7 +66,12 @@
 | phase2_observer_race1_test | tests/test_observer_race1.py | Phase 2 Race #1 elimination: original TOCTOU (waiting_for snapshot → atomic_transition) eliminated, new C1 race pattern (register during callback await) caught by re-check | 2 min | 2026-06-17 | ✅ PASS (3/3, feature/correlation-manager, commits 6a80a5ae+1347b426, 0 failures) |
 | phase2_observer_late_msg_test | tests/test_observer_late_msg.py | Phase 2 edge cases: late message arrival → re-registration + re-fire, graceful degradation (CM disabled → waiting_for fallback, CM exception → observer continues), zero children → normal completion | 2 min | 2026-06-17 | ✅ PASS (7/7, feature/correlation-manager, commits 6a80a5ae+1347b426, 0 failures) |
 | phase2_cm_resilience_test | tests/test_cm_resilience.py | Phase 2 CM resilience: W3 fail-safe (LLM fetch raises → FAILED, fail-safe failure swallowed), CM disabled fallback, CM exception handling, register/resolve error tolerance | 2 min | 2026-06-17 | ✅ PASS (23/23, feature/correlation-manager, commits 6a80a5ae+1347b426, 0 failures) |
-| phase2_job_feedback_observer_test | tests/job_queue/test_job_feedback_observer.py | Phase 2 observer unit tests: _process_event refactored (waiting_for guard → cm.get_pending_count check), handle_correlation_complete callback registration, graceful degradation paths | 2 min | 2026-06-17 | ✅ PASS (30/30, feature/correlation-manager, commits 6a80a5ae+1347b426, 0 failures) |
+| phase2_job_feedback_observer_test | tests/job_queue/test_job_feedback_observer.py | Phase 2 observer unit tests: _process_event refactored (waiting_for guard → cm.get_pending_count check), handle_correlation_complete callback registration, graceful degradation paths | 2 min | 2026-06-17 | ✅ PASS (28/28, feature/correlation-manager, commits 6a80a5ae+1347b426, 0 failures) |
+| phase3_finalize_instance_test | tests/test_finalize_instance.py | Phase 3 W1 _finalize_instance: status transition (RUNNING→COMPLETED/ERROR), SSE emission, CompletionRegistry signal, lifecycle event, idempotency (4 terminal statuses → early return), stuck RUNNING rescue, error isolation, DB commit failure propagation | 2 min | 2026-06-17 | ✅ PASS (19/19, feature/correlation-manager, commit 9598f684, 0 failures) |
+| phase3_cascade_unified_test | tests/test_cascade_unified.py | Phase 3 cascade unification: pure in-memory set completion, no DB query on completing resolve | 2 min | 2026-06-17 | ✅ PASS (13/13, feature/correlation-manager, commit 6af7b73e, 0 failures) |
+| phase3_cascade_integration_test | tests/test_cascade_integration.py | Phase 3 W2 cascade site bypass: Site 1A CM-active (no inline cascade/no DB count), Site 1A CM=None (legacy cascade), Site 2 CM-active/CM=None, notify_corr_resolve hook universal | 2 min | 2026-06-17 | ✅ PASS (8/8, feature/correlation-manager, commit 9598f684, 0 failures) |
+| phase3_cascade_race3_test | tests/test_cascade_race3.py | Phase 3 Race #3 elimination: no SELECT COUNT(*) in CM-active completion path, zero DB calls on completing resolve, shadow-only partial resolve | 2 min | 2026-06-17 | ✅ PASS (7/7, feature/correlation-manager, commit 6af7b73e, 0 failures) |
+| phase3_cascade_concurrency_test | tests/test_cascade_concurrency.py | Phase 3 per-parent lock serialization: concurrent child completions, callback fires once, mixed success+error children | 2 min | 2026-06-17 | ✅ PASS (9/9, feature/correlation-manager, commit 6af7b73e, 0 failures) |
 | mcp_warmup_pool_unit_test | tests/unit/test_mcp_warmup_pool.py | MCP warm-up pool: lifecycle, acquire, replenish, health check, drain, liveness probe, exception logging, CancelledError handling, BaseException propagation, **retry logic** (3 attempts, backoff, timeout, log levels), **get_cached_tool_schemas** | 2 min | 2026-06-12 | ✅ PASS (50/50, feature/mcp-lazy-init, 0 regressions) |
 | mcp_connection_manager_unit_test | tests/unit/test_mcp_connection_manager.py | MCP connection manager: transfer_session(), pool integration | 2 min | 2026-05-20 | ✅ PASS (19 tests, fix/mcp-stdio-connection-init, ManagedClientSession verified) |
 | mcp_lazy_init_unit_test | tests/unit/test_mcp_lazy_init.py | MCP lazy connection init: create_lazy_mcp_tools factory, _build_lazy_coroutine deferred connection, double-check locking (W7), shared session cache (C1), timeout wrapping, McpSessionProvider protocol, isError propagation, lifecycle hooks | 2 min | 2026-06-12 | ✅ PASS (22/22, feature/mcp-lazy-init, 0 regressions) |

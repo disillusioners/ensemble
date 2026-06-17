@@ -62,6 +62,10 @@ class Instance(SQLModel, table=True):
     # Denormalized cache of child instance IDs (stored as JSON string)
     children: str = Field(default="[]")
     # Count of pending child completions
+    # REBUILD-ONLY CACHE: This field is written for crash-recovery rebuild only
+    # (incremented at send_message, decremented at child completion).
+    # Do NOT read it for runtime control-flow decisions —
+    # use CorrelationManager.is_complete() / get_pending_count() instead.
     waiting_for: int = Field(default=0)
     # Optimistic locking version
     version: int = Field(default=1)

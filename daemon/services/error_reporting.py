@@ -304,8 +304,20 @@ class ErrorReportingService:
                     # checked `!= COMPLETED`, which would let a parent in ERROR state be
                     # overwritten to COMPLETED when its last child errored. The unified
                     # guard preserves ERROR (more useful for diagnostics — W1 fix).
+                    #
+                    # Phase 4: the ``parent.waiting_for == 0`` READ is
+                    # replaced by ``cm.is_complete(parent_id)`` when the
+                    # CorrelationManager is wired up. The DB column
+                    # ``waiting_for`` is retained as the rebuild cache
+                    # (ADR-011) and the graceful-degradation fallback.
+                    from .correlation_manager import get_correlation_manager
+                    cm = get_correlation_manager()
+                    if cm is not None:
+                        all_children_done = cm.is_complete(parent.instance_id)
+                    else:
+                        all_children_done = (getattr(parent, "waiting_for", None) or 0) == 0
                     if (
-                        parent.waiting_for == 0
+                        all_children_done
                         and parent.status != InstanceStatus.COMPLETED.value
                         and parent.status != InstanceStatus.ERROR.value
                     ):
@@ -319,8 +331,10 @@ class ErrorReportingService:
                         # — which transitions the parent JOB to terminal via
                         # ``_finalize_job``. No DB query, no TOCTOU window
                         # (Race #3 eliminated).
-                        from .correlation_manager import get_correlation_manager
-                        cm = get_correlation_manager()
+                        #
+                        # ``cm`` is already in scope from the
+                        # ``get_correlation_manager()`` call at the top of
+                        # this `if` block (Phase 4 dedup).
                         if cm is not None:
                             # CM is active — CM callback handles completion.
                             logger.info(

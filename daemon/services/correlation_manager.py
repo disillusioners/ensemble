@@ -286,6 +286,10 @@ class CorrelationManager:
                 )
                 # Clean up in-memory state while still holding the lock
                 del self._pending[parent_id]
+                # S3 fix: also drop the per-parent lock entry to prevent
+                # unbounded growth of the _locks dict across many sessions.
+                # Safe with None default if the lock was never created.
+                self._locks.pop(parent_id, None)
                 # W1 fix: defer the completion_callback invocation until AFTER
                 # the per-parent lock is released. In Phase 2 the callback
                 # performs cascade work (parent status transition) that may

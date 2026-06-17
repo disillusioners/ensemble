@@ -249,6 +249,15 @@ class TaskRepository:
                         AND j.job_type = :job_type_message
                         AND j.instance_id IS NOT NULL
                         AND j.deleted_at IS NULL
+                        -- Phase 4: legacy ``waiting_for`` read here is a
+                        -- SQL-level guard inside the FIFO carve-out. CM is
+                        -- an in-memory layer and cannot be queried from SQL,
+                        -- so this remains functional but is DEPRECATED.
+                        -- Future phase: replace with a CM-aware query path
+                        -- (e.g. a per-instance pending counter maintained
+                        -- alongside ``waiting_for``). The carve-out still
+                        -- serves as a defensive filter against the rare
+                        -- case where the CM singleton is None at startup.
                         AND COALESCE(i.waiting_for, 0) = 0
                         AND (i.status IS NULL OR i.status != :status_waiting_children)
                     )
@@ -634,6 +643,11 @@ class TaskRepository:
                             AND j_running.job_type = :job_type_message
                             AND j_running.instance_id = t_pending.instance_id
                             AND j_running.deleted_at IS NULL
+                            -- Phase 4: legacy ``waiting_for`` read in FIFO
+                            -- carve-out. See comment at the earlier
+                            -- ``find_processing_message_jobs_by_instance``
+                            -- block. DEPRECATED — to be migrated to a
+                            -- CM-aware SQL path in a future phase.
                             AND COALESCE(i.waiting_for, 0) = 0
                             AND (i.status IS NULL OR i.status != :status_waiting_children)
                         )

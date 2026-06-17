@@ -384,6 +384,13 @@ class JobFeedbackObserver:
                 # Graceful degradation: CM is None / disabled.
                 # Use the legacy waiting_for check from the DB. This preserves
                 # the pre-Phase-2 behavior when CM is not wired up.
+                #
+                # Phase 4: this read is INTENTIONALLY retained. Control-flow
+                # READS of ``waiting_for`` were deprecated in favor of
+                # ``cm.get_pending_count()`` (see the ``if cm is not None``
+                # branch above), but the rebuild cache (ADR-011) must remain
+                # queryable for ``rebuild_from_db()``. This branch is the
+                # legitimate fallback when CM is absent.
                 try:
                     instance_meta = await asyncio.to_thread(
                         self._instance_manager._instance_repository.get,

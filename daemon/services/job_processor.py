@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from daemon.manager import InstanceManager
 
 from daemon.models.instance import InstanceStatus
+from daemon.services.correlation_manager import get_correlation_manager
 from daemon.services.job_queue_service import (
     DemandState,
     JobQueueService,
@@ -138,19 +139,25 @@ class JobProcessor:
         """Centralized guard for the 6 in_progress-emit call sites.
 
         If the job's instance is in a would-be terminal state but still has
-        ``waiting_for > 0`` (child agent reports outstanding), emit an
-        ``in_progress`` notification instead of completing the job.
+        child agent reports outstanding, emit an ``in_progress`` notification
+        instead of completing the job.
+
+        Phase 4: the control-flow decision now consults the
+        ``CorrelationManager`` (in-memory pending set) when available. The
+        ``waiting_for`` DB column is retained as the rebuild cache and as the
+        fallback when CM is None / disabled.
 
         Adds two safety nets that the original 6 inline blocks did not have:
         * **Throttle/dedup** — within a 300s window we skip re-emitting when
-          ``waiting_for`` count is unchanged, so a hot poll loop cannot spam
+          pending count is unchanged, so a hot poll loop cannot spam
           watchers.
         * **Escape hatch** — if a job has been sitting in the guard for more
           than ``_child_timeout_seconds`` (default 1h), force-complete it as
           FAILED so a stuck child never permanently blocks the job.
 
         Args:
-            instance_meta: The Instance metadata (must expose ``waiting_for``).
+            instance_meta: The Instance metadata (must expose ``waiting_for``
+                as a fallback for the legacy code path).
             proc_job: The JobItem (must expose ``job_id``).
             job_type_label: Human label for logs, e.g. ``"MESSAGE"`` or ``"TASK"``.
             status_display: Human-readable instance status for the log line
@@ -160,8 +167,20 @@ class JobProcessor:
             ``True`` if the guard fired (caller should ``continue`` / skip normal
             processing). ``False`` if normal processing should proceed.
         """
-        # Defensive int conversion — handles None, strings, or any odd DB type.
-        wf = int(getattr(instance_meta, "waiting_for", 0) or 0)
+        # Phase 4: prefer the CM's in-memory pending count when available.
+        # Falls back to the ``waiting_for`` DB column (rebuild cache) when
+        # CM is None / disabled. The DB column's WRITES are retained for
+        # ``rebuild_from_db()`` (ADR-011); only the READ for control flow
+        # is deprecated in favor of the CM call.
+        instance_id = getattr(instance_meta, "instance_id", None) or getattr(
+            instance_meta, "id", None
+        )
+        cm = get_correlation_manager()
+        if cm is not None and instance_id is not None:
+            wf = int(cm.get_pending_count(instance_id) or 0)
+        else:
+            # Defensive int conversion — handles None, strings, or any odd DB type.
+            wf = int(getattr(instance_meta, "waiting_for", 0) or 0)
         if wf <= 0:
             return False
 

@@ -531,8 +531,20 @@ Provide a concise summary:"""
         # W1 FIX: Also preserve ERROR status during cascade — a parent whose last child
         # completed successfully should still report as ERROR (it errored first, and that
         # state is more useful for diagnostics than overwriting it with COMPLETED).
+        #
+        # Phase 4: the ``parent.waiting_for == 0`` control-flow READ is
+        # replaced by ``cm.is_complete(parent_id)`` when the CM is wired up.
+        # ``waiting_for`` is retained as the rebuild cache (ADR-011) and the
+        # graceful-degradation fallback. The WRITE SQL above (lines 425-437)
+        # must continue — it is the decrement that keeps the cache consistent.
+        from .correlation_manager import get_correlation_manager
+        cm = get_correlation_manager()
+        if cm is not None:
+            is_parent_complete = cm.is_complete(parent.instance_id)
+        else:
+            is_parent_complete = (getattr(parent, "waiting_for", None) or 0) == 0
         if (
-            parent.waiting_for == 0
+            is_parent_complete
             and parent.status != InstanceStatus.COMPLETED.value
             and parent.status != InstanceStatus.ERROR.value
         ):
@@ -550,8 +562,6 @@ Provide a concise summary:"""
             # logic with the SELECT COUNT(*) fallback. This path is also
             # the one exercised by every test that does not wire a CM
             # fixture (e.g. tests/job_queue/test_in_progress_guard.py).
-            from .correlation_manager import get_correlation_manager
-            cm = get_correlation_manager()
             if cm is not None:
                 # CM is active — CM callback handles completion.
                 # No count_pending query, no inline status transition,
@@ -593,12 +603,23 @@ Provide a concise summary:"""
                 # message processing to complete before marking job done. When parent completes
                 # its message, the status check will keep it in WAITING_CHILDREN, and the cascade
                 # will run again to mark it COMPLETED.
+                #
+                # Phase 4: WAITING_CHILDREN is DEPRECATED as a control-flow
+                # signal — CM is the authoritative source of correlation
+                # state. The status set is RETAINED for graceful-degradation
+                # (CM is None) and for the FIFO carve-out SQL compatibility
+                # (daemon/repositories/task/repository.py). The
+                # ``transitioned_to_running`` return value remains ``True``
+                # because the parent is still alive (will process more
+                # messages) — contract required by
+                # ``tests/test_cascade_integration.py``.
                 parent.status = InstanceStatus.WAITING_CHILDREN.value
                 logger.info(
                     f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                    f"pending messages, status=WAITING_CHILDREN"
+                    f"pending messages, status=WAITING_CHILDREN (deprecated; CM is authoritative)"
                 )
                 # Emit status_change SSE event for parent waiting_children
+                # (display only — status field is being phased out).
                 if self._manager._live_hub:
                     try:
                         await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children", agent_id=parent.agent_id)
@@ -607,7 +628,7 @@ Provide a concise summary:"""
                 return True, None, None
 
         return False, None, None
-        
+
     async def _create_completion_events(
         self,
         session,
@@ -738,19 +759,33 @@ Provide a concise summary:"""
             logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, waiting_for={instance.waiting_for}, status={instance.status}")
             
             # Not a child? Instance completed (no parent to send report to)
-            # Check if we have active children - if so, wait for them before completing
+            # Check if we have active children - if so, wait for them before completing.
+            #
+            # Phase 4: the ``waiting_for > 0`` READ for the deferral decision
+            # is replaced by ``cm.get_pending_count()`` when the
+            # CorrelationManager is wired up. ``waiting_for`` is retained as
+            # the rebuild cache (ADR-011) and as the graceful-degradation
+            # fallback.
             if instance.parent_id is None:
-                if instance.waiting_for > 0:
-                    # Has children still running - transition to WAITING_CHILDREN
-                    # Job will complete when last child finishes
-                    instance.status = InstanceStatus.WAITING_CHILDREN.value
-                    session.commit()
+                from .correlation_manager import get_correlation_manager
+                cm = get_correlation_manager()
+                if cm is not None:
+                    pending_children = cm.get_pending_count(instance_id)
+                else:
+                    # Legacy fallback — ``waiting_for`` column.
+                    pending_children = getattr(instance, "waiting_for", None) or 0
+                if pending_children > 0:
+                    # Has children still running — defer completion.
+                    # Phase 4: do NOT transition status to WAITING_CHILDREN;
+                    # the CM is the authoritative source of pending children
+                    # and instances stay PROCESSING while children run.
+                    # The ``waiting_children`` SSE event is kept for watcher
+                    # compatibility (display only).
                     logger.info(
                         f"Instance {instance_id[:8]}... completed message but waiting for "
-                        f"{instance.waiting_for} children, status=WAITING_CHILDREN"
+                        f"{pending_children} children (CM={cm is not None}), deferring completion"
                     )
-                    logger.info(f"Instance {instance_id[:8]}... has children (waiting_for>0), deferring completion")
-                    # Emit status_change SSE event
+                    # Emit status_change SSE event (display only — status stays PROCESSING).
                     if self._manager._live_hub:
                         try:
                             await self._manager._live_hub.stream_status_change(instance_id, "waiting_children", agent_id=instance.agent_id)
@@ -773,6 +808,11 @@ Provide a concise summary:"""
                 # degradation), skip Condition 1 and fall through to
                 # Condition 2 (the existing pending_count query).
                 from .correlation_manager import get_correlation_manager
+                # Reuse the ``cm`` from the earlier lookup at line ~804 above
+                # to avoid a redundant singleton fetch. (Phase 4: the second
+                # `from .correlation_manager import` is a no-op because Python
+                # caches the module; we just rebind ``cm`` to the cached value
+                # which is the same singleton as before.)
                 cm = get_correlation_manager()
                 if cm is not None:
                     all_children_done = cm.is_complete(instance_id)
@@ -780,12 +820,15 @@ Provide a concise summary:"""
                         # CM still has pending correlations for this
                         # root. Trust CM (more accurate than the DB
                         # ``waiting_for`` snapshot — Race #3 adjacent
-                        # window). Stay WAITING_CHILDREN.
-                        instance.status = InstanceStatus.WAITING_CHILDREN.value
-                        session.commit()
+                        # window).
+                        #
+                        # Phase 4: do NOT set status to WAITING_CHILDREN
+                        # — instances stay PROCESSING while children run.
+                        # The ``waiting_children`` SSE event is kept below
+                        # for watcher compatibility (display only).
                         logger.info(
                             f"Instance {instance_id[:8]}... waiting_for=0 but CM has "
-                            f"unresolved child responses, status=WAITING_CHILDREN"
+                            f"unresolved child responses, status=PROCESSING (CM tracks pending)"
                         )
                         if self._manager._live_hub:
                             try:
@@ -808,6 +851,10 @@ Provide a concise summary:"""
                 # not child-response correlation. The CM set does not
                 # track these. Per ADR-012 and the plan, this is NOT
                 # subject to Race #3.
+                #
+                # Phase 4: the ``WAITING_CHILDREN`` set here is DEPRECATED
+                # and retained only for graceful degradation. CM is the
+                # authoritative source of correlation state. Display/log.
                 pending_count = session.exec(
                     select(func.count())
                     .select_from(MessageQueue)
@@ -826,11 +873,17 @@ Provide a concise summary:"""
                     # single pending_count guard is sufficient. Do NOT
                     # transition to COMPLETED — there is queued work that
                     # the worker must still process.
+                    #
+                    # Display/log: ``waiting_for=0`` is a snapshot read
+                    # of the rebuild cache. CM is authoritative. The
+                    # WAITING_CHILDREN status set is retained for
+                    # graceful-degradation watchers and FIFO carve-out
+                    # SQL compatibility.
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     session.commit()
                     logger.info(
-                        f"Instance {instance_id[:8]}... waiting_for=0 but has {pending_count} "
-                        f"pending messages, status=WAITING_CHILDREN"
+                        f"Instance {instance_id[:8]}... waiting_for=0 (rebuild-cache snapshot) "
+                        f"but has {pending_count} pending messages, status=WAITING_CHILDREN (deprecated)"
                     )
                     # Emit status_change SSE event
                     if self._manager._live_hub:
@@ -941,8 +994,19 @@ Provide a concise summary:"""
             # Update parent state
             parent_transitioned_to_running, completed_parent_id, completed_parent_parent_id = await self._update_parent_on_child_complete(session, instance, completed_message_id=completed_message_id)
             
-            # Calculate waiting_for remaining for event
-            waiting_for_remaining = max(0, (instance.parent_id and session.get(Instance, instance.parent_id).waiting_for) or 0)
+            # Calculate waiting_for remaining for event.
+            #
+            # Phase 4: derive from the CorrelationManager when available
+            # (in-memory pending set — authoritative for runtime). Falls
+            # back to the ``waiting_for`` DB column (rebuild cache) when
+            # CM is None / disabled (graceful degradation).
+            from .correlation_manager import get_correlation_manager
+            cm = get_correlation_manager()
+            if instance.parent_id is not None and cm is not None:
+                waiting_for_remaining = max(0, int(cm.get_pending_count(instance.parent_id) or 0))
+            else:
+                # Legacy fallback — read from the DB column.
+                waiting_for_remaining = max(0, (instance.parent_id and session.get(Instance, instance.parent_id).waiting_for) or 0)
             
             # Create events
             await self._create_completion_events(
