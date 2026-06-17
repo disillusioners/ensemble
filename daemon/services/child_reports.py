@@ -867,6 +867,26 @@ Provide a concise summary:"""
                     ]))
                 ).scalar_one()
 
+                # WHY ROOT GETS WAITING_CHILDREN BUT NON-ROOT DOES NOT:
+                # This branch is reached only when ``instance.parent_id is None``
+                # (a root instance). The semantic concern here is the root's OWN
+                # message queue — messages from external sources (HTTP, scheduler,
+                # direct user input) that are not child-response correlations.
+                # The CM tracks parent→child correlation; it does NOT track a
+                # root's own-queue work. So we still set WAITING_CHILDREN to
+                # signal "this root has queued work to process" even though
+                # there is no child correlation pending.
+                #
+                # Non-root parents (handled in ``_update_parent_on_child_complete``
+                # at line ~565) are gated by ``cm.is_complete()`` — when CM is
+                # active, they stay PROCESSING because the CM tracks their
+                # pending children. They never reach the SELECT COUNT branch
+                # for their own queue because the CM-active bypass returns early
+                # at line ~574.
+                #
+                # The root carve-out is intentional and aligned with Site 1B
+                # (ADR-012) two-condition check: root completion requires BOTH
+                # no pending children AND no own-queue messages.
                 if pending_count > 0:
                     # By this point waiting_for is guaranteed 0 (the early
                     # return above handled all waiting_for > 0 cases), so the

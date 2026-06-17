@@ -1288,3 +1288,219 @@ class TestRebuildFromDbUsesWaitingFor:
             )
         finally:
             await cm.stop()
+
+
+# =============================================================================
+# Scenario 7: Root vs Non-Root WAITING_CHILDREN semantics (W1 carve-out)
+# =============================================================================
+
+
+class TestRootVsNonRootWaitingChildren:
+    """Phase 4 W1: Root instances with pending own-queue messages get
+    ``WAITING_CHILDREN``; non-root parents with the same condition stay
+    ``PROCESSING`` under CM (CM tracks their children).
+
+    The root carve-out is intentional: root instances may have messages
+    in their OWN queue (from HTTP, scheduler, user input) that are NOT
+    child-response correlations. The CM does not track these, so we
+    still set ``WAITING_CHILDREN`` to signal "root has queued work to
+    process." Non-root parents are gated by ``cm.is_complete()`` and the
+    CM-active bypass returns early before reaching any own-queue check.
+
+    Reference: ``child_reports.py`` line 858 (root own-queue query) vs
+    line 565 (non-root cascade, CM bypass).
+    """
+
+    @pytest.mark.asyncio
+    async def test_root_with_pending_own_queue_gets_waiting_children(self) -> None:
+        """Root instance with pending own-queue messages → status = WAITING_CHILDREN.
+
+        Scenario: a child completion report is still queued in the
+        instance's ``MessageQueue`` (``READY``) when the previous message
+        finishes. The instance has no parent (``parent_id is None``) and
+        ``waiting_for == 0``. The CM tracks child-response correlations
+        but NOT the root's own-queue work. So the function falls through
+        to the SELECT COUNT branch and sets ``WAITING_CHILDREN``.
+        """
+        from daemon.services.child_reports import ChildReportsService
+
+        set_correlation_manager(None)
+
+        root = MagicMock()
+        root.instance_id = "root-p4-W1-pending"
+        root.parent_id = None  # root: no parent
+        root.agent_id = "coder"
+        root.status = InstanceStatus.RUNNING.value
+        root.waiting_for = 0  # all children done
+        root.instance_metadata = {}
+        root.children = None
+        root.version = 1
+        root.last_activity_at = None
+        root.updated_at = None
+
+        # Mock session: root is in the DB, and its own-queue has 1 pending.
+        session = MagicMock()
+        session.get = MagicMock(return_value=root)
+        exec_result = MagicMock()
+        exec_result.scalar_one = MagicMock(return_value=1)
+        session.exec = MagicMock(return_value=exec_result)
+        session.commit = MagicMock()
+
+        # Build a mock manager with the attributes _process_child_completion_and_notify_parent reads.
+        manager = MagicMock()
+        manager._instance_repository = MagicMock()
+        manager._instance_repository.get.return_value = root
+        manager._checkpointer = None  # skips _get_last_assistant_message_raw
+        manager._live_hub = None
+        manager.write_guard = MagicMock()
+        manager._queue_repository = MagicMock()
+        manager.engine = MagicMock()
+
+        # Bypass __init__ (avoids binding real manager attributes).
+        service = ChildReportsService.__new__(ChildReportsService)
+        service._manager = manager
+        service._events_service = None
+        # Mock the title generation trigger so we don't try to actually run it.
+        service._trigger_title_generation = MagicMock()
+
+        # Patch Session and WriteGuardSession so the function uses our mock session.
+        wgs = MagicMock()
+        wgs.__enter__ = MagicMock(return_value=session)
+        wgs.__exit__ = MagicMock(return_value=False)
+
+        with patch("daemon.services.child_reports.Session", return_value=MagicMock()):
+            with patch(
+                "daemon.services.child_reports.WriteGuardSession", return_value=wgs
+            ):
+                await service._process_child_completion_and_notify_parent(
+                    instance_id="root-p4-W1-pending",
+                    completed_message_id="msg-p4-W1-pending",
+                )
+
+        # Root carve-out: WAITING_CHILDREN is set for own-queue pending work.
+        assert root.status == InstanceStatus.WAITING_CHILDREN.value, (
+            f"Root with pending own-queue should get WAITING_CHILDREN, "
+            f"got {root.status!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_root_with_pending_own_queue_stays_processing_under_cm(self) -> None:
+        """Non-root parent under CM stays PROCESSING even with own-queue work.
+
+        Non-root parents are gated by ``cm.is_complete()``. When CM says
+        the parent still has pending child correlations, the code returns
+        early WITHOUT checking the own-queue. The own-queue check only
+        runs when CM is None (graceful degradation fallback).
+        """
+        from daemon.services.child_reports import ChildReportsService
+
+        # CM active, says NOT complete (children still pending).
+        cm = MagicMock(spec=CorrelationManager, name="cm-W1-non-root")
+        cm.is_complete = MagicMock(return_value=False)
+        cm.get_pending_count = MagicMock(return_value=1)
+        set_correlation_manager(cm)
+        try:
+            # Non-root parent: has a parent of its own (so it's not a root).
+            parent = _make_parent(
+                status="processing",
+                waiting_for=1,
+                parent_id="parent-p4-W1",
+            )
+            parent.parent_id = "grandparent-p4-W1"  # not None → non-root
+            parent.waiting_for = 1
+
+            child = _make_child(parent_id="parent-p4-W1")
+            # session.get(Instance, child.parent_id) returns the parent mock.
+            session = _setup_cascade_session(parent)
+
+            mock_manager = _make_mock_manager()
+            service = ChildReportsService(manager=mock_manager)
+
+            with patch(
+                "daemon.services.correlation_manager.notify_corr_resolve",
+                new=AsyncMock(),
+            ):
+                result = await service._update_parent_on_child_complete(
+                    session, child, completed_message_id="msg-p4-W1-nr"
+                )
+
+            # CM was consulted (CM was the authority for control flow).
+            assert cm.is_complete.called, (
+                "cm.is_complete() was never called — cascade skipped CM. "
+                "Phase 4 deprecation violated: control flow must consult CM."
+            )
+            # Non-root parent stays PROCESSING (no WAITING_CHILDREN set by code).
+            assert parent.status != InstanceStatus.WAITING_CHILDREN.value, (
+                f"Non-root parent under CM should NOT get WAITING_CHILDREN, "
+                f"got {parent.status!r}. The CM-active bypass should return early."
+            )
+            assert parent.status == "processing"
+            # The function takes the CM-bypass return path.
+            assert result == (False, None, None), (
+                f"CM-bypass must return (False, None, None); got {result!r}"
+            )
+        finally:
+            set_correlation_manager(None)
+
+    @pytest.mark.asyncio
+    async def test_root_with_no_pending_messages_completes(self) -> None:
+        """Root with no children AND no own-queue messages → status = COMPLETED.
+
+        The happy path: root has finished all work (no children pending,
+        no own-queue messages) and can complete.
+        """
+        from daemon.services.child_reports import ChildReportsService
+
+        set_correlation_manager(None)
+
+        root = MagicMock()
+        root.instance_id = "root-p4-W1-clean"
+        root.parent_id = None  # root
+        root.agent_id = "coder"
+        root.status = InstanceStatus.RUNNING.value
+        root.waiting_for = 0
+        root.instance_metadata = {}
+        root.children = None
+        root.version = 1
+        root.last_activity_at = None
+        root.updated_at = None
+
+        # Mock session: root in DB, own-queue has 0 pending.
+        session = MagicMock()
+        session.get = MagicMock(return_value=root)
+        exec_result = MagicMock()
+        exec_result.scalar_one = MagicMock(return_value=0)
+        session.exec = MagicMock(return_value=exec_result)
+        session.commit = MagicMock()
+
+        manager = MagicMock()
+        manager._instance_repository = MagicMock()
+        manager._instance_repository.get.return_value = root
+        manager._checkpointer = None
+        manager._live_hub = None
+        manager.write_guard = MagicMock()
+        manager._queue_repository = MagicMock()
+        manager.engine = MagicMock()
+
+        service = ChildReportsService.__new__(ChildReportsService)
+        service._manager = manager
+        service._events_service = None
+        service._trigger_title_generation = MagicMock()
+
+        wgs = MagicMock()
+        wgs.__enter__ = MagicMock(return_value=session)
+        wgs.__exit__ = MagicMock(return_value=False)
+
+        with patch("daemon.services.child_reports.Session", return_value=MagicMock()):
+            with patch(
+                "daemon.services.child_reports.WriteGuardSession", return_value=wgs
+            ):
+                await service._process_child_completion_and_notify_parent(
+                    instance_id="root-p4-W1-clean",
+                    completed_message_id="msg-p4-W1-clean",
+                )
+
+        # Root with nothing pending → COMPLETED.
+        assert root.status == InstanceStatus.COMPLETED.value, (
+            f"Root with no pending work should COMPLETE, got {root.status!r}"
+        )
