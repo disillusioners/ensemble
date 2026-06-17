@@ -535,7 +535,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             return f"ERROR: Instance '{instance_id}' is terminated. Cannot send message."
 
         # Check if there's already a message in progress (pending or processing)
-        stats = manager.get_queue_stats(instance_id)
+        stats = await manager.get_queue_stats(instance_id)
         if stats["pending_count"] > 0 or stats["processing_count"] > 0:
             return (
                 f"ERROR: Instance '{instance_id}' already has a message in progress. "

@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import text
 from sqlmodel import Session
@@ -26,6 +26,39 @@ logger = logging.getLogger(__name__)
 # Error report severity classification
 CRITICAL_ERROR_TYPES = frozenset({"max_retries_exceeded", "circuit_breaker_open"})
 RECOVERABLE_ERROR_TYPES = frozenset({"watchdog_timeout", "circuit_breaker_open"})
+
+
+class _ErrorReportDbResult(NamedTuple):
+    """Result of the sync DB half of :meth:`ErrorReportingService._send_error_report`.
+
+    Carries the values the async caller needs after the ``WriteGuardSession``
+    block has run on a worker thread (via ``asyncio.to_thread``):
+
+    * ``skip`` — when True, the child instance row was not found in the DB.
+      The caller should return early without firing the post-commit side
+      effects (CompletionRegistry / SSE / lifecycle event / enqueue).
+    * ``child_instance_id`` / ``child_agent_id`` — captured from the child
+      instance row before the session closes (the instance is detached
+      after commit). Used by the caller for the child-error SSE.
+    * ``cascade_status`` — ``"completed"`` or ``"waiting_children"`` when
+      the CM-disabled inline cascade ran and committed a parent status
+      transition; ``None`` when no cascade happened (CM-active path, or
+      the parent still has pending children, or parent is already
+      terminal). The caller uses this to fire the appropriate
+      post-commit SSE + lifecycle event on the parent.
+    * ``cascade_parent_id`` / ``cascade_parent_agent_id`` /
+      ``cascade_parent_parent_id`` — the parent instance IDs captured
+      before the cascade commit. Only meaningful when ``cascade_status``
+      is not ``None``.
+    """
+
+    skip: bool
+    child_instance_id: str | None
+    child_agent_id: str | None
+    cascade_status: str | None
+    cascade_parent_id: str | None
+    cascade_parent_agent_id: str | None
+    cascade_parent_parent_id: str | None
 
 
 class ErrorReportingService:
@@ -61,6 +94,314 @@ class ErrorReportingService:
         self._manager = manager
         self._events_service = events_service
 
+    def _send_error_report_db_sync(
+        self,
+        instance_id: str,
+        parent_id: str,
+        message_id: str | None,
+    ) -> _ErrorReportDbResult:
+        """Sync DB half of :meth:`_send_error_report`.
+
+        Opens a ``WriteGuardSession`` and performs ALL the DB operations
+        that were previously inlined in the async caller:
+
+          a) Set child instance status to ERROR + bookkeeping.
+          b) Fail the associated message (if ``message_id`` is provided).
+          c) Decrement parent's ``waiting_for`` counter atomically.
+          d) Parent bookkeeping: ``last_activity_at``, ``version`` bump.
+          e) Update parent's ``children[]`` cache (remove the failed child).
+          f) Delete from ``instance_hierarchy``.
+          g) Inline cascade (CM-disabled / graceful-degradation path only):
+             check ``all_children_done`` → if so, do the legacy
+             ``SELECT COUNT(*)`` → either transition parent to COMPLETED
+             or WAITING_CHILDREN, then commit.
+
+        When the CM is active, the inline cascade is SKIPPED (the CM
+        callback owns completion). The CM hook itself
+        (``notify_corr_resolve``) is an in-memory notification that must
+        run on the asyncio event loop — it is NOT a DB operation and
+        therefore NOT in this helper. The async caller invokes it
+        AFTER this helper returns.
+
+        Post-commit async side effects (SSE ``status_change``,
+        lifecycle event publish) are also NOT in this helper — they
+        remain in the async caller so they can use ``await``. This
+        method returns a :class:`_ErrorReportDbResult` that tells the
+        caller which post-commit SSE/lifecycle event to fire (if any).
+
+        Runs on a worker thread via ``asyncio.to_thread`` from
+        :meth:`_send_error_report`. This keeps ``session.commit()`` off
+        the event loop so SQLite WAL write contention cannot deadlock
+        the daemon (see the deadlock analysis in the experience docs).
+
+        Idempotency: if the child instance row is missing, returns
+        ``skip=True`` and the caller short-circuits without firing
+        the post-commit side effects.
+
+        Args:
+            instance_id: The child instance ID that has failed.
+            parent_id: The parent instance ID (already resolved by the
+                caller from a pre-session read; passed in so the helper
+                doesn't re-read the instance row just to find the
+                parent).
+            message_id: Optional message ID that triggered the error.
+
+        Returns:
+            :class:`_ErrorReportDbResult` carrying ``skip=True`` when
+            the child row is missing, or ``skip=False`` with the
+            captured child IDs and (if the inline cascade ran) the
+            parent status transition info.
+        """
+        from sqlalchemy import func, select
+        from .correlation_manager import get_correlation_manager
+
+        with WriteGuardSession(
+            Session(self._manager.engine), self._manager.write_guard
+        ) as session:
+            # a) Get child instance
+            instance = session.get(Instance, instance_id)
+            if not instance:
+                return _ErrorReportDbResult(
+                    skip=True,
+                    child_instance_id=None,
+                    child_agent_id=None,
+                    cascade_status=None,
+                    cascade_parent_id=None,
+                    cascade_parent_agent_id=None,
+                    cascade_parent_parent_id=None,
+                )
+
+            # Capture child agent_id before session closes
+            child_agent_id = instance.agent_id
+
+            # b) Set child instance status to ERROR
+            instance.status = InstanceStatus.ERROR.value
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
+
+            # Capture instance_id before session closes
+            error_instance_id = instance.instance_id
+
+            # c) Fail associated message if provided
+            if message_id:
+                message = session.get(MessageQueue, message_id)
+                if message:
+                    message.status = MessageStatus.FAILED.value
+                    message.completed_at = datetime.now(timezone.utc)
+
+            # d) Decrement parent's waiting_for counter atomically.
+            # Fix C: symmetric to the decrement in child_reports.py. A
+            # non-atomic read-modify-write races with concurrent
+            # child-completion decrements. SQL UPDATE is atomic in both
+            # SQLite and Postgres. Use CASE (not MAX, not GREATEST) for
+            # the clamp-at-zero: PostgreSQL's MAX is aggregate-only and
+            # errors on multi-arg scalar ``MAX(0, ...)``; GREATEST is a
+            # SQLite *extension* function the stdlib sqlite3 driver
+            # doesn't load. CASE is portable SQL — same shape in both
+            # dialects, no dialect branch needed. RETURNING gives us the
+            # post-UPDATE value for accurate logging (see child_reports.py
+            # for the rationale on why we don't log a from-value).
+            parent = session.get(Instance, parent_id)
+            if parent:
+                result = session.execute(
+                    text(
+                        "UPDATE instances "
+                        "SET waiting_for = CASE "
+                        "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                        "        THEN COALESCE(waiting_for, 0) - 1 "
+                        "    ELSE 0 "
+                        "END "
+                        "WHERE instance_id = :pid "
+                        "RETURNING waiting_for"
+                    ),
+                    {"pid": parent_id},
+                )
+                new_waiting_row = result.first()
+                new_waiting = (
+                    int(new_waiting_row[0]) if new_waiting_row is not None else 0
+                )
+                logger.info(
+                    f"waiting_for decremented (error path) -> {new_waiting} "
+                    f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
+                )
+
+                # NOTE: The CM hook (``await notify_corr_resolve``) that
+                # used to live here has been moved out of this sync helper
+                # to the async caller. It is an in-memory CM notification
+                # that acquires the CM's per-parent asyncio.Lock (N3
+                # constraint: must run on the main event loop) — it
+                # cannot be called from a worker thread. The hook is
+                # safe to run AFTER this helper returns because:
+                #   - When CM is active, the inline cascade below is
+                #     SKIPPED anyway (CM callback owns completion), so
+                #     ordering the hook before or after the cascade check
+                #     does not change the outcome.
+                #   - When CM is None (disabled), the hook is a no-op.
+
+                session.expire(parent)
+                parent = session.get(Instance, parent_id)
+                parent.last_activity_at = datetime.now(timezone.utc)
+                parent.version = (parent.version or 1) + 1
+
+                # e) Update parent's children[] cache
+                if parent.children:
+                    try:
+                        children_list = (
+                            json.loads(parent.children)
+                            if isinstance(parent.children, str)
+                            else parent.children
+                        )
+                        if instance_id in children_list:
+                            children_list = [
+                                c for c in children_list if c != instance_id
+                            ]
+                            parent.children = json.dumps(children_list)
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning(
+                            f"Failed to parse children JSON for parent {parent_id[:8]}..."
+                        )
+
+                # f) Delete from instance_hierarchy
+                session.execute(
+                    text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                    {"child_id": instance_id},
+                )
+
+                # g) Cascade: check if parent can complete after all children done/error
+                # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
+                # regardless of current status. Mirrors the fix in _update_parent_on_child_complete.
+                # Phase 3 (Cascade Unification): the `!= ERROR` guard is added here
+                # to unify the divergent guard with Site 1A. Previously Site 2 only
+                # checked `!= COMPLETED`, which would let a parent in ERROR state be
+                # overwritten to COMPLETED when its last child errored. The unified
+                # guard preserves ERROR (more useful for diagnostics — W1 fix).
+                #
+                # Phase 4: the ``parent.waiting_for == 0`` READ is
+                # replaced by ``cm.is_complete(parent_id)`` when the
+                # CorrelationManager is wired up. The DB column
+                # ``waiting_for`` is retained as the rebuild cache
+                # (ADR-011) and the graceful-degradation fallback.
+                cm = get_correlation_manager()
+                if cm is not None:
+                    all_children_done = cm.is_complete(parent.instance_id)
+                else:
+                    all_children_done = (
+                        getattr(parent, "waiting_for", None) or 0
+                    ) == 0
+                if (
+                    all_children_done
+                    and parent.status != InstanceStatus.COMPLETED.value
+                    and parent.status != InstanceStatus.ERROR.value
+                ):
+                    # Phase 3 (Cascade Unification): when CM is active, the
+                    # inline cascade + SELECT COUNT(*) + inline status
+                    # transition + inline lifecycle event publication are
+                    # all SKIPPED. The CM's resolve_response (called via
+                    # the authoritative hook above) already removed the entry
+                    # from its in-memory pending set, and if that was the
+                    # last correlation the CM callback fires synchronously
+                    # — which transitions the parent JOB to terminal via
+                    # ``_finalize_job``. No DB query, no TOCTOU window
+                    # (Race #3 eliminated).
+                    #
+                    # ``cm`` is already in scope from the
+                    # ``get_correlation_manager()`` call at the top of
+                    # this `if` block (Phase 4 dedup).
+                    if cm is not None:
+                        # CM is active — CM callback handles completion.
+                        logger.info(
+                            f"CM-active: skipping inline cascade for parent "
+                            f"{parent.instance_id[:8]}... (error path) — "
+                            f"CM callback owns completion"
+                        )
+                    else:
+                        # Graceful degradation: keep the original inline
+                        # logic with SELECT COUNT(*) fallback. This path
+                        # is also the one exercised by tests that do not
+                        # wire a CM fixture.
+                        # Check if parent has any pending messages
+                        parent_pending = session.exec(
+                            select(func.count())
+                            .select_from(MessageQueue)
+                            .where(MessageQueue.instance_id == parent.instance_id)
+                            .where(
+                                MessageQueue.status.in_(
+                                    [
+                                        MessageStatus.READY.value,
+                                        MessageStatus.PROCESSING.value,
+                                        MessageStatus.RETRYING.value,
+                                    ]
+                                )
+                            )
+                        ).scalar_one()
+
+                        if parent_pending == 0:
+                            # No pending messages, parent is truly complete
+                            parent.status = InstanceStatus.COMPLETED.value
+                            parent.updated_at = datetime.now(
+                                timezone.utc
+                            ).isoformat()
+                            logger.info(
+                                f"Parent {parent.instance_id[:8]}... completed after child error"
+                            )
+
+                            # Capture parent_id and agent_id for event publishing (outside transaction)
+                            completed_parent_id = parent.instance_id
+                            completed_parent_agent_id = parent.agent_id
+                            completed_parent_parent_id = parent.parent_id
+
+                            session.commit()
+
+                            # Return cascade info so the async caller can
+                            # fire the post-commit SSE + lifecycle event
+                            # AFTER ``await asyncio.to_thread`` returns.
+                            return _ErrorReportDbResult(
+                                skip=False,
+                                child_instance_id=error_instance_id,
+                                child_agent_id=child_agent_id,
+                                cascade_status="completed",
+                                cascade_parent_id=completed_parent_id,
+                                cascade_parent_agent_id=completed_parent_agent_id,
+                                cascade_parent_parent_id=completed_parent_parent_id,
+                            )
+                        else:
+                            # Has pending messages - transition to WAITING_CHILDREN
+                            # Parent should wait for its message processing to complete
+                            parent.status = InstanceStatus.WAITING_CHILDREN.value
+                            parent.updated_at = datetime.now(
+                                timezone.utc
+                            ).isoformat()
+                            session.commit()  # Commit the WAITING_CHILDREN status change
+                            logger.info(
+                                f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                                f"pending messages, status=WAITING_CHILDREN after child error"
+                            )
+                            # Return cascade info so the async caller can
+                            # fire the post-commit SSE AFTER the helper.
+                            return _ErrorReportDbResult(
+                                skip=False,
+                                child_instance_id=error_instance_id,
+                                child_agent_id=child_agent_id,
+                                cascade_status="waiting_children",
+                                cascade_parent_id=parent.instance_id,
+                                cascade_parent_agent_id=parent.agent_id,
+                                cascade_parent_parent_id=parent.parent_id,
+                            )
+
+        # Session exited (CM-active path, or cascade didn't trigger).
+        # Return the captured child IDs so the async caller can fire
+        # the post-commit CompletionRegistry / child-error SSE. No
+        # cascade_status set — the CM callback or the next caller's
+        # processing owns any parent-side transition.
+        return _ErrorReportDbResult(
+            skip=False,
+            child_instance_id=error_instance_id,
+            child_agent_id=child_agent_id,
+            cascade_status=None,
+            cascade_parent_id=None,
+            cascade_parent_agent_id=None,
+            cascade_parent_parent_id=None,
+        )
+
     @property
     def _config(self) -> "Config":
         """Access config through manager for test mockability."""
@@ -91,7 +432,6 @@ class ErrorReportingService:
             error_type: Category of error (e.g., "max_retries", "timeout", "circuit_breaker").
             message_id: Optional message ID that triggered the error.
         """
-        from sqlalchemy import func, select
         from ..repositories.instance.repository import get_agent_name
         
         try:
@@ -156,253 +496,108 @@ class ErrorReportingService:
             truncated_error = error[:2000] if len(error) > 2000 else error
             severity = "critical" if error_type in CRITICAL_ERROR_TYPES else "warning"
             
-            # Step 3: Atomic DB transaction
-            with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
-                # a) Get child instance
-                instance = session.get(Instance, instance_id)
-                if not instance:
-                    return
-                
-                # Capture child agent_id before session closes
-                child_agent_id = instance.agent_id
-                
-                # b) Set child instance status to ERROR
-                instance.status = InstanceStatus.ERROR.value
-                instance.updated_at = datetime.now(timezone.utc).isoformat()
-                
-                # Capture instance_id before session closes
-                error_instance_id = instance.instance_id
-                
-                # c) Fail associated message if provided
-                if message_id:
-                    message = session.get(MessageQueue, message_id)
-                    if message:
-                        message.status = MessageStatus.FAILED.value
-                        message.completed_at = datetime.now(timezone.utc)
-                
-                # d) Decrement parent's waiting_for counter atomically.
-                # Fix C: symmetric to the decrement in child_reports.py. A
-                # non-atomic read-modify-write races with concurrent
-                # child-completion decrements. SQL UPDATE is atomic in both
-                # SQLite and Postgres. Use CASE (not MAX, not GREATEST) for
-                # the clamp-at-zero: PostgreSQL's MAX is aggregate-only and
-                # errors on multi-arg scalar ``MAX(0, ...)``; GREATEST is a
-                # SQLite *extension* function the stdlib sqlite3 driver
-                # doesn't load. CASE is portable SQL — same shape in both
-                # dialects, no dialect branch needed. RETURNING gives us the
-                # post-UPDATE value for accurate logging (see child_reports.py
-                # for the rationale on why we don't log a from-value).
-                parent = session.get(Instance, parent_id)
-                if parent:
-                    result = session.execute(
-                        text(
-                            "UPDATE instances "
-                            "SET waiting_for = CASE "
-                            "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
-                            "        THEN COALESCE(waiting_for, 0) - 1 "
-                            "    ELSE 0 "
-                            "END "
-                            "WHERE instance_id = :pid "
-                            "RETURNING waiting_for"
-                        ),
-                        {"pid": parent_id},
-                    )
-                    new_waiting_row = result.first()
-                    new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
-                    logger.info(
-                        f"waiting_for decremented (error path) -> {new_waiting} "
-                        f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
-                    )
+            # Step 3: Atomic DB transaction — runs on a worker thread via
+            # ``asyncio.to_thread`` so the sync ``session.commit()`` cannot
+            # block the event loop. SQLite WAL + 30s busy_timeout would
+            # otherwise wedge the loop completely on write contention
+            # (the documented deadlock chain). The helper returns a
+            # ``_ErrorReportDbResult`` carrying everything the async caller
+            # needs to fire the post-commit side effects.
+            db_result = await asyncio.to_thread(
+                self._send_error_report_db_sync,
+                instance_id,
+                parent_id,
+                message_id,
+            )
+            if db_result.skip:
+                # Child instance row missing — return without firing
+                # any post-commit side effects (CompletionRegistry / SSE
+                # / lifecycle event / enqueue). The helper already
+                # logged at debug-equivalent; nothing to do here.
+                return
 
-                    # AUTHORITATIVE RESOLUTION HOOK (CorrelationManager
-                    # Phase 3): the CM is the single source of truth for
-                    # parent completion. This ``notify_corr_resolve`` call
-                    # (with ``status="error"``) decrements the CM's
-                    # per-parent pending set AND marks the correlation as
-                    # had_error — so the CM can pick the conservative
-                    # "error" terminal status when the last pending
-                    # correlation resolves. If the pending set drops to
-                    # zero, the CM synchronously fires
-                    # ``handle_correlation_complete``, which transitions
-                    # the parent JOB to terminal and (Phase 3) the parent
-                    # INSTANCE to terminal. The CM's in-memory pending
-                    # set is authoritative — no ``SELECT COUNT(*)``
-                    # fallback, no TOCTOU window (Race #1 / #3
-                    # eliminated).
-                    #
-                    # MUST NOT affect control flow — wrapped in
-                    # try/except inside notify_corr_resolve. The inline
-                    # cascade below this hook is only reached when
-                    # ``get_correlation_manager()`` returns ``None``
-                    # (graceful degradation / CM disabled).
-                    #
-                    # Calling context: _send_error_report is an async
-                    # method invoked from worker threads via
-                    # MainLoopBridge.run_async_no_wait (see
-                    # manager._on_stale_task_permanent_failure and
-                    # worker_pool._notify_parent_of_failure), so we are
-                    # on the main asyncio event loop. The CM's
-                    # per-parent lock is bound to the main loop (N3
-                    # constraint); a direct await is safe here.
-                    #
-                    # Skip the hook when message_id is missing/empty:
-                    # the CM keys correlations on (child_id, message_id)
-                    # and cannot resolve a None/empty message_id against
-                    # any registered entry. Calling with message_id=""
-                    # would silently no-op and the pending entry would
-                    # stay forever.
-                    if message_id:
-                        try:
-                            from .correlation_manager import notify_corr_resolve
-                            await notify_corr_resolve(
-                                parent_id=parent_id,
-                                child_id=instance_id,
-                                message_id=message_id,
-                                status="error",
-                            )
-                        except Exception as hook_err:
-                            # Defensive outer guard — the helper already
-                            # swallows CM errors, but keep this so a failure in the import path or
-                            # argument binding can never break the error-reporting path.
-                            logger.warning(
-                                f"CM hook: resolve (error) path failed "
-                                f"(parent={parent_id[:8]}..., child={instance_id[:8]}...): {hook_err}"
-                            )
-                    else:
-                        logger.debug(
-                            f"CM hook: skipping resolve (error) for parent="
-                            f"{parent_id[:8]}..., child={instance_id[:8]}... "
-                            f"(no message_id — error reported without a tracked send)"
+            # CM hook — runs on the event loop AFTER the sync helper
+            # returns. This is an in-memory CM notification (acquires the
+            # CM's per-parent ``asyncio.Lock``; N3 constraint: must run
+            # on the main event loop) and is therefore NOT in the sync
+            # helper. Safe to run after the helper because:
+            #   - When CM is active, the inline cascade inside the helper
+            #     is SKIPPED anyway (CM callback owns completion), so
+            #     ordering the hook before or after the cascade check
+            #     does not change the outcome.
+            #   - When CM is None (disabled / not wired), the hook is a
+            #     no-op (``notify_corr_resolve`` checks for CM and
+            #     returns early when absent).
+            #
+            # Skip the hook when message_id is missing/empty:
+            # the CM keys correlations on (child_id, message_id) and
+            # cannot resolve a None/empty message_id against any
+            # registered entry. Calling with message_id="" would
+            # silently no-op and the pending entry would stay forever.
+            if message_id:
+                try:
+                    from .correlation_manager import notify_corr_resolve
+                    await notify_corr_resolve(
+                        parent_id=parent_id,
+                        child_id=instance_id,
+                        message_id=message_id,
+                        status="error",
+                    )
+                except Exception as hook_err:
+                    # Defensive outer guard — the helper already
+                    # swallows CM errors, but keep this so a failure in
+                    # the import path or argument binding can never break
+                    # the error-reporting path.
+                    logger.warning(
+                        f"CM hook: resolve (error) path failed "
+                        f"(parent={parent_id[:8]}..., child={instance_id[:8]}...): {hook_err}"
+                    )
+            else:
+                logger.debug(
+                    f"CM hook: skipping resolve (error) for parent="
+                    f"{parent_id[:8]}..., child={instance_id[:8]}... "
+                    f"(no message_id — error reported without a tracked send)"
+                )
+
+            # Post-commit side effects for the inline cascade
+            # (CM-disabled / graceful-degradation path only). The sync
+            # helper committed the parent status transition; we now fire
+            # the corresponding SSE + lifecycle event on the event loop.
+            if db_result.cascade_status == "completed":
+                # Emit status_change SSE event for parent completed
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            db_result.cascade_parent_id,
+                            "completed",
+                            agent_id=db_result.cascade_parent_agent_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to emit status_change for completed parent: {e}"
                         )
 
-                    session.expire(parent)
-                    parent = session.get(Instance, parent_id)
-                    parent.last_activity_at = datetime.now(timezone.utc)
-                    parent.version = (parent.version or 1) + 1
-                    
-                    # e) Update parent's children[] cache
-                    if parent.children:
-                        try:
-                            children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
-                            if instance_id in children_list:
-                                children_list = [c for c in children_list if c != instance_id]
-                                parent.children = json.dumps(children_list)
-                        except (json.JSONDecodeError, TypeError):
-                            logger.warning(f"Failed to parse children JSON for parent {parent_id[:8]}...")
-                    
-                    # f) Delete from instance_hierarchy
-                    session.execute(
-                        text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
-                        {"child_id": instance_id}
+                # FIX: Publish lifecycle event so JobFeedbackObserver completes the job
+                if self._events_service:
+                    await self._events_service._publish_instance_lifecycle_event(
+                        instance_id=db_result.cascade_parent_id,
+                        status="completed",
+                        error=None,
+                        parent_id=db_result.cascade_parent_parent_id,
                     )
-                    
-                    # g) Cascade: check if parent can complete after all children done/error
-                    # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
-                    # regardless of current status. Mirrors the fix in _update_parent_on_child_complete.
-                    # Phase 3 (Cascade Unification): the `!= ERROR` guard is added here
-                    # to unify the divergent guard with Site 1A. Previously Site 2 only
-                    # checked `!= COMPLETED`, which would let a parent in ERROR state be
-                    # overwritten to COMPLETED when its last child errored. The unified
-                    # guard preserves ERROR (more useful for diagnostics — W1 fix).
-                    #
-                    # Phase 4: the ``parent.waiting_for == 0`` READ is
-                    # replaced by ``cm.is_complete(parent_id)`` when the
-                    # CorrelationManager is wired up. The DB column
-                    # ``waiting_for`` is retained as the rebuild cache
-                    # (ADR-011) and the graceful-degradation fallback.
-                    from .correlation_manager import get_correlation_manager
-                    cm = get_correlation_manager()
-                    if cm is not None:
-                        all_children_done = cm.is_complete(parent.instance_id)
-                    else:
-                        all_children_done = (getattr(parent, "waiting_for", None) or 0) == 0
-                    if (
-                        all_children_done
-                        and parent.status != InstanceStatus.COMPLETED.value
-                        and parent.status != InstanceStatus.ERROR.value
-                    ):
-                        # Phase 3 (Cascade Unification): when CM is active, the
-                        # inline cascade + SELECT COUNT(*) + inline status
-                        # transition + inline lifecycle event publication are
-                        # all SKIPPED. The CM's resolve_response (called via
-                        # the authoritative hook above) already removed the entry
-                        # from its in-memory pending set, and if that was the
-                        # last correlation the CM callback fires synchronously
-                        # — which transitions the parent JOB to terminal via
-                        # ``_finalize_job``. No DB query, no TOCTOU window
-                        # (Race #3 eliminated).
-                        #
-                        # ``cm`` is already in scope from the
-                        # ``get_correlation_manager()`` call at the top of
-                        # this `if` block (Phase 4 dedup).
-                        if cm is not None:
-                            # CM is active — CM callback handles completion.
-                            logger.info(
-                                f"CM-active: skipping inline cascade for parent "
-                                f"{parent.instance_id[:8]}... (error path) — "
-                                f"CM callback owns completion"
-                            )
-                        else:
-                            # Graceful degradation: keep the original inline
-                            # logic with SELECT COUNT(*) fallback. This path
-                            # is also the one exercised by tests that do not
-                            # wire a CM fixture.
-                            # Check if parent has any pending messages
-                            parent_pending = session.exec(
-                                select(func.count())
-                                .select_from(MessageQueue)
-                                .where(MessageQueue.instance_id == parent.instance_id)
-                                .where(MessageQueue.status.in_([
-                                    MessageStatus.READY.value,
-                                    MessageStatus.PROCESSING.value,
-                                    MessageStatus.RETRYING.value,
-                                ]))
-                            ).scalar_one()
-
-                            if parent_pending == 0:
-                                # No pending messages, parent is truly complete
-                                parent.status = InstanceStatus.COMPLETED.value
-                                parent.updated_at = datetime.now(timezone.utc).isoformat()
-                                logger.info(f"Parent {parent.instance_id[:8]}... completed after child error")
-
-                                # Capture parent_id and agent_id for event publishing (outside transaction)
-                                completed_parent_id = parent.instance_id
-                                completed_parent_agent_id = parent.agent_id
-                                completed_parent_parent_id = parent.parent_id
-
-                                session.commit()
-
-                                # Emit status_change SSE event for parent completed
-                                if self._manager._live_hub:
-                                    try:
-                                        await self._manager._live_hub.stream_status_change(completed_parent_id, "completed", agent_id=completed_parent_agent_id)
-                                    except Exception as e:
-                                        logger.warning(f"Failed to emit status_change for completed parent: {e}")
-
-                                # FIX: Publish lifecycle event so JobFeedbackObserver completes the job
-                                if self._events_service:
-                                    await self._events_service._publish_instance_lifecycle_event(
-                                        instance_id=completed_parent_id,
-                                        status="completed",
-                                        error=None,
-                                        parent_id=completed_parent_parent_id,
-                                    )
-                            else:
-                                # Has pending messages - transition to WAITING_CHILDREN
-                                # Parent should wait for its message processing to complete
-                                parent.status = InstanceStatus.WAITING_CHILDREN.value
-                                parent.updated_at = datetime.now(timezone.utc).isoformat()
-                                session.commit()  # Commit the WAITING_CHILDREN status change
-                                logger.info(
-                                    f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                                    f"pending messages, status=WAITING_CHILDREN after child error"
-                                )
-                                # Emit status_change SSE event for parent waiting_children
-                                if self._manager._live_hub:
-                                    try:
-                                        await self._manager._live_hub.stream_status_change(parent.instance_id, "waiting_children", agent_id=parent.agent_id)
-                                    except Exception as e:
-                                        logger.warning(f"Failed to emit status_change for waiting_children parent: {e}")
+            elif db_result.cascade_status == "waiting_children":
+                # Emit status_change SSE event for parent waiting_children
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            db_result.cascade_parent_id,
+                            "waiting_children",
+                            agent_id=db_result.cascade_parent_agent_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to emit status_change for waiting_children parent: {e}"
+                        )
             
             # Signal CompletionRegistry for invoke_agent_and_wait() callers
             # After session commit — instance is in ERROR state in DB
@@ -416,7 +611,11 @@ class ErrorReportingService:
             # Emit status_change SSE event for child error
             if self._manager._live_hub:
                 try:
-                    await self._manager._live_hub.stream_status_change(error_instance_id, "error", agent_id=child_agent_id)
+                    await self._manager._live_hub.stream_status_change(
+                        db_result.child_instance_id,
+                        "error",
+                        agent_id=db_result.child_agent_id,
+                    )
                 except Exception as e:
                     logger.warning(f"Failed to emit status_change for error instance: {e}")
             

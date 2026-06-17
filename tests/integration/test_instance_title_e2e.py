@@ -194,7 +194,7 @@ async def test_instance_title_generation_e2e(
         async def _wait_for_completion() -> None:
             while time.time() - start_time < wait_timeout:
                 # Check if message was completed (check queue stats)
-                stats = manager.get_queue_stats(instance_id)
+                stats = await manager.get_queue_stats(instance_id)
                 logger.debug(f"[TEST] Queue stats: pending={stats['pending_count']}, processing={stats['processing_count']}")
 
                 if stats['pending_count'] == 0 and stats['processing_count'] == 0:
@@ -333,7 +333,7 @@ async def test_instance_title_not_regenerated(
 
         async def _wait_for_completion() -> None:
             while time.time() - start_time < wait_timeout:
-                stats = manager.get_queue_stats(instance_id)
+                stats = await manager.get_queue_stats(instance_id)
                 if stats['pending_count'] == 0 and stats['processing_count'] == 0:
                     await asyncio.sleep(1)
                     break

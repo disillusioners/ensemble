@@ -171,7 +171,7 @@ Wait for it to respond. Do not use any other tools."""
     while time.time() - start_time < max_wait:
         # Check for completion report in Leader's queue
         # The report is enqueued as a regular message
-        stats = manager.get_queue_stats(leader_instance_id)
+        stats = await manager.get_queue_stats(leader_instance_id)
         
         # Check if we received a completion report event
         for event in events_received:
@@ -380,7 +380,7 @@ async def test_completion_report_message_format(
     # Wait for queue to be empty (indicates completion)
     start_time = time.time()
     while time.time() - start_time < 60:
-        stats = manager.get_queue_stats(coder_instance_id)
+        stats = await manager.get_queue_stats(coder_instance_id)
         if stats.pending_count == 0 and stats.processing_count == 0:
             logger.info("[TEST] Coder queue is empty")
             # Give time for report to be sent
@@ -395,7 +395,7 @@ async def test_completion_report_message_format(
         pass
     
     # Check Leader's queue for report message
-    leader_stats = manager.get_queue_stats(leader_instance_id)
+    leader_stats = await manager.get_queue_stats(leader_instance_id)
     logger.info(f"[TEST] Leader queue stats: pending={leader_stats.pending_count}, processing={leader_stats.processing_count}")
     
     # Check for report in Leader's queue (direct DB query)

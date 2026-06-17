@@ -189,7 +189,7 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
         }
 
     # Fallback: existing queue stats (internal/WorkerPool messages)
-    stats = manager.get_queue_stats(instance_id)
+    stats = await manager.get_queue_stats(instance_id)
     return {
         "message_id": message_id,
         "instance_id": instance_id,

@@ -881,16 +881,17 @@ class TestFacadeDelegationPattern:
         import asyncio
         asyncio.run(test())
 
-    def test_manager_get_queue_stats_delegates_to_messaging_service(self):
+    @pytest.mark.asyncio
+    async def test_manager_get_queue_stats_delegates_to_messaging_service(self):
         """get_queue_stats should delegate to _messaging_service."""
         from daemon.manager import InstanceManager
 
         manager = InstanceManager.__new__(InstanceManager)
-        manager._messaging_service = MagicMock()
+        manager._messaging_service = AsyncMock()
         mock_stats = {"pending_count": 5, "processing_count": 1}
         manager._messaging_service.get_queue_stats.return_value = mock_stats
 
-        result = manager.get_queue_stats("instance-123")
+        result = await manager.get_queue_stats("instance-123")
 
         assert result == mock_stats
         manager._messaging_service.get_queue_stats.assert_called_once_with("instance-123")

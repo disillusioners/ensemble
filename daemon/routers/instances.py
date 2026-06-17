@@ -183,7 +183,7 @@ async def get_instance(
         # source of truth (Phase 4+). External consumers may still
         # read this field for observability / UI display.
         waiting_for=instance_meta.get("waiting_for"),
-        pending_count=manager.get_queue_stats(instance_id).get("pending_count"),
+        pending_count=(await manager.get_queue_stats(instance_id)).get("pending_count"),
     )
 
 

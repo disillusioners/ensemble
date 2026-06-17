@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from sqlalchemy import func, select, text
 from sqlmodel import Session
@@ -28,6 +28,53 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _ChildCompletionDbResult(NamedTuple):
+    """Result of the sync DB half of ``_process_child_completion_and_notify_parent``.
+
+    Carries the outcome + data the async caller needs to fire
+    post-commit side effects (SSE / CompletionRegistry / lifecycle event /
+    CM resolve hook) AFTER ``asyncio.to_thread`` returns to the event loop.
+
+    The sync helper that produces this runs the entire ``WriteGuardSession``
+    block on a worker thread so ``session.commit()`` cannot wedge the event
+    loop under SQLite WAL write contention (the same deadlock chain fixed
+    in ``job_feedback_observer._finalize_instance``).
+
+    Outcomes:
+        ``"instance_not_found"`` — no instance row, nothing to do.
+        ``"deferred_waiting_children"`` — root has pending children (CM or
+            ``waiting_for``), SSE ``waiting_children`` only, no commit.
+        ``"root_waiting_children"`` — root carve-out: own-queue pending,
+            commit + SSE ``waiting_children``.
+        ``"root_completed"`` — root completed cleanly, commit + SSE
+            ``completed`` + CompletionRegistry + lifecycle event + title gen.
+        ``"idempotency_skip"`` — already reported, nothing to do.
+        ``"tool_invocation_completed"`` — tool-invocation child, commit
+            + SSE ``completed`` + CompletionRegistry + lifecycle event +
+            title gen.
+        ``"regular_child_completed"`` — regular child, commit + SSE
+            ``completed`` + CompletionRegistry + lifecycle event + title
+            gen + child_completed lifecycle broadcast + (optional) parent
+            completion event when all children resolved.
+    """
+
+    outcome: str
+    instance_id: str
+    agent_id: str | None
+    parent_id: str | None
+    # For regular_child_completed
+    child_agent_id: str | None = None
+    report_message_id: str | None = None
+    completed_parent_id: str | None = None
+    completed_parent_parent_id: str | None = None
+    parent_agent_id: str | None = None
+    # True if the parent cascade set status to WAITING_CHILDREN (CM-disabled
+    # legacy path with pending own-queue messages). The async caller emits
+    # the ``waiting_children`` SSE for the parent after the commit.
+    parent_waiting_children_sse: bool = False
+    waiting_children_parent_agent_id: str | None = None
 
 
 class ChildReportsService:
@@ -734,6 +781,18 @@ Provide a concise summary:"""
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
         leaving the instance in COMPLETED state without a report if the fetch fails.
         
+        The entire ``WriteGuardSession`` block (DB reads, writes, commits) now
+        runs on a worker thread via ``asyncio.to_thread`` — mirrors the
+        ``_finalize_instance_db_sync`` fix in ``job_feedback_observer.py``.
+        Under SQLite WAL write contention (busy_timeout=30s), a sync
+        ``session.commit()`` on the event loop thread wedges the loop
+        completely — Ctrl+C ignored, all APIs frozen. Moving it to a
+        worker thread keeps the loop responsive.
+        
+        Post-commit side effects (SSE, CompletionRegistry, lifecycle events,
+        CM resolve hook) remain on the event loop — they fire AFTER
+        ``asyncio.to_thread`` returns.
+        
         Args:
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
@@ -741,20 +800,76 @@ Provide a concise summary:"""
         logger.info(f"_process_child_completion_and_notify_parent called: instance={instance_id[:8]}..., message_id={completed_message_id[:8] if completed_message_id else None}")
         
         # FIX C3: Fetch content BEFORE transaction — avoid orphaned COMPLETED state
-        # Get instance's agent_id for the report
-        instance_meta = self._instance_repository.get(instance_id)
+        # Get instance's agent_id for the report (sync DB read → wrap in to_thread)
+        instance_meta = await asyncio.to_thread(
+            self._instance_repository.get, instance_id
+        )
         agent_id = instance_meta.agent_id if instance_meta else "agent"
         last_content = await self._get_last_assistant_message(instance_id, agent_id)
         if last_content is None:
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
             last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
         
+        # Run the ENTIRE WriteGuardSession block on a worker thread so
+        # session.commit() cannot deadlock the event loop.
+        result = await asyncio.to_thread(
+            self._process_child_completion_db_sync,
+            instance_id,
+            completed_message_id,
+            last_content,
+        )
+        
+        # Dispatch post-commit side effects on the event loop.
+        await self._dispatch_post_commit_side_effects(
+            result, last_content, completed_message_id
+        )
+
+    def _process_child_completion_db_sync(
+        self,
+        instance_id: str,
+        completed_message_id: str,
+        last_content: str,
+    ) -> _ChildCompletionDbResult:
+        """Sync DB half of ``_process_child_completion_and_notify_parent``.
+        
+        Opens a ``WriteGuardSession`` and performs ALL DB reads/writes/commits
+        for the four child-completion branches (root, idempotency-skip,
+        tool-invocation, regular-child). Returns a ``_ChildCompletionDbResult``
+        describing the outcome so the async caller can fire the post-commit
+        side effects (SSE / CompletionRegistry / lifecycle event / CM resolve
+        hook) on the event loop.
+        
+        Runs on a worker thread via ``asyncio.to_thread`` from
+        ``_process_child_completion_and_notify_parent``. This keeps
+        ``session.commit()`` off the event loop so SQLite WAL write contention
+        cannot deadlock the daemon (see the deadlock analysis in the
+        experience docs — same chain as ``_finalize_instance``).
+        
+        The DB operations are EXACTLY the same as the pre-refactor inline
+        block — same order, same conditions, same commits. Only the call
+        site changed (inline → extracted helper + ``to_thread``).
+        
+        Args:
+            instance_id: The child instance that completed.
+            completed_message_id: The message ID that just completed.
+            last_content: The assistant message content (pre-fetched to avoid
+                orphaned COMPLETED state — see Fix C3).
+            
+        Returns:
+            ``_ChildCompletionDbResult`` with the outcome + data the async
+            caller needs for side effects.
+        """
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # Get instance metadata
             instance = session.get(Instance, instance_id)
             if instance is None:
                 logger.info(f"Instance {instance_id[:8]}... not found in DB, skipping")
-                return
+                return _ChildCompletionDbResult(
+                    outcome="instance_not_found",
+                    instance_id=instance_id,
+                    agent_id=None,
+                    parent_id=None,
+                )
             
             logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, waiting_for={instance.waiting_for}, status={instance.status}")
             
@@ -785,13 +900,13 @@ Provide a concise summary:"""
                         f"Instance {instance_id[:8]}... completed message but waiting for "
                         f"{pending_children} children (CM={cm is not None}), deferring completion"
                     )
-                    # Emit status_change SSE event (display only — status stays PROCESSING).
-                    if self._manager._live_hub:
-                        try:
-                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children", agent_id=instance.agent_id)
-                        except Exception as e:
-                            logger.warning(f"Failed to emit status_change for waiting_children: {e}")
-                    return
+                    # SSE side effect is dispatched by the async caller.
+                    return _ChildCompletionDbResult(
+                        outcome="deferred_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
 
                 # Phase 3 (Cascade Unification — Fix A2): root completion
                 # is NOT a child response, so we MUST NOT call
@@ -827,12 +942,13 @@ Provide a concise summary:"""
                             f"Instance {instance_id[:8]}... waiting_for=0 but CM has "
                             f"unresolved child responses, status=PROCESSING (CM tracks pending)"
                         )
-                        if self._manager._live_hub:
-                            try:
-                                await self._manager._live_hub.stream_status_change(instance_id, "waiting_children", agent_id=instance.agent_id)
-                            except Exception as e:
-                                logger.warning(f"Failed to emit status_change for waiting_children: {e}")
-                        return
+                        # SSE side effect is dispatched by the async caller.
+                        return _ChildCompletionDbResult(
+                            outcome="deferred_waiting_children",
+                            instance_id=instance_id,
+                            agent_id=instance.agent_id,
+                            parent_id=None,
+                        )
 
                 # waiting_for == 0, but check for pending messages before completing.
                 # This handles the case where child completion reports are still queued
@@ -902,13 +1018,13 @@ Provide a concise summary:"""
                         f"Instance {instance_id[:8]}... waiting_for=0 (rebuild-cache snapshot) "
                         f"but has {pending_count} pending messages, status=WAITING_CHILDREN (deprecated)"
                     )
-                    # Emit status_change SSE event
-                    if self._manager._live_hub:
-                        try:
-                            await self._manager._live_hub.stream_status_change(instance_id, "waiting_children", agent_id=instance.agent_id)
-                        except Exception as e:
-                            logger.warning(f"Failed to emit status_change for waiting_children: {e}")
-                    return
+                    # SSE side effect is dispatched by the async caller.
+                    return _ChildCompletionDbResult(
+                        outcome="root_waiting_children",
+                        instance_id=instance_id,
+                        agent_id=instance.agent_id,
+                        parent_id=None,
+                    )
 
                 # No children, no pending messages - safe to complete
                 logger.info(f"Instance {instance_id[:8]}... no parent, skipping notification")
@@ -923,35 +1039,77 @@ Provide a concise summary:"""
                 instance.version = (instance.version or 1) + 1
 
                 session.commit()
-
-                # Emit status_change SSE event for root instance completed
-                if self._manager._live_hub:
-                    try:
-                        await self._manager._live_hub.stream_status_change(instance_id, "completed", agent_id=instance.agent_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to emit status_change for completed root instance: {e}")
-
-                # Signal CompletionRegistry for invoke_agent_and_wait() callers
-                from .completion_registry import get_completion_registry
-                get_completion_registry().complete(instance_id, result=last_content)
-
-                if self._events_service:
-                    await self._events_service._publish_instance_lifecycle_event(
-                        instance_id=instance_id,
-                        status="completed",
-                        error=None,
-                        parent_id=None,
-                    )
-                
-                # Trigger title generation (fire-and-forget)
-                self._trigger_title_generation(instance_id, completed_message_id)
-                return
+                # Post-commit side effects (SSE, CompletionRegistry, lifecycle, title)
+                # are dispatched by the async caller.
+                return _ChildCompletionDbResult(
+                    outcome="root_completed",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=None,
+                )
             
-            # Idempotency checks
-            should_send, skip_reason = await self._should_send_completion_report(session, instance_id, completed_message_id)
+            # Idempotency checks — inlined from _should_send_completion_report
+            # (no await needed; runs on worker thread inside WriteGuardSession).
+            if completed_message_id is None:
+                pending_count = session.exec(
+                    select(func.count())
+                    .select_from(MessageQueue)
+                    .where(MessageQueue.instance_id == instance_id)
+                    .where(MessageQueue.status.in_([
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.RETRYING.value,
+                    ]))
+                ).scalar_one()
+                should_send = pending_count > 0
+                skip_reason = "no_completed_message_id"
+            else:
+                pending_count = session.exec(
+                    select(func.count())
+                    .select_from(MessageQueue)
+                    .where(MessageQueue.instance_id == instance_id)
+                    .where(MessageQueue.message_id != completed_message_id)
+                    .where(MessageQueue.status.in_([
+                        MessageStatus.PROCESSING.value,
+                        MessageStatus.RETRYING.value,
+                    ]))
+                ).scalar_one()
+                if pending_count > 0:
+                    should_send = False
+                    skip_reason = "pending_messages_exist"
+                else:
+                    inst_check = session.get(Instance, instance_id)
+                    if inst_check is None:
+                        should_send = False
+                        skip_reason = "instance_not_found"
+                    elif inst_check.parent_id is None:
+                        should_send = False
+                        skip_reason = "no_parent_id"
+                    else:
+                        existing_report = session.exec(
+                            select(MessageQueue)
+                            .where(MessageQueue.instance_id == inst_check.parent_id)
+                            .where(MessageQueue.source == f"internal_report:{instance_id}:{completed_message_id}")
+                            .where(MessageQueue.status.in_([
+                                MessageStatus.READY.value,
+                                MessageStatus.PROCESSING.value,
+                                MessageStatus.COMPLETED.value,
+                            ]))
+                        ).first()
+                        if existing_report is not None:
+                            should_send = False
+                            skip_reason = "idempotency_skip"
+                        else:
+                            should_send = True
+                            skip_reason = "all_checks_passed"
+            
             if not should_send:
                 logger.info(f"Instance {instance_id[:8]}... completion report skipped: reason={skip_reason}")
-                return
+                return _ChildCompletionDbResult(
+                    outcome="idempotency_skip",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=instance.parent_id,
+                )
 
             # Check if this is a tool invocation (explore/experience)
             # If so, skip parent notification but still update status and signal CompletionRegistry
@@ -971,126 +1129,429 @@ Provide a concise summary:"""
                 parent_id = instance.parent_id
 
                 session.commit()
-                
-                # Emit status_change SSE event for tool invocation completed
-                if self._manager._live_hub:
-                    try:
-                        await self._manager._live_hub.stream_status_change(instance_id, "completed", agent_id=instance.agent_id)
-                    except Exception as e:
-                        logger.warning(f"Failed to emit status_change for completed tool invocation: {e}")
-
-                # Signal CompletionRegistry for explore() callers
-                from .completion_registry import get_completion_registry
-                get_completion_registry().complete(instance_id, result=last_content)
-
-                # Optionally publish lifecycle event
-                if self._events_service:
-                    try:
-                        await self._events_service._publish_instance_lifecycle_event(
-                            instance_id=instance_id,
-                            status="completed",
-                            error=None,
-                            parent_id=parent_id,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to publish lifecycle event: {e}")
-
-                # Trigger title generation (fire-and-forget)
-                self._trigger_title_generation(instance_id, completed_message_id)
-
-                return
+                # Post-commit side effects are dispatched by the async caller.
+                return _ChildCompletionDbResult(
+                    outcome="tool_invocation_completed",
+                    instance_id=instance_id,
+                    agent_id=instance.agent_id,
+                    parent_id=parent_id,
+                )
 
             # ATOMIC: Instance completed — create completion report for parent
             logger.info(f"Instance {instance_id[:8]}... completed, sending report to parent {instance.parent_id[:8]}...")
             
-            # Create completion report
-            report_message, report_task, report_message_id = await self._create_completion_report(
-                session, instance, last_content, completed_message_id
+            # --- Inline: _create_completion_report (no await needed) ---
+            # Update child instance status to COMPLETED
+            instance.status = InstanceStatus.COMPLETED.value
+            instance.updated_at = datetime.now(timezone.utc).isoformat()
+            instance.last_activity_at = datetime.now(timezone.utc)
+            instance.version = (instance.version or 1) + 1
+            
+            # Create completion report message for parent
+            # Include message_id in source for per-message idempotency
+            report_message_id = str(uuid.uuid4())
+            report_message = MessageQueue(
+                message_id=report_message_id,
+                instance_id=instance.parent_id,
+                content=last_content,
+                source=f"internal_report:{instance.instance_id}:{completed_message_id}",
+                type=MessageType.COMPLETION_REPORT.value,
+                status=MessageStatus.READY.value,
+                priority=0,
+                enqueued_at=datetime.now(timezone.utc),
+            )
+            session.add(report_message)
+            
+            # Create task for parent to process the report
+            report_task = Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id=instance.parent_id,
+                message_id=report_message_id,
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(report_task)
+            
+            # --- Inline: _update_parent_on_child_complete (no await needed) ---
+            # Decrement parent's waiting_for counter atomically.
+            result_update = session.execute(
+                text(
+                    "UPDATE instances "
+                    "SET waiting_for = CASE "
+                    "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                    "        THEN COALESCE(waiting_for, 0) - 1 "
+                    "    ELSE 0 "
+                    "END "
+                    "WHERE instance_id = :pid "
+                    "RETURNING waiting_for"
+                ),
+                {"pid": instance.parent_id},
+            )
+            new_waiting_row = result_update.first()
+            new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
+
+            # Force the session to re-read for the cascade check below.
+            parent = session.get(Instance, instance.parent_id)
+            session.expire(parent)
+            parent = session.get(Instance, instance.parent_id)
+            logger.info(
+                f"waiting_for decremented -> {new_waiting} "
+                f"(parent={parent.instance_id[:8] if parent else '?'}..., "
+                f"child={instance.instance_id[:8]}...)"
+            )
+
+            parent.last_activity_at = datetime.now(timezone.utc)
+            parent.version = (parent.version or 1) + 1
+            
+            # FIX W6: Update parent's children[] denormalized cache
+            if parent.children:
+                try:
+                    children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
+                    if instance.instance_id in children_list:
+                        children_list = [c for c in children_list if c != instance.instance_id]
+                        parent.children = json.dumps(children_list)
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning(f"Failed to parse children JSON for parent {instance.parent_id[:8]}...")
+            
+            # Remove from instance_hierarchy junction table
+            session.execute(
+                text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
+                {"child_id": instance.instance_id}
             )
             
-            # Update parent state
-            parent_transitioned_to_running, completed_parent_id, completed_parent_parent_id = await self._update_parent_on_child_complete(session, instance, completed_message_id=completed_message_id)
+            # Cascade check
+            from .correlation_manager import get_correlation_manager as get_cm_for_cascade
+            cm = get_cm_for_cascade()
+            if cm is not None:
+                is_parent_complete = cm.is_complete(parent.instance_id)
+            else:
+                is_parent_complete = (getattr(parent, "waiting_for", None) or 0) == 0
             
-            # Calculate waiting_for remaining for event.
-            #
+            completed_parent_id: str | None = None
+            completed_parent_parent_id: str | None = None
+            parent_waiting_children_sse: bool = False
+            waiting_children_parent_agent_id: str | None = None
+            
+            if (
+                is_parent_complete
+                and parent.status != InstanceStatus.COMPLETED.value
+                and parent.status != InstanceStatus.ERROR.value
+            ):
+                if cm is not None:
+                    # CM is active — CM callback handles completion.
+                    # No count_pending query, no inline status transition.
+                    logger.info(
+                        f"CM-active: skipping inline cascade for parent "
+                        f"{parent.instance_id[:8]}... — CM callback owns completion"
+                    )
+                else:
+                    # Check if parent has any pending messages (legacy path)
+                    parent_pending = session.exec(
+                        select(func.count())
+                        .select_from(MessageQueue)
+                        .where(MessageQueue.instance_id == parent.instance_id)
+                        .where(MessageQueue.status.in_([
+                            MessageStatus.READY.value,
+                            MessageStatus.PROCESSING.value,
+                            MessageStatus.RETRYING.value,
+                        ]))
+                    ).scalar_one()
+
+                    if parent_pending == 0:
+                        # No pending messages, parent is truly complete
+                        parent.status = InstanceStatus.COMPLETED.value
+                        parent.updated_at = datetime.now(timezone.utc).isoformat()
+                        logger.info(f"Parent {parent.instance_id[:8]}... completed after all children done")
+                        completed_parent_id = parent.instance_id
+                        completed_parent_parent_id = parent.parent_id
+                    else:
+                        # Has pending messages but all children done - transition to WAITING_CHILDREN
+                        parent.status = InstanceStatus.WAITING_CHILDREN.value
+                        logger.info(
+                            f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                            f"pending messages, status=WAITING_CHILDREN (deprecated; CM is authoritative)"
+                        )
+                        # Flag SSE emission for the async caller (was at
+                        # line 624-627 in the pre-refactor inline block).
+                        parent_waiting_children_sse = True
+                        waiting_children_parent_agent_id = parent.agent_id
+            
+            # --- Inline: _create_completion_events (no await needed) ---
             # Phase 4: derive from the CorrelationManager when available
             # (in-memory pending set — authoritative for runtime). Falls
             # back to the ``waiting_for`` DB column (rebuild cache) when
             # CM is None / disabled (graceful degradation).
-            from .correlation_manager import get_correlation_manager
-            cm = get_correlation_manager()
             if instance.parent_id is not None and cm is not None:
                 waiting_for_remaining = max(0, int(cm.get_pending_count(instance.parent_id) or 0))
             else:
                 # Legacy fallback — read from the DB column.
                 waiting_for_remaining = max(0, (instance.parent_id and session.get(Instance, instance.parent_id).waiting_for) or 0)
             
-            # Create events
-            await self._create_completion_events(
-                session,
-                instance_id,
-                instance.parent_id,
-                report_message_id,
-                waiting_for_remaining,
+            # Create completion event for child
+            completion_event = Event(
+                instance_id=instance_id,
+                kind=EventKind.INSTANCE_COMPLETED.value,
+                data=json.dumps({
+                    "parent_id": instance.parent_id,
+                    "report_message_id": report_message_id,
+                }),
+                created_at=datetime.now(timezone.utc),
             )
+            session.add(completion_event)
             
-            # Capture parent_id and agent_id before session closes (instance will be detached)
+            # Also create event for parent about child completion
+            parent_event = Event(
+                instance_id=instance.parent_id,
+                message_id=report_message_id,
+                kind=EventKind.CHILD_COMPLETED.value,
+                data=json.dumps({
+                    "child_instance_id": instance_id,
+                    "waiting_for_remaining": waiting_for_remaining,
+                }),
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(parent_event)
+            
+            # Capture IDs before session closes (instance will be detached)
             parent_id = instance.parent_id
             child_agent_id = instance.agent_id
             
             # Capture parent's agent_id for status_change event
-            parent_agent_id = None
+            parent_agent_id: str | None = None
             if completed_parent_id:
-                parent = session.get(Instance, completed_parent_id)
-                if parent:
-                    parent_agent_id = parent.agent_id
+                parent_for_event = session.get(Instance, completed_parent_id)
+                if parent_for_event:
+                    parent_agent_id = parent_for_event.agent_id
             
             session.commit()
-
-        # Signal CompletionRegistry for invoke_agent_and_wait() callers
-        # After commit (DB consistent), before SSE broadcast (non-critical)
-        from .completion_registry import get_completion_registry
-        get_completion_registry().complete(instance_id, result=last_content)
-        
-        # Emit status_change SSE event for child completed
-        if self._manager._live_hub:
-            try:
-                await self._manager._live_hub.stream_status_change(instance_id, "completed", agent_id=child_agent_id)
-            except Exception as e:
-                logger.warning(f"Failed to emit status_change for completed instance: {e}")
-        
-        # Broadcast child completion event asynchronously (using captured parent_id)
-        try:
-            await self._manager._live_hub.stream_lifecycle(
-                instance_id=parent_id,
-                event_type="child_completed",
-                data={
-                    "child_instance_id": instance_id,
-                    "report_message_id": report_message_id,
-                },
+            # Post-commit side effects are dispatched by the async caller.
+            return _ChildCompletionDbResult(
+                outcome="regular_child_completed",
+                instance_id=instance_id,
+                agent_id=instance.agent_id,
+                parent_id=parent_id,
+                child_agent_id=child_agent_id,
+                report_message_id=report_message_id,
+                completed_parent_id=completed_parent_id,
+                completed_parent_parent_id=completed_parent_parent_id,
+                parent_agent_id=parent_agent_id,
+                parent_waiting_children_sse=parent_waiting_children_sse,
+                waiting_children_parent_agent_id=waiting_children_parent_agent_id,
             )
-        except Exception as e:
-            logger.warning(f"Failed to broadcast child completion event: {e}")
-        
-        # If parent completed (all children done), publish lifecycle event to mark job as completed
-        if completed_parent_id:
-            try:
-                # Emit status_change SSE event for parent completed
-                if self._manager._live_hub:
-                    await self._manager._live_hub.stream_status_change(completed_parent_id, "completed", agent_id=parent_agent_id)
-            except Exception as e:
-                logger.warning(f"Failed to emit status_change for completed parent: {e}")
-            
-            try:
-                if self._events_service:
+
+    async def _dispatch_post_commit_side_effects(
+        self,
+        result: _ChildCompletionDbResult,
+        last_content: str,
+        completed_message_id: str,
+    ) -> None:
+        """Fire post-commit side effects for ``_process_child_completion_and_notify_parent``.
+
+        Called on the event loop AFTER ``asyncio.to_thread`` returns from
+        ``_process_child_completion_db_sync``. Dispatches SSE, CompletionRegistry,
+        lifecycle events, and the CM resolve hook based on the DB outcome.
+
+        The CM resolve hook (``notify_corr_resolve``) fires AFTER the commit so
+        that the CM's in-memory pending set is updated after the DB state is
+        consistent. The callback ``handle_correlation_complete`` does its own
+        separate DB transaction (via ``asyncio.to_thread``), so there is no
+        dependency between the commit orderings.
+
+        Args:
+            result: The outcome from the sync DB helper.
+            last_content: The assistant message content (used for CompletionRegistry).
+            completed_message_id: The completed message ID (used for CM hook).
+        """
+        outcome = result.outcome
+        instance_id = result.instance_id
+        agent_id = result.agent_id
+        parent_id = result.parent_id
+
+        # Emit SSE for deferred waiting_children (no commit happened)
+        if outcome in ("deferred_waiting_children",):
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "waiting_children", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for waiting_children: {e}"
+                    )
+            return
+
+        # Root waiting_children: commit + SSE
+        if outcome == "root_waiting_children":
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "waiting_children", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for waiting_children: {e}"
+                    )
+            return
+
+        # Root completed: commit + SSE + CompletionRegistry + lifecycle + title
+        if outcome == "root_completed":
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "completed", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for completed root instance: {e}"
+                    )
+            from .completion_registry import get_completion_registry
+            get_completion_registry().complete(instance_id, result=last_content)
+            if self._events_service:
+                try:
                     await self._events_service._publish_instance_lifecycle_event(
-                        instance_id=completed_parent_id,
+                        instance_id=instance_id,
                         status="completed",
                         error=None,
-                        parent_id=completed_parent_parent_id,
+                        parent_id=None,
                     )
-            except Exception as e:
-                logger.warning(f"Failed to publish lifecycle event for completed parent {completed_parent_id[:8]}...: {e}")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to publish lifecycle event for root {instance_id[:8]}...: {e}"
+                    )
+            self._trigger_title_generation(instance_id, completed_message_id)
+            return
 
-        # Trigger title generation for child instance (fire-and-forget)
-        self._trigger_title_generation(instance_id, completed_message_id)
+        # Idempotency skip: nothing to do
+        if outcome == "idempotency_skip":
+            return
+
+        # Tool invocation completed: commit + SSE + CompletionRegistry + lifecycle + title
+        if outcome == "tool_invocation_completed":
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "completed", agent_id=agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for completed tool invocation: {e}"
+                    )
+            from .completion_registry import get_completion_registry
+            get_completion_registry().complete(instance_id, result=last_content)
+            if self._events_service:
+                try:
+                    await self._events_service._publish_instance_lifecycle_event(
+                        instance_id=instance_id,
+                        status="completed",
+                        error=None,
+                        parent_id=parent_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to publish lifecycle event for tool invocation {instance_id[:8]}...: {e}"
+                    )
+            self._trigger_title_generation(instance_id, completed_message_id)
+            return
+
+        # Regular child completed: commit + CM hook + SSE + CompletionRegistry + lifecycle + title
+        if outcome == "regular_child_completed":
+            # CM resolve hook: fires AFTER the commit so the DB state is
+            # consistent before the CM's callback runs its own transaction.
+            if completed_message_id:
+                try:
+                    from .correlation_manager import notify_corr_resolve
+                    await notify_corr_resolve(
+                        parent_id=parent_id,
+                        child_id=instance_id,
+                        message_id=completed_message_id,
+                        status="responded",
+                    )
+                except Exception as hook_err:
+                    logger.warning(
+                        f"CM hook: resolve path failed "
+                        f"(parent={parent_id[:8] if parent_id else '?'}..., "
+                        f"child={instance_id[:8]}...): {hook_err}"
+                    )
+
+            # CompletionRegistry
+            from .completion_registry import get_completion_registry
+            get_completion_registry().complete(instance_id, result=last_content)
+            
+            # SSE for child completed
+            if self._manager._live_hub:
+                try:
+                    await self._manager._live_hub.stream_status_change(
+                        instance_id, "completed", agent_id=result.child_agent_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to emit status_change for completed instance: {e}"
+                    )
+            
+            # Broadcast child completion event
+            try:
+                await self._manager._live_hub.stream_lifecycle(
+                    instance_id=parent_id,
+                    event_type="child_completed",
+                    data={
+                        "child_instance_id": instance_id,
+                        "report_message_id": result.report_message_id,
+                    },
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to broadcast child completion event: {e}"
+                )
+            
+            # If parent completed (all children done)
+            if result.completed_parent_id:
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            result.completed_parent_id, "completed", agent_id=result.parent_agent_id
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to emit status_change for completed parent: {e}"
+                        )
+                if self._events_service:
+                    try:
+                        await self._events_service._publish_instance_lifecycle_event(
+                            instance_id=result.completed_parent_id,
+                            status="completed",
+                            error=None,
+                            parent_id=result.completed_parent_parent_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to publish lifecycle event for completed parent "
+                            f"{result.completed_parent_id[:8]}...: {e}"
+                        )
+
+            # Emit SSE for parent WAITING_CHILDREN (CM-disabled legacy path
+            # with pending own-queue messages — was inside the WriteGuardSession
+            # at line 624-627 in the pre-refactor inline block).
+            if result.parent_waiting_children_sse and result.parent_id:
+                if self._manager._live_hub:
+                    try:
+                        await self._manager._live_hub.stream_status_change(
+                            result.parent_id, "waiting_children",
+                            agent_id=result.waiting_children_parent_agent_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to emit status_change for waiting_children parent: {e}"
+                        )
+            
+            # Title generation
+            self._trigger_title_generation(instance_id, completed_message_id)
+            return
+
+        # instance_not_found or unknown outcome: nothing to do
+        if outcome in ("instance_not_found",):
+            return
+
+        logger.warning(
+            f"Unknown child completion outcome '{outcome}' for "
+            f"instance {instance_id[:8]}..."
+        )

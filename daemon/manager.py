@@ -2271,13 +2271,13 @@ class InstanceManager:
             instance_id, message_content
         )
 
-    def get_queue_stats(self, instance_id: str):
+    async def get_queue_stats(self, instance_id: str):
         """Get queue statistics for an instance.
-        
+
         Returns a dict with pending_count, processing_count,
         and oldest_message_age_seconds attributes.
         """
-        return self._messaging_service.get_queue_stats(instance_id)
+        return await self._messaging_service.get_queue_stats(instance_id)
 
     async def _has_checkpoint(self, instance_id: str) -> bool:
         """Check if a checkpoint exists for this instance.

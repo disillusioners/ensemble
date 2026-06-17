@@ -1470,13 +1470,13 @@ class InstanceMessagingService:
             return await get_instance_messages(self._checkpointer, instance_id)
         return []
 
-    def get_queue_stats(self, instance_id: str) -> dict:
+    async def get_queue_stats(self, instance_id: str) -> dict:
         """Get queue statistics for an instance.
 
         Returns a dict with pending_count, processing_count,
         and oldest_message_age_seconds attributes.
         """
-        stats = self._queue_repository.get_stats(instance_id)
+        stats = await asyncio.to_thread(self._queue_repository.get_stats, instance_id)
         return {
             "pending_count": stats["pending_count"],
             "processing_count": stats["processing_count"],
