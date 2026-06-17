@@ -1,10 +1,10 @@
-import { Injectable, inject, signal, computed, WritableSignal, Signal, effect } from '@angular/core';
+import { Injectable, inject, signal, WritableSignal, effect } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 import { ApiService } from './api.service';
 import { SseService } from './sse.service';
 import type { InstanceInfo, InstanceStatus } from '../models';
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 10;
 
 // Keep in sync with backend: daemon/repositories/instance/repository.py (KB_AGENT_IDS)
 
@@ -54,9 +54,11 @@ export class InstanceService {
   readonly loading: WritableSignal<boolean> = signal(false);
   readonly showKb: WritableSignal<boolean> = signal(false);
 
-  readonly hasMoreInstances: Signal<boolean> = computed(
-    () => this.instances().length < this.totalInstances()
-  );
+  // Backend returns has_more directly in the list response (root-based pagination).
+  // Each page contains N root instances + all their descendants, so we cannot compute
+  // hasMoreInstances locally from instances().length vs totalInstances() (descendants
+  // would inflate the count and cause premature termination). Use the backend's signal.
+  readonly hasMoreInstances: WritableSignal<boolean> = signal(false);
 
   toggleKb(): void {
     this.showKb.update(v => !v);
@@ -272,19 +274,19 @@ export class InstanceService {
         const existingIds = new Set(this.instances().map((i: InstanceInfo) => i.instance_id));
         const newInstances = response.instances.filter(i => !existingIds.has(i.instance_id));
         this.instances.update((prev: InstanceInfo[]) => sortByCreatedAtDesc([...prev, ...newInstances]));
-        this.currentOffset += response.instances.length;
+        // Backend paginates by roots (limit/offset on root instances); descendants
+        // are bundled in the response but do not advance the root offset.
+        this.currentOffset += PAGE_SIZE;
       } else {
         // Merge with existing instances to avoid overwriting SSE updates.
         // See mergeInstances() docstring for the SSE-vs-polling race condition it handles.
         const merged = this.mergeInstances(this.instances(), response.instances);
         this.instances.set(merged);
-        this.currentOffset = response.instances.length;
+        this.currentOffset = PAGE_SIZE;
       }
 
       this.totalInstances.set(response.total);
-
-      // Update hasMoreInstances based on whether we have more to load
-      // (hasMoreInstances is a computed signal, so it auto-updates)
+      this.hasMoreInstances.set(response.has_more);
     } catch (err) {
       console.error('Failed to load instances:', err);
     } finally {

@@ -1,4 +1,4 @@
-import { signal, computed } from '@angular/core';
+import { signal } from '@angular/core';
 import { Observable, of, throwError, firstValueFrom } from 'rxjs';
 import { InstanceInfo, InstanceStatus } from '../models';
 
@@ -8,6 +8,7 @@ const PAGE_SIZE = 100;
 interface MockInstanceListResponse {
   instances: InstanceInfo[];
   total: number;
+  has_more: boolean;
 }
 
 // Mock ApiService
@@ -16,6 +17,7 @@ class MockApiService {
     return of({
       instances: [],
       total: 0,
+      has_more: false,
     });
   }
 
@@ -57,10 +59,8 @@ class TestableInstanceService {
   readonly isLoadingMore = signal<boolean>(false);
   readonly loading = signal<boolean>(false);
   readonly showKb = signal<boolean>(false);
-
-  readonly hasMoreInstances = computed(
-    () => this.instances().length < this.totalInstances()
-  );
+  // Mirrors actual service: backend-provided has_more (root-based pagination)
+  readonly hasMoreInstances = signal<boolean>(false);
 
   toggleKb(): void {
     this.showKb.update(v => !v);
@@ -107,13 +107,15 @@ class TestableInstanceService {
         const existingIds = new Set(this.instances().map(i => i.instance_id));
         const newInstances = response.instances.filter(i => !existingIds.has(i.instance_id));
         this.instances.update(prev => [...prev, ...newInstances]);
-        this.currentOffset += response.instances.length;
+        // Backend paginates by roots; offset advances by PAGE_SIZE, not by instances returned
+        this.currentOffset += PAGE_SIZE;
       } else {
         this.instances.set(response.instances);
-        this.currentOffset = response.instances.length;
+        this.currentOffset = PAGE_SIZE;
       }
 
       this.totalInstances.set(response.total);
+      this.hasMoreInstances.set(response.has_more);
     } catch (err) {
       console.error('Failed to load instances:', err);
     } finally {
@@ -256,7 +258,7 @@ describe('InstanceService', () => {
       ];
 
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: mockInstances, total: 2 })
+        of({ instances: mockInstances, total: 2, has_more: false })
       );
 
       await service.loadInstances();
@@ -268,7 +270,7 @@ describe('InstanceService', () => {
 
     it('should set loading state during fetch', async () => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       let loadingDuringFetch: boolean | null = null;
@@ -290,7 +292,7 @@ describe('InstanceService', () => {
 
     it('should set totalInstances from response', async () => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [createMockInstance()], total: 50 })
+        of({ instances: [createMockInstance()], total: 50, has_more: false })
       );
 
       await service.loadInstances();
@@ -300,7 +302,7 @@ describe('InstanceService', () => {
 
     it('should pass projectId to API', async () => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       await service.loadInstances('project-123');
@@ -325,20 +327,20 @@ describe('InstanceService', () => {
   describe('loadInstances with append', () => {
     beforeEach(() => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
     });
 
     it('should append to existing instances', async () => {
       // First load
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [createMockInstance({ instance_id: 'instance-1' })], total: 3 })
+        of({ instances: [createMockInstance({ instance_id: 'instance-1' })], total: 3, has_more: false })
       );
       await service.loadInstances();
 
       // Second load (append)
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [createMockInstance({ instance_id: 'instance-2' })], total: 3 })
+        of({ instances: [createMockInstance({ instance_id: 'instance-2' })], total: 3, has_more: false })
       );
       await service.loadInstances(undefined, true);
 
@@ -351,13 +353,13 @@ describe('InstanceService', () => {
       const sameInstance = createMockInstance({ instance_id: 'same-instance' });
 
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [sameInstance], total: 2 })
+        of({ instances: [sameInstance], total: 2, has_more: false })
       );
       await service.loadInstances();
 
       // Append same instance
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [sameInstance], total: 2 })
+        of({ instances: [sameInstance], total: 2, has_more: false })
       );
       await service.loadInstances(undefined, true);
 
@@ -367,7 +369,7 @@ describe('InstanceService', () => {
 
     it('should set isLoadingMore during append', async () => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       const loadPromise = service.loadInstances(undefined, true);
@@ -382,19 +384,19 @@ describe('InstanceService', () => {
     it('should reset offset when not appending', async () => {
       // Load first page
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [createMockInstance()], total: 100 })
+        of({ instances: [createMockInstance()], total: 100, has_more: false })
       );
       await service.loadInstances();
 
       // Load more
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [createMockInstance()], total: 100 })
+        of({ instances: [createMockInstance()], total: 100, has_more: false })
       );
       await service.loadInstances(undefined, true);
 
       // New load without append should reset
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [createMockInstance({ instance_id: 'new-instance' })], total: 50 })
+        of({ instances: [createMockInstance({ instance_id: 'new-instance' })], total: 50, has_more: false })
       );
       await service.loadInstances();
 
@@ -406,7 +408,7 @@ describe('InstanceService', () => {
   describe('loadInstances with projectId', () => {
     it('should pass projectId to API', async () => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       await service.loadInstances('my-project');
@@ -416,7 +418,7 @@ describe('InstanceService', () => {
 
     it('should not pass projectId when undefined', async () => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       await service.loadInstances();
@@ -426,24 +428,15 @@ describe('InstanceService', () => {
   });
 
   describe('hasMoreInstances', () => {
-    it('should return true when more instances available', () => {
-      service.instances.set([createMockInstance()]);
-      service.totalInstances.set(10);
-
-      expect(service.hasMoreInstances()).toBe(true);
-    });
-
-    it('should return false when all instances loaded', () => {
-      service.instances.set([createMockInstance(), createMockInstance()]);
-      service.totalInstances.set(2);
-
+    it('should default to false', () => {
       expect(service.hasMoreInstances()).toBe(false);
     });
 
-    it('should return false when no instances', () => {
-      service.instances.set([]);
-      service.totalInstances.set(0);
+    it('should be writable', () => {
+      service.hasMoreInstances.set(true);
+      expect(service.hasMoreInstances()).toBe(true);
 
+      service.hasMoreInstances.set(false);
       expect(service.hasMoreInstances()).toBe(false);
     });
   });
@@ -451,7 +444,7 @@ describe('InstanceService', () => {
   describe('startPolling', () => {
     beforeEach(() => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
       jest.useFakeTimers();
     });
@@ -472,7 +465,7 @@ describe('InstanceService', () => {
       service.totalInstances.set(5);
 
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       service.startPolling();
@@ -519,7 +512,7 @@ describe('InstanceService', () => {
   describe('stopPolling', () => {
     beforeEach(() => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
       jest.useFakeTimers();
     });
@@ -546,17 +539,17 @@ describe('InstanceService', () => {
   describe('loadMore', () => {
     beforeEach(() => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
     });
 
     it('should increment offset and load more', async () => {
       // Set up state with more available
-      service.totalInstances.set(10);
+      service.hasMoreInstances.set(true);
       service.instances.set([createMockInstance({ instance_id: 'instance-1' })]);
 
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [createMockInstance({ instance_id: 'instance-2' })], total: 10 })
+        of({ instances: [createMockInstance({ instance_id: 'instance-2' })], total: 10, has_more: false })
       );
 
       service.loadMore();
@@ -568,11 +561,7 @@ describe('InstanceService', () => {
     });
 
     it('should not load more when all loaded', () => {
-      service.totalInstances.set(2);
-      service.instances.set([
-        createMockInstance({ instance_id: 'instance-1' }),
-        createMockInstance({ instance_id: 'instance-2' }),
-      ]);
+      service.hasMoreInstances.set(false);
 
       service.loadMore();
 
@@ -786,7 +775,7 @@ describe('InstanceService', () => {
     it('should pass excludeKb=true to API when showKb is false', async () => {
       service.showKb.set(false);
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       await service.loadInstances();
@@ -797,7 +786,7 @@ describe('InstanceService', () => {
     it('should pass excludeKb=false to API when showKb is true', async () => {
       service.showKb.set(true);
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       await service.loadInstances();
@@ -807,7 +796,7 @@ describe('InstanceService', () => {
 
     it('should respect showKb state changes between calls', async () => {
       mockApi.listInstances = jest.fn().mockReturnValue(
-        of({ instances: [], total: 0 })
+        of({ instances: [], total: 0, has_more: false })
       );
 
       service.showKb.set(false);

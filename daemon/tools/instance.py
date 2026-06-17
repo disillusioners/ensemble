@@ -113,6 +113,7 @@ from .infra import create_infra_tools
 from ._tool_registry import list_tools_by_category, scan_tools_for_full_docs, register_tool_category
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.utils import DEFAULT_FUZZY_MATCH_DISTANCE
+from daemon.constants import DEFAULT_PAGE_LIMIT
 from daemon.rag.config import is_rag_enabled
 
 
@@ -623,10 +624,10 @@ Returns:
     @tool
     def list_instances() -> list[dict]:
         """List all active instances. Use tool_help("list_instances") for details."""
-        instances, _ = manager.list_instances(limit=20)
+        instances, _ = manager.list_instances(limit=DEFAULT_PAGE_LIMIT)
         return instances
-    
-    list_instances._full_doc_ = """List the 20 most recent active instances.
+
+    list_instances._full_doc_ = f"""List the {DEFAULT_PAGE_LIMIT} most recent active instances.
 
 Returns:
     List of instance info dictionaries

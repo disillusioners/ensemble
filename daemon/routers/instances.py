@@ -102,22 +102,31 @@ async def list_instances(
     exclude_kb: bool = Query(True, description="Exclude KB-related instances (experiencer, kb-importer)"),
 ) -> InstanceListResponse:
     """List instances with pagination.
-    
+
+    Pagination is root-based: only root instances (parent_id IS NULL or empty)
+    are counted and paginated. ALL descendants of each root in the current page
+    are loaded via BFS and included in the flat result list.
+
     Args:
         request: FastAPI request object.
-        limit: Maximum number of instances to return (default: 20, max: 100).
-        offset: Number of instances to skip (default: 0, min: 0).
+        limit: Maximum number of root instances to return (default: 10, max: 100).
+        offset: Number of root instances to skip (default: 0, min: 0).
         project_id: Filter instances by project ID (optional).
         exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
+            Applies to both root counting and descendant loading.
     """
     manager = _get_manager(request)
-    
+
     # Input validation
     limit = max(1, min(limit, MAX_PAGE_LIMIT))  # Clamp to 1-MAX_PAGE_LIMIT
     offset = max(0, offset)  # Ensure non-negative
     
     instances_data, total = manager.list_instances(
-        limit=limit, offset=offset, project_id=project_id, exclude_kb=exclude_kb
+        limit=limit,
+        offset=offset,
+        project_id=project_id,
+        exclude_kb=exclude_kb,
+        include_descendants=True,
     )
     instances = []
     for inst in instances_data:

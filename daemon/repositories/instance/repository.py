@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,8 @@ from daemon.repositories.task.models import Task
 from daemon.repositories.event.models import Event
 from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.job_queue.watcher_models import JobWatcher
+
+logger = logging.getLogger(__name__)
 
 # Keep in sync with frontend: frontend/src/app/services/instance.service.ts (KB_AGENT_IDS)
 KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
@@ -288,22 +291,82 @@ class SQLModelInstanceRepository:
         limit: int = 100,
         offset: int = 0,
         exclude_kb: bool = True,
+        include_descendants: bool = False,
     ) -> tuple[list[Instance], int]:
-        """List instances with optional status filter and pagination.
-        
+        """List instances with optional root-based pagination and full tree loading.
+
+        Two modes are supported:
+
+        1. **Flat pagination (default)**: ``include_descendants=False``. Returns a
+           simple paginated list of all instances matching the filters, ordered
+           by ``created_at DESC``. Use this for callers that expect a flat
+           list (manager cache cleanup, fuzzy match, project deletion,
+           maintenance, agent tools).
+
+        2. **Root-based pagination with BFS descendant loading**: ``include_descendants=True``.
+           Only root instances (``parent_id`` IS NULL or empty) are counted and
+           paginated. ALL descendants of each root in the current page are
+           loaded via iterative BFS and included in the flat result list.
+
+        Descendant loading uses ``instances.parent_id`` (the permanent record), NOT
+        ``instance_hierarchy`` (which is a working set that deletes entries when
+        children complete). Traversal is iterative BFS — one query per tree depth
+        level, so total queries = number of depth levels (not number of instances).
+        A ``seen_ids`` set guards against duplicates in case of circular
+        ``parent_id`` references.
+
         Args:
-            status: Optional status filter.
-            project_id: Optional project ID filter.
-            limit: Maximum number of instances to return.
-            offset: Number of instances to skip.
-            exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
-            
+            status: Optional status filter applied to BOTH roots and descendants.
+            project_id: Optional project ID filter applied to BOTH roots and
+                descendants (defense-in-depth; descendants should inherit project
+                from their root, but applying the filter prevents leakage in case
+                of corrupt parent_id references).
+            limit: Maximum number of root instances to return.
+            offset: Number of root instances to skip.
+            exclude_kb: Exclude KB-related instances (experiencer, kb-importer)
+                when True (default: True). Applied to BOTH root counting and
+                descendant loading.
+            include_descendants: When False (default), return a flat paginated
+                list of all matching instances. When True, paginate by root and
+                BFS-load all descendants of each root in the current page.
+
         Returns:
-            Tuple of (list of instances, total count).
+            Tuple of (flat list of instances, total count). In
+            ``include_descendants=False`` mode, the total reflects all matching
+            instances. In ``include_descendants=True`` mode, the total reflects
+            only root instances (matching the pagination).
         """
+        if not include_descendants:
+            # ────────────────────────────────────────────────────────────────
+            # Flat pagination path: original behavior for all non-API callers.
+            # ────────────────────────────────────────────────────────────────
+            with SQLModelSession(self.engine) as db_session:
+                count_stmt = select(func.count()).select_from(Instance)
+                stmt = select(Instance)
+                if status:
+                    count_stmt = count_stmt.where(Instance.status == status)
+                    stmt = stmt.where(Instance.status == status)
+                if project_id is not None:
+                    count_stmt = count_stmt.where(Instance.project_id == project_id)
+                    stmt = stmt.where(Instance.project_id == project_id)
+                if exclude_kb:
+                    count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+                    stmt = stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+
+                total = db_session.exec(count_stmt).one()
+
+                stmt = stmt.order_by(col(Instance.created_at).desc()).offset(offset).limit(limit)
+                instances = list(db_session.exec(stmt))
+                return self._enrich_instances(db_session, instances), total
+
+        # ────────────────────────────────────────────────────────────────
+        # Root-based pagination + BFS descendant loading (API path).
+        # ────────────────────────────────────────────────────────────────
         with SQLModelSession(self.engine) as db_session:
-            # Get total count using database-level counting
-            count_stmt = select(func.count()).select_from(Instance)
+            # 1. Count root instances only (parent_id IS NULL OR empty).
+            count_stmt = select(func.count()).select_from(Instance).where(
+                (Instance.parent_id.is_(None)) | (Instance.parent_id == "")
+            )
             if status:
                 count_stmt = count_stmt.where(Instance.status == status)
             if project_id is not None:
@@ -312,19 +375,88 @@ class SQLModelInstanceRepository:
                 count_stmt = count_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
             total = db_session.exec(count_stmt).one()
 
-            # Get paginated instances
-            stmt = select(Instance)
+            # 2. Paginate root instances (ORDER BY created_at DESC).
+            root_stmt = select(Instance).where(
+                (Instance.parent_id.is_(None)) | (Instance.parent_id == "")
+            )
             if status:
-                stmt = stmt.where(Instance.status == status)
+                root_stmt = root_stmt.where(Instance.status == status)
             if project_id is not None:
-                stmt = stmt.where(Instance.project_id == project_id)
+                root_stmt = root_stmt.where(Instance.project_id == project_id)
             if exclude_kb:
-                stmt = stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
-            
-            stmt = stmt.order_by(col(Instance.created_at).desc()).offset(offset).limit(limit)
-            instances = list(db_session.exec(stmt))
-            
-            return self._enrich_instances(db_session, instances), total
+                root_stmt = root_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+
+            root_stmt = (
+                root_stmt.order_by(col(Instance.created_at).desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            roots = list(db_session.exec(root_stmt))
+
+            if not roots:
+                return [], total
+
+            # 3. Iterative BFS to load ALL descendants of the paginated roots.
+            #    Uses instances.parent_id (permanent record), not the working-set
+            #    instance_hierarchy table.
+            #    Each depth level is a single query: WHERE parent_id IN (...).
+            #    ``seen_ids`` guards against duplicates from circular parent_id refs.
+            all_instances: list[Instance] = list(roots)
+            seen_ids: set[str] = {r.instance_id for r in roots}
+            current_level_ids: list[str] = [r.instance_id for r in roots]
+            hit_depth_limit = False
+
+            for _ in range(_MAX_TRAVERSAL_DEPTH):
+                if not current_level_ids:
+                    break
+
+                child_stmt = select(Instance).where(
+                    col(Instance.parent_id).in_(current_level_ids)
+                )
+                if status:
+                    child_stmt = child_stmt.where(Instance.status == status)
+                if project_id is not None:
+                    child_stmt = child_stmt.where(Instance.project_id == project_id)
+                if exclude_kb:
+                    child_stmt = child_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
+
+                children = list(db_session.exec(child_stmt))
+                if not children:
+                    break
+
+                # Dedup: skip children whose IDs were already encountered at an
+                # earlier level (defends against circular parent_id references).
+                new_children: list[Instance] = []
+                next_level_ids: list[str] = []
+                for child in children:
+                    if child.instance_id in seen_ids:
+                        continue
+                    seen_ids.add(child.instance_id)
+                    new_children.append(child)
+                    next_level_ids.append(child.instance_id)
+
+                all_instances.extend(new_children)
+
+                if not new_children:
+                    # All children were duplicates — no new IDs to traverse.
+                    break
+
+                current_level_ids = next_level_ids
+            else:
+                # Loop exhausted ``_MAX_TRAVERSAL_DEPTH`` iterations without
+                # ``current_level_ids`` becoming empty. Possible data corruption
+                # (very deep tree or circular refs not caught by ``seen_ids``).
+                hit_depth_limit = True
+
+            if hit_depth_limit and current_level_ids:
+                logger.warning(
+                    "BFS descendant loading hit depth limit (%d) with %d unprocessed IDs; "
+                    "possible data corruption or excessively deep tree.",
+                    _MAX_TRAVERSAL_DEPTH,
+                    len(current_level_ids),
+                )
+
+            return self._enrich_instances(db_session, all_instances), total
 
     def list_by_parent(self, parent_id: str) -> list[Instance]:
         """List all child instances of a parent."""

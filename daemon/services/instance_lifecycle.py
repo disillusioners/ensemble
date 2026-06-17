@@ -935,22 +935,48 @@ class InstanceLifecycleService:
 
         return graph
 
-    def list_instances(self, limit: int = 20, offset: int = 0, project_id: str | None = None, exclude_kb: bool = True) -> tuple[list[dict], int]:
+    def list_instances(
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        project_id: str | None = None,
+        exclude_kb: bool = True,
+        include_descendants: bool = False,
+    ) -> tuple[list[dict], int]:
         """List instances with pagination.
 
+        When ``include_descendants`` is True, pagination is root-based: only root
+        instances (parent_id IS NULL or empty) are counted and paginated, and
+        ALL descendants of each root in the current page are loaded via BFS and
+        included in the flat result list.
+
+        When ``include_descendants`` is False (default), returns a flat paginated
+        list of all matching instances.
+
         Args:
-            limit: Maximum number of instances to return (default: 20).
-            offset: Number of instances to skip (default: 0).
+            limit: Maximum number of root instances to return (default: 10).
+                When ``include_descendants=False``, this is the page size of all
+                matching instances.
+            offset: Number of root instances to skip (default: 0).
             project_id: Filter by project ID (default: None, returns all projects).
-            exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
+            exclude_kb: Exclude KB-related instances (experiencer, kb-importer)
+                when True (default: True).
+            include_descendants: When True, paginate by root and BFS-load all
+                descendants of each root in the current page (default: False).
 
         Returns:
             Tuple of (list of instance info dictionaries, total count).
         """
         # Access manager's state dynamically
         instance_repository = self._manager._instance_repository
-        
-        instances, total = instance_repository.list(limit=limit, offset=offset, project_id=project_id, exclude_kb=exclude_kb)
+
+        instances, total = instance_repository.list(
+            limit=limit,
+            offset=offset,
+            project_id=project_id,
+            exclude_kb=exclude_kb,
+            include_descendants=include_descendants,
+        )
         # Convert Instance objects to dicts for backward compatibility
         return [i.to_dict() for i in instances], total
 
