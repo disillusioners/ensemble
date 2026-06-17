@@ -1,4 +1,27 @@
-After test, make sure the dev.sh is runable by running it.
-dev.sh is server, run it with bash and 30 seconds timeout, if it end before 30s surely it crashed, if it run fine for 30s, it is good.
-If it is crashed, check the log and fix the issue, then run it again until it run fine for 30s.
-When it work fine stop running script and you can go next step.
+# Quality Requirements
+
+## Critical
+_MUST pass before testing is complete_
+
+- [ ] All non-integration tests pass (pytest exit code 0)
+  - Validation: Run `python -m pytest tests/ -x --tb=short -q`
+- [ ] Deadlock fix tests pass (test_deadlock_fix.py)
+  - Validation: Run `python -m pytest tests/test_deadlock_fix.py -v`
+- [ ] No sync DB calls remain on the asyncio event loop thread
+  - Validation: Thread-identity tests verify asyncio.to_thread wrapping for all DB helpers
+- [ ] dev.sh includes `--timeout-graceful-shutdown 10`
+  - Validation: Check dev.sh content for the flag
+
+## Important
+_Should pass, flag if failed_
+
+- [ ] All callers of converted async functions properly await
+  - Validation: `_get_system_prompt_tokens`, `_compute_context_usage`, `get_queue_stats` callers use await
+- [ ] Original deadlock scenario (parent→child→complete) works without blocking
+  - Validation: Parent spawn child → child responds → parent completes flow
+
+## Nice-to-have
+_Informational, report status only_
+
+- [ ] No dead code from the fix (deleted code was truly unused)
+  - Validation: Verify dead code deletion didn't break imports
