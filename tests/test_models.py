@@ -254,9 +254,9 @@ class TestInstanceStatus:
         assert status == InstanceStatus.RUNNING
 
     def test_instance_status_values(self):
-        """Test InstanceStatus has correct number of values."""
+        """Test InstanceStatus has correct number of values (Phase 5: canonical 10-value enum)."""
         values = [s.value for s in InstanceStatus]
-        assert len(values) == 8
+        assert len(values) == 10
         assert "idle" in values
         assert "running" in values
         assert "waiting" in values
@@ -265,6 +265,9 @@ class TestInstanceStatus:
         assert "terminated" in values
         assert "completed" in values
         assert "paused" in values
+        # Phase 5 canonical enum (re-exported from daemon.repositories.instance.models)
+        assert "queued" in values
+        assert "failed" in values
 
 
 class TestErrorCodes:
