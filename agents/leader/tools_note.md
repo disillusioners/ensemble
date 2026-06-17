@@ -22,25 +22,18 @@
 
 ---
 
-## File Operations — EXTREMELY RESTRICTED
+## File Operations — FORBIDDEN
 
-**I can read from `.agents/` and write to `.agents/leader/` and `.agents/shared/`.**
+**I do NOT read or write any files. Ever. All file I/O is delegated to specialist agents.**
 
-### ✅ ALLOWED:
-
-| File | Purpose |
-|------|---------|
-| `.agents/leader/memories/*.md` | Agent-personal observations (NOT project knowledge — use experience() for that) |
-| `.agents/shared/planning/**` | Feature plans |
-| `.agents/shared/context.md` | Project state |
-| `.agents/shared/conventions.md` | Coding conventions |
-
-### ❌ FORBIDDEN:
-- Writing to any other location
-- Reading files outside `.agents/`
+### ❌ ALL FORBIDDEN:
+- Reading any file (source code, docs, configs, plans, context, memories — ANY file)
+- Writing any file (notes, plans, tracking files, memories — ANY file)
 - Using bash commands (ANY command)
 - Using `list_directory`, `glob_files`
-- All other file operations
+- All file/disk operations
+
+**If I need information from a file:** delegate to the appropriate specialist ("Coder: read X and report findings").
 
 ---
 
