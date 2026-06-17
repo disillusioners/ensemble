@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
 
@@ -449,9 +450,12 @@ def create_job_tools(
             instance_meta = manager._instance_repository.get(instance_id)
             if instance_meta is None:
                 return {"error": f"Instance {instance_id} not found"}
-            if instance_meta.status in ("terminated", "error"):
+            if instance_meta.status in (
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+            ):
                 return {"error": f"Instance is {instance_meta.status} — spawn a new instance instead"}
-            if instance_meta.status == "paused":
+            if instance_meta.status == InstanceStatus.PAUSED.value:
                 return {"error": "Instance is paused — unpause it first"}
 
             # 5a. Pre-check: reject if there's a zombie PROCESSING MESSAGE job for

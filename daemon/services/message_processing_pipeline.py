@@ -1,0 +1,724 @@
+"""Path-agnostic pipeline for message processing.
+
+Phase 5 of the CorrelationManager migration. The daemon has two physical
+dispatchers that both process user/internal messages against an
+instance's langgraph thread:
+
+1. **WorkerPool path** —
+   :class:`daemon.services.task_processor.ProcessMessageProcessor` is
+   driven by worker threads in ``worker_pool.py`` polling the ``task``
+   table. Triggered by ``enqueue_message`` (used by
+   ``child_reports._create_completion_report`` for completion reports
+   from child instances).
+
+2. **JobQueue path** —
+   :class:`daemon.services.message_job_handler.MessageJobHandler` is
+   driven by ``JobProcessor._process_loop`` polling the
+   ``job_queue_items`` table. Triggered by
+   ``enqueue_message_via_jq`` (the API/HTTP entry point and some
+   internal paths).
+
+Before Phase 5, the two paths each contained near-identical copies of
+the same six shared stages: building the ``_do_process`` closure,
+acquiring the Execution Gate lease, marking the message COMPLETED,
+resolving the dispatch source and dispatching externally, checking
+child completion, and error reporting. Path-specific differences lived
+inline in each copy.
+
+This module is the **single source of truth** for those shared stages.
+The pipeline takes a :class:`ProcessingContext` and a
+:class:`PipelineCallbacks` and produces a :class:`ProcessingResult`.
+Path-specific behaviour (how to back off on contention, how to
+complete a job vs. a task, how to discriminate pause-vs-terminate
+cancellation, what to emit on skip) is supplied as callbacks.
+
+Design notes
+------------
+
+- **No behavioral changes.** This is a structural refactor. The
+  pipeline must produce identical observable behaviour to what each
+  path currently does independently. Any divergence should be fixed
+  in a follow-up.
+
+- **Pure pipeline, path-specific callbacks.** The pipeline performs
+  the shared stages. Callbacks let each path inject its own behaviour
+  at the boundaries: contention handling (jittered backoff for
+  WorkerPool; atomic_transition + bus-notify for JobQueue),
+  cancellation discrimination (WorkerPool re-raises;
+  JobQueue completes the job), and error side-effect hook for
+  after the shared error helper runs.
+
+- **Defensive defaults.** The pipeline uses the defensive pattern
+  observed in the JobQueue path for ``queue_repository.complete``
+  and ``dispatch_completed`` (try/except with warn-log) rather than
+  the trust-the-call pattern in the WorkerPool path, because the
+  discovery report explicitly recommends the JQ pattern as the
+  unified behaviour. Both paths are now equivalent in failure
+  handling for these two side-effects.
+
+- **Error handler takes either ``task_id`` or ``job_id``.** The
+  pipeline accepts an ``error_handler_id`` dict that the caller
+  populates with the appropriate key for its path. This avoids
+  adding a single non-required parameter to the pipeline's
+  constructor just to hold one of two mutually exclusive IDs.
+
+- **CancellationToken threading.** WorkerPool receives the
+  ``cancellation_token`` from the caller (``TaskProcessor.run_task``)
+  and threads it through ``_do_process``. JobQueue creates a
+  ``CancellationTokenSource`` internally and uses ``cts.token`` for
+  the same purpose. The pipeline accepts the token in
+  :class:`ProcessingContext` (``cancellation_token`` field, default
+  None) so each path supplies the right value: WorkerPool passes
+  through the caller's token; JobQueue passes ``cts.token``. The
+  pipeline does NOT create its own token — cancellation ownership
+  stays with the dispatcher (the path that knows how to translate
+  cancellation into the right terminal action).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
+
+from daemon.cancellation import OperationCancelledError
+from daemon.services.execution_gate import LeaseContention, LeaseLostError
+from daemon.services.message_processing_errors import (
+    handle_message_processing_error,
+)
+
+if TYPE_CHECKING:
+    from daemon.cancellation import CancellationToken
+    from daemon.manager import MessageResult
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Input / output dataclasses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ProcessingContext:
+    """Path-agnostic input for message processing.
+
+    Carries everything the pipeline needs to call
+    ``manager._process_message_with_tracking`` plus the metadata
+    required for the shared post-processing stages
+    (mark-completed, dispatch-completed, child-completion-check).
+
+    Path-specific fields:
+
+    - ``cancellation_token``: WorkerPool passes the caller's token
+      through; JobQueue passes ``cts.token`` from its internally
+      created ``CancellationTokenSource``. The pipeline does NOT
+      create or own the token — cancellation ownership stays with
+      the dispatcher.
+
+    - ``retry_count``: Read by the pipeline and threaded into
+      ``_process_message_with_tracking`` as the ``retry_count`` kwarg.
+      WorkerPool reads it from ``task.retry_count``; JobQueue reads
+      it from ``job.job_metadata`` with a fallback to
+      ``job.retry_count``. The pipeline does not interpret the value.
+
+    Fields default to safe values so callers can construct a context
+    incrementally.
+    """
+
+    instance_id: str
+    message_id: str
+    message: str
+    retry_count: int = 0
+    message_source: str | None = None
+    silent: bool = False
+    images: list[str] | None = None
+    resume_mode: bool = False
+    cancellation_token: Optional["CancellationToken"] = None
+
+
+@dataclass
+class ProcessingResult:
+    """Path-agnostic output of message processing.
+
+    ``success`` covers the happy path (graph produced a result AND
+    the post-processing side-effects ran without raising a
+    dispatcher-fatal error). ``should_defer`` is set by
+    ``on_contention`` when a callback successfully re-queued the work
+    (e.g. JobQueue's atomic_transition to PENDING, WorkerPool's
+    requeue_task_with_backoff) — the dispatcher can short-circuit
+    its own post-actions in that case.
+
+    ``error`` is set when an exception bubbled out of the pipeline
+    after ``handle_message_processing_error`` ran; the dispatcher
+    decides whether to re-raise, log, or swallow.
+    """
+
+    success: bool
+    result_content: str | None = None
+    error: Exception | None = None
+    should_defer: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Callbacks
+# ---------------------------------------------------------------------------
+
+
+# Type aliases for callbacks. Each callback is async and optional; the
+# pipeline applies a default behaviour when a callback is None.
+OnSuccessCb = Callable[["ProcessingResult"], Awaitable[None]]
+OnErrorCb = Callable[["ProcessingResult"], Awaitable[None]]
+OnDeferCb = Callable[["ProcessingResult"], Awaitable[None]]
+OnContentionCb = Callable[[Exception], Awaitable[Optional["ProcessingResult"]]]
+OnCancelCb = Callable[[Exception], Awaitable[Optional["ProcessingResult"]]]
+
+
+@dataclass
+class PipelineCallbacks:
+    """Optional callbacks for path-specific behaviour at pipeline boundaries.
+
+    Every callback is optional. The pipeline applies the documented
+    default when a callback is ``None``. Callbacks that take an
+    exception are expected to be idempotent and best-effort: the
+    pipeline does not retry failed callbacks.
+
+    Callbacks
+    ---------
+
+    ``on_success``
+        Called after the happy path completes and the post-processing
+        stages have run. The WorkerPool path uses this to call
+        ``TaskRepository.complete_task`` (it does NOT do this in the
+        pipeline because ``complete_task`` lives on a different repo
+        than ``queue_repository``). The JobQueue path uses this to
+        call ``JobQueueService.complete_job(COMPLETED)`` — possibly
+        gated by the CM/waiting_for deferral check, which the
+        JobQueue still performs locally.
+
+    ``on_error``
+        Called after ``handle_message_processing_error`` runs. The
+        JobQueue path uses this to also complete the job as FAILED
+        (already covered by ``handle_message_processing_error`` when
+        ``job_id`` is passed, so this is a no-op for JobQueue). The
+        WorkerPool path uses this for nothing today — the error
+        helper handles the side-effects.
+
+    ``on_defer``
+        Called when the pipeline defers completion because the
+        CM/waiting_for check reports pending child correlations
+        (JobQueue only). WorkerPool does not consult CM in the
+        hot path; this is a JobQueue-specific concern. When the
+        pipeline sees a happy-path result but reports deferred
+        completion, ``on_defer`` is the place for the JobQueue
+        callback to emit ``notify_watchers(status="in_progress")``
+        and return.
+
+    ``on_contention``
+        Called when the Execution Gate returns ``LeaseContention``
+        OR raises ``LeaseLostError``. The callback receives the
+        exception (``LeaseContention`` instance or ``LeaseLostError``)
+        and returns a :class:`ProcessingResult` (typically
+        ``success=False, should_defer=True``) OR ``None`` to signal
+        "use the pipeline default of re-raising the exception".
+
+        The WorkerPool path uses this to log per-instance throttled
+        summaries and call ``requeue_task_with_backoff``. The JobQueue
+        path uses this to call ``atomic_transition(PROCESSING→PENDING)``
+        and notify the dispatch bus. If ``on_contention`` is ``None``,
+        the pipeline re-raises — matching the pre-Phase-5 behaviour
+        for code paths that did not customise contention handling.
+
+    ``on_cancel``
+        Called when ``OperationCancelledError`` or
+        ``asyncio.CancelledError`` bubbles out of the pipeline. The
+        callback receives the exception and returns a
+        :class:`ProcessingResult` (typically
+        ``success=False, should_defer=True`` for pause) OR ``None``
+        to re-raise.
+
+        The WorkerPool path uses this to log "task paused" and
+        re-raise. The JobQueue path uses this for the
+        pause-vs-terminate discrimination: if the instance is
+        ``PAUSED``, complete the job as PAUSED-leave-PROCESSING
+        (don't complete); otherwise complete the job as CANCELLED
+        and re-raise. If ``on_cancel`` is ``None``, the pipeline
+        re-raises.
+    """
+
+    on_success: OnSuccessCb | None = None
+    on_error: OnErrorCb | None = None
+    on_defer: OnDeferCb | None = None
+    on_contention: OnContentionCb | None = None
+    on_cancel: OnCancelCb | None = None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+
+
+class MessageProcessingPipeline:
+    """Path-agnostic message processing pipeline.
+
+    Encapsulates the six shared stages that both the WorkerPool
+    (``ProcessMessageProcessor.process``) and the JobQueue
+    (``MessageJobHandler.handle``) perform identically:
+
+    1. Build the ``_do_process`` closure wrapping
+       ``manager._process_message_with_tracking``.
+    2. Call ``execution_gate.run`` with the supplied ``holder_id`` /
+       ``holder_kind`` to serialise ``graph.astream`` per instance.
+    3. Handle ``LeaseContention`` / ``LeaseLostError`` via
+       ``callbacks.on_contention`` (or re-raise when no callback).
+    4. Mark the message COMPLETED via ``queue_repository.complete``.
+    5. Resolve the dispatch source (internal_report →
+       original_source) and call ``source_dispatcher.dispatch_completed``
+       (best-effort, JQ guard applied: skip when no valid external
+       source).
+    6. Check child completion via
+       ``manager._process_child_completion_and_notify_parent``
+       (best-effort).
+
+    Error reporting is unified via
+    :func:`handle_message_processing_error`, which writes the error
+    event to the DB, publishes the lifecycle event, sends the error
+    report to the parent, and (when ``job_id`` is provided) marks
+    the JobQueue job as FAILED.
+
+    Path-specific behaviour lives in :class:`PipelineCallbacks`. The
+    pipeline is constructed once per dispatcher and reused for the
+    lifetime of the dispatcher.
+    """
+
+    def __init__(
+        self,
+        execution_gate: Any,
+        manager: Any,
+        source_dispatcher: Any | None = None,
+        queue_repository: Any | None = None,
+    ) -> None:
+        """Initialize the pipeline.
+
+        Args:
+            execution_gate: The :class:`ExecutionGateService` instance
+                (typically ``manager.execution_gate``). Required —
+                the lease acquisition is the pipeline's first shared
+                stage.
+            manager: The ``InstanceManager`` facade. The pipeline
+                uses ``manager._process_message_with_tracking``,
+                ``manager._instance_repository``, and
+                ``manager._process_child_completion_and_notify_parent``.
+            source_dispatcher: Optional
+                :class:`daemon.sources.dispatcher.ResponseDispatcher`.
+                When ``None``, dispatch is skipped silently (matches
+                the WorkerPool behaviour in tests that omit the
+                dispatcher).
+            queue_repository: Optional message queue repository. Must
+                expose ``complete(message_id)``. When ``None``, the
+                mark-completed stage is skipped with a warn-log
+                (matches the WorkerPool behaviour in tests that
+                omit the repo).
+        """
+        self._execution_gate = execution_gate
+        self._manager = manager
+        self._source_dispatcher = source_dispatcher
+        self._queue_repository = queue_repository
+
+    # ------------------------------------------------------------------
+    # Public entry point
+    # ------------------------------------------------------------------
+
+    async def execute(
+        self,
+        context: ProcessingContext,
+        holder_id: str,
+        holder_kind: str,
+        callbacks: PipelineCallbacks,
+        error_handler_id: dict[str, str] | None = None,
+    ) -> ProcessingResult:
+        """Execute the shared pipeline stages for a single message.
+
+        Stages 1–6 (see class docstring) run identically for both
+        paths. Path-specific behaviour is supplied via ``callbacks``.
+
+        Args:
+            context: The path-agnostic input describing the message
+                to process.
+            holder_id: Stable identifier for this caller (e.g.
+                ``f"task:{task.id}"`` or ``f"message_job:{job_id}"``).
+                Used by the Execution Gate's lease release to verify
+                ownership.
+            holder_kind: One of :class:`LeaseHolderKind` values
+                (``"task"`` or ``"message_job"``). Forwarded to
+                ``execution_gate.run`` so lease rows carry a kind tag.
+            callbacks: Path-specific behaviour at pipeline boundaries.
+                All callbacks are optional; see :class:`PipelineCallbacks`.
+            error_handler_id: Optional dict passed to
+                :func:`handle_message_processing_error` as kwargs.
+                Populate with the appropriate key for the calling
+                path: ``{"task_id": task.id}`` for WorkerPool,
+                ``{"job_id": job.job_id}`` for JobQueue. When ``None``,
+                the error helper runs without a task/job ID (e.g. for
+                ad-hoc tests).
+
+        Returns:
+            A :class:`ProcessingResult` describing the outcome:
+
+            - Happy path: ``success=True``, ``result_content`` set
+              from the langgraph result.
+            - Contention handled by ``on_contention``: whatever the
+              callback returned (typically
+              ``success=False, should_defer=True``).
+            - Cancellation handled by ``on_cancel``: whatever the
+              callback returned.
+            - Generic exception: ``success=False``, ``error`` set,
+              ``handle_message_processing_error`` already ran.
+
+        Raises:
+            LeaseContention: When ``on_contention`` is ``None`` and
+                the Execution Gate returns ``LeaseContention``.
+            LeaseLostError: When ``on_contention`` is ``None`` and
+                the Execution Gate raises ``LeaseLostError``.
+            OperationCancelledError: When ``on_cancel`` is ``None``
+                and the pipeline catches
+                ``OperationCancelledError``.
+            asyncio.CancelledError: When ``on_cancel`` is ``None``
+                and the pipeline catches ``asyncio.CancelledError``.
+        """
+        # ---- Stage 1: build the _do_process closure ----
+        # The closure captures ``context`` so the caller doesn't need
+        # to thread the parameters into the work_fn body. The
+        # closure does NOT capture the cancellation token directly —
+        # it reads ``context.cancellation_token`` at call time so
+        # a late-arriving cancellation (e.g. a new dispatcher that
+        # re-uses the pipeline instance) sees the latest value.
+        async def _do_process() -> "MessageResult":
+            return await self._manager._process_message_with_tracking(
+                instance_id=context.instance_id,
+                message=context.message,
+                message_id=context.message_id,
+                cancellation_token=context.cancellation_token,
+                is_retry=context.resume_mode,
+                retry_count=context.retry_count,
+                message_source=context.message_source,
+                images=context.images,
+                silent=context.silent,
+            )
+
+        # ---- Stage 2: acquire lease + run work_fn ----
+        # Two exit paths from the gate:
+        #   - returns LeaseContention: another holder has the lease.
+        #     Hand off to ``on_contention`` (or re-raise).
+        #   - raises LeaseLostError: the lease was revoked mid-flight
+        #     (typically by ``recover_stale_leases`` on another node).
+        #     Hand off to ``on_contention`` (or re-raise).
+        #   - returns the work_fn result: happy path, fall through to
+        #     post-processing.
+        try:
+            gate_outcome = await self._execution_gate.run(
+                instance_id=context.instance_id,
+                holder_id=holder_id,
+                holder_kind=holder_kind,
+                work_fn=_do_process,
+            )
+        except LeaseLostError as e:
+            return await self._handle_contention(e, callbacks)
+        if isinstance(gate_outcome, LeaseContention):
+            return await self._handle_contention(gate_outcome, callbacks)
+        result: "MessageResult | None" = gate_outcome
+
+        # ---- Stages 3-6: shared post-processing (inside try/except) ----
+        try:
+            # Stage 4: mark message COMPLETED. The discovery report
+            # recommends the defensive JQ pattern (try/except +
+            # warn-log) as the unified behaviour, so both paths now
+            # treat a complete() failure as non-fatal.
+            await self._mark_message_completed(context.message_id)
+
+            # Stage 5: resolve dispatch source and dispatch. JQ guard
+            # applied: skip when the resolved source is missing or
+            # still starts with ``internal_``.
+            await self._dispatch_completed(context, result)
+
+            # Stage 6: child completion check. Best-effort: a
+            # failure here MUST NOT fail the message — the message
+            # itself was processed successfully. Mirrors the
+            # behaviour in both source paths.
+            await self._check_child_completion(context.instance_id, context.message_id)
+
+        except OperationCancelledError as e:
+            return await self._handle_cancel(e, callbacks)
+        except asyncio.CancelledError as e:
+            return await self._handle_cancel(e, callbacks)
+        except Exception as e:
+            # Generic error: run the unified error helper so DB
+            # event + lifecycle event + parent report all fire
+            # regardless of which dispatcher picked the job up.
+            # Then defer to ``on_error`` for path-specific
+            # post-actions (e.g. WorkerPool re-raises; JobQueue
+            # would have already had its job marked FAILED by
+            # the error helper when ``job_id`` was passed).
+            await self._run_error_handler(context, e, error_handler_id)
+            if callbacks.on_error is not None:
+                try:
+                    await callbacks.on_error(
+                        ProcessingResult(success=False, error=e)
+                    )
+                except Exception as cb_err:
+                    logger.warning(
+                        f"MessageProcessingPipeline: on_error callback "
+                        f"raised (non-fatal): {cb_err}"
+                    )
+            return ProcessingResult(success=False, error=e)
+
+        # ---- Happy path return ----
+        # result.content is what the dispatcher (WorkerPool/JobQueue)
+        # will use to populate task/job completion payloads.
+        processing_result = ProcessingResult(
+            success=True,
+            result_content=result.content if result else None,
+        )
+        if callbacks.on_success is not None:
+            try:
+                await callbacks.on_success(processing_result)
+            except Exception as cb_err:
+                logger.warning(
+                    f"MessageProcessingPipeline: on_success callback "
+                    f"raised (non-fatal): {cb_err}"
+                )
+        return processing_result
+
+    # ------------------------------------------------------------------
+    # Internal helpers (the shared post-processing stages)
+    # ------------------------------------------------------------------
+
+    async def _mark_message_completed(self, message_id: str | None) -> None:
+        """Stage 4: mark the queue message COMPLETED.
+
+        Follows the JQ pattern: wrap in try/except + warn-log so a
+        failure here does not fail the message. When
+        ``queue_repository`` is ``None`` (e.g. tests), skip with a
+        debug log — matches the WorkerPool behaviour in tests that
+        omit the repo.
+        """
+        if not message_id:
+            return
+        if self._queue_repository is None:
+            logger.debug(
+                "MessageProcessingPipeline: queue_repository not wired; "
+                "skipping message complete()"
+            )
+            return
+        try:
+            await asyncio.to_thread(self._queue_repository.complete, message_id)
+        except Exception as e:
+            logger.warning(
+                f"MessageProcessingPipeline: failed to mark message "
+                f"{message_id} as completed: {e}"
+            )
+
+    async def _dispatch_completed(
+        self,
+        context: ProcessingContext,
+        result: "MessageResult | None",
+    ) -> None:
+        """Stage 5: resolve dispatch source and dispatch externally.
+
+        Mirrors the JQ implementation exactly: ``internal_report:``,
+        ``internal_error_report:``, and ``internal_agent:job_event:``
+        sources resolve to the instance's ``original_source`` from
+        instance metadata. The JQ guard (skip when the resolved
+        source is missing or still starts with ``internal_``) is
+        applied to prevent re-dispatching internal noise.
+        """
+        if self._source_dispatcher is None:
+            return
+        if result is None:
+            return
+
+        dispatch_source = context.message_source
+        is_internal_report = (
+            context.message_source is not None
+            and (
+                context.message_source.startswith("internal_report:")
+                or context.message_source.startswith("internal_error_report:")
+                or context.message_source.startswith("internal_agent:job_event:")
+            )
+        )
+        if is_internal_report:
+            try:
+                instance_meta = await asyncio.to_thread(
+                    self._manager._instance_repository.get,
+                    context.instance_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"MessageProcessingPipeline: failed to read instance "
+                    f"metadata for dispatch resolution "
+                    f"{context.instance_id[:8]}...: {e}"
+                )
+                instance_meta = None
+            if (
+                instance_meta is not None
+                and getattr(instance_meta, "instance_metadata", None) is not None
+            ):
+                dispatch_source = instance_meta.instance_metadata.get(
+                    "original_source"
+                )
+            # JQ guard: skip when the resolved source is missing or
+            # still internal. This prevents a child agent from
+            # re-dispatching internal noise back to the parent's
+            # external source.
+            if not dispatch_source or (
+                isinstance(dispatch_source, str)
+                and dispatch_source.startswith("internal_")
+            ):
+                logger.debug(
+                    f"MessageProcessingPipeline: no valid external "
+                    f"source for instance {context.instance_id[:8]}... "
+                    f"(message_source={context.message_source}); "
+                    f"skipping dispatch"
+                )
+                return
+
+        if not dispatch_source:
+            return
+
+        try:
+            await self._source_dispatcher.dispatch_completed(
+                instance_id=context.instance_id,
+                message_id=context.message_id,
+                source=dispatch_source,
+                content=result.content or "",
+                message_type="final",
+            )
+        except Exception as e:
+            logger.error(
+                f"MessageProcessingPipeline: error dispatching to external "
+                f"source: {e}",
+                exc_info=True,
+            )
+            # Don't fail the task — dispatch is best-effort.
+
+    async def _check_child_completion(
+        self,
+        instance_id: str,
+        message_id: str | None,
+    ) -> None:
+        """Stage 6: child completion check.
+
+        Best-effort: a failure here MUST NOT fail the message. The
+        child completion notification is what unblocks a parent
+        stuck in ``WAITING_CHILDREN``; a transient failure there
+        is recoverable on the next message, so we log and move on.
+        """
+        try:
+            checker = getattr(
+                self._manager, "_process_child_completion_and_notify_parent", None
+            )
+            if checker is not None:
+                await checker(instance_id, message_id)
+        except Exception as e:
+            logger.error(
+                f"MessageProcessingPipeline: child completion check "
+                f"failed for {instance_id[:8]}...: {e}",
+                exc_info=True,
+            )
+            # Don't fail the task — the message was processed successfully.
+
+    # ------------------------------------------------------------------
+    # Boundary handlers (contention / cancel)
+    # ------------------------------------------------------------------
+
+    async def _handle_contention(
+        self,
+        exc: Exception,
+        callbacks: PipelineCallbacks,
+    ) -> ProcessingResult:
+        """Delegate contention handling to ``on_contention`` or re-raise.
+
+        Covers both ``LeaseContention`` (returned from the gate when
+        another holder has the lease) and ``LeaseLostError`` (raised
+        from the gate when the lease was revoked mid-flight).
+        """
+        if callbacks.on_contention is None:
+            raise exc
+        try:
+            cb_result = await callbacks.on_contention(exc)
+        except Exception as cb_err:
+            logger.warning(
+                f"MessageProcessingPipeline: on_contention callback "
+                f"raised (re-raising original): {cb_err}"
+            )
+            raise exc
+        if cb_result is None:
+            # Callback signaled "use the default" — re-raise the
+            # original exception to preserve pre-Phase-5 behaviour.
+            raise exc
+        return cb_result
+
+    async def _handle_cancel(
+        self,
+        exc: BaseException,
+        callbacks: PipelineCallbacks,
+    ) -> ProcessingResult:
+        """Delegate cancellation handling to ``on_cancel`` or re-raise.
+
+        Covers both ``OperationCancelledError`` (token cancelled) and
+        ``asyncio.CancelledError`` (task cancelled). The callback
+        decides whether the cancellation is pause (leave
+        PROCESSING for resume) or terminate (mark CANCELLED).
+        """
+        if callbacks.on_cancel is None:
+            raise exc
+        try:
+            cb_result = await callbacks.on_cancel(exc)
+        except Exception as cb_err:
+            logger.warning(
+                f"MessageProcessingPipeline: on_cancel callback "
+                f"raised (re-raising original): {cb_err}"
+            )
+            raise exc
+        if cb_result is None:
+            raise exc
+        return cb_result
+
+    # ------------------------------------------------------------------
+    # Error handling
+    # ------------------------------------------------------------------
+
+    async def _run_error_handler(
+        self,
+        context: ProcessingContext,
+        error: Exception,
+        error_handler_id: dict[str, str] | None,
+    ) -> None:
+        """Run the unified error helper with the right id kwargs.
+
+        The WorkerPool path passes ``task_id``; the JobQueue path
+        passes ``job_id``. The pipeline accepts either via
+        ``error_handler_id`` and forwards to
+        :func:`handle_message_processing_error`. A ``None`` value
+        (ad-hoc tests) skips the id argument entirely.
+        """
+        kwargs: dict[str, Any] = {
+            "instance_manager": self._manager,
+            "instance_id": context.instance_id,
+            "error": error,
+            "message_id": context.message_id,
+        }
+        if error_handler_id:
+            kwargs.update(error_handler_id)
+        try:
+            await handle_message_processing_error(**kwargs)
+        except Exception as helper_err:
+            # The error helper is documented as best-effort and
+            # should not raise, but defend against it anyway: a
+            # secondary failure during error reporting must not
+            # mask the original error.
+            logger.warning(
+                f"MessageProcessingPipeline: handle_message_processing_error "
+                f"raised (non-fatal): {helper_err}"
+            )

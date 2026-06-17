@@ -519,8 +519,15 @@ class TestDispatchErrorHandling:
         with caplog.at_level(logging.ERROR):
             await handler.handle(job)
 
-        # Error should be logged
-        assert any("Error dispatching to external source" in record.message for record in caplog.records)
+        # Error should be logged (Phase 5: the dispatch error is now
+        # caught inside MessageProcessingPipeline._dispatch_completed
+        # and logged with the module prefix; the handler no longer
+        # sees the exception, so it doesn't need its own log line).
+        assert any(
+            "MessageProcessingPipeline" in record.message
+            and "error dispatching to external source" in record.message
+            for record in caplog.records
+        )
 
     @pytest.mark.asyncio
     async def test_dispatch_error_propagates_not_to_job_completion(

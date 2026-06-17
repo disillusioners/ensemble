@@ -3,18 +3,10 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-
-class InstanceStatus(str, Enum):
-    """Status of a daemon instance."""
-
-    IDLE = "idle"
-    RUNNING = "running"
-    WAITING = "waiting"
-    WAITING_CHILDREN = "waiting_children"
-    ERROR = "error"
-    TERMINATED = "terminated"
-    COMPLETED = "completed"
-    PAUSED = "paused"
+# Re-export the canonical InstanceStatus enum from the repositories layer.
+# This avoids a duplicate definition and ensures a single source of truth
+# (see Phase 5 of the CorrelationManager migration).
+from daemon.repositories.instance.models import InstanceStatus  # re-export for backward compat
 
 
 class InstanceCreate(BaseModel):

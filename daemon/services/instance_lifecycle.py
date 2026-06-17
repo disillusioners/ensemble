@@ -726,6 +726,19 @@ class InstanceLifecycleService:
                     getattr(meta, "waiting_for", None) and meta.waiting_for > 0
                 )
             if has_pending_children:
+                # Pause carve-out (ADR-011): the ``waiting_for=0`` write below
+                # looks contradictory (instance DOES have pending children),
+                # but it is the documented Phase 4 carve-out. The CorrelationManager
+                # is the authoritative source of pending children; the
+                # ``waiting_for`` column is a REBUILD-ONLY cache for crash
+                # recovery, never read for control flow. Children are also being
+                # paused in the cascade above, so no new completions can arrive
+                # to decrement it during the paused window. On resume, the
+                # child instances re-register with the CM, so the count is
+                # re-derived authoritatively from CM — not from the cached
+                # ``waiting_for`` value. Resetting the cache to 0 here keeps
+                # the DB consistent with the "no completions possible right
+                # now" state during the paused window.
                 repo.update(
                     target_id,
                     status=InstanceStatus.PAUSED.value,

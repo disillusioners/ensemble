@@ -20,6 +20,7 @@ class InstanceStatus(str, enum.Enum):
     """Instance status enum."""
     IDLE = "idle"
     RUNNING = "running"
+    WAITING = "waiting"  # Active but no in-flight work (e.g. awaiting next user input)
     PAUSED = "paused"
     COMPLETED = "completed"
     ERROR = "error"
@@ -27,7 +28,7 @@ class InstanceStatus(str, enum.Enum):
     QUEUED = "queued"  # Idle but has queued messages
     WAITING_CHILDREN = "waiting_children"  # Parent waiting for child completion reports
     FAILED = "failed"  # Task-level failure (distinct from instance ERROR)
-    
+
     @classmethod
     def is_valid(cls, status: str) -> bool:
         return status in cls._value2member_map_

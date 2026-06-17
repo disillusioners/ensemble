@@ -18,7 +18,8 @@ from ..base import (
     SourceConfig,
     SourceStatus,
 )
-from daemon.models import SchedulerInstanceMode, InstanceStatus
+from daemon.models import SchedulerInstanceMode
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.source.models import ExecutionStatus
 from daemon.registry import get_registry
 from daemon.constants import (

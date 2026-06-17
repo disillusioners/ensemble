@@ -807,13 +807,10 @@ Provide a concise summary:"""
                 # snapshot), trust CM. When CM is None (graceful
                 # degradation), skip Condition 1 and fall through to
                 # Condition 2 (the existing pending_count query).
-                from .correlation_manager import get_correlation_manager
-                # Reuse the ``cm`` from the earlier lookup at line ~804 above
-                # to avoid a redundant singleton fetch. (Phase 4: the second
-                # `from .correlation_manager import` is a no-op because Python
-                # caches the module; we just rebind ``cm`` to the cached value
-                # which is the same singleton as before.)
-                cm = get_correlation_manager()
+                #
+                # Note: ``cm`` is reused from the earlier lookup above
+                # (it remains in scope after the ``return`` guard at
+                # the end of the previous block).
                 if cm is not None:
                     all_children_done = cm.is_complete(instance_id)
                     if not all_children_done:

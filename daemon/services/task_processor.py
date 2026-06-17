@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING, Any
 
 from .execution_gate import LeaseContention, LeaseLostError
 from .main_loop_bridge import MainLoopBridge
+from .message_processing_pipeline import (
+    MessageProcessingPipeline,
+    PipelineCallbacks,
+    ProcessingContext,
+    ProcessingResult,
+)
 from daemon.cancellation import CancellationToken, OperationCancelledError
 from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.services.message_processing_errors import (
@@ -44,20 +50,26 @@ class BaseProcessor(ABC):
 class ProcessMessageProcessor(BaseProcessor):
     """Processor for process_message tasks.
 
-    This processor handles the actual message processing:
-    1. Updates message status to PROCESSING
-    2. Calls the message processing logic from manager
-    3. Updates message status to COMPLETED or FAILED
-    4. Creates events for state changes
+    This processor handles the actual message processing. Phase 5 of
+    the CorrelationManager migration: the six shared stages
+    (acquire-lease, mark-message-completed, dispatch, child-completion
+    check, error reporting, contention/cancellation handling) are
+    delegated to :class:`MessageProcessingPipeline`. Path-specific
+    behaviour (throttled lease-contention logging, the "task paused"
+    log message on cancellation, task-completion writes via
+    ``TaskRepository.complete_task``, error re-raise to the worker
+    pool) lives in this class and is supplied to the pipeline as
+    :class:`PipelineCallbacks`.
     """
 
     def __init__(
         self,
         instance_manager,
         task_repo: "TaskRepository",
-        event_repo: "EventRepository | None",
+        event_repo: "EventRepository | None" = None,
         message_repository=None,
         source_dispatcher=None,  # ResponseDispatcher for external routing
+        pipeline: "MessageProcessingPipeline | None" = None,
     ):
         """Initialize the message processor.
 
@@ -65,12 +77,27 @@ class ProcessMessageProcessor(BaseProcessor):
             instance_manager: InstanceManager for message processing.
             task_repo: TaskRepository for task operations.
             event_repo: Optional EventRepository for event creation.
-            message_repository: Optional MessageQueueRepository for message updates.
-            source_dispatcher: Optional ResponseDispatcher for external routing.
+                Accepted for API compatibility — the refactored
+                implementation no longer writes events directly (the
+                pipeline's error helper handles it for failure paths
+                and no event is needed for success).
+            message_repository: Optional MessageQueueRepository for
+                message updates. Wired into the pipeline as
+                ``queue_repository`` if ``pipeline`` is not provided.
+            source_dispatcher: Optional ResponseDispatcher for
+                external routing. Wired into the pipeline if
+                ``pipeline`` is not provided.
+            pipeline: Optional pre-built
+                :class:`MessageProcessingPipeline`. When ``None``
+                (default) the processor constructs one from
+                ``instance_manager.execution_gate``,
+                ``instance_manager``, ``source_dispatcher``, and
+                ``message_repository``. Test/extension code may
+                inject a custom pipeline.
         """
         self._manager = instance_manager
         self._task_repo = task_repo
-        self._event_repo = event_repo
+        self._event_repo = event_repo  # accepted for API compat; unused
         self._message_repo = message_repository
         self._source_dispatcher = source_dispatcher
         # Per-instance contention counters. When a task hits
@@ -83,91 +110,239 @@ class ProcessMessageProcessor(BaseProcessor):
         self._contention_counts: dict[str, int] = {}
         self._last_info_at: dict[str, float] = {}
 
+        if pipeline is None:
+            pipeline = MessageProcessingPipeline(
+                execution_gate=instance_manager.execution_gate,
+                manager=instance_manager,
+                source_dispatcher=source_dispatcher,
+                queue_repository=message_repository,
+            )
+        self._pipeline = pipeline
+
     async def process(self, task: "Task", cancellation_token: "CancellationToken | None" = None) -> dict[str, Any]:
         """Process a message task with full lifecycle.
-        
-        1. Get message content from repository
-        2. Call manager's _process_message_with_tracking (LangGraph execution)
-        3. On success: check child completion (may create parent task)
-        4. On failure: record error event
-        
+
+        Phase 5 refactor: pre-pipeline work (loading the message,
+        computing ``is_retry`` / ``silent`` flags) and post-pipeline
+        mapping (ProcessingResult → worker dict, error re-raise to
+        the worker pool) stay in this method. The shared stages
+        (lease acquisition, mark-completed, dispatch, child
+        completion, error reporting) are delegated to the pipeline.
+
+        The worker loop expects a dict return:
+        - ``{success: True, content, message_id}`` on success
+        - ``{success: False, requeued: True, content: None, message_id}`` on contention
+        - exception is raised on error or cancellation so the
+          worker pool can mark the task FAILED / leave it RUNNING
+          for resume, respectively.
+
         Args:
             task: The task with message_id to process.
             cancellation_token: Optional token for cancellation.
-            
+
         Returns:
             Result dictionary with processing outcome.
         """
         if not task.message_id:
             raise ValueError(f"Task {task.id} has no message_id")
-        
+
         logger.info(
             f"Processing message task {task.id}: "
             f"message={task.message_id[:8]}..., instance={task.instance_id[:8]}..."
         )
-        
-        # Get message content via repository (thread-safe)
+
+        # ---- Pre-pipeline: load message and compute flags ----
+        # Get message content via repository (thread-safe). The
+        # message holds content, source, images, and metadata;
+        # metadata drives ``resume_mode`` / ``silent`` flags.
         message = None
         if self._message_repo:
             message = await asyncio.to_thread(
                 self._message_repo.get, task.message_id
             )
-        
+
         if not message:
             # Fallback: try task repo
             message = await asyncio.to_thread(
                 self._task_repo.get_by_message, task.message_id
             )
-        
+
         if not message:
             raise ValueError(
                 f"Message {task.message_id} not found for task {task.id}"
             )
-        
+
         message_content = message.content if message else ""
         message_source = message.source if message else None
         message_images = getattr(message, 'images', None) if message else None
-        # resume_mode: if True in message metadata, treat as checkpoint resume
         message_metadata = getattr(message, 'message_metadata', None) if message else None
-        resume_mode = message_metadata.get("resume_mode", False) if message_metadata else False
-        is_retry = task.retry_count > 0 or resume_mode
+        original_resume_mode = (
+            message_metadata.get("resume_mode", False)
+            if message_metadata else False
+        )
+        # ``is_retry`` drives ``_process_message_with_tracking``'s
+        # checkpoint-resume path. The original WP code computed it as
+        # ``retry_count > 0 or resume_mode``; the pipeline maps
+        # ``ProcessingContext.resume_mode`` to the ``is_retry`` kwarg,
+        # so we pre-compute the OR here to preserve identical
+        # behaviour.
+        is_retry = task.retry_count > 0 or original_resume_mode
         # silent: if True, skip message injection during checkpoint resume
-        silent = message_metadata.get("silent", False) if message_metadata else False
-        
-        try:
-            # Execution Gate: acquire the per-instance lease before
-            # driving graph.astream. The lease is the single source of
-            # truth for "who is driving graph.astream for this
-            # instance?"; the Gate prevents the dual-dispatcher
-            # checkpoint race documented in
-            # docs/bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md.
-            #
-            # If the lease is held by another dispatcher (most likely
-            # a MessageJobHandler driving a sibling MESSAGE job), the
-            # gate returns ``LeaseContention`` and we re-queue the
-            # task in PENDING state so the next worker poll picks it
-            # up after the holder releases.
-            async def _do_process():
-                return await self._manager._process_message_with_tracking(
-                    instance_id=task.instance_id,
-                    message=message_content,
-                    message_id=task.message_id,
-                    cancellation_token=cancellation_token,
-                    is_retry=is_retry,
-                    retry_count=task.retry_count,
-                    message_source=message_source,
-                    images=message_images,
-                    silent=silent,
-                )
+        silent = (
+            message_metadata.get("silent", False)
+            if message_metadata else False
+        )
 
-            try:
-                gate_outcome = await self._manager.execution_gate.run(
-                    instance_id=task.instance_id,
-                    holder_id=f"task:{task.id}",
-                    holder_kind=LeaseHolderKind.TASK.value,
-                    work_fn=_do_process,
-                )
-            except LeaseLostError as e:
+        # ---- Build pipeline input ----
+        context = ProcessingContext(
+            instance_id=task.instance_id,
+            message_id=task.message_id,
+            message=message_content,
+            retry_count=task.retry_count,
+            message_source=message_source,
+            silent=silent,
+            images=message_images,
+            resume_mode=is_retry,
+            cancellation_token=cancellation_token,
+        )
+        callbacks = self._build_callbacks(task)
+
+        # ---- Run the pipeline ----
+        # The pipeline handles the six shared stages. Errors from
+        # stage 2 (gate.run / work_fn) propagate as exceptions;
+        # errors from stages 4-6 are caught inside the pipeline and
+        # returned as ``ProcessingResult(success=False, error=e)``
+        # (the pipeline runs ``handle_message_processing_error``
+        # for those). ``on_cancel`` is left as ``None`` so the
+        # pipeline re-raises cancellation and we can attach the
+        # WorkerPool's "task paused" log message in the outer
+        # except clause below.
+        try:
+            result = await self._pipeline.execute(
+                context=context,
+                holder_id=f"task:{task.id}",
+                holder_kind=LeaseHolderKind.TASK.value,
+                callbacks=callbacks,
+                error_handler_id={"task_id": task.id},
+            )
+        except OperationCancelledError:
+            # Cancellation requested via cancellation_token (pause /
+            # shutdown). Re-raise silently — the worker pool's
+            # ``_handle_cancellation`` distinguishes pause from
+            # shutdown via the cancellation reason.
+            raise
+        except asyncio.CancelledError:
+            # asynqio task cancellation (e.g. worker thread pool
+            # cancellation during pause). Log a friendly message
+            # so the operator can correlate the log line with the
+            # task, then re-raise.
+            logger.info(
+                f"Task {task.id} paused (instance {task.instance_id[:8]}...)"
+            )
+            raise
+        except Exception as e:
+            # Work_fn / gate error: the pipeline did NOT run
+            # ``handle_message_processing_error`` for this case (the
+            # error bypassed the pipeline's post-processing try
+            # block). Run the unified error helper so the three
+            # side-effects (DB error event, lifecycle event, parent
+            # report) still fire regardless of which stage raised.
+            logger.error(
+                f"Failed to process message task {task.id}: {e}", exc_info=True
+            )
+            await handle_message_processing_error(
+                instance_manager=self._manager,
+                instance_id=task.instance_id,
+                error=e,
+                message_id=task.message_id,
+                task_id=task.id,
+            )
+            raise
+
+        # If the pipeline returned a result with an error
+        # (post-processing error from stages 4-6), the pipeline
+        # already ran ``handle_message_processing_error``. Re-raise
+        # so the worker pool's ``_handle_task_failure`` marks the
+        # task FAILED via ``fail_task``.
+        if result.error is not None:
+            raise result.error
+
+        # Map ``ProcessingResult`` back to the dict the worker loop
+        # expects.
+        if result.should_defer:
+            # ``on_contention`` already re-queued the task with
+            # jittered backoff. Return a dict that signals
+            # "re-queued, not failed" so the worker loop can move
+            # on to the next claim.
+            return {
+                "success": False,
+                "requeued": True,
+                "content": None,
+                "message_id": task.message_id,
+            }
+
+        return {
+            "success": True,
+            "content": result.result_content,
+            "message_id": task.message_id,
+        }
+
+    def _build_callbacks(self, task: "Task") -> PipelineCallbacks:
+        """Build :class:`PipelineCallbacks` for the WorkerPool path.
+
+        ``on_success``     - marks the task COMPLETED in the task
+        repo with ``{"success": True, "message_id": ...}``. This
+        happens AFTER the pipeline's mark-message-completed,
+        dispatch, and child-completion stages, which matches the
+        observable behaviour of the post-refactor implementation
+        (the unified pipeline's success path ends with the
+        ``on_success`` callback).
+
+        ``on_error``       - no-op. The pipeline already runs
+        ``handle_message_processing_error`` (which writes the DB
+        error event, publishes the lifecycle event, and sends the
+        error report to the parent), and the worker pool marks the
+        task FAILED via ``fail_task`` when ``process()`` re-raises.
+        No additional task-specific cleanup is required.
+
+        ``on_contention``  - throttled lease-contention logging
+        (per-instance count + 60-second INFO summary) plus
+        ``requeue_task_with_backoff``. Returns
+        ``ProcessingResult(success=False, should_defer=True)`` so
+        the worker loop knows the task was re-queued. Covers both
+        ``LeaseContention`` (returned from the gate) and
+        ``LeaseLostError`` (raised by the gate) — the only
+        difference is the log level/message.
+
+        ``on_cancel`` is intentionally left as ``None``: the
+        pipeline re-raises cancellation, and ``process()``'s outer
+        try/except attaches the WorkerPool-specific "task paused"
+        log message for ``asyncio.CancelledError``.
+        """
+        task_id = task.id
+        instance_id = task.instance_id
+        message_id = task.message_id
+        task_repo = self._task_repo
+        counts = self._contention_counts
+        last_info = self._last_info_at
+
+        async def on_success(result: ProcessingResult) -> None:
+            await asyncio.to_thread(
+                task_repo.complete_task,
+                task_id,
+                {"success": True, "message_id": message_id},
+            )
+
+        async def on_error(result: ProcessingResult) -> None:
+            # The pipeline already ran ``handle_message_processing_error``
+            # before invoking this callback, and ``process()`` re-raises
+            # ``result.error`` afterwards so the worker pool can mark
+            # the task FAILED. There is no task-specific cleanup to do
+            # here.
+            return
+
+        async def on_contention(exc: Exception) -> ProcessingResult:
+            if isinstance(exc, LeaseLostError):
                 # Lease row was cleared by ``recover_stale_leases`` on
                 # another node (or otherwise revoked) while we were
                 # driving graph.astream. The in-flight work_fn was
@@ -175,19 +350,10 @@ class ProcessMessageProcessor(BaseProcessor):
                 # next attempt acquires a fresh lease.
                 logger.warning(
                     f"ProcessMessageProcessor: lease lost mid-execution "
-                    f"for task {task.id} instance={task.instance_id[:8]}... "
-                    f"— re-queuing with backoff: {e}"
+                    f"for task {task_id} instance={instance_id[:8]}... "
+                    f"— re-queuing with backoff: {exc}"
                 )
-                await asyncio.to_thread(
-                    self._task_repo.requeue_task_with_backoff, task.id
-                )
-                return {
-                    "success": False,
-                    "requeued": True,
-                    "content": None,
-                    "message_id": task.message_id,
-                }
-            if isinstance(gate_outcome, LeaseContention):
+            elif isinstance(exc, LeaseContention):
                 # Cross-dispatcher contention: a MESSAGE job is
                 # currently driving graph.astream for this instance.
                 # Back off: re-queue the task to PENDING with a
@@ -204,148 +370,40 @@ class ProcessMessageProcessor(BaseProcessor):
                 # Log at DEBUG per occurrence to avoid flooding on a
                 # hot instance; emit a throttled INFO summary at most
                 # once per minute per instance.
-                self._contention_counts[task.instance_id] = (
-                    self._contention_counts.get(task.instance_id, 0) + 1
-                )
+                counts[instance_id] = counts.get(instance_id, 0) + 1
                 logger.debug(
-                    f"ProcessMessageProcessor: lease contention for task {task.id} "
-                    f"instance={task.instance_id[:8]}... "
-                    f"(holder_id={gate_outcome.holder_id} "
-                    f"holder_kind={gate_outcome.holder_kind}) — re-queuing with backoff"
+                    f"ProcessMessageProcessor: lease contention for task {task_id} "
+                    f"instance={instance_id[:8]}... "
+                    f"(holder_id={exc.holder_id} "
+                    f"holder_kind={exc.holder_kind}) — re-queuing with backoff"
                 )
                 now = time.monotonic()
-                last = self._last_info_at.get(task.instance_id, 0.0)
+                last = last_info.get(instance_id, 0.0)
                 if now - last >= 60.0:
                     logger.info(
                         f"ProcessMessageProcessor: lease contention summary "
-                        f"instance={task.instance_id[:8]}... "
-                        f"count={self._contention_counts[task.instance_id]} "
+                        f"instance={instance_id[:8]}... "
+                        f"count={counts[instance_id]} "
                         f"in the last {int(now - last)}s"
                     )
-                    self._last_info_at[task.instance_id] = now
-                # Transition: RUNNING -> PENDING with a short
-                # jittered backoff. ``requeue_task_with_backoff`` is
-                # conditional on ``status='running'`` so a task that
-                # has been completed/cancelled in the meantime is
-                # left alone.
-                await asyncio.to_thread(
-                    self._task_repo.requeue_task_with_backoff, task.id
-                )
-                # Bail out of this task run without an exception —
-                # the next worker poll will re-claim and retry.
-                return {
-                    "success": False,
-                    "requeued": True,
-                    "content": None,
-                    "message_id": task.message_id,
-                }
-            result = gate_outcome
-            
-            # Mark message as completed so _process_child_completion_and_notify_parent can proceed
-            if self._message_repo:
-                await asyncio.to_thread(self._message_repo.complete, task.message_id)
-            
-            # Mark task as completed - THIS WAS THE BUG: complete_task was never called
-            # causing tasks to stay in RUNNING status forever, making them appear "stale"
+                    last_info[instance_id] = now
+
+            # Transition: RUNNING -> PENDING with a short jittered
+            # backoff. ``requeue_task_with_backoff`` is conditional
+            # on ``status='running'`` so a task that has been
+            # completed/cancelled in the meantime is left alone.
             await asyncio.to_thread(
-                self._task_repo.complete_task,
-                task.id,
-                {"success": True, "message_id": task.message_id}
+                task_repo.requeue_task_with_backoff, task_id
             )
-            
-            # Dispatch completed message to external sources (Telegram, Discord, etc.)
-            # For internal messages (completion reports, etc.), use the original external source
-            # Note: internal_agent:* is agent-to-agent communication, NOT a completion report
-            logger.debug(f"[DISPATCH] task completed: instance={task.instance_id}, message_source={message_source}, result={'truthy' if result else 'falsy'}")
-            dispatch_source = message_source
-            # job_event notifications are completion reports from the watcher system —
-            # they must be routed back to the original external source (e.g. Slack/Telegram)
-            is_internal_report = (
-                message_source.startswith("internal_report:")
-                or message_source.startswith("internal_error_report:")
-                or message_source.startswith("internal_agent:job_event:")
-            )
-            logger.debug(f"[DISPATCH] is_internal_report={is_internal_report}, dispatch_source={dispatch_source}")
-            if is_internal_report:
-                # Retrieve original external source from instance metadata
-                instance_meta = self._manager._instance_repository.get(task.instance_id)
-                # Use is not None check because empty dict {} is falsy
-                if instance_meta is not None and instance_meta.instance_metadata is not None:
-                    dispatch_source = instance_meta.instance_metadata.get("original_source")
-                logger.debug(f"[DISPATCH] resolved original_source: {dispatch_source}")
-                if not dispatch_source:
-                    logger.warning(
-                        f"No original_source found for instance {task.instance_id[:8]}... "
-                        f"(message_source={message_source})"
-                    )
-                    dispatch_source = None  # Skip dispatch if no original source
-            
-            logger.debug(f"[DISPATCH] attempting dispatch: source={dispatch_source}, has_dispatcher={self._source_dispatcher is not None}")
-            if not dispatch_source:
-                logger.debug("[DISPATCH] SKIPPED: dispatch_source is None or empty")
-            elif not result:
-                logger.debug("[DISPATCH] SKIPPED: result is None or empty")
-            elif self._source_dispatcher:
-                try:
-                    await self._source_dispatcher.dispatch_completed(
-                        instance_id=task.instance_id,
-                        message_id=task.message_id,
-                        source=dispatch_source,
-                        content=result.content or "",
-                        message_type="final",
-                    )
-                except Exception as e:
-                    logger.error(f"Error dispatching to external source: {e}", exc_info=True)
-                    # Don't fail the task - dispatch is best-effort
-            
-            # Check if this instance is a child that has completed all work
-            # This may create a completion report task for the parent
-            try:
-                if hasattr(self._manager, '_process_child_completion_and_notify_parent'):
-                    await self._manager._process_child_completion_and_notify_parent(
-                        task.instance_id, task.message_id
-                    )
-            except Exception as e:
-                logger.error(
-                    f"Error checking child completion for {task.instance_id[:8]}...: {e}",
-                    exc_info=True,
-                )
-                # Don't fail the task — the message was processed successfully
-            
-            return {
-                "success": True,
-                "content": result.content if result else None,
-                "message_id": task.message_id,
-            }
-            
-        except OperationCancelledError:
-            raise
-        except asyncio.CancelledError:
-            logger.info(
-                f"Task {task.id} paused (instance {task.instance_id[:8]}...)"
-            )
-            raise
-        except Exception as e:
-            logger.error(
-                f"Failed to process message task {task.id}: {e}", exc_info=True
-            )
+            # Bail out of this task run without an exception — the
+            # next worker poll will re-claim and retry.
+            return ProcessingResult(success=False, should_defer=True)
 
-            # Phase 0 of CorrelationManager migration: the WorkerPool
-            # and JobQueue paths now share the same three error
-            # side-effects (DB error event, lifecycle event publish,
-            # error report to parent) via
-            # ``handle_message_processing_error``. The WorkerPool path
-            # does NOT pass ``job_id`` — task completion is handled
-            # separately by the WorkerPool via ``TaskRepository.complete_task``.
-            await handle_message_processing_error(
-                instance_manager=self._manager,
-                instance_id=task.instance_id,
-                error=e,
-                message_id=task.message_id,
-                task_id=task.id,
-            )
-
-            raise
+        return PipelineCallbacks(
+            on_success=on_success,
+            on_error=on_error,
+            on_contention=on_contention,
+        )
 
 
 class SendReportProcessor(BaseProcessor):

@@ -129,7 +129,12 @@ class JobRecoveryService:
                     f"Job {job.job_id[:8]}... instance {job.instance_id[:8]}... not found, marking FAILED"
                 )
                 await self._fail_orphaned_job(job, "Recovered: instance no longer exists", stats)
-            elif instance.status in ("completed", "terminated", "error", "failed"):
+            elif instance.status in (
+                InstanceStatus.COMPLETED.value,
+                InstanceStatus.TERMINATED.value,
+                InstanceStatus.ERROR.value,
+                InstanceStatus.FAILED.value,
+            ):
                 # Instance is terminal — job is orphaned
                 logger.warning(
                     f"Job {job.job_id[:8]}... instance {job.instance_id[:8]}... "

@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
     from daemon.manager import InstanceManager
 
-from daemon.models.instance import InstanceStatus
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.correlation_manager import get_correlation_manager
 from daemon.services.job_queue_service import (
     DemandState,
@@ -172,11 +172,10 @@ class JobProcessor:
         # CM is None / disabled. The DB column's WRITES are retained for
         # ``rebuild_from_db()`` (ADR-011); only the READ for control flow
         # is deprecated in favor of the CM call.
-        instance_id = getattr(instance_meta, "instance_id", None) or getattr(
-            instance_meta, "id", None
-        )
+        assert hasattr(instance_meta, "instance_id"), "instance_meta must be an InstanceModel"
+        instance_id = instance_meta.instance_id
         cm = get_correlation_manager()
-        if cm is not None and instance_id is not None:
+        if cm is not None:
             wf = int(cm.get_pending_count(instance_id) or 0)
         else:
             # Defensive int conversion — handles None, strings, or any odd DB type.
@@ -402,7 +401,7 @@ class JobProcessor:
                                         proc_job.instance_id
                                     )
                                     # Instance exists — check if it's still alive or finished
-                                    if instance_meta.status == InstanceStatus.COMPLETED:
+                                    if instance_meta.status == InstanceStatus.COMPLETED.value:
                                         if await self._emit_in_progress_if_children_pending(
                                             instance_meta, proc_job, "MESSAGE", "completed"
                                         ):
@@ -428,7 +427,7 @@ class JobProcessor:
                                         )
                                         self._cleanup_in_progress_tracking(proc_job.job_id)
                                         continue
-                                    elif instance_meta.status == InstanceStatus.TERMINATED:
+                                    elif instance_meta.status == InstanceStatus.TERMINATED.value:
                                         if await self._emit_in_progress_if_children_pending(
                                             instance_meta, proc_job, "MESSAGE", "terminated"
                                         ):
@@ -445,7 +444,7 @@ class JobProcessor:
                                         )
                                         self._cleanup_in_progress_tracking(proc_job.job_id)
                                         continue
-                                    elif instance_meta.status == InstanceStatus.ERROR:
+                                    elif instance_meta.status == InstanceStatus.ERROR.value:
                                         if await self._emit_in_progress_if_children_pending(
                                             instance_meta, proc_job, "MESSAGE", "errored"
                                         ):
@@ -520,7 +519,7 @@ class JobProcessor:
                                         )
                                         if instance_meta is not None:
                                             # Instance exists in DB — check its status
-                                            if instance_meta.status == InstanceStatus.COMPLETED:
+                                            if instance_meta.status == InstanceStatus.COMPLETED.value:
                                                 if await self._emit_in_progress_if_children_pending(
                                                     instance_meta, proc_job, "TASK", "completed"
                                                 ):
@@ -558,7 +557,7 @@ class JobProcessor:
                                                 )
                                                 self._cleanup_in_progress_tracking(proc_job.job_id)
                                                 continue
-                                            elif instance_meta.status == InstanceStatus.ERROR:
+                                            elif instance_meta.status == InstanceStatus.ERROR.value:
                                                 if await self._emit_in_progress_if_children_pending(
                                                     instance_meta, proc_job, "TASK", "errored"
                                                 ):
@@ -574,7 +573,7 @@ class JobProcessor:
                                                 )
                                                 self._cleanup_in_progress_tracking(proc_job.job_id)
                                                 continue
-                                            elif instance_meta.status == InstanceStatus.PAUSED:
+                                            elif instance_meta.status == InstanceStatus.PAUSED.value:
                                                 logger.debug(
                                                     f"JobProcessor: TASK job {proc_job.job_id[:8]}... "
                                                     f"instance {proc_job.instance_id[:8]}... is paused, skipping"

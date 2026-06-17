@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from daemon.constants import SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE, SSE_TIMEOUT_S
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
-from daemon.models.instance import InstanceStatus
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.live_event_hub import LiveEventHub
 from sse_starlette.sse import EventSourceResponse
 

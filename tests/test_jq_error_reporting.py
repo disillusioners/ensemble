@@ -812,26 +812,21 @@ class TestProcessMessageProcessorStillTriggersAllSideEffects:
         message_repo.complete = MagicMock()
         manager._queue_repository = message_repo
 
-        task_repo = MagicMock()
-        event_repo = MagicMock()
-
-        processor = ProcessMessageProcessor(
-            instance_manager=manager,
-            task_repo=task_repo,
-            event_repo=event_repo,
-            message_repository=message_repo,
-            source_dispatcher=None,
-        )
-
-        # We need a cancellation_token stub and a message lookup stub
-        # The processor's flow: get message → call _process_message_with_tracking → raise
+        # Message lookup stub — the processor reads the message from
+        # ``message_repo.get`` before driving the pipeline.
         msg = MagicMock()
         msg.content = "test"
         msg.source = "api"
         msg.message_metadata = None
         message_repo.get = MagicMock(return_value=msg)
 
-        # execution_gate stub (transparent passthrough)
+        # Execution gate stub (transparent passthrough). Phase 5 of
+        # the CorrelationManager migration: the pipeline snapshots
+        # ``manager.execution_gate`` at construction time, so the
+        # gate MUST be installed BEFORE constructing the
+        # processor. (Pre-Phase-5 code did dynamic lookup of
+        # ``self._manager.execution_gate`` at call time, which
+        # masked this ordering issue.)
         from daemon.services.execution_gate import (
             ExecutionGateService, LeaseContention, LeaseLostError,
         )
@@ -842,6 +837,17 @@ class TestProcessMessageProcessorStillTriggersAllSideEffects:
         gate = MagicMock(spec=ExecutionGateService)
         gate.run = AsyncMock(side_effect=_passthrough)
         manager.execution_gate = gate
+
+        task_repo = MagicMock()
+        event_repo = MagicMock()
+
+        processor = ProcessMessageProcessor(
+            instance_manager=manager,
+            task_repo=task_repo,
+            event_repo=event_repo,
+            message_repository=message_repo,
+            source_dispatcher=None,
+        )
 
         with pytest.raises(ValueError, match="worker pool boom"):
             await processor.process(task)

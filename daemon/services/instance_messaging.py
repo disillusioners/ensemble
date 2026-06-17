@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -116,6 +116,20 @@ def _compute_message_content_hash(msg: dict) -> str:
     # Normalize: sort keys and remove None values for consistent hashing
     content_str = json.dumps(content_parts, sort_keys=True, default=str)
     return hashlib.md5(content_str.encode()).hexdigest()[:16]
+
+
+class _PreparedEnqueueContext(NamedTuple):
+    """Result of `_prepare_enqueued_message` shared prelude.
+
+    Carries the values callers need to perform their path-specific dispatch
+    (WorkerPool Task row + notify vs JobQueueService enqueue).
+    """
+    message_id: str
+    msg_type: str
+    status_changed_to_running: bool
+    is_idle_to_running: bool
+    instance_agent_id: str | None
+    previous_status: str | None
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -693,34 +707,51 @@ class InstanceMessagingService:
                 )
         return MessageResult(content="")
 
-    async def enqueue_message(
-        self, 
-        instance_id: str, 
-        message: str, 
-        source: str = "api",
-        priority: int = 1,
-        images: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> "AsyncMessageResult":
-        """Enqueue a message using the worker pool (DB-backed) path.
-        
+    def _prepare_enqueued_message(
+        self,
+        instance_id: str,
+        message: str,
+        source: str,
+        priority: int,
+        images: list[str] | None,
+        metadata: dict[str, Any] | None,
+        *,
+        create_task_row: bool = False,
+        path_label: str = "",
+    ) -> _PreparedEnqueueContext:
+        """Shared prelude for `enqueue_message` and `enqueue_message_via_jq`.
+
+        Performs the work both paths do identically before diverging into
+        path-specific dispatch (WorkerPool Task + notify vs JobQueue enqueue):
+
+        - Reject messages during shutdown.
+        - Resolve ``msg_type`` from the ``source`` prefix and mint a UUID.
+        - Insert the ``MessageQueue`` row.
+        - Optionally insert a ``Task`` row in the same transaction (atomicity
+          is preserved — see ``create_task_row``).
+        - Auto-resume ``IDLE`` / ``WAITING_CHILDREN`` / ``COMPLETED`` instances
+          to ``RUNNING`` and bump ``last_activity_at`` / ``version``.
+        - Append a ``MESSAGE_RECEIVED`` event for event-sourced features.
+        - Commit the session.
+
         Args:
-            instance_id: The ID of the target instance.
-            message: The message content.
-            source: Source identifier (e.g., "api", "web", "telegram:user:123").
-            priority: Message priority (0=system, 1=user).
-            images: Optional list of base64-encoded images for vision messages.
-            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-        
+            create_task_row: When ``True``, also insert a ``Task`` row for
+                WorkerPool dispatch within the same transaction as the
+                ``MessageQueue`` row, so the two either both commit or both
+                roll back together.
+            path_label: Optional identifier appended to the "Reactivating
+                completed instance" log message (e.g., ``"WorkerPool"``).
+                Empty string omits the suffix.
+
         Returns:
-            AsyncMessageResult with message_id and status.
+            ``_PreparedEnqueueContext`` carrying the values callers need to
+            proceed with their path-specific dispatch (SSE emit, title
+            generation, and either Task notification or JobQueue enqueue).
         """
-        from ..manager import AsyncMessageResult
-        
         # Reject new messages during shutdown
         if self._cancellation_service.is_shutting_down:
             raise RuntimeError("Manager is shutting down, cannot accept new messages")
-        
+
         # Determine message type based on source
         if source.startswith("internal_report:"):
             msg_type = MessageType.COMPLETION_REPORT.value
@@ -738,11 +769,16 @@ class InstanceMessagingService:
             msg_type = MessageType.HUMAN.value
             # User messages use UUID IDs
             message_id = str(uuid.uuid4())
-        
+
         # Log image count if images are provided
         if images:
             logger.info(f"Processing message with {len(images)} image(s)")
-        
+
+        status_changed_to_running = False
+        is_idle_to_running = False
+        instance_agent_id: str | None = None
+        previous_status: str | None = None
+
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
             db_message = MessageQueue(
@@ -758,45 +794,51 @@ class InstanceMessagingService:
                 enqueued_at=datetime.now(timezone.utc),
             )
             session.add(db_message)
-            
-            # 2. Create a task for the worker pool to pick up
-            task = Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id=instance_id,
-                message_id=message_id,
-                status=TaskStatus.PENDING.value,
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(task)
-            
-            # NOTE: PAUSED→RUNNING transition is handled explicitly by user action.
-            # 3. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED (auto-resume)
+
+            # 2. (WorkerPool only) Create a task for the worker pool to pick up.
+            #    Inserted in the same transaction as MessageQueue so the two
+            #    either both commit or both roll back together.
+            if create_task_row:
+                task = Task(
+                    task_type=TaskType.PROCESS_MESSAGE.value,
+                    instance_id=instance_id,
+                    message_id=message_id,
+                    status=TaskStatus.PENDING.value,
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(task)
+
+            # 3. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED.
             #    COMPLETED instances are reactivated on new messages (conversation continues).
-            status_changed_to_running = False
-            is_idle_to_running = False
-            instance_agent_id = None
+            #    PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN/COMPLETED
+            #    transition; PAUSED stays PAUSED until explicitly unpaused.
             instance = session.get(Instance, instance_id)
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
-                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN/COMPLETED transition
-                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value, InstanceStatus.COMPLETED.value):
+                if instance.status in (
+                    InstanceStatus.IDLE.value,
+                    InstanceStatus.WAITING_CHILDREN.value,
+                    InstanceStatus.COMPLETED.value,
+                ):
                     instance.status = InstanceStatus.RUNNING.value
                     status_changed_to_running = True
                     is_idle_to_running = previous_status == InstanceStatus.IDLE.value
                     if previous_status == InstanceStatus.COMPLETED.value:
+                        suffix = f" ({path_label})" if path_label else ""
                         logger.info(
-                            f"Reactivating completed instance {instance_id[:8]}... for new message (WorkerPool)"
+                            f"Reactivating completed instance {instance_id[:8]}... "
+                            f"for new message{suffix}"
                         )
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
             else:
                 logger.warning(
-                    f"Instance {instance_id} not found in database during enqueue_message. "
-                    f"This may indicate the instance was not properly persisted."
+                    f"Instance {instance_id} not found in database during message "
+                    f"enqueue. This may indicate the instance was not properly persisted."
                 )
-            
-            # 4. Create event for the new message
+
+            # 4. Create MESSAGE_RECEIVED event for event-sourced features
             role = "system" if msg_type == MessageType.SYSTEM.value else "user"
             message_data = {
                 "message_id": message_id,
@@ -813,29 +855,75 @@ class InstanceMessagingService:
                 created_at=datetime.now(timezone.utc),
             )
             session.add(event)
-            
+
             session.commit()
-        
+
+        return _PreparedEnqueueContext(
+            message_id=message_id,
+            msg_type=msg_type,
+            status_changed_to_running=status_changed_to_running,
+            is_idle_to_running=is_idle_to_running,
+            instance_agent_id=instance_agent_id,
+            previous_status=previous_status,
+        )
+
+    async def enqueue_message(
+        self,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+        images: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> "AsyncMessageResult":
+        """Enqueue a message using the worker pool (DB-backed) path.
+
+        Args:
+            instance_id: The ID of the target instance.
+            message: The message content.
+            source: Source identifier (e.g., "api", "web", "telegram:user:123").
+            priority: Message priority (0=system, 1=user).
+            images: Optional list of base64-encoded images for vision messages.
+            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
+
+        Returns:
+            AsyncMessageResult with message_id and status.
+        """
+        from ..manager import AsyncMessageResult
+
+        ctx = self._prepare_enqueued_message(
+            instance_id=instance_id,
+            message=message,
+            source=source,
+            priority=priority,
+            images=images,
+            metadata=metadata,
+            create_task_row=True,
+            path_label="WorkerPool",
+        )
+
         # Emit status_change event if status was changed to running
-        if status_changed_to_running:
-            await self._manager._live_hub.stream_status_change(instance_id, InstanceStatus.RUNNING.value, agent_id=instance_agent_id)
-        
+        if ctx.status_changed_to_running:
+            await self._manager._live_hub.stream_status_change(
+                instance_id, InstanceStatus.RUNNING.value, agent_id=ctx.instance_agent_id
+            )
+
         # Trigger title generation for first message (fire-and-forget)
         # This fires when instance transitions from IDLE -> RUNNING with any message type
         self._maybe_trigger_title_generation(
-            instance_id, message, is_idle_to_running
+            instance_id, message, ctx.is_idle_to_running
         )
-        
+
         # After commit — task is now visible in DB
         if self._manager._worker_pool is not None:
             self._manager._worker_pool.notify_work()
-        
-        logger.debug(f"Enqueued message {message_id} for instance {instance_id}")
-        
+
+        logger.debug(f"Enqueued message {ctx.message_id} for instance {instance_id}")
+
         return AsyncMessageResult(
-            message_id=message_id,
+            message_id=ctx.message_id,
             instance_id=instance_id,
-            status="queued"
+            status="queued",
         )
 
     async def _process_message_with_tracking(
@@ -1342,7 +1430,7 @@ class InstanceMessagingService:
         Creates MessageQueue entry + all side effects (same as enqueue_message),
         then enqueues a MESSAGE-type job via JobQueueService.
         Does NOT create Task or notify WorkerPool.
-        
+
         Args:
             instance_id: The ID of the target instance.
             message: The message content.
@@ -1353,108 +1441,30 @@ class InstanceMessagingService:
         """
         from ..manager import AsyncMessageResult
 
-        # Reject new messages during shutdown
-        if self._cancellation_service.is_shutting_down:
-            raise RuntimeError("Manager is shutting down, cannot accept new messages")
-
-        # Determine message type based on source (exact same logic as enqueue_message)
-        if source.startswith("internal_report:"):
-            msg_type = MessageType.COMPLETION_REPORT.value
-            message_id = str(uuid.uuid4())
-        elif source.startswith("internal_error_report:"):
-            msg_type = MessageType.ERROR_REPORT.value
-            message_id = str(uuid.uuid4())
-        elif source.startswith("internal_agent:"):
-            msg_type = MessageType.AGENT.value
-            message_id = str(uuid.uuid4())
-        else:
-            msg_type = MessageType.HUMAN.value
-            message_id = str(uuid.uuid4())
-
-        # Log image count if images are provided
-        if images:
-            logger.info(f"Processing message with {len(images)} image(s)")
-
-        with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
-            # 1. Insert the message
-            db_message = MessageQueue(
-                message_id=message_id,
-                instance_id=instance_id,
-                content=message,
-                source=source,
-                type=msg_type,
-                status=MessageStatus.READY.value,
-                priority=priority,
-                images=images,
-                message_metadata=metadata or {},
-                enqueued_at=datetime.now(timezone.utc),
-            )
-            session.add(db_message)
-
-            # NOTE: No Task creation here — JobQueue handles job tracking instead.
-
-            # 2. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED → RUNNING
-            #    DO NOT auto-resume PAUSED instances - jobs will sit in PENDING
-            #    until explicitly unpaused by the user.
-            #    COMPLETED instances are reactivated on new messages (conversation continues).
-            #    Also update last_activity_at and increment version
-            status_changed_to_running = False
-            is_idle_to_running = False
-            instance_agent_id = None
-            instance = session.get(Instance, instance_id)
-            if instance:
-                instance_agent_id = instance.agent_id
-                previous_status = instance.status
-                # PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN/COMPLETED transition
-                if instance.status in (InstanceStatus.IDLE.value, InstanceStatus.WAITING_CHILDREN.value, InstanceStatus.COMPLETED.value):
-                    instance.status = InstanceStatus.RUNNING.value
-                    status_changed_to_running = True
-                    is_idle_to_running = previous_status == InstanceStatus.IDLE.value
-                    if previous_status == InstanceStatus.COMPLETED.value:
-                        logger.info(
-                            f"Reactivating completed instance {instance_id[:8]}... for new message"
-                        )
-                instance.last_activity_at = datetime.now(timezone.utc)
-                instance.version = (instance.version or 1) + 1
-            else:
-                logger.warning(
-                    f"Instance {instance_id} not found in database during enqueue_message_via_jq. "
-                    f"This may indicate the instance was not properly persisted."
-                )
-
-            # 3. Create MESSAGE_RECEIVED event (event-sourced features)
-            role = "system" if msg_type == MessageType.SYSTEM.value else "user"
-            message_data = {
-                "message_id": message_id,
-                "role": role,
-                "content": message,
-                "source": source,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            event = Event(
-                instance_id=instance_id,
-                message_id=message_id,
-                kind=EventKind.MESSAGE_RECEIVED.value,
-                data=json.dumps(message_data),
-                created_at=datetime.now(timezone.utc),
-            )
-            session.add(event)
-
-            session.commit()
-
-        # 4. Emit SSE status_change if instance transitioned to RUNNING
-        if status_changed_to_running:
-            await self._manager._live_hub.stream_status_change(
-                instance_id, InstanceStatus.RUNNING.value, agent_id=instance_agent_id
-            )
-
-        # 5. Trigger title generation for first message (fire-and-forget)
-        # This fires when instance transitions from IDLE -> RUNNING with any message type
-        self._maybe_trigger_title_generation(
-            instance_id, message, is_idle_to_running
+        ctx = self._prepare_enqueued_message(
+            instance_id=instance_id,
+            message=message,
+            source=source,
+            priority=priority,
+            images=images,
+            metadata=metadata,
+            create_task_row=False,
+            path_label="",
         )
 
-        # 6. Look up instance metadata for JobQueue enqueue
+        # Emit SSE status_change if instance transitioned to RUNNING
+        if ctx.status_changed_to_running:
+            await self._manager._live_hub.stream_status_change(
+                instance_id, InstanceStatus.RUNNING.value, agent_id=ctx.instance_agent_id
+            )
+
+        # Trigger title generation for first message (fire-and-forget)
+        # This fires when instance transitions from IDLE -> RUNNING with any message type
+        self._maybe_trigger_title_generation(
+            instance_id, message, ctx.is_idle_to_running
+        )
+
+        # Look up instance metadata for JobQueue enqueue
         #    Use instance repository for agent_id and project_id lookup.
         instance_meta = self._manager._instance_repository.get(instance_id)
         if instance_meta is None:
@@ -1463,7 +1473,7 @@ class InstanceMessagingService:
         agent_id = instance_meta.agent_id
         project_id = instance_meta.project_id
 
-        # 7. Enqueue as MESSAGE job via JobQueueService
+        # Enqueue as MESSAGE job via JobQueueService
         #    instance_id goes to JobItem.instance_id column (not metadata)
         #    Pass resume_mode from caller metadata
         resume_mode = metadata.get("resume_mode") if metadata else None
@@ -1476,7 +1486,7 @@ class InstanceMessagingService:
             job_type="message",
             instance_id=instance_id,  # stored in JobItem.instance_id column
             metadata={
-                "message_id": message_id,
+                "message_id": ctx.message_id,
                 "source": source,
                 "images": images,
                 "resume_mode": resume_mode,
@@ -1484,7 +1494,7 @@ class InstanceMessagingService:
         )
 
         # [TRACE] Log job enqueue
-        instance_status = previous_status if instance else "unknown"
+        instance_status = ctx.previous_status if ctx.previous_status is not None else "unknown"
         logger.info(
             f"[TRACE] enqueue_message_via_jq: instance={instance_id[:8]} status={instance_status} "
             f"job_id={job.job_id[:8]}... job_type=message"
@@ -1493,7 +1503,7 @@ class InstanceMessagingService:
         logger.debug(f"[TRACE] enqueue_message_via_jq: job {job.job_id[:8]}... dispatched via DispatchEventBus")
 
         return AsyncMessageResult(
-            message_id=message_id,
+            message_id=ctx.message_id,
             instance_id=instance_id,
             status="queued",
             job_id=job.job_id,

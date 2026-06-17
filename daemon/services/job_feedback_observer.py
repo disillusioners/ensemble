@@ -335,7 +335,7 @@ class JobFeedbackObserver:
             return
 
         # Skip "terminated" — already handled by terminate_instance()
-        if status == "terminated":
+        if status == InstanceStatus.TERMINATED.value:
             logger.debug(
                 f"Skipping terminated event for instance {instance_id[:8]}... "
                 "(handled by terminate_instance)"
@@ -358,7 +358,7 @@ class JobFeedbackObserver:
             return
 
         # Phase 2: decide between in_progress and terminal based on CM state.
-        if status in ("completed", "error"):
+        if status in (InstanceStatus.COMPLETED.value, InstanceStatus.ERROR.value):
             cm = get_correlation_manager()
             if cm is not None:
                 # CM is active and authoritative.
@@ -490,7 +490,7 @@ class JobFeedbackObserver:
         """
         now = datetime.now(timezone.utc).isoformat()
         try:
-            if terminal_status == "completed":
+            if terminal_status == InstanceStatus.COMPLETED.value:
                 result_summary = (
                     await self._instance_manager._get_last_assistant_message_raw(
                         instance_id
@@ -532,7 +532,7 @@ class JobFeedbackObserver:
                 await self._job_queue_service.notify_watchers(
                     job.job_id, "completed"
                 )
-            elif terminal_status == "error":
+            elif terminal_status == InstanceStatus.ERROR.value:
                 error_message = error if error else "Unknown error"
                 # C1 fix (TOCTOU race introduced by W1): same re-check as the
                 # completed branch. New pending correlations may have been
@@ -692,9 +692,9 @@ class JobFeedbackObserver:
             error: Optional error message for ``"error"`` transitions.
         """
         # Map terminal_status → instance status.
-        if terminal_status == "completed":
+        if terminal_status == InstanceStatus.COMPLETED.value:
             new_status = InstanceStatus.COMPLETED.value
-        elif terminal_status == "error":
+        elif terminal_status == InstanceStatus.ERROR.value:
             new_status = InstanceStatus.ERROR.value
         else:
             logger.warning(
@@ -774,7 +774,7 @@ class JobFeedbackObserver:
         try:
             from .completion_registry import get_completion_registry
 
-            if terminal_status == "error":
+            if terminal_status == InstanceStatus.ERROR.value:
                 error_message = error if error else "Unknown error"
                 get_completion_registry().complete(
                     instance_id,
