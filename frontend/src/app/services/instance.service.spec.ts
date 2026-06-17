@@ -2,7 +2,7 @@ import { signal } from '@angular/core';
 import { Observable, of, throwError, firstValueFrom } from 'rxjs';
 import { InstanceInfo, InstanceStatus } from '../models';
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 10;
 
 // Mock API response type
 interface MockInstanceListResponse {
@@ -307,7 +307,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances('project-123');
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'project-123', true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, 'project-123', true);
     });
 
     it('should handle API errors gracefully', async () => {
@@ -413,7 +413,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances('my-project');
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'my-project', true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, 'my-project', true);
     });
 
     it('should not pass projectId when undefined', async () => {
@@ -423,7 +423,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances();
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, undefined, true);
     });
   });
 
@@ -490,7 +490,7 @@ describe('InstanceService', () => {
 
       jest.advanceTimersByTime(61000);
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, 'test-project', true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, 'test-project', true);
     });
 
     it('should stop existing polling before starting new', () => {
@@ -780,7 +780,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances();
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, undefined, true);
     });
 
     it('should pass excludeKb=false to API when showKb is true', async () => {
@@ -791,7 +791,7 @@ describe('InstanceService', () => {
 
       await service.loadInstances();
 
-      expect(mockApi.listInstances).toHaveBeenCalledWith(100, 0, undefined, false);
+      expect(mockApi.listInstances).toHaveBeenCalledWith(PAGE_SIZE, 0, undefined, false);
     });
 
     it('should respect showKb state changes between calls', async () => {
@@ -801,15 +801,15 @@ describe('InstanceService', () => {
 
       service.showKb.set(false);
       await service.loadInstances();
-      expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(PAGE_SIZE, 0, undefined, true);
 
       service.showKb.set(true);
       await service.loadInstances();
-      expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, false);
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(PAGE_SIZE, 0, undefined, false);
 
       service.showKb.set(false);
       await service.loadInstances();
-      expect(mockApi.listInstances).toHaveBeenLastCalledWith(100, 0, undefined, true);
+      expect(mockApi.listInstances).toHaveBeenLastCalledWith(PAGE_SIZE, 0, undefined, true);
     });
   });
 

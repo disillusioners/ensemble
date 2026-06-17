@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from sqlmodel import SQLModel, create_engine
 
 from daemon.repositories.instance.repository import (
+    MAX_DESCENDANTS_PER_PAGE,
     SQLModelInstanceRepository,
     _MAX_TRAVERSAL_DEPTH,
 )
@@ -147,22 +148,29 @@ class TestListIncludeDescendantsBFS:
             "root-2", "child-2a",
         }
 
-    def test_empty_result_no_roots(self, repo):
-        """No root instances → returns ([], 0)."""
-        # Only children, no roots
-        _make_instance(repo, "root-a")
-        _make_instance(repo, "child", parent_id="root-a")
+    def test_empty_database_no_instances(self, repo):
+        """Completely empty database → returns ([], 0)."""
+        instances, total = repo.list(include_descendants=True)
+        assert instances == []
+        assert total == 0
 
-        # Now delete the root to leave only an orphan child
-        # Actually, easier to start with a tree, then test with no roots
-        # by directly creating just children of a non-existent parent.
-        # Use a fresh repo with no data.
-        from sqlmodel import SQLModel, create_engine
-        empty_engine = create_engine("sqlite:///:memory:")
-        SQLModel.metadata.create_all(empty_engine)
-        empty_repo = SQLModelInstanceRepository(empty_engine)
+    def test_no_root_instances_only_orphans(self, repo):
+        """Instances exist but none are roots (all have non-null parent_id) → ([], 0).
 
-        instances, total = empty_repo.list(include_descendants=True)
+        This is the scenario the previous ``test_empty_result_no_roots`` claimed
+        to cover but actually didn't (it used a fresh empty DB). To create
+        non-root instances without a real parent we point ``parent_id`` at a
+        non-existent ID — there's no FK constraint between
+        ``InstanceHierarchy.parent_id`` and ``Instance.instance_id``, so the
+        rows commit cleanly. The root query (parent_id IS NULL OR empty)
+        matches nothing, and BFS never runs.
+        """
+        # Three orphans, all with parent_id pointing at non-existent parents.
+        _make_instance(repo, "orphan-1", parent_id="ghost-parent-a")
+        _make_instance(repo, "orphan-2", parent_id="ghost-parent-b")
+        _make_instance(repo, "orphan-3", parent_id="ghost-parent-c")
+
+        instances, total = repo.list(include_descendants=True)
         assert instances == []
         assert total == 0
 
@@ -246,6 +254,106 @@ class TestListIncludeDescendantsDepthLimit:
         assert any("depth limit" in t for t in warning_texts), (
             f"Expected depth-limit warning, got: {warning_texts}"
         )
+
+
+class TestExcludeKBTraversesThroughKBParents:
+    """C-1 regression: BFS must traverse THROUGH KB agents to find their
+    non-KB children. Stripping KB agents mid-traversal would orphan any
+    non-KB grandchildren whose KB parent's ID never enters the next level.
+    """
+
+    def test_kb_parent_with_non_kb_child_grandchild_kept(self, repo):
+        """root (coder) → kb_child (experiencer) → non_kb_grandchild (coder).
+
+        With ``exclude_kb=True``:
+        - The KB child should be EXCLUDED from the final list.
+        - The non-KB grandchild must STILL be returned (BFS traversed
+          through the KB parent to reach it).
+        - The total count is 1 (only the root counts).
+        """
+        _make_instance(repo, "root", agent_id="coder")
+        _make_instance(repo, "kb_child", parent_id="root", agent_id="experiencer")
+        _make_instance(
+            repo, "non_kb_grandchild", parent_id="kb_child", agent_id="coder"
+        )
+
+        instances, total = repo.list(include_descendants=True, exclude_kb=True)
+
+        assert total == 1
+        returned_ids = {i.instance_id for i in instances}
+        # Root present, non-KB grandchild present, KB child stripped.
+        assert returned_ids == {"root", "non_kb_grandchild"}
+        assert "kb_child" not in returned_ids
+
+    def test_kb_parent_with_non_kb_child_exclude_kb_false_keeps_all(self, repo):
+        """Same tree, but with ``exclude_kb=False``: all three are returned."""
+        _make_instance(repo, "root", agent_id="coder")
+        _make_instance(repo, "kb_child", parent_id="root", agent_id="experiencer")
+        _make_instance(
+            repo, "non_kb_grandchild", parent_id="kb_child", agent_id="coder"
+        )
+
+        instances, total = repo.list(include_descendants=True, exclude_kb=False)
+
+        assert total == 1
+        returned_ids = {i.instance_id for i in instances}
+        assert returned_ids == {"root", "kb_child", "non_kb_grandchild"}
+
+
+class TestDescendantCap:
+    """Tests for the MAX_DESCENDANTS_PER_PAGE safety cap (C-4)."""
+
+    def test_descendant_cap_truncates_with_warning(self, repo, caplog, monkeypatch):
+        """A tree that exceeds the cap is truncated and a warning is logged.
+
+        We monkeypatch the cap down to 3 to keep the test fast and the
+        fixture small. The tree is a chain so each BFS batch adds exactly
+        one node — the loop fires the cap the moment the count hits the
+        limit, so the final list is exactly ``MAX_DESCENDANTS_PER_PAGE``.
+
+            root → child-1 → child-2 → child-3 → child-4
+
+        BFS expansion: root (1) → child-1 (2) → child-2 (3)
+        → cap fires, loop breaks. child-3 and child-4 are never loaded.
+        """
+        monkeypatch.setattr(
+            "daemon.repositories.instance.repository.MAX_DESCENDANTS_PER_PAGE", 3
+        )
+
+        _make_instance(repo, "root")
+        _make_instance(repo, "child-1", parent_id="root")
+        _make_instance(repo, "child-2", parent_id="child-1")
+        # These should never be loaded because the cap fires first.
+        _make_instance(repo, "child-3", parent_id="child-2")
+        _make_instance(repo, "child-4", parent_id="child-3")
+
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.repositories.instance.repository"
+        ):
+            instances, total = repo.list(include_descendants=True)
+
+        assert total == 1
+        assert len(instances) == 3
+        # Root and the first two chain links are present; the rest are dropped.
+        returned_ids = {i.instance_id for i in instances}
+        assert returned_ids == {"root", "child-1", "child-2"}
+        assert "child-3" not in returned_ids
+        assert "child-4" not in returned_ids
+
+        # Warning must mention the descendant limit.
+        warning_texts = [
+            rec.getMessage() for rec in caplog.records if rec.levelno == logging.WARNING
+        ]
+        assert any("Descendant limit" in t for t in warning_texts), (
+            f"Expected descendant-cap warning, got: {warning_texts}"
+        )
+
+    def test_descendant_cap_default_constant_value(self):
+        """Sanity check: the documented default is 500.
+
+        Guards against accidental value changes in a refactor.
+        """
+        assert MAX_DESCENDANTS_PER_PAGE == 500
 
 
 class TestListFlatPaginationUnchanged:

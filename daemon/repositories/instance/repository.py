@@ -28,6 +28,11 @@ KB_AGENT_IDS = frozenset(["experiencer", "kb-importer"])
 # Safety limit for tree traversal — prevents infinite loops from circular references
 _MAX_TRAVERSAL_DEPTH = 256
 
+# Safety cap on descendants loaded per page during root-based pagination.
+# Prevents pathological trees (huge fan-out, accidental cycles) from blowing
+# up response size / DB latency. Triggers a truncation warning when hit.
+MAX_DESCENDANTS_PER_PAGE = 500
+
 
 def get_agent_name(agent_dir: str) -> str:
     """Derive agent name from agent directory path.
@@ -68,7 +73,21 @@ class SQLModelInstanceRepository:
         return instance
 
     def _enrich_instances(self, db_session: SQLModelSession, instances: list[Instance]) -> list[Instance]:
-        """Load children for multiple instances."""
+        """Load children for multiple instances.
+
+        .. note::
+            ``inst.children`` is loaded from the ``instance_hierarchy`` working
+            set (entries are removed on child completion). The BFS traversal in
+            :meth:`list` (include_descendants=True), by contrast, uses
+            ``instances.parent_id`` — the permanent record that survives
+            completion. This asymmetry is **intentional**:
+
+            * ``children[]`` drives working-set operations (cascade
+              pause/resume) where completed children are no longer relevant.
+            * The frontend rebuilds the visible tree from the flat result list
+              using ``parent_id`` relationships, so completed descendants are
+              still surfaced even when they're absent from ``children[]``.
+        """
         with db_session.no_autoflush:
             for inst in instances:
                 inst.children = self._load_children(db_session, inst.instance_id)
@@ -315,17 +334,33 @@ class SQLModelInstanceRepository:
         A ``seen_ids`` set guards against duplicates in case of circular
         ``parent_id`` references.
 
+        Filtering semantics for ``include_descendants=True``:
+
+        * ``status`` is applied to the **root query only**. Once a root is
+          selected for the current page, ALL of its descendants are loaded —
+          regardless of status. This keeps descendant sets complete.
+        * ``project_id`` is applied to both the root query and the BFS child
+          queries (defense-in-depth; descendants should inherit project from
+          their root, but the BFS filter prevents leakage in case of corrupt
+          ``parent_id`` references).
+        * ``exclude_kb`` is applied to the **root query** for pagination and
+          then **post-filtered** in Python on the assembled descendant list.
+          The BFS itself does NOT exclude KB agents mid-traversal — that would
+          orphan non-KB grandchildren whose KB parent's ID never enters
+          ``next_level_ids``. KB agents are still traversed *through* (so their
+          non-KB children are reachable) and then stripped from the final
+          result.
+
         Args:
-            status: Optional status filter applied to BOTH roots and descendants.
-            project_id: Optional project ID filter applied to BOTH roots and
-                descendants (defense-in-depth; descendants should inherit project
-                from their root, but applying the filter prevents leakage in case
-                of corrupt parent_id references).
+            status: Optional status filter. For ``include_descendants=True``,
+                applied to root selection only; descendants are returned
+                regardless of status. For flat pagination, applied to all rows.
+            project_id: Optional project ID filter (applied to both roots and
+                descendants when ``include_descendants=True``).
             limit: Maximum number of root instances to return.
             offset: Number of root instances to skip.
             exclude_kb: Exclude KB-related instances (experiencer, kb-importer)
-                when True (default: True). Applied to BOTH root counting and
-                descendant loading.
+                when True (default: True).
             include_descendants: When False (default), return a flat paginated
                 list of all matching instances. When True, paginate by root and
                 BFS-load all descendants of each root in the current page.
@@ -401,6 +436,16 @@ class SQLModelInstanceRepository:
             #    instance_hierarchy table.
             #    Each depth level is a single query: WHERE parent_id IN (...).
             #    ``seen_ids`` guards against duplicates from circular parent_id refs.
+            #
+            #    IMPORTANT: We do NOT apply exclude_kb or status to the BFS
+            #    child query. Applying exclude_kb mid-traversal would orphan
+            #    non-KB grandchildren (a KB parent's ID would never enter
+            #    next_level_ids, so its children would never be queried). We
+            #    still traverse through KB agents to find their non-KB
+            #    descendants, then strip KB agents in a post-filter below.
+            #    Similarly, the status filter only governs WHICH roots are
+            #    paginated; once a root is in the page, all of its descendants
+            #    are loaded regardless of status.
             all_instances: list[Instance] = list(roots)
             seen_ids: set[str] = {r.instance_id for r in roots}
             current_level_ids: list[str] = [r.instance_id for r in roots]
@@ -410,15 +455,13 @@ class SQLModelInstanceRepository:
                 if not current_level_ids:
                     break
 
+                # Only project_id is applied mid-traversal (defense-in-depth).
+                # exclude_kb and status are handled outside the loop.
                 child_stmt = select(Instance).where(
                     col(Instance.parent_id).in_(current_level_ids)
                 )
-                if status:
-                    child_stmt = child_stmt.where(Instance.status == status)
                 if project_id is not None:
                     child_stmt = child_stmt.where(Instance.project_id == project_id)
-                if exclude_kb:
-                    child_stmt = child_stmt.where(Instance.agent_id.not_in(KB_AGENT_IDS))
 
                 children = list(db_session.exec(child_stmt))
                 if not children:
@@ -441,6 +484,18 @@ class SQLModelInstanceRepository:
                     # All children were duplicates — no new IDs to traverse.
                     break
 
+                # Safety cap: pathological trees (huge fan-out, accidental
+                # cycles, very deep hierarchies) must not blow up response
+                # size or DB latency. Truncate with a warning.
+                if len(all_instances) >= MAX_DESCENDANTS_PER_PAGE:
+                    logger.warning(
+                        "Descendant limit (%d) reached for roots at offset %d; "
+                        "truncating tree load",
+                        MAX_DESCENDANTS_PER_PAGE,
+                        offset,
+                    )
+                    break
+
                 current_level_ids = next_level_ids
             else:
                 # Loop exhausted ``_MAX_TRAVERSAL_DEPTH`` iterations without
@@ -455,6 +510,16 @@ class SQLModelInstanceRepository:
                     _MAX_TRAVERSAL_DEPTH,
                     len(current_level_ids),
                 )
+
+            # Post-filter: strip KB agents from the assembled descendant list.
+            # Roots were already KB-filtered by the root query above; this
+            # only affects descendants. We do NOT post-filter by status —
+            # all descendants of the selected roots are returned regardless
+            # of their status (see docstring).
+            if exclude_kb:
+                all_instances = [
+                    inst for inst in all_instances if inst.agent_id not in KB_AGENT_IDS
+                ]
 
             return self._enrich_instances(db_session, all_instances), total
 
