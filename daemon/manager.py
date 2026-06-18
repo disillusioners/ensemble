@@ -3001,21 +3001,40 @@ class InstanceManager:
         return self._lifecycle_service._restore_instance(instance_id, meta)
 
     def list_instances(
-        self, limit: int = 20, offset: int = 0, project_id: str | None = None, exclude_kb: bool = True
+        self,
+        limit: int = 10,
+        offset: int = 0,
+        project_id: str | None = None,
+        exclude_kb: bool = True,
+        include_descendants: bool = False,
     ) -> tuple[list[dict], int]:
         """List instances with pagination.
 
+        When ``include_descendants`` is True, pagination is root-based: only root
+        instances (parent_id IS NULL or empty) are counted and paginated, and
+        ALL descendants of each root in the current page are loaded via BFS and
+        included in the flat result list.
+
         Args:
-            limit: Maximum number of instances to return (default: 20).
-            offset: Number of instances to skip (default: 0).
+            limit: Maximum number of root instances to return (default: 10).
+                When ``include_descendants=False``, this is the page size of all
+                matching instances.
+            offset: Number of root instances to skip (default: 0).
             project_id: Filter by project ID (optional).
-            exclude_kb: Exclude KB-related instances (experiencer, kb-importer) when True (default: True).
+            exclude_kb: Exclude KB-related instances (experiencer, kb-importer)
+                when True (default: True).
+            include_descendants: When True, paginate by root and BFS-load all
+                descendants of each root in the current page (default: False).
 
         Returns:
             Tuple of (list of instance info dictionaries, total count).
         """
         return self._lifecycle_service.list_instances(
-            limit=limit, offset=offset, project_id=project_id, exclude_kb=exclude_kb
+            limit=limit,
+            offset=offset,
+            project_id=project_id,
+            exclude_kb=exclude_kb,
+            include_descendants=include_descendants,
         )
 
     def get_instance_info(self, instance_id: str) -> dict:

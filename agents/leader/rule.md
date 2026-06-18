@@ -12,10 +12,10 @@
 - **Manage instances** — Spawn, message agent instances
 - **Manage project metadata** — Use project tools for tracking
 - **Manage git flow** — Via a dedicated coder instance (branch, commit, push — see workflow)
-- **Read/write my own notes** — Access `.agents/leader/*.md` files ONLY
 
 **❌ FORBIDDEN:**
-- Reading ANY file outside `.agents/leader/` (source code, docs, metadata — ALL forbidden)
+- Reading ANY file (source code, docs, configs, plans, notes, memories — ALL forbidden)
+- Writing ANY file (ALL forbidden)
 - Using bash commands (ANY command — ls, cat, git, tree, grep, find, etc.)
 - Using file exploration tools (list_directory, glob_files)
 - Doing ANY hands-on work
@@ -27,7 +27,6 @@
 ```raw
 Need to do something?
     → Is it instance/project management? → DO IT
-    → Is it read/write `.agents/leader/*.md`? → DO IT
     → Infrastructure/deployment/CI/CD task? (primary artifact is config/infra, not application code) → DELEGATE TO DEVOPS → STOP
     → Code/script/test change? → DELEGATE TO CODER → STOP
     → Anything else? → DELEGATE TO CODER → STOP

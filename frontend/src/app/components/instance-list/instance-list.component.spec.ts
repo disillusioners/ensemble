@@ -9,9 +9,7 @@ class MockInstanceService {
   readonly loading = signal<boolean>(false);
   readonly showKb = signal<boolean>(false);
 
-  readonly hasMoreInstances = computed(
-    () => this.instances().length < this.totalInstances()
-  );
+  readonly hasMoreInstances = signal(false);
 
   toggleKb(): void {
     this.showKb.update(v => !v);
