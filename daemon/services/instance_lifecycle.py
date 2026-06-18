@@ -536,11 +536,15 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to cleanup watches for instance {instance_id[:8]}...: {e}")
 
-        # 5. Update DB status to terminated using repository
+        # 5. Update DB status to terminated using repository.
         # Reset waiting_for to 0 to prevent counter divergence on revive.
+        # Single atomic write: a crash between status and waiting_for would
+        # leave (status=terminated, waiting_for=N>0) and cause rebuild_from_db
+        # to over-count on restart.
         if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
-            self._manager._instance_repository.update_status(instance_id, "terminated")
-            self._manager._instance_repository.update(instance_id, waiting_for=0)
+            self._manager._instance_repository.update(
+                instance_id, status="terminated", waiting_for=0
+            )
 
         # 5.5. Emit status_change event
         await self._manager._live_hub.stream_status_change(instance_id, "terminated", agent_id=meta.agent_id if meta else None)

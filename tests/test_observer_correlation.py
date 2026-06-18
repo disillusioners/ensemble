@@ -964,3 +964,167 @@ class TestHandleCorrelationCompleteStaleJobLookup:
         # the fix correctly avoids.
         mocks["job_repo"].atomic_transition.assert_not_called()
         mocks["job_queue_service"].notify_watchers.assert_not_called()
+
+
+# ─── Test 9 (Round-2 reviewer): _process_event stale-job defense ────────────
+
+
+class TestProcessEventStaleJobDefense:
+    """Regression tests for fix/revive-stale-job-lookup Round 2: ``_process_event``
+    must use the same ``_get_processing_job_for_instance`` helper as
+    ``handle_correlation_complete``, so it also gets the defense-in-depth
+    ``get_active_by_instance`` re-query when ``get_by_instance`` returns a
+    stale (non-PROCESSING) row.
+
+    Round-2 fix closes the asymmetry documented in the experience notes:
+    before the helper was extracted, ``_process_event`` short-circuited on
+    ``job.status != PROCESSING`` without the re-query, so a terminate→revive
+    scenario where ``get_by_instance`` returned the stale CANCELLED job
+    would silently drop the lifecycle event for the live PROCESSING job.
+    """
+
+    @pytest.mark.asyncio
+    async def test_process_event_re_queries_and_finalizes_active_when_stale_job_returned(
+        self,
+    ):
+        """Defensive re-query: ``get_job_by_instance`` returns CANCELLED,
+        ``get_active_by_instance`` returns PROCESSING → ``_process_event``
+        finalizes the ACTIVE job (does NOT bail out early).
+
+        Mirrors the Round-2 fix's symmetry with
+        ``handle_correlation_complete``: both paths now route through
+        ``_get_processing_job_for_instance`` and exercise the same
+        re-query branch.
+        """
+        # Stale CANCELLED job returned by get_job_by_instance (newer
+        # created_at because of how the DB write order works in a
+        # terminate→revive scenario).
+        stale_job = make_mock_job(
+            status="cancelled", instance_id="parent-pe-stale-111"
+        )
+        stale_job.job_id = "stale-job-id-aaaa"
+
+        # Live PROCESSING job returned by get_active_by_instance (the one
+        # we must finalize).
+        active_job = make_mock_job(
+            status="processing", instance_id="parent-pe-stale-111"
+        )
+        active_job.job_id = "active-job-id-bbbb"
+
+        observer, mocks = make_observer(stale_job)
+
+        # Wire the active-job re-query to return the live PROCESSING job.
+        mocks["job_repo"].get_active_by_instance = MagicMock(
+            return_value=active_job
+        )
+
+        # Use the CM-disabled path (graceful degradation) so the lifecycle
+        # event falls through to the terminal transition without needing a
+        # real CM. The default ``make_observer`` mocks
+        # ``_instance_repository.get(...).waiting_for == 0``, which routes
+        # the handler past the deferred ``_emit_in_progress`` and into
+        # ``_finalize_job``. We still reset CM explicitly to insulate from
+        # any CM state leaked from a prior test.
+        from daemon.services.correlation_manager import set_correlation_manager
+        set_correlation_manager(None)
+        try:
+            lifecycle_event = {
+                "event_type": "instance_lifecycle",
+                "data": {
+                    "instance_id": "parent-pe-stale-111",
+                    "status": "completed",
+                    "error": None,
+                },
+            }
+
+            await observer._process_event(lifecycle_event)
+
+            # The re-query was made — this is the proof the helper was used
+            # and that the Round-2 fix is wired into _process_event too.
+            mocks["job_repo"].get_active_by_instance.assert_called_once_with(
+                "parent-pe-stale-111"
+            )
+
+            # _process_event did NOT bail out early — it proceeded with the
+            # active PROCESSING job and finalized it.
+            mocks["job_repo"].atomic_transition.assert_called_once()
+            kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
+            assert kwargs["from_status"] == JobStatus.PROCESSING.value
+            assert kwargs["to_status"] == JobStatus.COMPLETED.value
+            assert kwargs["job_id"] == active_job.job_id, (
+                f"Expected active job_id={active_job.job_id} to be finalized, "
+                f"got {kwargs['job_id']} — stale CANCELLED job leaked through"
+            )
+
+            # Watchers notified once for the completed active job.
+            terminal_calls = [
+                c
+                for c in mocks[
+                    "job_queue_service"
+                ].notify_watchers.call_args_list
+                if len(c.args) > 1 and c.args[1] == "completed"
+            ]
+            assert len(terminal_calls) == 1, (
+                f"Expected exactly 1 'completed' notify_watchers call, got "
+                f"{len(terminal_calls)}: "
+                f"{mocks['job_queue_service'].notify_watchers.call_args_list}"
+            )
+            assert terminal_calls[0].args[0] == active_job.job_id
+        finally:
+            set_correlation_manager(None)
+
+    @pytest.mark.asyncio
+    async def test_process_event_bails_out_when_no_active_job_exists(self):
+        """Re-query returns None → ``_process_event`` returns silently.
+
+        Same semantics as the ``handle_correlation_complete`` analog:
+        when ``get_by_instance`` returns a stale row AND
+        ``get_active_by_instance`` returns None, no active PROCESSING job
+        exists, so finalization must be skipped to avoid finalizing a
+        phantom job.
+        """
+        stale_job = make_mock_job(
+            status="cancelled", instance_id="parent-pe-ghost-222"
+        )
+        stale_job.job_id = "stale-job-id-cccc"
+
+        observer, mocks = make_observer(stale_job)
+
+        # No live active job for this parent.
+        mocks["job_repo"].get_active_by_instance = MagicMock(return_value=None)
+
+        from daemon.services.correlation_manager import set_correlation_manager
+        set_correlation_manager(None)
+        try:
+            lifecycle_event = {
+                "event_type": "instance_lifecycle",
+                "data": {
+                    "instance_id": "parent-pe-ghost-222",
+                    "status": "completed",
+                    "error": None,
+                },
+            }
+
+            await observer._process_event(lifecycle_event)
+
+            # Re-query was attempted (proves the helper's defensive branch
+            # was exercised).
+            mocks["job_repo"].get_active_by_instance.assert_called_once_with(
+                "parent-pe-ghost-222"
+            )
+
+            # No finalization: no atomic_transition, no terminal watcher.
+            mocks["job_repo"].atomic_transition.assert_not_called()
+            terminal_calls = [
+                c
+                for c in mocks[
+                    "job_queue_service"
+                ].notify_watchers.call_args_list
+                if len(c.args) > 1 and c.args[1] in ("completed", "failed")
+            ]
+            assert terminal_calls == [], (
+                f"Expected no terminal notify_watchers calls, got "
+                f"{terminal_calls}"
+            )
+        finally:
+            set_correlation_manager(None)

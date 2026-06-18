@@ -905,6 +905,71 @@ class TestRepositoryGetByInstanceRecent:
             "Soft-deleted jobs must be filtered out"
         )
 
+    def test_get_by_instance_breaks_ties_with_job_id_when_created_at_identical(
+        self, repository, sample_job_data
+    ):
+        """When 2+ jobs share an identical ``created_at`` (same microsecond),
+        the secondary sort on ``job_id`` ASC must deterministically pick the
+        lexicographically LOWEST ``job_id`` (the row SQLAlchemy returns from
+        ``.order_by(created_at.desc(), job_id).first()``).
+
+        Branch: fix/revive-stale-job-lookup Round 2. Without an explicit
+        tie-breaker, two PROCESSING jobs inserted in the same microsecond
+        for the same instance would have non-deterministic ordering across
+        SQLite/PostgreSQL and across replays — the terminate→revive
+        defense-in-depth re-query depends on a stable ordering.
+
+        The fix adds ``.order_by(JobItem.job_id)`` as the secondary key.
+        SQL semantics: ``ORDER BY created_at DESC, job_id ASC`` with
+        ``LIMIT 1`` returns MAX(created_at), and within ties MIN(job_id)
+        — i.e. the lexicographically LOWER ``job_id`` wins.
+        """
+        # Two jobs for the same instance, both PROCESSING.
+        job_a = repository.create(**sample_job_data, instance_id="inst-tie")
+        job_b = repository.create(**sample_job_data, instance_id="inst-tie")
+        repository.start_job(job_a.job_id, "inst-tie")
+        repository.start_job(job_b.job_id, "inst-tie")
+
+        # Force both rows to share an IDENTICAL created_at (same microsecond
+        # string). The repository's ``create()`` sets created_at to the
+        # current wall clock — two consecutive creates almost always
+        # differ at the microsecond granularity on most platforms, so we
+        # overwrite via ``update()`` to make the tie deterministic.
+        fixed_ts = "2026-06-18T12:00:00.000000+00:00"
+        repository.update(job_a.job_id, created_at=fixed_ts)
+        repository.update(job_b.job_id, created_at=fixed_ts)
+
+        # Sanity check: timestamps are now identical.
+        assert job_a.job_id != job_b.job_id
+        refreshed_a = repository.get(job_a.job_id)
+        refreshed_b = repository.get(job_b.job_id)
+        assert refreshed_a is not None and refreshed_b is not None
+        assert refreshed_a.created_at == refreshed_b.created_at == fixed_ts
+
+        # The deterministic winner is the lexicographically LOWER job_id
+        # (secondary sort ASC → first row has MIN).
+        expected_winner_id = min(job_a.job_id, job_b.job_id)
+        expected_loser_id = max(job_a.job_id, job_b.job_id)
+
+        # get_by_instance: tie-break on job_id ASC.
+        result = repository.get_by_instance("inst-tie")
+        assert result is not None
+        assert result.job_id == expected_winner_id, (
+            f"Tie-break mismatch: expected job_id={expected_winner_id} "
+            f"(lexicographically lower of [{job_a.job_id}, {job_b.job_id}]), "
+            f"got {result.job_id}"
+        )
+        assert result.job_id != expected_loser_id
+
+        # get_active_by_instance must apply the SAME tie-break — both jobs
+        # are PROCESSING, so the same row wins.
+        active_result = repository.get_active_by_instance("inst-tie")
+        assert active_result is not None
+        assert active_result.job_id == expected_winner_id, (
+            f"get_active_by_instance tie-break mismatch: expected "
+            f"job_id={expected_winner_id}, got {active_result.job_id}"
+        )
+
 
 class TestRepositoryGetActiveByInstance:
     """Tests for the new ``get_active_by_instance`` method (Fix 1).

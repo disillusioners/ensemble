@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from sqlmodel import Session
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.services.correlation_manager import get_correlation_manager
@@ -263,6 +263,79 @@ class JobFeedbackObserver:
 
         logger.info(f"JobFeedbackObserver stopped after processing {events_processed} events")
 
+    async def _get_processing_job_for_instance(
+        self, instance_id: str
+    ) -> JobItem | None:
+        """Get the PROCESSING job for an instance, with stale-job defense.
+
+        Shared lookup used by both the CorrelationManager callback path
+        (:meth:`handle_correlation_complete`) and the legacy lifecycle-event
+        path (:meth:`_process_event`). Both paths previously duplicated the
+        ``get_by_instance → status check → optional re-query`` dance inline;
+        that asymmetry left :meth:`_process_event` unprotected by the
+        defense-in-depth re-query that the CM callback got in
+        ``fix/revive-stale-job-lookup`` (commit b1218739).
+
+        Behavior:
+          1. First lookup via the job queue service wrapper (functionally
+             identical to ``await asyncio.to_thread(self._job_repo.get_by_instance,
+             instance_id)`` — the service layer just adds the
+             ``asyncio.to_thread`` indirection required to keep sync DB calls
+             off the event loop).
+          2. If the returned row is already PROCESSING, return it directly —
+             the happy path skips the re-query entirely.
+          3. Otherwise (stale CANCELLED / COMPLETED / FAILED row from a prior
+             cycle), re-query the repository for the active (PENDING or
+             PROCESSING) row. Only a PROCESSING row is considered "safe to
+             finalize" — a PENDING row would fail ``atomic_transition`` from
+             PROCESSING and is treated as "no active job".
+          4. Returns ``None`` when no PROCESSING job exists for the instance.
+             Callers use this to skip finalization silently.
+
+        The re-query is defense-in-depth only: in production, the
+        ``ORDER BY created_at DESC, job_id`` ordering in
+        :meth:`JobRepository.get_by_instance` (Fix 1 of the
+        fix/revive-stale-job-lookup branch) already returns the active row in
+        the terminate→revive scenario, since ``JobItem.created_at`` is set
+        ONCE at row insert and NEVER updated by transitions — the revived
+        PROCESSING job ALWAYS has a newer ``created_at`` than the stale
+        CANCELLED job left behind. The re-query here future-proofs against
+        manual DB operations or synthetic test mocks where that ordering may
+        not hold.
+
+        Args:
+            instance_id: The instance ID to look up.
+
+        Returns:
+            The active PROCESSING :class:`JobItem`, or ``None`` if no such
+            job exists.
+        """
+        # First lookup via the existing service wrapper. Equivalent to
+        # ``await asyncio.to_thread(self._job_repo.get_by_instance, instance_id)``
+        # — preserved as the service call so the existing test mock surface
+        # (``mock_jqs.get_job_by_instance``) keeps working.
+        job = await self._job_queue_service.get_job_by_instance(instance_id)
+        if job is None:
+            return None
+        if job.status == JobStatus.PROCESSING.value:
+            return job
+        # Defense-in-depth: future-proofing against manual DB operations or
+        # synthetic test mocks where created_at ordering may not reflect the
+        # active job. The real terminate→revive scenario is already covered
+        # by the ``ORDER BY created_at DESC, job_id`` ordering in
+        # JobRepository.get_by_instance — created_at is immutable post-insert,
+        # so the revived PROCESSING row always sorts after the stale
+        # CANCELLED row.
+        active_job = await asyncio.to_thread(
+            self._job_repo.get_active_by_instance, instance_id
+        )
+        if (
+            active_job is not None
+            and active_job.status == JobStatus.PROCESSING.value
+        ):
+            return active_job
+        return None
+
     async def handle_correlation_complete(
         self, parent_id: str, terminal_status: str
     ) -> None:
@@ -293,34 +366,13 @@ class JobFeedbackObserver:
             parent_id: The parent instance ID whose correlations just completed.
             terminal_status: ``"completed"`` or ``"error"``.
         """
-        job = await self._job_queue_service.get_job_by_instance(parent_id)
+        job = await self._get_processing_job_for_instance(parent_id)
         if job is None:
-            logger.debug(
-                f"CM callback: no job for parent {parent_id[:8]}..., skipping"
+            logger.info(
+                f"CM callback: no active PROCESSING job for instance "
+                f"{parent_id[:8]}..., skipping"
             )
             return
-
-        if job.status != JobStatus.PROCESSING.value:
-            # Defense-in-depth: ``get_by_instance`` returns the most recent
-            # non-deleted job (ORDER BY created_at DESC), but in a
-            # terminate→revive cycle the freshest row may be a CANCELLED job
-            # whose created_at is newer than the revived PROCESSING row.
-            # Re-query for the active (PENDING/PROCESSING) job before skipping
-            # so the real active PROCESSING job still gets finalized.
-            active_job = await asyncio.to_thread(
-                self._job_repo.get_active_by_instance, parent_id
-            )
-            if (
-                active_job is not None
-                and active_job.status == JobStatus.PROCESSING.value
-            ):
-                job = active_job
-            else:
-                logger.info(
-                    f"CM callback: no active PROCESSING job for instance "
-                    f"{parent_id[:8]}..., skipping"
-                )
-                return
 
         await self._finalize_job(job, parent_id, terminal_status, error=None)
 
@@ -374,20 +426,13 @@ class JobFeedbackObserver:
             )
             return
 
-        # Look up job by instance using job_queue_service
-        job = await self._job_queue_service.get_job_by_instance(instance_id)
+        # Look up the active PROCESSING job (with stale-job defense; the
+        # helper encapsulates the get_by_instance + optional re-query for
+        # terminate→revive scenarios, matching the protection that
+        # handle_correlation_complete already had).
+        job = await self._get_processing_job_for_instance(instance_id)
         if job is None:
-            return  # No job associated with this instance
-
-        # Skip if job is not in PROCESSING state
-        # Another actor (e.g., terminate_instance, CM callback) may have
-        # already transitioned it.
-        if job.status != JobStatus.PROCESSING.value:
-            logger.debug(
-                f"Job {job.job_id[:8]}... not in PROCESSING state "
-                f"(current: {job.status}), skipping"
-            )
-            return
+            return  # No active PROCESSING job for this instance
 
         # Phase 2: decide between in_progress and terminal based on CM state.
         if status in (InstanceStatus.COMPLETED.value, InstanceStatus.ERROR.value):

@@ -118,7 +118,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.instance_id == instance_id)
                 .where(JobItem.deleted_at.is_(None))
-                .order_by(JobItem.created_at.desc())
+                .order_by(JobItem.created_at.desc(), JobItem.job_id)
             )
             job = db_session.exec(stmt).first()
             return job
@@ -145,7 +145,7 @@ class JobRepository:
                 .where(JobItem.status.in_(
                     [JobStatus.PENDING.value, JobStatus.PROCESSING.value]
                 ))
-                .order_by(JobItem.created_at.desc())
+                .order_by(JobItem.created_at.desc(), JobItem.job_id)
             )
             return db_session.exec(stmt).first()
 
