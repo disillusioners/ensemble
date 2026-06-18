@@ -126,6 +126,42 @@ class ChildReportsService:
         adapter = self._manager._checkpointer
         return adapter.raw_saver if adapter is not None else None
 
+    def _has_no_active_message_job(self, session, instance_id: str) -> bool:
+        """Check if there is NO active (PENDING/PROCESSING) MESSAGE job for an instance.
+
+        Used as a defense-in-depth guard before writing WAITING_CHILDREN status.
+        If no active job exists, pending messages are likely stale/duplicate
+        (from a task-claim race) and writing WAITING_CHILDREN would permanently
+        strand the instance — there is no code path that transitions out of
+        WAITING_CHILDREN other than a new message arriving on a fresh
+        MESSAGE job, which is exactly what is missing here.
+
+        NOTE: MESSAGE jobs are NOT 1:1-per-instance — each user message creates
+        a new job (see ``instance_messaging.enqueue_message_job``). We check for
+        ACTIVE jobs (PENDING/PROCESSING), not terminal jobs, to avoid false
+        positives when a completed old job coexists with an active new job.
+
+        Args:
+            session: Active SQLModel session (DB read happens here, not committed).
+            instance_id: The instance to check.
+
+        Returns:
+            True iff there is no active MESSAGE job (PENDING or PROCESSING) for
+            this instance. False when at least one active job exists.
+        """
+        _no_active = session.exec(
+            select(func.count())
+            .select_from(JobItem)
+            .where(JobItem.instance_id == instance_id)
+            .where(JobItem.job_type == "message")
+            .where(JobItem.deleted_at.is_(None))
+            .where(JobItem.status.in_([
+                JobStatus.PENDING.value,
+                JobStatus.PROCESSING.value,
+            ]))
+        ).scalar_one() == 0
+        return _no_active
+
     def _trigger_title_generation(self, instance_id: str, completed_message_id: str) -> None:
         """Trigger title generation for an instance after message completion.
         
@@ -661,6 +697,20 @@ Provide a concise summary:"""
                 # because the parent is still alive (will process more
                 # messages) — contract required by
                 # ``tests/test_cascade_integration.py``.
+                #
+                # Defense-in-depth (F8): if there is NO active MESSAGE job
+                # for this parent, the parent_pending count is a false
+                # positive (stale/duplicate from task-claim race). Skip
+                # the WAITING_CHILDREN write to avoid permanently
+                # stranding the parent — fall through to ``return False,
+                # None, None`` so no transition is recorded.
+                if self._has_no_active_message_job(session, parent.instance_id):
+                    logger.warning(
+                        f"Parent {parent.instance_id[:8]}... has {parent_pending} pending "
+                        f"messages but no active MESSAGE job — skipping WAITING_CHILDREN "
+                        f"write (stale/duplicate messages from task-claim race)"
+                    )
+                    return False, None, None
                 parent.status = InstanceStatus.WAITING_CHILDREN.value
                 logger.info(
                     f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
@@ -1014,36 +1064,27 @@ Provide a concise summary:"""
                     # graceful-degradation watchers and FIFO carve-out
                     # SQL compatibility.
 
-                    # Defense-in-depth: if the instance's MESSAGE job is
-                    # already in a terminal state
-                    # (completed/failed/cancelled/dead_letter), the
+                    # Defense-in-depth: if there is NO active MESSAGE job
+                    # (PENDING/PROCESSING) for this instance, the
                     # pending_count is a false positive — stale/duplicate
                     # messages from a task-claim race (see
                     # daemon/repositories/task/repository.py claim race).
                     # Do NOT write WAITING_CHILDREN or the instance gets
                     # permanently stuck (no code path clears it back).
-                    _terminal_statuses = [
-                        JobStatus.COMPLETED.value,
-                        JobStatus.FAILED.value,
-                        JobStatus.CANCELLED.value,
-                        JobStatus.DEAD_LETTER.value,
-                    ]
-                    _terminal_job_exists = session.exec(
-                        select(func.count())
-                        .select_from(JobItem)
-                        .where(JobItem.instance_id == instance_id)
-                        .where(JobItem.job_type == "message")
-                        .where(JobItem.status.in_(_terminal_statuses))
-                        .where(JobItem.deleted_at.is_(None))
-                    ).scalar_one() > 0
-                    if _terminal_job_exists:
+                    #
+                    # NOTE: MESSAGE jobs are NOT 1:1-per-instance — each
+                    # user message creates a new job. We check for ACTIVE
+                    # jobs, not terminal jobs, to avoid false positives
+                    # when a completed old job coexists with an active
+                    # new job.
+                    if self._has_no_active_message_job(session, instance_id):
                         logger.warning(
                             f"Instance {instance_id[:8]}... has pending_count={pending_count} "
-                            f"but already has a terminal MESSAGE job — skipping WAITING_CHILDREN "
+                            f"but no active MESSAGE job — skipping WAITING_CHILDREN "
                             f"write (stale/duplicate messages from task-claim race)"
                         )
                         # Do NOT set status to WAITING_CHILDREN. Leave the
-                        # instance status as-is (terminal state preserved).
+                        # instance status as-is (current status preserved).
                         return _ChildCompletionDbResult(
                             outcome="root_skipped_terminal_job",
                             instance_id=instance_id,
@@ -1305,15 +1346,34 @@ Provide a concise summary:"""
                         completed_parent_parent_id = parent.parent_id
                     else:
                         # Has pending messages but all children done - transition to WAITING_CHILDREN
-                        parent.status = InstanceStatus.WAITING_CHILDREN.value
-                        logger.info(
-                            f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                            f"pending messages, status=WAITING_CHILDREN (deprecated; CM is authoritative)"
-                        )
-                        # Flag SSE emission for the async caller (was at
-                        # line 624-627 in the pre-refactor inline block).
-                        parent_waiting_children_sse = True
-                        waiting_children_parent_agent_id = parent.agent_id
+                        #
+                        # Defense-in-depth (F8): if there is NO active
+                        # MESSAGE job for this parent, the parent_pending
+                        # count is a false positive (stale/duplicate
+                        # from task-claim race). Skip the
+                        # WAITING_CHILDREN write to avoid permanently
+                        # stranding the parent. The child-completion
+                        # work above (report message, task,
+                        # waiting_for decrement, children cache,
+                        # hierarchy delete) is still real and we let
+                        # the function proceed to commit + emit
+                        # events — just leave the parent status as-is.
+                        if self._has_no_active_message_job(session, parent.instance_id):
+                            logger.warning(
+                                f"Parent {parent.instance_id[:8]}... has {parent_pending} pending "
+                                f"messages but no active MESSAGE job — skipping WAITING_CHILDREN "
+                                f"write (stale/duplicate messages from task-claim race)"
+                            )
+                        else:
+                            parent.status = InstanceStatus.WAITING_CHILDREN.value
+                            logger.info(
+                                f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                                f"pending messages, status=WAITING_CHILDREN (deprecated; CM is authoritative)"
+                            )
+                            # Flag SSE emission for the async caller (was at
+                            # line 624-627 in the pre-refactor inline block).
+                            parent_waiting_children_sse = True
+                            waiting_children_parent_agent_id = parent.agent_id
             
             # --- Inline: _create_completion_events (no await needed) ---
             # Phase 4: derive from the CorrelationManager when available
@@ -1430,6 +1490,31 @@ Provide a concise summary:"""
                     logger.warning(
                         f"Failed to emit status_change for waiting_children: {e}"
                     )
+            return
+
+        # Root carve-out (F5/F6): the WAITING_CHILDREN write was
+        # suppressed because there is no active MESSAGE job
+        # (stale/duplicate from task-claim race). The instance stays in
+        # its current (non-terminal) status — we do NOT emit a
+        # "completed" SSE, do NOT publish a lifecycle "completed"
+        # event, and do NOT trigger title generation. We DO signal
+        # CompletionRegistry so any ``invoke_agent_and_wait()``
+        # callers do not hang. ``complete()`` is idempotent (see
+        # ``CompletionRegistry.complete`` — duplicate calls return
+        # False but are safe) and buffers the result if no event
+        # exists yet.
+        if outcome == "root_skipped_terminal_job":
+            try:
+                from .completion_registry import get_completion_registry
+                get_completion_registry().complete(instance_id, result=last_content)
+                logger.info(
+                    f"Root {instance_id[:8]}... carve-out fired (no active job), "
+                    f"CompletionRegistry signaled"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to signal CompletionRegistry for {instance_id[:8]}...: {e}"
+                )
             return
 
         # Root completed: commit + SSE + CompletionRegistry + lifecycle + title

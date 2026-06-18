@@ -112,18 +112,19 @@ class TestTaskClaiming:
         assert claimed_task.started_at is not None
 
     def test_concurrent_claim_only_one_wins(self, repository, sample_task_data):
-        """Test that two claim_pending_task calls don't both claim the same task.
+        """Smoke test only: that two claim_pending_task calls don't both claim the same task.
 
         Regression test for the task-claim race where the outer UPDATE WHERE
         clause only checked id=(subquery) without re-verifying status='pending'.
         After the fix, the outer WHERE includes 'AND status = :status_pending'
         so the losing worker gets None.
 
-        Note: This test runs against in-memory SQLite, which serializes writes
-        and prevents the race from manifesting. On SQLite, this test validates
-        basic claim correctness (exactly one winner). The actual EvalPlanQual
-        recheck fix for PostgreSQL concurrency is verified separately in
-        integration tests against a real PostgreSQL backend.
+        Note: This is a smoke test only. The actual EvalPlanQual recheck fix
+        for PostgreSQL concurrency is NOT covered by any integration test in
+        this repository — the claim race itself cannot manifest on in-memory
+        SQLite (writes are serialized), and no PostgreSQL integration test
+        suite exists in this codebase. If a real PG integration test is
+        added, update this docstring to point at it.
         """
         # Create a single pending task
         created_task = repository.create(**sample_task_data)

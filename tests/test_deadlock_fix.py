@@ -69,6 +69,7 @@ from daemon.repositories.instance.repository import (
     SQLModelInstanceRepository,
     get_agent_name,
 )
+from daemon.repositories.job_queue.models import JobItem, JobStatus
 from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageQueue,
     MessageStatus,
@@ -951,6 +952,23 @@ class TestWaitingChildrenSseSideEffect:
                     instance_id=parent_id,
                     content="pending follow-up",
                     status=MessageStatus.READY.value,
+                )
+            )
+            # F8 carve-out guard: the parent must have an active MESSAGE
+            # job (PENDING/PROCESSING) so the guard does NOT fire. Without
+            # this job, the pending_count would be a false positive (no
+            # worker will ever drain the stale READY message) and the
+            # WAITING_CHILDREN write would be correctly skipped.
+            session.add(
+                JobItem(
+                    job_id="wcs-job-1",
+                    agent_id="parent-agent",
+                    agent_dir="/tmp/parent",
+                    message="pending follow-up",
+                    source="api",
+                    job_type="message",
+                    status=JobStatus.PROCESSING.value,
+                    instance_id=parent_id,
                 )
             )
             session.commit()
