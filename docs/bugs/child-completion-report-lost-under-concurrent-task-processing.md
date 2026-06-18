@@ -1,5 +1,7 @@
 # Bug: Child Completion Report Lost from Parent LLM Context Under Concurrent Task Processing
 
+> **✅ Resolved (2026-06).** The worker-pool concurrent-claim race is resolved by the per-instance claim guard (Fix B) and the ExecutionGate. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md).
+
 **Date:** 2026-06-06
 **Severity:** High (silent — no error, just wrong LLM output)
 **Status:** Confirmed (root cause identified, fix not implemented)

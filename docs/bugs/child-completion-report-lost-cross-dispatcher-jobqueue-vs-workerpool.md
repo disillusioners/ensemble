@@ -1,5 +1,7 @@
 # Bug: Giter Completion Report Lost from Parent LLM Context — Cross-Dispatcher Race (JobQueue ↔ WorkerPool)
 
+> **✅ Resolved (2026-06-14).** The cross-dispatcher checkpoint corruption race — the exact bug the `ExecutionGate` was built to eliminate — is now resolved. The gate is the single chokepoint for `graph.astream` on both dispatch paths. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md).
+
 **Date:** 2026-06-14
 **Severity:** High (silent — no error, parent's LLM produces incorrect final response)
 **Status:** Confirmed (root cause identified, fix not implemented)

@@ -4,6 +4,8 @@
 > **Goal**: Eliminate race conditions and concurrency bugs through principled architecture  
 > **Principle**: Bugs should be impossible by design, not fixed by patches
 
+> **Historical proposal.** This redesign was superseded by the incremental CorrelationManager migration (6 phases), which unified message processing through a shared pipeline rather than the wholesale rewrite proposed here. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md).
+
 ---
 
 ## Executive Summary

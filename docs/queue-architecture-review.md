@@ -4,6 +4,8 @@
 **Reviewers:** Engineering Council (council session)  
 **Status:** Issues Identified
 
+> **Historical snapshot (2026-04-11).** This review of queue gaps predates the CorrelationManager migration. Most gaps are now RESOLVED: the sync/async lock mismatch was fixed via `asyncio.to_thread` wrapping; polling overhead reduced via the `notify_work` condition-variable pattern; incomplete processors removed. Retained as a historical record. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
+
 ---
 
 ## Executive Summary
@@ -24,6 +26,8 @@ The codebase contains three overlapping queue systems that evolved over time. Th
 ---
 
 ## 1. Gap Severity Matrix
+
+> **Resolution Status:** Most gaps resolved post-migration. Still active: **StaleTaskRecovery timing** (now configurable).
 
 | # | Gap | Severity | Root Cause | Production Impact |
 |---|-----|----------|------------|-------------------|

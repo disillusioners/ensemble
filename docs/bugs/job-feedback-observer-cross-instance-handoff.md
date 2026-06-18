@@ -1,5 +1,7 @@
 # Bug: JobFeedbackObserver cross-instance handoff crash
 
+> **✅ Resolved (2026-06).** The observer handoff crash is resolved by the ExecutionGate + CM callback migration. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md).
+
 **Date**: 2026-06-10
 **Severity**: High (stuck job queue, repeated crashes, no recovery)
 **Status**: Open — deeper architectural issue, not a small fix

@@ -1,5 +1,7 @@
 # Job Queue Implementation Guide
 
+> **Historical artifact (2026-03-16):** This is the original Sprint 1 delivery log. The system has since been significantly extended and refactored. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md) and [`docs/features/job-queue.md`](job-queue.md).
+
 > **Sprint 1 Complete** - Last updated: 2026-03-16
 
 ## Sprint 1 Summary
@@ -177,6 +179,8 @@ curl "http://localhost:8079/api/tasks?status=pending&project_id=project-uuid&lim
 
 ## Current Limitations
 
+**[Shipped]** — see the current architecture docs.
+
 The following features are planned for Sprint 2:
 
 | Feature | Description | Status |
@@ -201,6 +205,8 @@ Poll `GET /api/tasks/{task_id}` for status updates. Task transitions through:
 ---
 
 ## Sprint 2 Roadmap
+
+**[Shipped]** — see the current architecture docs.
 
 ### Background TaskProcessor
 

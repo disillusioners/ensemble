@@ -1,5 +1,7 @@
 # Code Review: Per-Instance Claim Guard + Companion Fixes
 
+> **Historical review artifact.** The fix under review shipped successfully; the underlying race class is now fully addressed by the ExecutionGate. See [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md) for the current state.
+
 **Branch:** `latest`
 **Commits reviewed (HEAD~5..HEAD, in order applied):**
 1. `c62fc09` — fix(task): notify workers on terminal task transitions

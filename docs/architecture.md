@@ -1,5 +1,7 @@
 # Agents Ensemble Architecture
 
+> **Note (2026-06-18):** The message-processing sections of this doc describe the architecture BEFORE the CorrelationManager migration. For the current state — unified `MessageProcessingPipeline`, `CorrelationManager`, and `ExecutionGate` — see [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
+
 ## Core Design Philosophy
 
 **System orchestrates, agents execute.**
@@ -90,6 +92,8 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 
 ## Agent-to-Agent Messaging Architecture
 
+> **Current model (2026-06-18):** Parent-child correlation is now authoritative in `CorrelationManager` (in-memory `(parent, child, message_id)` triples, per-parent lock, direct async callback to `JobFeedbackObserver`). `waiting_for` is **deprecated as control-flow** and retained only as a rebuild-only cache per ADR-011. Both dispatch paths (WorkerPool, JobQueue) share a unified `MessageProcessingPipeline` and an `ExecutionGate` that serializes `graph.astream` per instance. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the full reference.
+
 ### Flow Overview
 
 ```
@@ -111,10 +115,10 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 │     └─> graph.astream() runs child LangGraph                       │
 │                                                                     │
 │  4. Child completes                                                 │
-│     _check_child_completion_v2() → creates COMPLETION_REPORT      │
-│     └─> source="internal_report:{child_id}"                                 │
-│     └─> parent.waiting_for -= 1                                    │
-│     └─> Task created for parent                                    │
+│     Child LangGraph returns → completion event                    │
+│     └─> CorrelationManager.resolve_response() (authoritative)     │
+│     └─> When last child resolves, CM fires completion callback    │
+│     └─> JobFeedbackObserver finalizes parent job                  │
 │                                                                     │
 │  5. Parent receives report                                          │
 │     Worker processes parent's task                                  │
@@ -127,9 +131,11 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 
 1. **Atomic claiming**: `UPDATE-RETURNING` prevents worker race conditions
 2. **Idempotent completion**: Won't send duplicate COMPLETION_REPORT
-3. **Cascade status**: Parent transitions when children complete
+3. **Correlation via CM**: Parent-child tracking is authoritative in `CorrelationManager` (no longer `waiting_for` polling)
 4. **Fire-and-forget**: Parent doesn't block, system handles timing
 5. **Crash-safe**: Workers can die, tasks retried, state preserved
+
+> The `waiting_for` cascade described in earlier versions of this doc is **deprecated as control-flow** (ADR-011). Use `CM.get_pending_count()` / `CM.is_complete()` instead.
 
 ### Message Types
 
@@ -147,13 +153,15 @@ class Instance:
     instance_id: str      # Unique per instance
     agent_id: str         # Which agent type
     parent_id: str | None # Direct parent
-    waiting_for: int      # Children pending
+    waiting_for: int      # DEPRECATED as control-flow; rebuild-only cache per ADR-011
     status: str           # IDLE/RUNNING/WAITING_CHILDREN/COMPLETED
 
 class InstanceHierarchy:
     parent_id: str        # Composite PK
     child_id: str        # Composite PK
 ```
+
+> **Parent-child correlation** is now authoritative in `CorrelationManager` (`daemon/services/correlation_manager.py`), not on the `instance` row. The `waiting_for` column is kept only as the source for `CM.rebuild_from_db()` on startup. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
 
 ---
 
@@ -467,6 +475,7 @@ Ensemble could add:
 
 ## Appendix: Key Files
 
+### Core orchestration
 | Component | File | Purpose |
 |-----------|------|---------|
 | InstanceManager | `daemon/manager.py` | Core orchestration |
@@ -476,3 +485,11 @@ Ensemble could add:
 | Message queue | `daemon/repositories/message_queue/` | DB persistence |
 | Graph | `daemon/graph.py` | LangGraph definition |
 | Config | `config.yaml` | All configuration |
+
+### Message processing & correlation (current architecture)
+| Component | File | Purpose |
+|-----------|------|---------|
+| MessageProcessingPipeline | `daemon/services/message_processing_pipeline.py` | 6-stage shared pipeline (gate → process → mark → dispatch → child-check → error-handle) |
+| CorrelationManager | `daemon/services/correlation_manager.py` | Authoritative parent-child correlation; `(parent, child, message_id)` triples, per-parent asyncio.Lock, direct async callback |
+| ExecutionGate | `daemon/services/execution_gate.py` | DB-backed per-instance lease serializing `graph.astream`; required on ALL paths including resume |
+| Message processing errors | `daemon/services/message_processing_errors.py` | Shared error side-effects (event write, lifecycle event, parent report, job FAILED) |

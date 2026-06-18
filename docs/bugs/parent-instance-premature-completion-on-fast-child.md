@@ -1,5 +1,7 @@
 # Bug: Parent Instance Prematurely Marked COMPLETED When Child Completes Quickly
 
+> **✅ Resolved (2026-06).** Resolved by the `CorrelationManager` migration (Phase 2: JobFeedbackObserver migrated to CM callback, eliminating the waiting_for snapshot race). For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md).
+
 **Date:** 2026-06-01
 **Severity:** High
 **Status:** Confirmed

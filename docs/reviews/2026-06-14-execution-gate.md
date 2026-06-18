@@ -1,5 +1,7 @@
 # Code Review: Execution Gate
 
+> **Review artifact (2026-06-14).** This is the code review of the initial ExecutionGate implementation. The required follow-ups (heartbeat wiring, LeaseLostError detection) were addressed in subsequent work. The gate is now required on ALL paths including resume (Phase 0 / Race #5 fix). For the current architecture, see [`../architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md).
+
 - **Commits reviewed:** `6c11c2a` (feat), `c1aae71` (fix)
 - **Reviewed at:** 2026-06-14
 - **Reviewer:** kilo (claude code)

@@ -1,5 +1,7 @@
 # Bug: Job Marked Completed Prematurely When Root Instance Has Self-Pending Messages
 
+> **✅ Resolved (2026-06).** The premature-completion race described here is resolved by the `CorrelationManager` migration (Phase 4: `waiting_for` deprecation as control-flow; CM is authoritative). For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md).
+
 **Date:** 2026-06-16
 **Severity:** High
 **Status:** Confirmed, regression from prior fix

@@ -3,6 +3,8 @@
 > Analysis date: 2026-04-05  
 > Status: Active Issues Found
 
+> **Historical snapshot (2026-04-05).** This concurrency analysis predates the CorrelationManager migration. Most 🔴 CRITICAL issues documented here are now RESOLVED: sync DB calls are wrapped in `asyncio.to_thread` (deadlock fix), and the ExecutionGate + unified pipeline address the dispatch races. For the current concurrency model, see [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md).
+
 ---
 
 ## Overview
@@ -139,6 +141,8 @@ Telegram adapter's `_chat_locks` (telegram.py:89) with `OrderedDict` and MAX_CHA
 
 **Impact**: Critical - Active resource leak. Every terminated instance leaves its project lock dangling, blocking future jobs for that project.
 
+> ✅ Resolved — sync call now wrapped in `asyncio.to_thread`; lock release flows through the ExecutionGate lease model.
+
 **Fix**: Wrap the async call in `asyncio.run_coroutine_threadsafe()` from the sync context:
 ```python
 if self._job_queue_service is not None:
@@ -161,6 +165,8 @@ if self._job_queue_service is not None:
 
 **Impact**: High - Any long-running bash command blocks the entire event loop.
 
+> ✅ Resolved — bash tool migrated to the tool layer using `asyncio.create_subprocess_exec`; event loop no longer blocked by subprocess I/O.
+
 **Fix**:
 ```python
 # Replace:
@@ -180,6 +186,8 @@ stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
 **Problem**: The watchdog thread calls `asyncio.run_coroutine_threadsafe()` then waits with `.result(timeout=5.0)`. This turns an async operation into a synchronous blocking one. If multiple instances have retry-ready messages, the watchdog blocks **sequentially** for each instance.
 
 **Impact**: Medium - Watchdog health checks can be delayed.
+
+> ✅ Resolved — watchdog now uses the `notify_work` condition-variable pattern instead of blocking `.result()` waits.
 
 **Fix**:
 ```python
@@ -202,6 +210,8 @@ asyncio.run_coroutine_threadsafe(
 **Files**: `queue.py`, `manager.py`  
 **Problem**: `self._queue_repository.*()` calls are synchronous SQLAlchemy operations that hit SQLite. These run directly on the asyncio event loop. Under load, disk I/O can stall the event loop for milliseconds, affecting SSE latency.
 
+> ✅ Resolved — sync DB calls now wrapped in `asyncio.to_thread` across the message-processing pipeline.
+
 **Fix**:
 ```python
 # Instead of:
@@ -216,6 +226,8 @@ msg = await asyncio.to_thread(self._queue_repository.dequeue_by_instance, instan
 #### 5. Multiple `create_task` Call Sites for `_process_queue`
 **Files**: `manager.py:804, 1596, 1696`, `sources/registry.py:712`  
 **Problem**: `_process_queue(instance_id)` is called from multiple places via `asyncio.create_task()`. While the `asyncio.Lock` prevents concurrent execution, every call creates a new task that immediately exits when the lock is held. This creates unnecessary task churn.
+
+> ✅ Resolved — replaced with the `notify_work` persistent consumer pattern; per-instance consumers are started once and signaled via condition variables.
 
 **Fix**: Use a persistent consumer per instance:
 ```python

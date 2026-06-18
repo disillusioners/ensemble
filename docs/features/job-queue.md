@@ -1,5 +1,7 @@
 # Job Queue Feature Design Document
 
+> **Note (2026-06-18):** This doc predates the CorrelationManager migration. For the current message-processing architecture — including the unified `MessageProcessingPipeline`, `CorrelationManager`, and `ExecutionGate` — see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md). The Job Queue data model and API reference below remain accurate.
+
 ## Overview
 
 This document describes the Job Queue feature for agents-ensemble. The feature ensures that only one instance can modify a project's files at a time by implementing a per-project job queue with the following characteristics:
@@ -14,23 +16,9 @@ This document describes the Job Queue feature for agents-ensemble. The feature e
 
 ## Implementation Status
 
-**Sprint 1: COMPLETE** ✅ (2026-03-16)
+Sprint 1 shipped; the system has since been extended. See the canonical architecture doc for the current state.
 
-### Components
-
-| Component | Status | Description |
-|-----------|--------|-------------|
-| JobRepository | ✅ Complete | SQLite persistence with CRUD operations |
-| JobLockManager | ✅ Complete | Per-project lock management with waiters |
-| JobQueueService | ✅ Complete | Core enqueue/dequeue/cancel logic |
-| API Endpoints (POST/GET) | ✅ Complete | Submit and query jobs |
-| JobProcessor | ⏳ Pending | Background worker for queued jobs |
-| DELETE /tasks/{id} | ⏳ Pending | Cancel/abort tasks |
-| SSE /tasks/{id}/events | ⏳ Pending | Real-time task updates |
-| InstanceManager Integration | ⏳ Pending | Enhanced terminate_instance() |
-| Scheduler Integration | ⏳ Pending | project_id routing |
-
-### Sprint 1 Commits
+### Sprint 1 Commits (historical)
 
 | Commit | Description | Lines |
 |--------|-------------|-------|
@@ -38,43 +26,6 @@ This document describes the Job Queue feature for agents-ensemble. The feature e
 | `4c1a24a` | Lock Management: JobLockManager | 401 |
 | `b4d7ff3` | Core Service: JobQueueService | 284 |
 | `4639a675` | Basic API: POST/GET endpoints | 431 |
-
-### Files Created
-
-```
-daemon/repositories/job_queue/
-├── __init__.py
-├── models.py           # JobItem, JobStatus
-└── repository.py       # JobRepository (SQLite)
-
-daemon/services/
-├── __init__.py
-├── task_lock_manager.py    # Per-project lock management
-└── job_queue_service.py   # Core queue operations
-
-daemon/routers/
-├── __init__.py
-├── schemas.py          # Pydantic request/response models
-└── tasks.py            # FastAPI router for /api/tasks
-```
-
-### What's Working
-
-- **POST /api/tasks** - Submit tasks (immediate or queued based on lock)
-- **GET /api/tasks/{task_id}** - Query task status and results
-- **GET /api/tasks** - List tasks with filters (status, project_id, limit)
-- Priority-based queue ordering (1-10 scale)
-- Per-project lock management with waiter queues
-- Crash recovery via SQLite persistence
-
-### Sprint 2 Roadmap
-
-- Background JobProcessor worker
-- DELETE /api/tasks/{task_id} - Cancel pending/running tasks
-- GET /api/tasks/{task_id}/events - SSE endpoint
-- InstanceManager.terminate_instance() integration
-- Scheduler project_id routing
-- Cascade terminate to children
 
 ---
 
@@ -1368,17 +1319,19 @@ class Config:
 - [x] Implement JobQueueService
 - [x] Add API endpoints (POST/GET /tasks)
 
-### Sprint 2 ⏳ PENDING
+### Sprint 2 ✅ SHIPPED
 
-- [ ] Implement JobProcessor background worker
-- [ ] Add DELETE /tasks/{task_id} endpoint
-- [ ] Add SSE /tasks/{task_id}/events endpoint
-- [ ] Integrate with InstanceManager.terminate_instance()
-- [ ] Integrate with SchedulerAdapter
-- [ ] Add configuration options
-- [ ] Write unit tests
-- [ ] Write integration tests
-- [ ] Update documentation
+These items shipped after Sprint 1; the queue has since been significantly extended with the unified message-processing pipeline. See [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md) for the current architecture.
+
+- [x] Implement JobProcessor background worker
+- [x] Add DELETE /tasks/{task_id} endpoint
+- [x] Add SSE /tasks/{task_id}/events endpoint
+- [x] Integrate with InstanceManager.terminate_instance()
+- [x] Integrate with SchedulerAdapter
+- [x] Add configuration options
+- [x] Write unit tests
+- [x] Write integration tests
+- [x] Update documentation
 
 ---
 

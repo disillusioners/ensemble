@@ -1,5 +1,7 @@
 # Job-Task-Pause-Resume Architecture
 
+> **Note (2026-06-18):** The pause/resume semantics here remain largely accurate. However, references to `waiting_for` as a control-flow mechanism (around lines 252, 879, 988-998) are now DEPRECATED — `waiting_for` is retained only as a rebuild-only cache (ADR-011); the `CorrelationManager` is the authoritative correlation mechanism. For the current message-processing architecture, see [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md).
+
 ## 1. Overview
 
 ### What is the Feature?
@@ -250,6 +252,8 @@ Manages instance lifecycle operations.
    - Cancel graph task (`_graph_tasks.pop().cancel()`)
    - Update status to PAUSED, set `paused_at`
    - **Conditional reset of `waiting_for`**: Only resets `waiting_for` to 0 if the instance has `waiting_for > 0` (was waiting for children). Instances without pending children just get `status=PAUSED` without modifying `waiting_for`.
+
+   > *(Deprecated as control-flow; rebuild-only cache per ADR-011 — `CorrelationManager` is authoritative for child correlation.)*
 4. Emit status_change SSE events
 
 `resume_instance_cascade(instance_id)`:
@@ -319,6 +323,8 @@ Handles child instance completion reports to parents.
 5. Update parent's `children[]` cache (denormalized JSON array)
 6. Delete from `instance_hierarchy` junction table
 7. If `waiting_for == 0`:
+
+> ⚠️ Note: the `waiting_for == 0` decision shown here is the LEGACY control-flow. In the current architecture, this decision is made by the `CorrelationManager` (`get_pending_count`); `waiting_for` is retained only as a rebuild-only cache (ADR-011).
    - No pending messages → mark parent COMPLETED
    - Has pending messages → mark parent WAITING_CHILDREN
 8. Emit events
@@ -499,6 +505,7 @@ sequenceDiagram
         InstanceLifecycle->>Repository: Update status=PAUSED, paused_at=now
         alt waiting_for > 0
             InstanceLifecycle->>Repository: waiting_for=0
+            Note over InstanceLifecycle: cache reset — safe because children are also paused, so no new completions arrive; CM holds authoritative in-memory state (ADR-011)
         else waiting_for == 0
             Note over InstanceLifecycle: waiting_for unchanged (was already 0)
         end
@@ -526,6 +533,7 @@ sequenceDiagram
     loop For each node in tree
         InstanceLifecycle->>Repository: Update status=RUNNING, waiting_for=0
         Note over InstanceLifecycle: is_root_resume=True → waiting_for=0 for all
+        Note over InstanceLifecycle: cache reset — safe; on resume the CM re-registers all in-flight correlations (ADR-011)
         InstanceLifecycle->>User: Emit SSE status_change
     end
     API->>Manager: resume_processing_job(target_id, message, silent=False)
@@ -567,6 +575,7 @@ sequenceDiagram
             Note over InstanceLifecycle: Parent needs to wait for resumed child
         else Node is not ancestor
             InstanceLifecycle->>Repository: waiting_for=0
+            Note over InstanceLifecycle: cache reset — safe; CM re-registers on resume (ADR-011)
         end
     end
     API->>Manager: resume_processing_job(child_id, message="resume", silent=True)
@@ -702,7 +711,7 @@ class Instance(SQLModel, table=True):
     parent_id: str | None         # Parent instance ID
     status: str                   # idle | running | paused | completed | error | terminated
     children: str                 # JSON array of child IDs
-    waiting_for: int              # Count of pending child completions
+    waiting_for: int              # Count of pending child completions (deprecated as control-flow; rebuild-only cache per ADR-011 — CorrelationManager is authoritative)
     paused_at: str | None         # ISO timestamp when paused
     created_at: str               # ISO timestamp
     updated_at: str               # ISO timestamp
@@ -840,6 +849,8 @@ stateDiagram-v2
     running --> completed: All messages done + waiting_for=0
     running --> waiting_children: waiting_for>0 + no pending
 
+    Note over running,waiting_children: ⚠️ Transition guards above are LEGACY control-flow. The current architecture routes completion decisions through CorrelationManager (`is_complete` / `get_pending_count`); `waiting_for` is retained only as a rebuild-only cache (ADR-011).
+
     waiting_children --> running: Child completion report (enqueue_message)
     waiting_children --> completed: Last child done
 
@@ -878,6 +889,8 @@ stateDiagram-v2
 
 **Problem:** Agent instances can spawn child instances. A parent may `waiting_for` children.
 
+> *(Deprecated as control-flow; rebuild-only cache per ADR-011 — `CorrelationManager` is authoritative for child correlation.)*
+
 **Without Cascade:**
 1. Parent pauses → Parent status = PAUSED
 2. Children continue running → Send completion reports
@@ -885,7 +898,7 @@ stateDiagram-v2
 
 **With Cascade:**
 1. Parent pauses → All children pause
-2. `waiting_for` reset to 0 for all nodes
+2. `waiting_for` reset to 0 for all nodes — *cache reset; safe because paused children cannot send completions, and CM holds authoritative in-memory state (ADR-011)*
 3. Resume → All children resume together
 4. No deadlock possible
 
@@ -981,6 +994,8 @@ async for event in graph.astream(graph_input, config):
 ---
 
 ### 6.5 Why waiting_for > 0 Defense-in-Depth?
+
+> *(Deprecated as control-flow; rebuild-only cache per ADR-011 — `CorrelationManager` is authoritative. The defense-in-depth check below still functions as a cache, but completion tracking flows through the CM.)*
 
 **Purpose:** Prevent premature job completion when parent is waiting for children.
 

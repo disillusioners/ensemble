@@ -1,5 +1,7 @@
 # Messaging System Architecture
 
+> **Note (2026-06-18):** The two-path description below reflects the architecture BEFORE the CorrelationManager migration unified message processing. The two physical paths (JobQueue, WorkerPool) still exist, but they now share a `MessageProcessingPipeline`, a `CorrelationManager` for parent-child correlation, and an `ExecutionGate` that serializes `graph.astream`. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
+
 ## Overview
 
 The system implements a **multi-layer queue architecture** with two distinct paths for handling requests:
@@ -34,6 +36,8 @@ The system implements a **multi-layer queue architecture** with two distinct pat
 │  └─────────────────────────────────┘    └─────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+> **Both paths now converge** through the shared `MessageProcessingPipeline` (6 stages: gate acquire → process → mark complete → dispatch → child check → error handle) and the `ExecutionGate` per-instance lease. They also share the `CorrelationManager` for parent-child correlation. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the unified view.
 
 ---
 
@@ -114,6 +118,8 @@ Used for **background jobs** with priorities, project serialization, and queue m
 ## Path 2: Direct Message (Real-time)
 
 Used for **real-time messages** to existing instances, bypassing job queue.
+
+> Although this path bypasses the JobQueue, it still flows through the same shared `MessageProcessingPipeline` and `ExecutionGate` as Path 1 once the WorkerPool picks up the task — see [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
 
 ### Flow
 
@@ -203,6 +209,8 @@ with Session(self._engine) as session:
 ---
 
 ## Message Processing (Worker Pool)
+
+> **Current state:** Both the WorkerPool and the JobQueue drive messages through the shared `MessageProcessingPipeline` (`daemon/services/message_processing_pipeline.py`) under the `ExecutionGate` (`daemon/services/execution_gate.py`). The pipeline is identical across paths; only the injected `PipelineCallbacks` differ (retry semantics, contention backoff, completion-side-effects). See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -498,6 +506,7 @@ RETURNING *
 
 ## Key Files
 
+### Per-path
 | File | Purpose |
 |------|---------|
 | `daemon/manager.py:806` | `enqueue_message()` - atomic message+task creation |
@@ -508,3 +517,13 @@ RETURNING *
 | `daemon/repositories/task/repository.py` | Task CRUD + atomic claiming |
 | `daemon/repositories/message_queue/repository.py` | Message queue operations |
 | `daemon/repositories/job_queue/repository.py` | Job queue operations |
+
+### Shared message-processing infrastructure (current architecture)
+| File | Purpose |
+|------|---------|
+| `daemon/services/message_processing_pipeline.py` | 6-stage shared pipeline (gate → process → mark → dispatch → child-check → error-handle) |
+| `daemon/services/correlation_manager.py` | Authoritative parent-child correlation; `(parent, child, message_id)` triples |
+| `daemon/services/execution_gate.py` | DB-backed per-instance lease serializing `graph.astream` |
+| `daemon/services/message_processing_errors.py` | Shared error side-effects |
+
+> The "Per-path" files above describe the dispatch surfaces that still exist. The "Shared message-processing infrastructure" is what both paths now go through. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).

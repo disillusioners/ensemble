@@ -1,5 +1,7 @@
 # Task Timeout & Graceful Cancellation
 
+> **Note (2026-06-18):** The timeout/retry design here applies primarily to the WorkerPool path (Task table). Post-migration, completion tracking flows through the `CorrelationManager`, and both paths share a `MessageProcessingPipeline`. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md). For JobQueue retry semantics, see `docs/job-queue.md`.
+
 ## Problem Statement
 
 The current system has two problems:

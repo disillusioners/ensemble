@@ -1,5 +1,7 @@
 # Fix Plan: JobFeedbackObserver cross-instance handoff crash
 
+> **✅ Implemented & superseded.** The plan shipped, and the observer has since been further refactored as part of the CorrelationManager migration (Phase 2: observer migrated to CM callback). For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md).
+
 **Bug doc**: `docs/bugs/job-feedback-observer-cross-instance-handoff.md`
 **Date**: 2026-06-10
 **Approach**: Option B (refactored) — shared dispatch logic, zero-delay handoff preserved

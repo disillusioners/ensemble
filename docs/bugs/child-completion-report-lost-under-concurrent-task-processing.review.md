@@ -1,5 +1,7 @@
 # Review & Solution Proposal: Child Completion Report Lost Under Concurrent Task Processing
 
+> **Historical review artifact.** The fix under review shipped successfully; the underlying race class is now fully addressed by the ExecutionGate. See [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md) for the current state.
+
 **Companion to:** `docs/bugs/child-completion-report-lost-under-concurrent-task-processing.md`
 **Date:** 2026-06-06
 **Status:** Proposal — code not applied yet

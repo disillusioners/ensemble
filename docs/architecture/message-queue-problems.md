@@ -4,11 +4,15 @@
 > **Date**: 2026-04-09  
 > **Author**: Code Analysis (Agent Orchestrator)
 
+> **Historical snapshot (2026-04-09).** This problem-analysis doc describes race conditions and defects that have since been resolved by the CorrelationManager migration (6 phases) and the deadlock fix. Retained as a historical record of the investigation. For the current architecture, see [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md).
+
 ---
 
 ## Executive Summary
 
 The current message queue system has **three confirmed bugs** that manifest when running multiple leader instances in parallel. These bugs share a common root cause: **race conditions between event-driven signaling and database polling** in a mixed async/threading architecture.
+
+> **Resolution status:** Most issues documented below are now resolved by the CorrelationManager migration (6 phases) and the unified `MessageProcessingPipeline`. See the canonical doc linked above for current architecture.
 
 ### Bugs Experienced
 

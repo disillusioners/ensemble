@@ -1,5 +1,7 @@
 # Code Review (Round 2): Code-Review Findings Fix Commit
 
+> **Historical review artifact.** The fix under review shipped successfully; the underlying race class is now fully addressed by the ExecutionGate. See [`docs/architecture/message-processing-and-correlation.md`](../architecture/message-processing-and-correlation.md) for the current state.
+
 **Commit reviewed:** `3de5eea` fix(worker): code-review findings — restore `_truncate_error`, lock `_stats`, narrow catch, honest log lines
 **Previous review:** `docs/bugs/child-completion-report-lost-under-concurrent-task-processing.codereview.md`
 **Date:** 2026-06-06
