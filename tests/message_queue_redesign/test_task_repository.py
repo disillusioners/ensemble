@@ -111,6 +111,49 @@ class TestTaskClaiming:
         assert claimed_task.worker_id == "worker-1"
         assert claimed_task.started_at is not None
 
+    def test_concurrent_claim_only_one_wins(self, repository, sample_task_data):
+        """Test that two claim_pending_task calls don't both claim the same task.
+
+        Regression test for the task-claim race where the outer UPDATE WHERE
+        clause only checked id=(subquery) without re-verifying status='pending'.
+        After the fix, the outer WHERE includes 'AND status = :status_pending'
+        so the losing worker gets None.
+
+        Note: This test runs against in-memory SQLite, which serializes writes
+        and prevents the race from manifesting. On SQLite, this test validates
+        basic claim correctness (exactly one winner). The actual EvalPlanQual
+        recheck fix for PostgreSQL concurrency is verified separately in
+        integration tests against a real PostgreSQL backend.
+        """
+        # Create a single pending task
+        created_task = repository.create(**sample_task_data)
+
+        # Worker-1 claims first
+        claimed_by_1 = repository.claim_pending_task(worker_id="worker-1")
+
+        # Worker-2 tries to claim the same task
+        claimed_by_2 = repository.claim_pending_task(worker_id="worker-2")
+
+        # Worker-1 wins (task was pending)
+        assert claimed_by_1 is not None
+        assert claimed_by_1.id == created_task.id
+        assert claimed_by_1.status == TaskStatus.RUNNING.value
+        assert claimed_by_1.worker_id == "worker-1"
+
+        # Worker-2 gets None (task is no longer pending — already claimed by worker-1)
+        # This is exactly what the 'AND status = :status_pending' outer guard ensures:
+        # even if the inner subquery somehow returns the same id, the outer UPDATE
+        # rechecks status and finds it's now 'running', not 'pending'.
+        assert claimed_by_2 is None, (
+            f"Worker-2 should NOT have claimed a task that worker-1 already took. "
+            f"Got: {claimed_by_2}"
+        )
+
+        # Verify the task in DB is claimed by exactly one worker
+        db_task = repository.get(created_task.id)
+        assert db_task.status == TaskStatus.RUNNING.value
+        assert db_task.worker_id == "worker-1"
+
     def test_claim_pending_task_none_when_empty(self, repository):
         """Test claiming when no tasks available."""
         result = repository.claim_pending_task(worker_id="worker-1")

@@ -14,6 +14,7 @@ from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
+from ..repositories.job_queue.models import JobItem, JobStatus
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..registry import get_registry
@@ -1012,6 +1013,44 @@ Provide a concise summary:"""
                     # WAITING_CHILDREN status set is retained for
                     # graceful-degradation watchers and FIFO carve-out
                     # SQL compatibility.
+
+                    # Defense-in-depth: if the instance's MESSAGE job is
+                    # already in a terminal state
+                    # (completed/failed/cancelled/dead_letter), the
+                    # pending_count is a false positive — stale/duplicate
+                    # messages from a task-claim race (see
+                    # daemon/repositories/task/repository.py claim race).
+                    # Do NOT write WAITING_CHILDREN or the instance gets
+                    # permanently stuck (no code path clears it back).
+                    _terminal_statuses = [
+                        JobStatus.COMPLETED.value,
+                        JobStatus.FAILED.value,
+                        JobStatus.CANCELLED.value,
+                        JobStatus.DEAD_LETTER.value,
+                    ]
+                    _terminal_job_exists = session.exec(
+                        select(func.count())
+                        .select_from(JobItem)
+                        .where(JobItem.instance_id == instance_id)
+                        .where(JobItem.job_type == "message")
+                        .where(JobItem.status.in_(_terminal_statuses))
+                        .where(JobItem.deleted_at.is_(None))
+                    ).scalar_one() > 0
+                    if _terminal_job_exists:
+                        logger.warning(
+                            f"Instance {instance_id[:8]}... has pending_count={pending_count} "
+                            f"but already has a terminal MESSAGE job — skipping WAITING_CHILDREN "
+                            f"write (stale/duplicate messages from task-claim race)"
+                        )
+                        # Do NOT set status to WAITING_CHILDREN. Leave the
+                        # instance status as-is (terminal state preserved).
+                        return _ChildCompletionDbResult(
+                            outcome="root_skipped_terminal_job",
+                            instance_id=instance_id,
+                            agent_id=instance.agent_id,
+                            parent_id=None,
+                        )
+
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     session.commit()
                     logger.info(

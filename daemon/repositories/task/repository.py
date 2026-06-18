@@ -264,6 +264,7 @@ class TaskRepository:
                     ORDER BY created_at ASC
                     LIMIT 1
                 )
+                AND status = :status_pending
                 RETURNING *
             """)
             row = conn.execute(stmt, {
