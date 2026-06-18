@@ -352,6 +352,32 @@ class CorrelationManager:
             return True
         return self._pending[parent_id].is_complete
 
+    async def clear_for_instance(self, parent_id: str) -> None:
+        """Clear all pending correlations and locks for a terminated instance.
+
+        Called from instance_lifecycle.terminate_instance() to evict stale
+        in-memory state when an instance is terminated. Without this,
+        a terminated-and-revived instance would inherit its previous
+        ``_pending[parent_id]`` entry — ``is_complete()`` would never return
+        True again until daemon restart, wedging the parent permanently
+        (S3 leak: both dicts grow unbounded across terminate/revive cycles).
+
+        Safe to call even if there are no entries for ``parent_id``: both
+        ``.pop(key, None)`` calls are no-ops on missing keys. Mirrors the
+        cleanup pattern in ``resolve_response`` (when correlation completes)
+        and uses the same per-parent lock as ``register_message_send`` /
+        ``resolve_response`` for serialized access.
+
+        Must be called from the main event loop (N3 constraint).
+
+        Args:
+            parent_id: The parent instance ID whose CM state should be cleared.
+        """
+        async with self._get_lock(parent_id):
+            self._pending.pop(parent_id, None)
+            self._locks.pop(parent_id, None)
+            logger.debug(f"CM clear_for_instance: parent={parent_id[:8]}")
+
     # -------------------------------------------------------------------------
     # Shadow Validation (Phase 1)
     # -------------------------------------------------------------------------

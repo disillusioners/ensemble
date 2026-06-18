@@ -839,6 +839,214 @@ class TestRepositoryStartJobAtomic:
         assert retrieved.instance_id == "instance-1"
 
 
+class TestRepositoryGetByInstanceRecent:
+    """Tests for the ``get_by_instance`` and ``get_active_by_instance`` ordering fix.
+
+    Branch: fix/revive-stale-job-lookup. ``get_by_instance`` must return the MOST
+    RECENT non-deleted job (ORDER BY created_at DESC) instead of an
+    implementation-defined row, so a CANCELLED job left from a prior terminate
+    does NOT shadow a fresh PROCESSING job from a revive. ``get_active_by_instance``
+    filters further to PENDING/PROCESSING only.
+    """
+
+    def test_get_by_instance_returns_most_recent_when_multiple_exist(self, repository, sample_job_data):
+        """When 2+ jobs exist for the same instance_id, return the newest."""
+        # Job A: started, then cancelled (older).
+        job_a = repository.create(**sample_job_data, instance_id="inst-shared")
+        repository.start_job(job_a.job_id, "inst-shared")
+        repository.cancel_job(job_a.job_id)
+
+        # Job B: created AFTER job A (newer), still PENDING.
+        job_b = repository.create(**sample_job_data, instance_id="inst-shared")
+
+        result = repository.get_by_instance("inst-shared")
+
+        assert result is not None
+        assert result.job_id == job_b.job_id, (
+            f"Expected most recent job_id={job_b.job_id}, got {result.job_id}"
+        )
+
+    def test_get_by_instance_orders_by_created_at_desc_across_statuses(
+        self, repository, sample_job_data
+    ):
+        """Mixed statuses (PROCESSING newer, CANCELLED older) → PROCESSING wins."""
+        # Create a PENDING job, then PROCESSING it, then CANCELLED it (older).
+        old_job = repository.create(**sample_job_data, instance_id="inst-mix")
+        repository.start_job(old_job.job_id, "inst-mix")
+        repository.cancel_job(old_job.job_id)
+
+        # Create a fresh PENDING job (newer).
+        new_job = repository.create(**sample_job_data, instance_id="inst-mix")
+
+        # Most recent wins regardless of status.
+        result = repository.get_by_instance("inst-mix")
+
+        assert result.job_id == new_job.job_id
+        assert result.status == JobStatus.PENDING.value
+
+    def test_get_by_instance_excludes_soft_deleted(self, repository, sample_job_data):
+        """Soft-deleted jobs must NOT be returned (deleted_at IS NULL filter)."""
+        # Create a soft-deleted job (older).
+        deleted_job = repository.create(
+            **sample_job_data, instance_id="inst-softdel"
+        )
+        repository.start_job(deleted_job.job_id, "inst-softdel")
+        repository.soft_delete(deleted_job.job_id)
+
+        # Create a non-deleted job (newer).
+        kept_job = repository.create(
+            **sample_job_data, instance_id="inst-softdel"
+        )
+
+        result = repository.get_by_instance("inst-softdel")
+
+        assert result is not None
+        assert result.job_id == kept_job.job_id, (
+            "Soft-deleted jobs must be filtered out"
+        )
+
+
+class TestRepositoryGetActiveByInstance:
+    """Tests for the new ``get_active_by_instance`` method (Fix 1).
+
+    Returns the most recent non-deleted job in PENDING or PROCESSING. Terminal
+    states (COMPLETED, FAILED, CANCELLED, DEAD_LETTER) and soft-deleted rows are
+    excluded.
+    """
+
+    def test_get_active_returns_pending_job(self, repository, sample_job_data):
+        """A PENDING job (newest) is returned by get_active_by_instance."""
+        pending_job = repository.create(
+            **sample_job_data, instance_id="inst-pending"
+        )
+        # pending_job.status is PENDING by default.
+
+        result = repository.get_active_by_instance("inst-pending")
+
+        assert result is not None
+        assert result.job_id == pending_job.job_id
+        assert result.status == JobStatus.PENDING.value
+
+    def test_get_active_returns_processing_job(self, repository, sample_job_data):
+        """A PROCESSING job is returned by get_active_by_instance."""
+        job = repository.create(**sample_job_data, instance_id="inst-proc")
+        repository.start_job(job.job_id, "inst-proc")
+
+        result = repository.get_active_by_instance("inst-proc")
+
+        assert result is not None
+        assert result.job_id == job.job_id
+        assert result.status == JobStatus.PROCESSING.value
+
+    def test_get_active_returns_only_active_across_mixed_statuses(
+        self, repository, sample_job_data
+    ):
+        """When COMPLETED, FAILED, CANCELLED, PENDING, PROCESSING all exist,
+        only the most recent ACTIVE (PENDING/PROCESSING) job is returned.
+        """
+        # Terminal jobs (older).
+        completed = repository.create(
+            **sample_job_data, instance_id="inst-multi"
+        )
+        repository.start_job(completed.job_id, "inst-multi")
+        repository.complete_job(completed.job_id, "done")
+
+        failed = repository.create(
+            **sample_job_data, instance_id="inst-multi"
+        )
+        repository.start_job(failed.job_id, "inst-multi")
+        repository.fail_job(failed.job_id, "oops")
+
+        cancelled = repository.create(
+            **sample_job_data, instance_id="inst-multi"
+        )
+        repository.start_job(cancelled.job_id, "inst-multi")
+        repository.cancel_job(cancelled.job_id)
+
+        # Active jobs (newer).
+        processing = repository.create(
+            **sample_job_data, instance_id="inst-multi"
+        )
+        repository.start_job(processing.job_id, "inst-multi")
+
+        pending = repository.create(
+            **sample_job_data, instance_id="inst-multi"
+        )  # newest
+
+        result = repository.get_active_by_instance("inst-multi")
+
+        assert result is not None
+        assert result.job_id == pending.job_id, (
+            f"Expected newest active={pending.job_id}, got {result.job_id}"
+        )
+        assert result.status == JobStatus.PENDING.value
+
+    def test_get_active_returns_none_when_no_active_exists(
+        self, repository, sample_job_data
+    ):
+        """All jobs in terminal states → get_active_by_instance returns None."""
+        completed = repository.create(
+            **sample_job_data, instance_id="inst-allterm"
+        )
+        repository.start_job(completed.job_id, "inst-allterm")
+        repository.complete_job(completed.job_id)
+
+        cancelled = repository.create(
+            **sample_job_data, instance_id="inst-allterm"
+        )
+        repository.start_job(cancelled.job_id, "inst-allterm")
+        repository.cancel_job(cancelled.job_id)
+
+        failed = repository.create(
+            **sample_job_data, instance_id="inst-allterm"
+        )
+        repository.start_job(failed.job_id, "inst-allterm")
+        repository.fail_job(failed.job_id, "x")
+
+        result = repository.get_active_by_instance("inst-allterm")
+
+        assert result is None, (
+            "No active jobs exist; expected None"
+        )
+
+    def test_get_active_returns_none_for_unknown_instance(self, repository):
+        """Unknown instance_id → None (no rows match)."""
+        assert repository.get_active_by_instance("nope") is None
+
+    def test_get_active_excludes_soft_deleted(self, repository, sample_job_data):
+        """A soft-deleted PROCESSING job is NOT returned."""
+        job = repository.create(**sample_job_data, instance_id="inst-softproc")
+        repository.start_job(job.job_id, "inst-softproc")
+        repository.soft_delete(job.job_id)
+
+        assert repository.get_active_by_instance("inst-softproc") is None
+
+    def test_get_active_chooses_active_over_stale_when_same_instance(
+        self, repository, sample_job_data
+    ):
+        """Stale terminal job + fresh active job → active wins.
+
+        This is the exact pattern the fix protects against: a CANCELLED job
+        from a prior terminate (older created_at) plus a fresh PROCESSING job
+        from a revive (newer created_at). ``get_active_by_instance`` must
+        return the active one.
+        """
+        # Stale CANCELLED job (older).
+        stale = repository.create(**sample_job_data, instance_id="inst-revive")
+        repository.start_job(stale.job_id, "inst-revive")
+        repository.cancel_job(stale.job_id)
+
+        # Fresh PROCESSING job from revive (newer).
+        fresh = repository.create(**sample_job_data, instance_id="inst-revive")
+        repository.start_job(fresh.job_id, "inst-revive")
+
+        result = repository.get_active_by_instance("inst-revive")
+
+        assert result is not None
+        assert result.job_id == fresh.job_id
+        assert result.status == JobStatus.PROCESSING.value
+
+
 class TestRepositoryHardDeleteByProject:
     """Tests for hard_delete_by_project method."""
 

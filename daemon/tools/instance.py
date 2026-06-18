@@ -530,10 +530,21 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         except ValueError as e:
             return str(e)
 
-        # Check if instance is terminated
+        # Check if instance is terminated or errored
+        # NOTE: `to_dict()` returns the live status field, NOT a `terminated`
+        # boolean (the old `instance_info.get("terminated")` guard was always
+        # false because that key doesn't exist, so dead instances were never
+        # rejected). Status is stored as the enum's string value.
+        from ..repositories.instance.models import InstanceStatus
         instance_info = manager.get_instance_info(instance_id)
-        if instance_info.get("terminated"):
-            return f"ERROR: Instance '{instance_id}' is terminated. Cannot send message."
+        if instance_info.get("status") in (
+            InstanceStatus.TERMINATED.value,
+            InstanceStatus.ERROR.value,
+        ):
+            return (
+                f"ERROR: Instance '{instance_id}' is terminated/errored "
+                f"(status={instance_info.get('status')}). Cannot send message."
+            )
 
         # Check if there's already a message in progress (pending or processing)
         stats = await manager.get_queue_stats(instance_id)

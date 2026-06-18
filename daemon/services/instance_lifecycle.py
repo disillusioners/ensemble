@@ -537,8 +537,10 @@ class InstanceLifecycleService:
                 logger.warning(f"Failed to cleanup watches for instance {instance_id[:8]}...: {e}")
 
         # 5. Update DB status to terminated using repository
+        # Reset waiting_for to 0 to prevent counter divergence on revive.
         if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
             self._manager._instance_repository.update_status(instance_id, "terminated")
+            self._manager._instance_repository.update(instance_id, waiting_for=0)
 
         # 5.5. Emit status_change event
         await self._manager._live_hub.stream_status_change(instance_id, "terminated", agent_id=meta.agent_id if meta else None)
@@ -647,6 +649,23 @@ class InstanceLifecycleService:
                 logger.debug(f"[TRACE] terminate_instance: removed {count} MessageQueue entries for instance {instance_id[:8]}...")
             except Exception as e:
                 logger.warning(f"Failed to cleanup MessageQueue entries for instance {instance_id[:8]}...: {e}")
+
+        # 7.8. Clear CorrelationManager state for the terminated instance.
+        # Without this, a terminated-and-revived instance would inherit its
+        # previous _pending[parent_id] entry — is_complete() would never
+        # return True again until daemon restart, wedging the parent
+        # permanently. CM cleanup is defensive: a CM failure must NOT fail
+        # termination (legacy waiting_for cascade is the graceful-degradation
+        # fallback).
+        cm = get_correlation_manager()
+        if cm is not None:
+            try:
+                await cm.clear_for_instance(instance_id)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to clear CM state for terminated instance "
+                    f"{instance_id[:8]}...: {e}"
+                )
 
         # 8. Publish lifecycle event for terminated instance
         parent_id = meta.parent_id if meta else None

@@ -813,3 +813,169 @@ class TestDataclasses:
         assert pc.had_error is False
         pc.had_error = True
         assert pc.had_error is True
+
+
+# =============================================================================
+# Group 6 — clear_for_instance (Fix 3 part A: terminate cleanup)
+# =============================================================================
+
+
+class TestClearForInstance:
+    """Tests for ``CorrelationManager.clear_for_instance``.
+
+    Called from ``instance_lifecycle.terminate_instance()`` to evict stale
+    in-memory state when an instance is terminated. Without this, a
+    terminated-and-revived instance would inherit its previous
+    ``_pending[parent_id]`` entry — ``is_complete()`` would never return True
+    again until daemon restart, wedging the parent permanently.
+    """
+
+    async def test_clear_removes_pending_and_locks_after_register(self):
+        """After register_message_send populates _pending and _locks,
+        clear_for_instance must remove BOTH entries so a revived instance
+        starts with a clean slate.
+        """
+        cm = make_cm()
+        parent = "parent-cleanup-001"
+        child = "child-001"
+
+        # Populate _pending and _locks via a real registration.
+        await cm.register_message_send(parent, child, "msg-001")
+
+        # Sanity check: state is populated.
+        assert parent in cm._pending
+        assert parent in cm._locks
+        assert cm.get_pending_count(parent) == 1
+        assert cm.is_complete(parent) is False
+
+        # Clear.
+        await cm.clear_for_instance(parent)
+
+        # Both _pending and _locks entries are gone.
+        assert parent not in cm._pending, (
+            f"_pending should be cleared, found keys: {list(cm._pending)}"
+        )
+        assert parent not in cm._locks, (
+            f"_locks should be cleared, found keys: {list(cm._locks)}"
+        )
+        # Public-state confirmation.
+        assert cm.get_pending_count(parent) == 0
+        assert cm.is_complete(parent) is True  # no entry → complete
+
+    async def test_clear_unknown_parent_is_safe(self):
+        """clear_for_instance on a parent with no entries must NOT raise.
+
+        Both ``.pop(key, None)`` calls are no-ops on missing keys, so this
+        must complete silently. Critical for terminate cleanup when an
+        instance never had any children.
+        """
+        cm = make_cm()
+
+        # Must not raise.
+        await cm.clear_for_instance("never-registered-parent")
+
+        # Public state confirms nothing was tracked.
+        assert cm.get_pending_count("never-registered-parent") == 0
+        assert cm.is_complete("never-registered-parent") is True
+
+    async def test_clear_does_not_affect_other_parents(self):
+        """clear_for_instance(P1) must NOT touch P2's state.
+
+        Parents are isolated — clearing one must leave siblings untouched.
+        """
+        cm = make_cm()
+
+        # Two parents with pending entries.
+        await cm.register_message_send("parent-A", "child-1", "msg-a1")
+        await cm.register_message_send("parent-A", "child-2", "msg-a2")
+        await cm.register_message_send("parent-B", "child-1", "msg-b1")
+
+        # Clear parent-A.
+        await cm.clear_for_instance("parent-A")
+
+        # parent-A is gone.
+        assert "parent-A" not in cm._pending
+        assert "parent-A" not in cm._locks
+
+        # parent-B is untouched.
+        assert "parent-B" in cm._pending
+        assert "parent-B" in cm._locks
+        assert cm.get_pending_count("parent-B") == 1
+        assert cm.is_complete("parent-B") is False
+
+    async def test_clear_after_full_resolve_leaves_no_state(self):
+        """clear_for_instance after resolve_response is also safe.
+
+        resolve_response cleans up _pending on completion; clear_for_instance
+        is a defensive no-op when called after that.
+        """
+        recorder, cb = make_callback()
+        cm = make_cm(callback=cb)
+        parent = "parent-resolved-001"
+        child = "child-001"
+        msg = "msg-001"
+
+        await cm.register_message_send(parent, child, msg)
+        # Resolve to completion → callback fires → _pending is cleaned.
+        result = await cm.resolve_response(parent, child, msg)
+        assert result is True
+        assert parent not in cm._pending  # already cleared by resolve
+
+        # Now call clear — must not raise and must leave _locks clean too.
+        await cm.clear_for_instance(parent)
+
+        # _locks is also cleaned (resolve_response already popped it, but
+        # clear must be idempotent).
+        assert parent not in cm._locks
+
+    async def test_clear_then_register_starts_fresh(self):
+        """After clear, a new register on the same parent starts with count=0.
+
+        This is the exact behavior needed for terminate→revive: the revived
+        instance must NOT inherit the terminated instance's pending state.
+        """
+        cm = make_cm()
+        parent = "parent-revived-001"
+
+        # Pre-populate.
+        await cm.register_message_send(parent, "child-1", "msg-1")
+        await cm.register_message_send(parent, "child-2", "msg-2")
+        assert cm.get_pending_count(parent) == 2
+
+        # Terminate → clear.
+        await cm.clear_for_instance(parent)
+        assert cm.get_pending_count(parent) == 0
+
+        # Revive → fresh registration starts at count=1, NOT count=3.
+        await cm.register_message_send(parent, "child-3", "msg-3")
+        assert cm.get_pending_count(parent) == 1, (
+            "Revived instance must start with fresh pending count"
+        )
+
+    async def test_clear_uses_per_parent_lock(self):
+        """clear_for_instance must take the per-parent lock for serialized access.
+
+        Verifies by registering entries concurrently with a clear — neither
+        operation should hang or leave inconsistent state.
+        """
+        cm = make_cm()
+        parent = "parent-concurrent-001"
+
+        # Register many entries.
+        for i in range(10):
+            await cm.register_message_send(parent, f"child-{i}", f"msg-{i}")
+
+        # Race a clear against a final register. The clear must complete
+        # without hanging (no N3 lock-across-event-loop violation).
+        await asyncio.wait_for(
+            asyncio.gather(
+                cm.clear_for_instance(parent),
+                cm.register_message_send(parent, "child-late", "msg-late"),
+            ),
+            timeout=2.0,
+        )
+
+        # Final state: either the clear happened after the late register
+        # (no state at all) or before it (just the late entry). In either
+        # case the count is at most 1.
+        assert cm.get_pending_count(parent) <= 1

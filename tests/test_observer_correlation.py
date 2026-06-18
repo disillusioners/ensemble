@@ -795,3 +795,172 @@ class TestC2ConcurrentFinalize:
         finally:
             await cm.stop()
             set_correlation_manager(None)
+
+
+# ─── Test 8 (S3 fix): stale-job re-query in handle_correlation_complete ─────
+
+
+class TestHandleCorrelationCompleteStaleJobLookup:
+    """Regression tests for fix/revive-stale-job-lookup: ``handle_correlation_complete``
+    must re-query ``_job_repo.get_active_by_instance`` when ``get_by_instance``
+    returns a non-PROCESSING row (the most-recent non-deleted row may be a stale
+    CANCELLED job from a prior terminate cycle, not the live PROCESSING job).
+
+    The re-query is critical because the old code skipped finalization whenever
+    the freshly-returned job was not PROCESSING — which silently dropped the
+    terminal transition after a terminate→revive cycle.
+    """
+
+    async def test_callback_finalizes_when_get_by_instance_returns_processing(
+        self,
+    ):
+        """Happy path: get_by_instance returns PROCESSING → finalizes immediately,
+        NO re-query to get_active_by_instance.
+
+        Verifies Fix 2 doesn't regress the simple case: when the row returned
+        by ``get_job_by_instance`` is already PROCESSING, the re-query branch
+        must not be taken and ``_finalize_job`` proceeds with that row.
+        """
+        processing_job = make_mock_job(status="processing")
+        observer, mocks = make_observer(processing_job)
+
+        await observer.handle_correlation_complete(
+            processing_job.instance_id, "completed"
+        )
+
+        # Finalization happened with the PROCESSING job.
+        mocks["job_repo"].atomic_transition.assert_called_once()
+        kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
+        assert kwargs["from_status"] == JobStatus.PROCESSING.value
+        assert kwargs["to_status"] == JobStatus.COMPLETED.value
+        assert kwargs["job_id"] == processing_job.job_id
+
+        # Re-query was NOT made (happy path short-circuits before it).
+        mocks["job_repo"].get_active_by_instance.assert_not_called()
+
+        # Watchers notified once.
+        mocks["job_queue_service"].notify_watchers.assert_called_once()
+
+    async def test_callback_re_queries_and_finalizes_active_when_stale_job_returned(
+        self,
+    ):
+        """Defensive re-query: get_by_instance returns CANCELLED, get_active_by_instance
+        returns PROCESSING → finalize the ACTIVE job (not the stale one).
+
+        This is the exact scenario the fix protects against: a terminate→revive
+        cycle leaves a CANCELLED job with newer created_at than the revived
+        PROCESSING job, so get_by_instance (ORDER BY created_at DESC) returns
+        the CANCELLED row. The re-query finds the actual live PROCESSING job.
+        """
+        # Stale CANCELLED job (newer created_at because of how the DB write
+        # order works in a terminate→revive scenario).
+        stale_job = make_mock_job(
+            status="cancelled", instance_id="parent-stale-123"
+        )
+        # Live PROCESSING job (older created_at, but is the one we must finalize).
+        active_job = make_mock_job(
+            status="processing", instance_id="parent-stale-123"
+        )
+        # Make the job_ids distinct so we can assert which one is finalized.
+        stale_job.job_id = "stale-job-id-aaaa"
+        active_job.job_id = "active-job-id-bbbb"
+
+        observer, mocks = make_observer(stale_job)
+
+        # Wire the active-job re-query to return the live PROCESSING job.
+        mocks["job_repo"].get_active_by_instance = MagicMock(
+            return_value=active_job
+        )
+
+        await observer.handle_correlation_complete("parent-stale-123", "completed")
+
+        # The re-query was made.
+        mocks["job_repo"].get_active_by_instance.assert_called_once_with(
+            "parent-stale-123"
+        )
+
+        # Finalization happened with the ACTIVE job (not the stale one).
+        mocks["job_repo"].atomic_transition.assert_called_once()
+        kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
+        assert kwargs["from_status"] == JobStatus.PROCESSING.value
+        assert kwargs["to_status"] == JobStatus.COMPLETED.value
+        assert kwargs["job_id"] == active_job.job_id, (
+            f"Expected active job_id={active_job.job_id}, got "
+            f"{kwargs['job_id']}"
+        )
+
+        # Watchers notified once for the completed active job.
+        mocks["job_queue_service"].notify_watchers.assert_called_once()
+        assert (
+            mocks["job_queue_service"].notify_watchers.call_args.args[0]
+            == active_job.job_id
+        )
+
+    async def test_callback_skips_when_no_active_job_exists(self):
+        """Re-query returns None → callback returns silently, no finalization.
+
+        When ``get_by_instance`` returns a non-PROCESSING row AND
+        ``get_active_by_instance`` returns None (no live PENDING/PROCESSING
+        job exists for this parent), the callback must NOT call
+        ``_finalize_job``. This prevents finalizing a phantom job that doesn't
+        actually exist.
+        """
+        # Stale non-PROCESSING row — could be CANCELLED, COMPLETED, etc.
+        stale_job = make_mock_job(status="cancelled", instance_id="parent-ghost-456")
+        stale_job.job_id = "stale-job-id-cccc"
+
+        observer, mocks = make_observer(stale_job)
+
+        # No live active job for this parent.
+        mocks["job_repo"].get_active_by_instance = MagicMock(return_value=None)
+
+        await observer.handle_correlation_complete("parent-ghost-456", "completed")
+
+        # Re-query was made.
+        mocks["job_repo"].get_active_by_instance.assert_called_once_with(
+            "parent-ghost-456"
+        )
+
+        # No finalization: atomic_transition was NOT called.
+        mocks["job_repo"].atomic_transition.assert_not_called()
+
+        # No watcher notifications.
+        mocks["job_queue_service"].notify_watchers.assert_not_called()
+
+        # No lock release (finalization didn't run).
+        mocks["lock_repo"].release_by_instance.assert_not_called()
+
+    async def test_callback_skips_when_active_job_is_pending_not_processing(self):
+        """Re-query returns PENDING (not PROCESSING) → skip finalization.
+
+        ``get_active_by_instance`` may return a PENDING job. The fix only
+        finalizes when the active job is PROCESSING; a PENDING job has not
+        started yet and finalizing it would be wrong (the state machine
+        requires PENDING → PROCESSING → COMPLETED).
+        """
+        stale_job = make_mock_job(status="cancelled", instance_id="parent-pend-789")
+        stale_job.job_id = "stale-job-id-dddd"
+
+        pending_job = make_mock_job(
+            status="pending", instance_id="parent-pend-789"
+        )
+        pending_job.job_id = "pending-job-id-eeee"
+
+        observer, mocks = make_observer(stale_job)
+
+        # Active row exists but it's PENDING, not PROCESSING.
+        mocks["job_repo"].get_active_by_instance = MagicMock(
+            return_value=pending_job
+        )
+
+        await observer.handle_correlation_complete("parent-pend-789", "completed")
+
+        # Re-query was made.
+        mocks["job_repo"].get_active_by_instance.assert_called_once_with(
+            "parent-pend-789"
+        )
+
+        # No finalization: PENDING → COMPLETED is an invalid transition that
+        # the fix correctly avoids.
+        mocks["job_repo"].atomic_transition.assert_not_called()
+        mocks["job_queue_service"].notify_watchers.assert_not_called()

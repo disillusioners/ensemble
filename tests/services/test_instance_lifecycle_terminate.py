@@ -612,3 +612,208 @@ async def test_terminate_summary_log_has_all_fields(
     assert m is not None and int(m.group(1)) == 2, (
         f"Expected children=2; got: {trace_msg}"
     )
+
+
+# =============================================================================
+# Test 10 — terminate_instance resets waiting_for=0 (Fix 3 part B)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_terminate_resets_waiting_for_to_zero_on_instance_repo():
+    """terminate_instance must reset ``waiting_for=0`` on the instance repo.
+
+    Without this, a terminate→revive cycle leaves a non-zero ``waiting_for``
+    counter in the DB even though the instance is brand-new. The revived
+    instance would inherit a stale counter and ``is_complete()`` checks would
+    be wrong until manual cleanup.
+    """
+    instance_id = "wf-reset-123"
+
+    manager = make_manager(
+        meta_for={instance_id: make_meta(instance_id)},
+        graph_tasks={},
+        with_dispatch_bus=True,
+    )
+    svc = make_lifecycle_service(manager, make_job_queue_service())
+
+    await svc.terminate_instance(instance_id)
+
+    # update was called with waiting_for=0 for this instance.
+    update_calls = manager._instance_repository.update.call_args_list
+    wf_calls = [
+        c for c in update_calls if c.kwargs.get("waiting_for") == 0
+    ]
+    assert len(wf_calls) == 1, (
+        f"Expected exactly one update(waiting_for=0) call, got "
+        f"{update_calls}"
+    )
+    assert wf_calls[0].args[0] == instance_id
+
+
+# =============================================================================
+# Test 11 — terminate_instance clears CorrelationManager state (Fix 3 part B)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_terminate_clears_correlation_manager_state_for_instance():
+    """terminate_instance must call ``cm.clear_for_instance(instance_id)``.
+
+    Otherwise a terminated-and-revived instance would inherit its previous
+    ``_pending[parent_id]`` entry, and ``is_complete()`` would never return
+    True until daemon restart (S3 leak from the CM docs).
+    """
+    from daemon.services.correlation_manager import (
+        CorrelationManager,
+        set_correlation_manager,
+    )
+
+    instance_id = "cm-clear-123"
+
+    manager = make_manager(
+        meta_for={instance_id: make_meta(instance_id)},
+        graph_tasks={},
+        with_dispatch_bus=True,
+    )
+    svc = make_lifecycle_service(manager, make_job_queue_service())
+
+    # Wire a real CM and populate its state for this parent.
+    cm = CorrelationManager(
+        instance_repository=make_instance_repo_mock(),
+        message_queue_repository=make_msg_repo_mock(),
+    )
+    await cm.start()
+    set_correlation_manager(cm)
+    try:
+        # Register a correlation so _pending and _locks are populated.
+        await cm.register_message_send(instance_id, "child-001", "msg-001")
+        assert cm.get_pending_count(instance_id) == 1
+        assert instance_id in cm._pending
+        assert instance_id in cm._locks
+
+        # Terminate — must clear CM state for this parent.
+        await svc.terminate_instance(instance_id)
+
+        # CM state for this parent is gone.
+        assert instance_id not in cm._pending, (
+            f"_pending should be cleared; found: {list(cm._pending)}"
+        )
+        assert instance_id not in cm._locks, (
+            f"_locks should be cleared; found: {list(cm._locks)}"
+        )
+        assert cm.get_pending_count(instance_id) == 0
+    finally:
+        await cm.stop()
+        set_correlation_manager(None)
+
+
+# =============================================================================
+# Test 12 — terminate_instance with no CM registered still completes
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_terminate_succeeds_when_correlation_manager_is_none():
+    """When CM is None (not wired), terminate_instance must NOT crash.
+
+    The CM cleanup is wrapped in a None-check (``if cm is not None``). The
+    daemon must remain safe when CM is absent (graceful degradation path).
+    """
+    from daemon.services.correlation_manager import set_correlation_manager
+
+    instance_id = "no-cm-123"
+
+    manager = make_manager(
+        meta_for={instance_id: make_meta(instance_id)},
+        graph_tasks={},
+        with_dispatch_bus=True,
+    )
+    svc = make_lifecycle_service(manager, make_job_queue_service())
+
+    # Ensure no CM is wired.
+    set_correlation_manager(None)
+    try:
+        # Must not raise.
+        result = await svc.terminate_instance(instance_id)
+        assert result is True
+    finally:
+        set_correlation_manager(None)
+
+
+# =============================================================================
+# Test 13 — terminate_instance with CM that raises does not fail termination
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_terminate_handles_correlation_manager_failure_gracefully(
+    caplog: pytest.LogCaptureFixture,
+):
+    """When ``cm.clear_for_instance`` raises, terminate_instance must still
+    complete (defensive try/except in step 7.8). The CM failure is logged at
+    WARNING but does NOT propagate — legacy ``waiting_for`` cascade is the
+    graceful-degradation fallback.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from daemon.services.correlation_manager import (
+        CorrelationManager,
+        set_correlation_manager,
+    )
+
+    instance_id = "cm-raises-123"
+
+    manager = make_manager(
+        meta_for={instance_id: make_meta(instance_id)},
+        graph_tasks={},
+        with_dispatch_bus=True,
+    )
+    svc = make_lifecycle_service(manager, make_job_queue_service())
+
+    # Wire a CM mock whose clear_for_instance raises.
+    cm = MagicMock(spec=CorrelationManager)
+    cm.clear_for_instance = AsyncMock(
+        side_effect=RuntimeError("simulated CM failure")
+    )
+    set_correlation_manager(cm)
+    caplog.set_level(logging.WARNING)
+    try:
+        # Must NOT propagate the CM error.
+        result = await svc.terminate_instance(instance_id)
+
+        assert result is True
+        # The failing CM was called (we know the code path was reached).
+        cm.clear_for_instance.assert_awaited_once_with(instance_id)
+
+        # Failure was logged.
+        fail_logs = [
+            r for r in caplog.records
+            if "Failed to clear CM state" in r.message
+            and instance_id[:8] in r.message
+        ]
+        assert len(fail_logs) >= 1, (
+            f"Expected failure log; got: "
+            f"{[r.message for r in caplog.records]}"
+        )
+    finally:
+        set_correlation_manager(None)
+
+
+def make_instance_repo_mock():
+    """Lightweight mock for InstanceRepo used by CM tests."""
+    from unittest.mock import MagicMock
+
+    repo = MagicMock(name="InstanceRepo")
+    repo.get = MagicMock(return_value=None)
+    repo.get_all_with_waiting_for = MagicMock(return_value=[])
+    return repo
+
+
+def make_msg_repo_mock():
+    """Lightweight mock for MessageQueueRepo used by CM tests."""
+    from unittest.mock import MagicMock
+
+    repo = MagicMock(name="MsgRepo")
+    repo.get_pending_for_instances = MagicMock(return_value=[])
+    return repo

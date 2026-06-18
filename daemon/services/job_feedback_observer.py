@@ -299,14 +299,28 @@ class JobFeedbackObserver:
                 f"CM callback: no job for parent {parent_id[:8]}..., skipping"
             )
             return
-        # Idempotency guard: if job is no longer PROCESSING, another actor
-        # (terminate_instance, previous callback, etc.) already transitioned it.
+
         if job.status != JobStatus.PROCESSING.value:
-            logger.debug(
-                f"CM callback: job {job.job_id[:8]}... already {job.status}, "
-                f"skipping (idempotency guard)"
+            # Defense-in-depth: ``get_by_instance`` returns the most recent
+            # non-deleted job (ORDER BY created_at DESC), but in a
+            # terminate→revive cycle the freshest row may be a CANCELLED job
+            # whose created_at is newer than the revived PROCESSING row.
+            # Re-query for the active (PENDING/PROCESSING) job before skipping
+            # so the real active PROCESSING job still gets finalized.
+            active_job = await asyncio.to_thread(
+                self._job_repo.get_active_by_instance, parent_id
             )
-            return
+            if (
+                active_job is not None
+                and active_job.status == JobStatus.PROCESSING.value
+            ):
+                job = active_job
+            else:
+                logger.info(
+                    f"CM callback: no active PROCESSING job for instance "
+                    f"{parent_id[:8]}..., skipping"
+                )
+                return
 
         await self._finalize_job(job, parent_id, terminal_status, error=None)
 

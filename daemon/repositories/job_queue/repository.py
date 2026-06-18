@@ -102,20 +102,52 @@ class JobRepository:
             return job
 
     def get_by_instance(self, instance_id: str) -> JobItem | None:
-        """Get a job by instance ID.
-        
+        """Get the most recent non-deleted job for an instance ID.
+
         Args:
             instance_id: Instance identifier.
-            
+
         Returns:
-            JobItem if found, None otherwise.
+            Most recent non-deleted JobItem matching ``instance_id``, or ``None``
+            if none exists. ``ORDER BY created_at DESC`` ensures determinism when
+            multiple job rows exist for the same instance (e.g. a CANCELLED job
+            left from a prior terminate plus a fresh PROCESSING job from a revive).
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobItem).where(JobItem.instance_id == instance_id).where(
-                JobItem.deleted_at.is_(None)
+            stmt = (
+                select(JobItem)
+                .where(JobItem.instance_id == instance_id)
+                .where(JobItem.deleted_at.is_(None))
+                .order_by(JobItem.created_at.desc())
             )
             job = db_session.exec(stmt).first()
             return job
+
+    def get_active_by_instance(self, instance_id: str) -> JobItem | None:
+        """Get the most recent active (PENDING or PROCESSING) job for an instance.
+
+        Excludes terminal states (COMPLETED, FAILED, CANCELLED, DEAD_LETTER) and
+        soft-deleted rows. Used by callers that need to find the current live
+        job — never a historical one.
+
+        Args:
+            instance_id: Instance identifier.
+
+        Returns:
+            Most recent active non-deleted JobItem matching ``instance_id``, or
+            ``None`` if none exists.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(JobItem)
+                .where(JobItem.instance_id == instance_id)
+                .where(JobItem.deleted_at.is_(None))
+                .where(JobItem.status.in_(
+                    [JobStatus.PENDING.value, JobStatus.PROCESSING.value]
+                ))
+                .order_by(JobItem.created_at.desc())
+            )
+            return db_session.exec(stmt).first()
 
     def find_by_idempotency_key(self, idempotency_key: str) -> JobItem | None:
         """Find a job by its idempotency key.
