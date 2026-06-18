@@ -1,6 +1,6 @@
 # Bug: Symmetric Cross-System Race — MessageJobHandler Ignores RUNNING Tasks
 
-> **✅ Resolved.** This cross-system race is addressed by the ExecutionGate, which serializes execution across both dispatchers. If the doc body mentions a partial SQL carve-out as the only mitigation, note that the ExecutionGate is now the authoritative fix. For the current architecture, see [`../../architecture/message-processing-and-correlation.md`](../../architecture/message-processing-and-correlation.md).
+> **⚠️ Partially addressed (2026-06).** The ExecutionGate serializes one direction of this cross-system race. The other direction remains open — see the bug body for details. The file intentionally remains in `unresolved/`. For the current message-processing architecture, see [`../../architecture/message-processing-and-correlation.md`](../../architecture/message-processing-and-correlation.md).
 
 **Date:** 2026-06-06
 **Severity:** High (same class as commit 46cf524, opposite direction)

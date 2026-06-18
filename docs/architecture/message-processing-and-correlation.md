@@ -169,7 +169,7 @@ A concrete walkthrough from entry to finalization:
 
 **Why direct async callback, not EventBus.** The CM's `completion_callback` is a direct async callable passed at construction, not an `EventBus.publish()`. Direct invocation avoids the queue overflow risk and DB persistence overhead of the EventBus, and keeps the callback on the critical path without an extra hop.
 
-**Crash recovery via `rebuild_from_db()`.** On startup (or when CM is initialized), `rebuild_from_db()` queries the `message_queue` table for `(child_id, message_id)` pairs where the parent has a non-zero `waiting_for` count. It reconstructs the `_pending` state in memory. The `waiting_for` column is the **only** source of truth for this reconstruction.
+**Crash recovery via `rebuild_from_db()`.** On startup (or when CM is initialized), `rebuild_from_db()` queries the `message_queue` table for `(child_id, message_id)` pairs where the parent has a non-zero `waiting_for` count, and reconstructs the `_pending` state in memory. Note the division of responsibility: the `waiting_for` column identifies **which parents need rebuilding** (i.e. which parents had pending correlations at crash time), but it does NOT contain the correlation triples themselves — the actual `(parent_id, child_id, message_id)` data is reconstructed from the `message_queue` rows.
 
 **The `waiting_for` deprecation (ADR-011).** The `waiting_for` column on the `instance` table is **deprecated as control-flow**. It is retained as a rebuild-only cache (the source for `rebuild_from_db()`). The CM is authoritative for all runtime decisions. No code should read `waiting_for` to decide whether a parent is done; use `CM.get_pending_count()` or `CM.is_complete()` instead.
 
@@ -179,7 +179,9 @@ A concrete walkthrough from entry to finalization:
 
 **What it prevents: dual-driver checkpoint corruption.** Before the gate existed, both dispatchers could call `graph.astream` for the same instance concurrently. Each call would read the same LangGraph checkpoint version, append its own message via `add_messages`, and try to write a new version. The write-side lost-update race caused one of the appended messages to disappear from the final checkpoint. This was the root cause of the bug documented in `docs/bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md`.
 
-**The DB-backed lease (`instance_execution_leases` table).** The lease row carries `instance_id`, `holder_id`, `holder_kind` (`"task"` or `"message_job"`), `acquired_at`, and `heartbeat_at`. The heartbeat is written by a background task spawned inside `_execute_under_lease`; `recover_stale_leases` uses `COALESCE(heartbeat_at, acquired_at) < :cutoff` to detect crashed holders.
+**The DB-backed lease (`instance_execution_leases` table).** The lease row carries `instance_id`, `holder_id`, `holder_kind` (`"task"` or `"message_job"`), `acquired_at`, `heartbeat_at`, and a diagnostic `process_id` (the OS PID of the holder process — recorded for observability/debugging only; it is NOT used for correctness, and crash recovery relies on heartbeat staleness rather than PID). The heartbeat is written by a background task spawned inside `_execute_under_lease`; `recover_stale_leases` uses `COALESCE(heartbeat_at, acquired_at) < :cutoff` to detect crashed holders.
+
+> **Note on the `LeaseHolderKind` enum:** it currently defines three members — `MESSAGE_JOB`, `TASK`, and `RESUME` — but only the first two are produced by any code path today. The `RESUME` member is reserved for the planned paused-instance resume path and exists so the DB CHECK constraint does not need a migration when that path lands.
 
 **Lease lifecycle.** Acquire → hold for duration of `_process_message_with_tracking` → release on success. On contention (`LeaseContention`), the caller re-queues. On mid-flight revocation (`LeaseLostError`), the caller's work is cancelled and it re-queues with backoff.
 

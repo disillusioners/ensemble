@@ -4,7 +4,7 @@
 
 **Date:** 2026-06-06
 **Severity:** High (silent — no error, just wrong LLM output)
-**Status:** Confirmed (root cause identified, fix not implemented)
+**Status:** Resolved by per-instance claim guard (Fix B) + ExecutionGate
 **Affected Component:** `daemon/services/worker_pool.py` + `daemon/repositories/task/repository.py` (no per-instance serialization)
 **Symptom also observable in:** `daemon/services/child_reports.py` (lost update on `waiting_for`)
 

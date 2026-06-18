@@ -4,7 +4,7 @@
 
 **Date:** 2026-06-14
 **Severity:** High (silent — no error, parent's LLM produces incorrect final response)
-**Status:** Confirmed (root cause identified, fix not implemented)
+**Status:** Resolved (2026-06-14) by ExecutionGate
 **Variant of:** `docs/bugs/child-completion-report-lost-under-concurrent-task-processing.md` (worker-pool-only race, 2026-06-06)
 **This bug covers the *cross-dispatcher* race — the same defect class, but between two independent dispatch systems rather than two tasks within one dispatch system.**
 
