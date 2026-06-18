@@ -267,7 +267,13 @@ class TestTerminateInstance:
             
             assert result is True
             assert instance_id not in manager.instances
-            mock_instance_repository.update_status.assert_called_once_with(instance_id, "terminated")
+            # Fix 9376ab4d: terminate_instance now uses a single atomic update() call
+            # (status="terminated", waiting_for=0) instead of two separate writes
+            # (update_status + update) to prevent the crash window where status
+            # is "terminated" but waiting_for>0.
+            mock_instance_repository.update.assert_called_once_with(
+                instance_id, status="terminated", waiting_for=0
+            )
 
     @pytest.mark.asyncio
     async def test_terminate_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
