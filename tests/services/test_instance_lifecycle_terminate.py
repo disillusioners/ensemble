@@ -652,6 +652,71 @@ async def test_terminate_resets_waiting_for_to_zero_on_instance_repo():
 
 
 # =============================================================================
+# Test 10b — terminate_instance writes status + waiting_for=0 in ONE atomic
+# update call (Fix 3 part B atomicity)
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_terminate_writes_status_and_waiting_for_in_single_atomic_update():
+    """terminate_instance MUST set ``status="terminated"`` and
+    ``waiting_for=0`` in the SAME ``update()`` call.
+
+    The fix collapses the two writes (``update_status("terminated")`` followed
+    by a separate ``update(waiting_for=0)``) into ONE repository call to
+    eliminate the crash window: if the daemon died between the two writes, the
+    DB would be left with ``status=terminated, waiting_for=N>0``, and on
+    restart ``rebuild_from_db()`` would over-count pending work and resurrect
+    zombie correlations.
+
+    A regression that re-introduces TWO update calls (even if both succeed)
+    must be caught here. This test asserts:
+
+      1. Exactly ONE ``update(instance_id, ...)`` call is made for this
+         instance during terminate_instance.
+      2. That single call carries BOTH ``status="terminated"`` AND
+         ``waiting_for=0`` in its kwargs.
+
+    If a future refactor splits the writes, this test fails with a clear
+    message pointing at the regression.
+    """
+    instance_id = "atomic-123"
+
+    manager = make_manager(
+        meta_for={instance_id: make_meta(instance_id)},
+        graph_tasks={},
+        with_dispatch_bus=True,
+    )
+    svc = make_lifecycle_service(manager, make_job_queue_service())
+
+    await svc.terminate_instance(instance_id)
+
+    # All update() calls scoped to this instance.
+    update_calls = [
+        c for c in manager._instance_repository.update.call_args_list
+        if c.args and c.args[0] == instance_id
+    ]
+
+    # 1. Exactly one update call for this instance (atomicity invariant).
+    assert len(update_calls) == 1, (
+        f"Expected exactly ONE update() call for instance {instance_id}, "
+        f"got {len(update_calls)}: {update_calls}. "
+        f"Two calls would leave a crash window where status is set but "
+        f"waiting_for is not yet 0 (or vice versa)."
+    )
+
+    # 2. That single call carries BOTH status and waiting_for=0.
+    only_call = update_calls[0]
+    kwargs = only_call.kwargs
+    assert kwargs.get("status") == "terminated", (
+        f"Single update must set status='terminated'; got kwargs={kwargs}"
+    )
+    assert kwargs.get("waiting_for") == 0, (
+        f"Single update must reset waiting_for=0; got kwargs={kwargs}"
+    )
+
+
+# =============================================================================
 # Test 11 — terminate_instance clears CorrelationManager state (Fix 3 part B)
 # =============================================================================
 
