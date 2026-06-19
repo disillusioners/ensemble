@@ -12,9 +12,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import CheckConstraint, Column, ForeignKey, Integer, String, UniqueConstraint
-from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 from pydantic import BaseModel, field_validator
+
+from daemon.repositories.infra.types import JSONBType
 
 
 CRITICAL_NOTES_MAX_ENTRIES = 30
@@ -175,7 +176,7 @@ class ProjectMetadataRecord(SQLModel, table=True):
         sa_column=Column(String, ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True)
     )
     meta_key: str = Field(sa_column=Column(String, nullable=False))
-    meta_value: Any = Field(sa_column=Column(JSON, nullable=True))
+    meta_value: Any = Field(sa_column=Column(JSONBType, nullable=True))
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -204,7 +205,7 @@ class Project(SQLModel, table=True):
 
     related_directories: list[str] = Field(
         default_factory=list,
-        sa_column=Column(JSON)
+        sa_column=Column(JSONBType)
     )
 
     description: str | None = None
@@ -214,12 +215,12 @@ class Project(SQLModel, table=True):
     # Use 'project_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
     project_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("metadata", JSON)
+        sa_column=Column("metadata", JSONBType)
     )
 
     relationships: dict[str, list[str]] = Field(
         default_factory=dict,
-        sa_column=Column(JSON)
+        sa_column=Column(JSONBType)
     )
 
     creator_instance_id: str | None = None
@@ -301,7 +302,7 @@ class ProjectHistoryEntry(SQLModel, table=True):
     source_instance_id: str | None = Field(default=None)
     entry_metadata: dict | None = Field(
         default=None,
-        sa_column=Column(JSON)
+        sa_column=Column(JSONBType)
     )
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

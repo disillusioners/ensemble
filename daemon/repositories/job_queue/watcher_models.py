@@ -6,8 +6,9 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import Column, Index, UniqueConstraint
-from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
+
+from daemon.repositories.infra.types import JSONBType
 
 ALL_TERMINAL_STATES: list[str] = ["completed", "failed", "cancelled", "dead_letter"]
 
@@ -43,7 +44,7 @@ class JobWatcher(SQLModel, table=True):
     # Default includes ALL events (terminal + in_progress progress updates).
     watch_events: list[str] = Field(
         default_factory=lambda: list(ALL_WATCHABLE_EVENTS),
-        sa_column=Column(JSON)
+        sa_column=Column(JSONBType)
     )
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

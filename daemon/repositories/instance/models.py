@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column, String
-from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
+
+from daemon.repositories.infra.types import JSONBType
 
 
 class InstanceStatus(str, enum.Enum):
@@ -57,7 +58,7 @@ class Instance(SQLModel, table=True):
     
     instance_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("metadata", JSON)
+        sa_column=Column("metadata", JSONBType)
     )
     
     # Denormalized cache of child instance IDs (stored as JSON string)

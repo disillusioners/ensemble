@@ -1605,6 +1605,11 @@ class InstanceManager:
           them here for parity. SQLite does not support GIN and
           is never routed through this method (gated by the
           ``is_postgres`` check at the call site).
+        - JSON → JSONB column conversion (Phase 1, 2026-06-20):
+          PL/pgSQL DO block that idempotently converts the 17
+          ``Column(JSON)`` columns that were retyped to
+          ``JSONBType`` at the model level. See the DO block
+          comment for the rewrite-cost and invalid-JSON warnings.
 
         When a new column needs this treatment: add the IF NOT EXISTS
         ALTER + (optional) CREATE INDEX here. Do NOT add raw
@@ -1738,6 +1743,63 @@ class InstanceManager:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_idempotency "
                 "ON job_queue_items(idempotency_key) "
                 "WHERE idempotency_key IS NOT NULL AND deleted_at IS NULL"
+            ),
+            # ── JSON → JSONB column migration (Phase 1, 2026-06-20) ─────────
+            # NOTE: create_all() runs FIRST (creating jsonb columns on fresh
+            # DBs via JSONBType), THEN this hook runs (converting json→jsonb on
+            # existing DBs). Fresh DBs skip this DO block since the WHERE
+            # data_type='json' filter matches nothing.
+            #
+            # json→jsonb is a FULL TABLE REWRITE with ACCESS EXCLUSIVE lock. For
+            # large tables it may take seconds. Only runs once — idempotent on
+            # subsequent startups (WHERE data_type='json' filter excludes
+            # already-converted columns).
+            #
+            # WARNING: Invalid JSON data in any of these columns will cause the
+            # ALTER TYPE to fail and block daemon startup. Backup the database
+            # before the first migration run. The per-column EXCEPTION handler
+            # inside the LOOP identifies the failing column in its error message.
+            (
+                "DO $$\n"
+                "DECLARE\n"
+                "    r RECORD;\n"
+                "BEGIN\n"
+                "    FOR r IN\n"
+                "        SELECT table_name, column_name\n"
+                "        FROM information_schema.columns\n"
+                "        WHERE table_schema = 'public'\n"
+                "          AND data_type = 'json'\n"
+                "          AND (table_name, column_name) IN (\n"
+                "              ('source_configs','config'),\n"
+                "              ('instance_mappings','mapping_metadata'),\n"
+                "              ('project_metadata_records','meta_value'),\n"
+                "              ('projects','related_directories'),\n"
+                "              ('projects','metadata'),\n"
+                "              ('projects','relationships'),\n"
+                "              ('project_history','entry_metadata'),\n"
+                "              ('job_queue_items','metadata'),\n"
+                "              ('dead_letter_items','metadata'),\n"
+                "              ('job_watchers','watch_events'),\n"
+                "              ('instances','metadata'),\n"
+                "              ('message_queue','metadata'),\n"
+                "              ('message_queue','images'),\n"
+                "              ('mcp_servers','config'),\n"
+                "              ('mcp_servers','config_schema'),\n"
+                "              ('opencode_sessions','latest_response'),\n"
+                "              ('opencode_sessions','questions')\n"
+                "          )\n"
+                "    LOOP\n"
+                "        BEGIN\n"
+                "            EXECUTE format(\n"
+                "                'ALTER TABLE %I ALTER COLUMN %I TYPE jsonb USING %I::jsonb',\n"
+                "                r.table_name, r.column_name, r.column_name\n"
+                "            );\n"
+                "        EXCEPTION WHEN OTHERS THEN\n"
+                "            RAISE EXCEPTION 'jsonb migration failed for %.%: %',\n"
+                "                r.table_name, r.column_name, SQLERRM;\n"
+                "        END;\n"
+                "    END LOOP;\n"
+                "END $$;"
             ),
         ]
         with self._engine.begin() as conn:

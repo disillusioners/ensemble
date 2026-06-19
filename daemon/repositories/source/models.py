@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column, Index, UniqueConstraint
-from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
+
+from daemon.repositories.infra.types import JSONBType
 
 
 class SourceStatus(str, enum.Enum):
@@ -52,9 +53,9 @@ class SourceConfig(SQLModel, table=True):
     
     config: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column(JSON)
+        sa_column=Column(JSONBType)
     )
-    
+
     credentials: str | None = None
     enabled: bool = Field(default=True)
     autostart: bool = Field(default=True)
@@ -101,7 +102,7 @@ class InstanceMapping(SQLModel, table=True):
     
     mapping_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("mapping_metadata", JSON)
+        sa_column=Column("mapping_metadata", JSONBType)
     )
     
     last_message_at: str | None = None

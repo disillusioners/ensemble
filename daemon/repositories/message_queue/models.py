@@ -11,8 +11,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column
-from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
+
+from daemon.repositories.infra.types import JSONBType
 
 
 class MessageType(str, enum.Enum):
@@ -58,7 +59,7 @@ class MessageQueue(SQLModel, table=True):
     # Use 'message_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
     message_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("metadata", JSON)
+        sa_column=Column("metadata", JSONBType)
     )
     
     enqueued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -73,7 +74,7 @@ class MessageQueue(SQLModel, table=True):
     # Images for multimodal messages (base64 data URIs)
     images: list[str] | None = Field(
         default=None,
-        sa_column=Column("images", JSON)
+        sa_column=Column("images", JSONBType)
     )
 
     def to_dict(self) -> dict[str, Any]:

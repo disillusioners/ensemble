@@ -13,8 +13,9 @@ from typing import Any
 
 from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
-from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
+
+from daemon.repositories.infra.types import JSONBType
 
 
 class JobStatus(str, enum.Enum):
@@ -180,7 +181,7 @@ class JobItem(SQLModel, table=True):
     # Metadata (avoiding SQLAlchemy's reserved 'metadata' attribute)
     job_metadata: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("metadata", JSON)
+        sa_column=Column("metadata", JSONBType)
     )
 
     # Cancellation
@@ -351,7 +352,7 @@ class DeadLetterItem(SQLModel, table=True):
     # Optional metadata storage
     metadata_json: dict[str, Any | None] = Field(
         default=None,
-        sa_column=Column("metadata", JSON, nullable=True)
+        sa_column=Column("metadata", JSONBType, nullable=True)
     )
 
     def to_dict(self) -> dict[str, Any]:

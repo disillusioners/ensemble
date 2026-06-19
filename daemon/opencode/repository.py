@@ -30,10 +30,10 @@ from typing import Any
 
 from sqlalchemy import Column, Index
 from sqlalchemy.engine import Engine
-from sqlalchemy.types import JSON
 from sqlmodel import Field, Session, SQLModel, select
 
 from .constants import _now_rfc3339
+from daemon.repositories.infra.types import JSONBType
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +84,11 @@ class OpenCodeSessionRecord(SQLModel, table=True):
     # attributes are typed as the deserialized values.
     latest_response: Any | None = Field(
         default=None,
-        sa_column=Column("latest_response", JSON),
+        sa_column=Column("latest_response", JSONBType),
     )
     questions: list[Any] = Field(
         default_factory=list,
-        sa_column=Column("questions", JSON),
+        sa_column=Column("questions", JSONBType),
     )
     last_activity: str = Field(default="", max_length=64)
 

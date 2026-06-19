@@ -346,7 +346,7 @@ class SQLModelMessageQueueRepository:
 
         The model declares ``message_metadata`` as a Python attribute
         that maps to the DB column ``metadata`` (via
-        ``sa_column=Column("metadata", JSON)``) — we read the value
+        ``sa_column=Column("metadata", JSONBType)``) — we read the value
         from ``row._mapping`` to avoid the ``Row.metadata`` shadow
         attribute that SQLAlchemy reserves on Row objects.
 

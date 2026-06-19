@@ -7,8 +7,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import Column
-from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
+
+from daemon.repositories.infra.types import JSONBType
 
 
 class McpServer(SQLModel, table=True):
@@ -20,13 +21,13 @@ class McpServer(SQLModel, table=True):
     description: str | None = Field(default=None)
     config: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column(JSON)
+        sa_column=Column(JSONBType)
     )
     is_active: bool = Field(default=True)
     is_builtin: bool = Field(default=False)
     config_schema: list[dict[str, Any]] | None = Field(
         default=None,
-        sa_column=Column(JSON)
+        sa_column=Column(JSONBType)
     )
     config_schema_version: str = Field(default="0")
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
