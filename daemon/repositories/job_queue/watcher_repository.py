@@ -61,6 +61,16 @@ class JobWatcherRepository:
         (job_id, instance_id) plus dialect-aware INSERT ... ON CONFLICT
         DO UPDATE, which is race-free across processes and threads.
 
+        Concurrency note (M12):
+            The ``watch_events`` JSON column is **always written as a full
+            replace** on both branches of the UPSERT — the INSERT side via
+            the ``VALUES`` clause and the UPDATE side via
+            ``excluded.watch_events``. There is no partial-list append path
+            here; callers are expected to compute the desired full event
+            list and pass it in. Because the whole row mutation is a single
+            ``INSERT ... ON CONFLICT DO UPDATE`` statement, the write is
+            atomic with no read-modify-write window — **safe by design**.
+
         Args:
             job_id: The job ID to watch.
             instance_id: The instance ID that wants notifications.

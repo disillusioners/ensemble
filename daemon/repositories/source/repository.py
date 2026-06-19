@@ -58,7 +58,18 @@ class SQLModelSourceRepository:
         autostart: bool = True,
         source_id: str | None = None,
     ) -> SourceConfig:
-        """Create a new source configuration."""
+        """Create a new source configuration.
+
+        Concurrency note (M11):
+            This is an INSERT of a brand-new row. The ``config`` JSON/JSONB
+            column is written exactly once, with the full dict supplied by the
+            caller. There is no prior row to read first, so this path is
+            **full-replace by design and safe** — no read-modify-write race.
+            Per-key atomic updates of an existing config (e.g. the internal
+            ``_run_counter`` bookkeeping field) go through
+            ``increment_scheduler_run_counter``, which uses dialect-aware
+            ``jsonb_set`` / ``json_set`` with ``RETURNING``.
+        """
         with Session(self.engine) as session:
             now = datetime.now(timezone.utc).isoformat()
             source_id = source_id or str(uuid.uuid4())
@@ -94,7 +105,20 @@ class SQLModelSourceRepository:
         enabled: bool | None = None,
         autostart: bool | None = None,
     ) -> SourceConfig | None:
-        """Update a source configuration."""
+        """Update a source configuration.
+
+        Concurrency note (M11):
+            The ``config`` field is **always written as a full replace**:
+            ``source_config.config = config`` assigns the supplied dict
+            wholesale inside the SQLAlchemy UPDATE. Callers are expected to
+            build and pass a complete config object — there is no partial
+            key-level merge at this layer, so the JSON/JSONB column is never
+            subject to a read-modify-write race in this repository method.
+            If a future caller needs to mutate a single nested key, route
+            through the ``increment_scheduler_run_counter``-style dialect-aware
+            ``jsonb_set`` / ``json_set`` ``RETURNING`` pattern rather than
+            reintroducing a Python read-modify-write here.
+        """
         with Session(self.engine) as session:
             source_config = session.get(SourceConfig, source_id)
             if source_config is None:

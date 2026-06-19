@@ -47,6 +47,7 @@ from typing import Any
 from sqlalchemy import and_, cast as sa_cast
 from sqlalchemy import func, or_, update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
@@ -126,6 +127,35 @@ class SQLModelInfraRepository:
         ``json_extract(...)`` (SQLite).
         """
         return self.engine.dialect.name == "postgresql"
+
+    def _get_dialect_insert(self, session: Session):
+        """Get dialect-appropriate insert function for upsert operations.
+
+        Generic ``sqlalchemy.insert()`` does not support
+        ``on_conflict_do_update()`` — that method is dialect-specific. This
+        helper returns the dialect-specific insert callable so the caller can
+        chain ``on_conflict_do_update`` for both SQLite and PostgreSQL.
+
+        Used by :meth:`register_type` to atomically upsert the global
+        ``infra_asset_types`` registry on concurrent bootstrap calls.
+        Without the dialect-specific insert, a check-then-insert pattern
+        on the ``name`` primary key races under concurrent workers — two
+        ``session.get()`` lookups both return ``None`` and the second
+        ``session.add()`` raises ``IntegrityError``.
+
+        Args:
+            session: SQLAlchemy ``Session`` whose bound engine determines
+                the dialect. Both SQLite and PostgreSQL dialect inserts
+                returned by this helper support ``on_conflict_do_update``.
+
+        Returns:
+            Dialect-specific insert callable.
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            return pg_insert
+        return sqlite_insert
 
     def _json_path_text(self, column: Any, key: str) -> Any:
         """Build a dialect-aware expression that returns a JSON
@@ -1123,9 +1153,41 @@ class SQLModelInfraRepository:
         """Insert or update a type definition in the global registry.
 
         Atomic upsert: if a row with the same ``name`` already
-        exists, ``description`` and ``schema_json`` are
-        overwritten and ``updated_at`` is bumped; otherwise a
-        new row is created.
+        exists, ``description`` (when supplied as a non-``None``
+        value) and ``schema_json`` are overwritten and
+        ``updated_at`` is bumped; otherwise a new row is
+        created with ``created_at = updated_at = now``.
+
+        The upsert is implemented as a single
+        ``INSERT ... ON CONFLICT(name) DO UPDATE`` round trip via
+        the dialect-aware helper :meth:`_get_dialect_insert`.
+        This replaces a previous check-then-insert pattern
+        (``session.get(InfraAssetType, name)`` followed by
+        ``session.add()``) that raced under concurrent bootstrap
+        calls — two ``session.get()`` lookups could both return
+        ``None`` and the second ``session.add()`` then raised
+        ``IntegrityError`` because ``name`` is the primary key.
+        The atomic upsert is one round trip and is enforced by
+        the database, so concurrent callers (e.g. two daemons
+        starting in parallel, or two threads racing on the same
+        engine) all succeed and converge on a single row per
+        ``name``.
+
+        The ``description`` parameter is treated as
+        "preserve-on-update when ``None``, overwrite otherwise"
+        to match the legacy check-then-insert semantics: a
+        caller that omits the argument (or passes ``None``
+        explicitly) does not clobber the existing description,
+        and the upsert's ``set_`` dict conditionally excludes
+        ``description`` in that case. The INSERT leg always
+        stores ``description or ""`` so the not-null constraint
+        is satisfied regardless of caller input.
+
+        ``created_at`` is intentionally NOT in the ``set_`` dict
+        passed to ``on_conflict_do_update`` — the database
+        default / the value supplied at insert time is the
+        canonical creation timestamp and must not be bumped on
+        every update.
 
         Args:
             name: Type identifier — also the value used in
@@ -1133,7 +1195,12 @@ class SQLModelInfraRepository:
             schema_json: Optional JSON-Schema-shaped document.
                 Stored verbatim. Defaults to an empty dict.
             description: Optional human-readable description.
-                Defaults to empty string.
+                When ``None`` (default), the existing row's
+                description is preserved on update and ``""``
+                is used for fresh inserts. When a non-``None``
+                value is supplied, it overwrites the existing
+                row's description on update and is used
+                verbatim (or ``""`` if falsy) on insert.
 
         Returns:
             The :class:`InfraAssetType` instance reflecting the
@@ -1143,37 +1210,61 @@ class SQLModelInfraRepository:
         schema_json = dict(schema_json) if schema_json else {}
 
         with Session(self.engine) as session:
-            existing = session.get(InfraAssetType, name)
-            if existing is None:
-                row = InfraAssetType(
-                    name=name,
-                    description=description or "",
-                    schema_doc=schema_json,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(row)
-                session.commit()
-                session.refresh(row)
-                logger.info(f"Registered infra asset type: name={name}")
-                return row
+            insert_fn = self._get_dialect_insert(session)
 
-            # Update-in-place.
+            # Build the values for the INSERT leg. ``description``
+            # coerces ``None`` to ``""`` to satisfy the NOT NULL
+            # constraint and match the legacy ``description or ""``
+            # behavior on the insert path. NOTE: the ``schema_json``
+            # key uses the actual DB column name (not the Python
+            # attribute ``schema_doc``) because SQLAlchemy's
+            # ``Insert.values()`` resolves the dict by column
+            # name when the model is wired with ``sa_column=
+            # Column("schema_json", ...)`` — see
+            # :class:`InfraAssetType`.
+            insert_values: dict[str, Any] = {
+                "name": name,
+                "schema_json": schema_json,
+                "created_at": now,
+                "updated_at": now,
+                "description": description or "" if description is not None else "",
+            }
+
+            # Build the set_ dict for the UPDATE leg. Only
+            # include ``description`` when the caller supplied
+            # a non-``None`` value (preserves the legacy
+            # "don't overwrite on None" semantics). ``created_at``
+            # is intentionally absent — it is set once on
+            # insert and never bumped. ``schema_json`` is keyed
+            # by DB column name (see comment on ``insert_values``).
+            set_values: dict[str, Any] = {
+                "schema_json": schema_json,
+                "updated_at": now,
+            }
             if description is not None:
-                existing.description = description
-            existing.schema_doc = schema_json
-            existing.updated_at = now
-            # Defensive: flag_modified is needed for in-place JSON
-            # mutation; when replacing the whole dict SQLAlchemy already
-            # detects the change via the attribute set, but we flag
-            # anyway to guard against future in-place edits to
-            # ``existing.schema_doc`` silently bypassing the change
-            # tracker.
-            flag_modified(existing, "schema_doc")
+                set_values["description"] = description or ""
+
+            stmt = insert_fn(InfraAssetType.__table__).values(**insert_values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["name"],
+                set_=set_values,
+            )
+            session.execute(stmt)
             session.commit()
-            session.refresh(existing)
-            logger.info(f"Updated infra asset type: name={name}")
-            return existing
+
+            # Re-read the canonical post-upsert state and
+            # return it. ``session.get`` returns the row the
+            # upsert touched, so callers see the freshly-updated
+            # ``updated_at`` / ``description`` / ``schema_doc``
+            # values.
+            row = session.get(InfraAssetType, name)
+            session.refresh(row)
+            logger.info(
+                f"Upserted infra asset type: name={name} "
+                f"(description={'updated' if description is not None else 'preserved'}, "
+                f"schema_doc=updated)"
+            )
+            return row
 
     def get_type(self, name: str) -> InfraAssetType | None:
         """Fetch a type definition by name.
