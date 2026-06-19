@@ -1226,18 +1226,32 @@ class JobQueueService:
                         # Fall through to normal start logic below (don't return None)
                     else:
                         # MESSAGE: reactivate any terminal instance (COMPLETED/TERMINATED/ERROR/FAILED)
+                        # Use transition_status_if (atomic WHERE status IN guard) instead of
+                        # update_status — F-04 made update() reject status= with ValueError, and
+                        # transition_status_if avoids clobbering a concurrent terminal write.
                         logger.info(
                             f"[TRACE] start_job: attempting reactivation of {instance.status} instance "
                             f"{job.instance_id[:8]}... for MESSAGE job {job.job_id[:8]}..."
                         )
-                        await asyncio.to_thread(
-                            self._instance_manager._instance_repository.update_status,
-                            job.instance_id, InstanceStatus.RUNNING.value
+                        reactivated = await asyncio.to_thread(
+                            self._instance_manager._instance_repository.transition_status_if,
+                            job.instance_id,
+                            InstanceStatus.RUNNING.value,
+                            tuple(TERMINAL_STATUSES),
                         )
-                        await self._instance_manager._live_hub.stream_status_change(
-                            job.instance_id, InstanceStatus.RUNNING.value,
-                            agent_id=instance.agent_id
-                        )
+                        if reactivated is None:
+                            # Concurrent writer changed status between our read and the
+                            # atomic UPDATE, or the row no longer exists. Don't stream
+                            # RUNNING — the actual status is whatever the writer set.
+                            logger.info(
+                                f"[TRACE] start_job: reactivation no-op for job {job_id[:8]}... "
+                                f"(instance {job.instance_id[:8]}... no longer in terminal state)"
+                            )
+                        else:
+                            await self._instance_manager._live_hub.stream_status_change(
+                                job.instance_id, InstanceStatus.RUNNING.value,
+                                agent_id=instance.agent_id
+                            )
                         logger.info(
                             f"start_job: reactivating {instance.status} instance {job.instance_id[:8]}... "
                             f"for MESSAGE job {job.job_id[:8]}..."
