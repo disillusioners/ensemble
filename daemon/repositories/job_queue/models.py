@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy import CheckConstraint, Column, Index, Integer, UniqueConstraint
-from sqlalchemy.types import JSON, Text
+from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
 
@@ -108,7 +108,7 @@ class JobQueue(SQLModel, table=True):
 
 class JobItem(SQLModel, table=True):
     """Job queue item - persisted for crash recovery.
-    
+
     Jobs are serialized per-project to ensure only one job runs
     per project at a time.
     """
@@ -120,6 +120,31 @@ class JobItem(SQLModel, table=True):
         Index("idx_job_queue_items_queue", "queue_id"),
         Index("idx_job_queue_items_project_status_deleted", "project_id", "status", "deleted_at"),
         Index("idx_job_queue_items_status_type_instance", "status", "job_type", "instance_id"),
+        # M6 fix: partial UNIQUE index on ``idempotency_key`` so that
+        # ``create_or_get_by_idempotency_key`` can use
+        # ``INSERT ... ON CONFLICT DO NOTHING`` to atomically claim the
+        # key. The ``WHERE idempotency_key IS NOT NULL`` predicate lets
+        # multiple rows with NULL keys coexist (NULL ≠ NULL in unique
+        # index semantics), which preserves the old "no key, no
+        # constraint" behavior. The ``AND deleted_at IS NULL`` predicate
+        # extends the index to also exclude soft-deleted rows — this
+        # matches ``find_by_idempotency_key`` (which already filters on
+        # ``deleted_at IS NULL``) and allows the soft-delete → recreate
+        # pattern where a caller deletes a job then submits a fresh
+        # enqueue with the same key. The same index is also created in
+        # the ``20260420_000001_add_job_system_improvements`` migration
+        # (without the ``deleted_at`` clause), so the
+        # ``20260619_120000_fix_idempotency_index_include_deleted_at``
+        # migration drops and recreates the index with the refined
+        # predicate. ``create_all`` will create the correct index on
+        # fresh databases.
+        Index(
+            "idx_job_idempotency",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL AND deleted_at IS NULL"),
+            postgresql_where=text("idempotency_key IS NOT NULL AND deleted_at IS NULL"),
+        ),
     )
 
     # Primary identification

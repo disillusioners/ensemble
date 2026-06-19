@@ -355,49 +355,139 @@ class JobQueueService:
         if project_id is None:
             raise ValueError("project_id must be normalized before enqueue. This indicates a normalization gap.")
 
-        # Idempotency check: if idempotency_key provided, check for existing job
+        # M6 fix: use atomic ``INSERT ... ON CONFLICT DO NOTHING`` instead
+        # of the previous read-then-insert pattern. Two concurrent
+        # ``enqueue`` calls with the same key would BOTH pass the
+        # ``find_by_idempotency_key`` check, and the loser's INSERT
+        # would raise an unhandled ``IntegrityError`` (surfacing as a
+        # 500 to the caller). The atomic insert claims the partial
+        # unique index ``idx_job_idempotency`` in one round trip.
         if idempotency_key:
-            existing = await asyncio.to_thread(
-                self._repository.find_by_idempotency_key, idempotency_key
+            # Derive agent_dir from agent_id using registry before the
+            # atomic insert — we still need it for both the insert path
+            # and the registry validation below.
+            registry = get_registry()
+            agent_meta = registry.get(agent_id)
+            if agent_meta is None:
+                raise ValueError(f"Agent not found: {agent_id}")
+            agent_dir = str(agent_meta.path)
+
+            # Resolve queue_id for projects (needed for the INSERT row)
+            resolved_queue_id = queue_id
+            if resolved_queue_id is None:
+                if job_type == "message":
+                    queue = await asyncio.to_thread(
+                        self._queue_repo.get_by_name, project_id, "system_parallel_queue"
+                    )
+                    queue_kind = "parallel"
+                else:
+                    queue = await asyncio.to_thread(
+                        self._queue_repo.get_by_name, project_id, "system_fifo_queue"
+                    )
+                    queue_kind = "fifo"
+                if queue is not None:
+                    resolved_queue_id = queue.queue_id
+                else:
+                    raise ValueError(
+                        f"No system {queue_kind} queue found for project {project_id}. "
+                        f"Ensure system queues are provisioned."
+                    )
+            elif queue_id and project_id:
+                # Validate queue exists and belongs to project
+                queue = await asyncio.to_thread(self._queue_repo.get, queue_id)
+                if queue is None:
+                    logger.warning(
+                        f"Queue '{queue_id}' not found, job will be created without queue assignment"
+                    )
+                    resolved_queue_id = None
+                elif queue.project_id != project_id:
+                    # C4: Queue belongs to different project - reject the request
+                    raise ValueError(
+                        f"Queue {queue_id} does not belong to project {project_id}"
+                    )
+
+            # Atomically claim the key. ``created`` is True iff we
+            # inserted a fresh row.
+            job, created = await asyncio.to_thread(
+                self._repository.create_or_get_by_idempotency_key,
+                agent_id=agent_id,
+                agent_dir=agent_dir,
+                message=message,
+                source=source,
+                project_id=project_id,
+                priority=priority,
+                job_metadata=metadata,
+                queue_id=resolved_queue_id,
+                idempotency_key=idempotency_key,
+                job_type=job_type,
+                instance_id=instance_id,
             )
-            if existing is not None:
-                # Check TTL - jobs older than TTL are treated as new
+
+            if not created and job is not None:
+                # Another writer beat us. Apply the same terminal-vs-TTL
+                # policy as the previous read-then-insert code: if the
+                # existing job is non-terminal AND within TTL, return it
+                # (idempotent); otherwise fall through to a fresh insert.
                 try:
-                    created_time = datetime.fromisoformat(existing.created_at)
-                    ttl_cutoff = datetime.now(timezone.utc) - timedelta(hours=self._idempotency_key_ttl_hours)
+                    created_time = datetime.fromisoformat(job.created_at)
+                    ttl_cutoff = datetime.now(timezone.utc) - timedelta(
+                        hours=self._idempotency_key_ttl_hours
+                    )
                     if created_time < ttl_cutoff:
-                        # Job is older than TTL, treat as new
                         logger.info(
-                            f"Idempotency key '{idempotency_key}' matched job {existing.job_id} "
-                            f"but exceeded TTL ({self._idempotency_key_ttl_hours}h), creating new"
+                            f"Idempotency key '{idempotency_key}' matched job {job.job_id} "
+                            f"but exceeded TTL ({self._idempotency_key_ttl_hours}h), retrying insert"
                         )
-                        existing = None  # Reset so new job is created below
+                        job = None  # fall through to a fresh insert below
                 except (ValueError, TypeError):
-                    # If timestamp parsing fails, treat as existing
+                    # If timestamp parsing fails, keep the existing job.
                     pass
-                
-                if existing is not None:
-                    terminal_statuses = {JobStatus.COMPLETED.value, JobStatus.CANCELLED.value, JobStatus.DEAD_LETTER.value}
-                    if existing.status not in terminal_statuses:
-                        # Return existing non-terminal job (idempotent behavior)
+
+                if job is not None:
+                    terminal_statuses = {
+                        JobStatus.COMPLETED.value,
+                        JobStatus.CANCELLED.value,
+                        JobStatus.DEAD_LETTER.value,
+                    }
+                    if job.status not in terminal_statuses:
                         logger.debug(
-                            f"Idempotency key '{idempotency_key}' matched existing job {existing.job_id} "
-                            f"(status={existing.status})"
+                            f"Idempotency key '{idempotency_key}' matched existing job {job.job_id} "
+                            f"(status={job.status})"
                         )
-                        return existing
-                    # Terminal job with same key: allow creating new
+                        return job
                     logger.info(
-                        f"Idempotency key '{idempotency_key}' matched terminal job {existing.job_id}, "
+                        f"Idempotency key '{idempotency_key}' matched terminal job {job.job_id}, "
                         "creating new job"
                     )
-        
-        # Derive agent_dir from agent_id using registry
+
+            if created and job is not None:
+                # Fresh insert succeeded — notify and return.
+                if self._dispatch_bus is not None:
+                    self._dispatch_bus.notify_new_job(project_id)
+                return job
+
+            # Fallthrough: existing job was terminal / TTL-expired and
+            # we need a brand-new insert. Drop into the regular create
+            # path below by clearing idempotency_key (otherwise the
+            # legacy code below would loop on the same key).
+            if job is not None:
+                # Terminal existing job — bypass the unique index by
+                # using a synthetic suffix so the new row has a unique
+                # non-null key. This preserves the previous behavior
+                # where a terminal job does NOT block a fresh submit.
+                idempotency_key = f"{idempotency_key}#{uuid.uuid4().hex[:8]}"
+            else:
+                # TTL-expired job — same treatment.
+                idempotency_key = f"{idempotency_key}#{uuid.uuid4().hex[:8]}"
+
+        # Non-idempotency path (or terminal-fallback path above).
+        # Derive agent_dir from agent_id using registry.
         registry = get_registry()
         agent_meta = registry.get(agent_id)
         if agent_meta is None:
             raise ValueError(f"Agent not found: {agent_id}")
         agent_dir = str(agent_meta.path)
-        
+
         # Resolve queue_id for projects
         resolved_queue_id = queue_id
         if queue_id is None:

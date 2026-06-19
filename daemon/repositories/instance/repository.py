@@ -849,6 +849,31 @@ class SQLModelInstanceRepository:
     def delete_by_project(self, project_id: str) -> int:
         """Delete all instances for a project.
 
+        M7 fix: the previous implementation read instance IDs, ran
+        per-instance cascades, then bulk-deleted the rows — all without
+        any row-level lock. Concurrent ``insert_instance`` /
+        ``update_instance`` calls for the same project could either:
+          (a) insert a new row after the ID snapshot but before the
+              DELETE, leaving an orphaned instance behind (because the
+              DELETE WHERE project_id = :p would actually pick that row
+              up — see below — so this is the LOWER risk), or
+          (b) much worse: an in-flight ``terminate_instance`` call
+              could cascade-update dependent rows (status, hierarchy)
+              concurrently with our cascade delete, producing a
+              partial delete (e.g. JobWatcher gone but Instance row
+              stuck because the terminate path locked the Instance row
+              in a different transaction).
+
+        We close that window by acquiring ``SELECT ... FOR UPDATE`` on
+        the affected rows BEFORE the cascade. PostgreSQL honours
+        ``FOR UPDATE`` and serializes us against any concurrent writer
+        touching the same rows. SQLite (the dev/test path) does not
+        support ``FOR UPDATE`` but its implicit per-session transaction
+        already serializes writes against this session, which is
+        sufficient because SQLite is single-writer at the database
+        level — concurrent writers wait for the holding transaction
+        to commit/rollback.
+
         Args:
             project_id: Project identifier.
 
@@ -856,8 +881,22 @@ class SQLModelInstanceRepository:
             Number of instances deleted.
         """
         with SQLModelSession(self.engine) as db_session:
-            # Get all instance IDs for this project first to run per-instance cascade
-            stmt = select(Instance.instance_id).where(Instance.project_id == project_id)
+            # Detect dialect once and pick the right lock mode.
+            is_pg = (
+                db_session.bind is not None
+                and db_session.bind.dialect.name == "postgresql"
+            )
+
+            # Get all instance IDs for this project, locking the rows
+            # for the duration of this transaction. On PostgreSQL this
+            # is ``SELECT ... FOR UPDATE``; on SQLite we fall back to a
+            # plain SELECT (the implicit per-session transaction is the
+            # lock).
+            stmt = select(Instance.instance_id).where(
+                Instance.project_id == project_id
+            )
+            if is_pg:
+                stmt = stmt.with_for_update()
             instance_ids = list(db_session.exec(stmt).all())
 
             # Cascade deps for each instance (handles JobWatcher, Task, Event,
@@ -865,7 +904,10 @@ class SQLModelInstanceRepository:
             for instance_id in instance_ids:
                 self._cascade_instance_deps(db_session, instance_id)
 
-            # Delete all instances for this project
+            # Delete all instances for this project. The PostgreSQL
+            # ``FOR UPDATE`` from the snapshot above is still held here,
+            # so any concurrent writer that tried to read these rows
+            # would have been blocked at the SELECT.
             stmt = sql_delete(Instance).where(Instance.project_id == project_id)
             result = db_session.exec(stmt)
             db_session.commit()

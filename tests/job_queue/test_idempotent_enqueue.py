@@ -123,10 +123,30 @@ class TestIdempotentEnqueue:
 
     @pytest.fixture
     def mock_repository(self) -> MagicMock:
-        """Create mock JobRepository."""
+        """Create mock JobRepository.
+
+        M6 fix: the service now calls ``create_or_get_by_idempotency_key``
+        (atomic INSERT ... ON CONFLICT DO NOTHING) instead of the legacy
+        find-then-insert pattern. We wire the mock to simulate the atomic
+        method using the existing ``find_by_idempotency_key`` + ``create``
+        so the service-level assertions about idempotency behavior
+        continue to work without changes.
+        """
         repo = MagicMock()
         repo.find_by_idempotency_key = MagicMock(return_value=None)
         repo.create = MagicMock()
+
+        def _create_or_get_side_effect(**kwargs):
+            key = kwargs.get("idempotency_key")
+            existing = repo.find_by_idempotency_key(key)
+            if existing is not None:
+                return existing, False
+            new_job = repo.create(**kwargs)
+            return new_job, True
+
+        repo.create_or_get_by_idempotency_key = MagicMock(
+            side_effect=_create_or_get_side_effect
+        )
         return repo
 
     @pytest.fixture
@@ -499,10 +519,25 @@ class TestIdempotentEnqueueEdgeCases:
 
     @pytest.fixture
     def mock_repository(self) -> MagicMock:
-        """Create mock JobRepository."""
+        """Create mock JobRepository.
+
+        M6 fix: see TestIdempotentEnqueue.mock_repository for rationale.
+        """
         repo = MagicMock()
         repo.find_by_idempotency_key = MagicMock(return_value=None)
         repo.create = MagicMock()
+
+        def _create_or_get_side_effect(**kwargs):
+            key = kwargs.get("idempotency_key")
+            existing = repo.find_by_idempotency_key(key)
+            if existing is not None:
+                return existing, False
+            new_job = repo.create(**kwargs)
+            return new_job, True
+
+        repo.create_or_get_by_idempotency_key = MagicMock(
+            side_effect=_create_or_get_side_effect
+        )
         return repo
 
     @pytest.fixture
@@ -592,10 +627,25 @@ class TestIdempotentEnqueueTTL:
 
     @pytest.fixture
     def mock_repository(self) -> MagicMock:
-        """Create mock JobRepository."""
+        """Create mock JobRepository.
+
+        M6 fix: see TestIdempotentEnqueue.mock_repository for rationale.
+        """
         repo = MagicMock()
         repo.find_by_idempotency_key = MagicMock(return_value=None)
         repo.create = MagicMock()
+
+        def _create_or_get_side_effect(**kwargs):
+            key = kwargs.get("idempotency_key")
+            existing = repo.find_by_idempotency_key(key)
+            if existing is not None:
+                return existing, False
+            new_job = repo.create(**kwargs)
+            return new_job, True
+
+        repo.create_or_get_by_idempotency_key = MagicMock(
+            side_effect=_create_or_get_side_effect
+        )
         return repo
 
     @pytest.fixture

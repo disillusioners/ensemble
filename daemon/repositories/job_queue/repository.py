@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func, select as sql_select
+from sqlalchemy import delete as sql_delete, func, select as sql_select, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
 from .models import JobItem, JobQueue, JobStatus, QueueType
 
 logger = logging.getLogger(__name__)
+
+
+def _is_postgres(session: SQLModelSession) -> bool:
+    """Return True when the session's bound engine is PostgreSQL."""
+    return (
+        session.bind is not None
+        and session.bind.dialect.name == "postgresql"
+    )
 
 
 class JobRepository:
@@ -25,6 +35,31 @@ class JobRepository:
     def __init__(self, engine: Engine):
         """Initialize repository with a database engine."""
         self.engine = engine
+
+    # --------------------------------------------------------
+    # INTERNAL HELPERS
+    # --------------------------------------------------------
+
+    def _get_dialect_insert(self, session: SQLModelSession):
+        """Return the dialect-appropriate insert callable for upsert ops.
+
+        Generic ``sqlalchemy.insert()`` lacks ``on_conflict_do_nothing()`` —
+        that method is dialect-specific. This helper returns the right
+        insert callable so callers can chain ``on_conflict_do_nothing`` /
+        ``on_conflict_do_update`` for both SQLite and PostgreSQL.
+
+        Args:
+            session: SQLAlchemy/SQLModel Session whose bound engine
+                determines the dialect.
+
+        Returns:
+            Dialect-specific ``insert`` callable. Both ``sqlite`` and
+            ``postgresql`` dialect inserts support ``on_conflict_do_nothing``.
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            return pg_insert
+        return sqlite_insert
 
     # --------------------------------------------------------
     # CREATE
@@ -83,6 +118,145 @@ class JobRepository:
             db_session.refresh(job)
 
             return job
+
+    def create_or_get_by_idempotency_key(
+        self,
+        *,
+        agent_id: str,
+        agent_dir: str,
+        message: str,
+        source: str = "api",
+        project_id: str | None = None,
+        priority: int = 5,
+        job_metadata: dict[str, Any | None] = None,
+        queue_id: str | None = None,
+        idempotency_key: str,
+        job_type: str = "task",
+        instance_id: str | None = None,
+    ) -> tuple[JobItem | None, bool]:
+        """Atomically insert a job or return the existing one with the same key.
+
+        Uses ``INSERT ... ON CONFLICT DO NOTHING`` (PostgreSQL) / the SQLite
+        equivalent, keyed on the partial unique index ``idx_job_idempotency``
+        (``WHERE idempotency_key IS NOT NULL``), to atomically claim the
+        idempotency key. This closes the TOCTOU race in the previous
+        read-then-insert ``enqueue`` pattern (M6): two concurrent enqueues
+        with the same key would both pass ``find_by_idempotency_key`` and
+        the loser's INSERT would raise an unhandled ``IntegrityError``.
+
+        Args:
+            agent_id: Agent ID.
+            agent_dir: Path to the agent directory.
+            message: Job message.
+            source: Job source ("api", "telegram", ...).
+            project_id: Optional project ID.
+            priority: Job priority (1-10).
+            job_metadata: Optional metadata dict.
+            queue_id: Optional queue ID for routing.
+            idempotency_key: Required idempotency key. Must be non-null.
+            job_type: Job type ("task" or "message").
+            instance_id: Optional pre-set instance ID (for MESSAGE jobs).
+
+        Returns:
+            Tuple ``(job, created)`` where ``job`` is the JobItem that now
+            holds the key (either the row we just inserted or the
+            pre-existing winner) and ``created`` is ``True`` if a new row
+            was inserted by THIS call, ``False`` if an existing row was
+            returned (i.e. another writer beat us to it).
+
+        Raises:
+            ValueError: If ``idempotency_key`` is None or empty (the
+                partial unique index only matches non-null keys, so
+                calling this with no key is a programming error).
+        """
+        if not idempotency_key:
+            raise ValueError(
+                "create_or_get_by_idempotency_key requires a non-empty "
+                "idempotency_key"
+            )
+
+        with SQLModelSession(self.engine) as db_session:
+            insert_fn = self._get_dialect_insert(db_session)
+            now = datetime.now(timezone.utc).isoformat()
+            new_job_id = str(uuid.uuid4())
+
+            # Build the values dict. The Core ``Table`` uses the DB
+            # column name ``metadata`` for the JSON column, while the
+            # SQLModel Python attribute is ``job_metadata``. We must
+            # use the DB column name when calling ``Table.insert().values()``
+            # (SQLAlchemy would raise ``Unconsumed column names`` otherwise).
+            values = {
+                "job_id": new_job_id,
+                "agent_id": agent_id,
+                "agent_dir": agent_dir,
+                "message": message,
+                "source": source,
+                "project_id": project_id,
+                "priority": priority,
+                "status": JobStatus.PENDING.value,
+                "metadata": job_metadata or {},  # DB column name, not job_metadata
+                "queue_id": queue_id,
+                "idempotency_key": idempotency_key,
+                "job_type": job_type,
+                "instance_id": instance_id,
+                "created_at": now,
+            }
+
+            # ON CONFLICT keyed on the partial unique index
+            # ``idx_job_idempotency`` (WHERE idempotency_key IS NOT
+            # NULL AND deleted_at IS NULL). We MUST pass
+            # ``index_where`` matching the partial index predicate so
+            # PostgreSQL can infer the right index for conflict
+            # detection (required for partial-index inference). The
+            # ``deleted_at IS NULL`` clause mirrors
+            # ``find_by_idempotency_key``'s filter and allows the
+            # soft-delete → recreate pattern: a caller soft-deletes a
+            # job and then submits a fresh enqueue with the same key —
+            # the old row is excluded from the index, so the new
+            # INSERT wins. We pass ``JobItem.__table__`` (the
+            # SQLAlchemy ``Table``) rather than the ORM class so
+            # ``insert(...).values(...)`` is a pure Core insert —
+            # mixing ORM classes into Core ``insert()`` tries to
+            # invoke ORM bulk-persistence paths that fail on SQLModel
+            # ``Table`` objects.
+            job_table = JobItem.__table__
+            stmt = (
+                insert_fn(job_table)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=["idempotency_key"],
+                    index_where=text(
+                        "idempotency_key IS NOT NULL AND deleted_at IS NULL"
+                    ),
+                )
+            )
+
+            result = db_session.execute(stmt)
+            inserted = result.rowcount == 1
+            db_session.commit()
+
+            # Fetch the row holding the key — either the one we just
+            # inserted or the pre-existing winner. The partial unique
+            # index guarantees at most one row exists with a given key.
+            job = db_session.exec(
+                select(JobItem)
+                .where(JobItem.idempotency_key == idempotency_key)
+                .where(JobItem.deleted_at.is_(None))
+            ).first()
+
+            if inserted and job is None:
+                # Extremely defensive — the INSERT reported rowcount=1
+                # but the follow-up SELECT came back empty. Log and
+                # surface to caller; the caller will treat this as a
+                # duplicate (the row is provably there for the next
+                # read).
+                logger.warning(
+                    "create_or_get_by_idempotency_key: INSERT succeeded "
+                    "but follow-up SELECT returned no row for key=%r",
+                    idempotency_key,
+                )
+
+            return job, inserted
 
     # --------------------------------------------------------
     # READ
