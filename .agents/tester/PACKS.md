@@ -188,6 +188,14 @@
 | phase5_jq_error_reporting_test | tests/test_jq_error_reporting.py | Phase 5 JQ error reporting | 2 min | 2026-06-17 | ✅ PASS (feature/correlation-manager, commit 8f4b46f7) |
 | phase5_dispatch_completed_test | tests/unit/test_dispatch_completed_fix.py | Phase 5 dispatch_completed fix | 2 min | 2026-06-17 | ✅ PASS (feature/correlation-manager, commit 8f4b46f7) |
 
+### PostgreSQL Test Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| pg_concurrency_test | tests/postgres/ (-m postgres) | PG concurrency: concurrent enqueue (5), jsonb updates (5), lock claims (6), status transitions (10), optimistic locking (5), smoke (7) — 38 tests against ensemble_test | 5 min | 2026-06-19 | ✅ PASS (38/38, feature/jsonb-migration, commit 351f5622) |
+| jsonb_migration_test | tests/migration/test_jsonb_migration.py | JSONB migration: fresh PG schema is JSONB (2), _ensure_postgres_columns converts json→jsonb (3), SQLite regression (3) | 2 min | 2026-06-19 | ✅ PASS (8/8, feature/jsonb-migration, commit 351f5622) |
+| sqlite_full_regression_test | tests/ (-m 'not integration and not postgres') | Full SQLite suite regression: 8086 tests, all modules | 5 min | 2026-06-19 | ✅ PASS (7999 passed, 28 pre-existing failures, 0 NEW, feature/jsonb-migration) |
+
 ---
 
 ## Updating PACKS.md
