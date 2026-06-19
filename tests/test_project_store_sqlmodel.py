@@ -352,14 +352,16 @@ class TestUpdate:
         assert updated.description == "Updated"
 
     def test_update_related_directories(self, store):
-        """Test updating related directories list."""
+        """Test updating related directories list.
+
+        Uses the atomic API (add_related_directory) — plain ``update()`` rejects
+        ``related_directories`` to prevent JSON-clobber races (see H11).
+        """
         project = store.create(name="Test")
-        
-        updated = store.update(
-            project.project_id, 
-            related_directories=["/dir1", "/dir2"]
-        )
-        
+
+        store.add_related_directory(project.project_id, "/dir1")
+        updated = store.add_related_directory(project.project_id, "/dir2")
+
         assert updated.related_directories == ["/dir1", "/dir2"]
 
     def test_update_invalid_status_error(self, store):
