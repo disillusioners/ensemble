@@ -142,7 +142,7 @@ class InfraAssetType(SQLModel, table=True):
 # INSERT starts at version 1 so the first concurrent-modification
 # check sees a stable initial value regardless of which dialect
 # wrote the row.
-_infra_asset_version_col = Column("version", Integer, nullable=False, default=1)
+_infra_asset_version_col = Column("version", Integer, nullable=False, default=1, server_default="1")
 
 
 class InfraAsset(SQLModel, table=True):

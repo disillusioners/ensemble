@@ -441,10 +441,33 @@ class MigrationRunner:
         Returns:
             List of applied migration versions.
         """
-        # Skip migrations entirely for non-SQLite databases.
-        # PostgreSQL schemas are created by SQLModel.metadata.create_all() instead.
+        # PostgreSQL is the DEFAULT dialect from v0.5.2+. The runner is
+        # intentionally a NO-OP for non-SQLite engines:
+        #
+        #   - Fresh PostgreSQL databases get their schema from
+        #     SQLModel.metadata.create_all() (called during manager init),
+        #     which emits every model-defined Column, FK, Index, and
+        #     UniqueConstraint in __table_args__.
+        #
+        #   - Existing PostgreSQL databases get column/index/constraint
+        #     evolution from ``EnsembleManager._ensure_postgres_columns``
+        #     in ``daemon/manager.py``. Every new .sql migration that
+        #     adds schema elements which must exist on existing PG
+        #     databases MUST also extend ``_ensure_postgres_columns``
+        #     with an idempotent statement. See the docstring of that
+        #     method for the pattern (IF NOT EXISTS clauses throughout).
+        #
+        # Do not "fix" this to apply .sql files on PostgreSQL. The runner's
+        # naive split(";") parser does not respect SQL comments, and the
+        # .sql files themselves use Postgres-incompatible constructs
+        # (e.g. rowid-based dedup, ON CONFLICT DO NOTHING) — those are
+        # the SQLite paths; the PostgreSQL equivalents live in
+        # _ensure_postgres_columns.
         if "sqlite" not in str(self.engine.url):
-            logger.info("Skipping migrations for non-SQLite database (using SQLModel metadata)")
+            logger.info(
+                "Skipping migrations for non-SQLite database "
+                "(schema evolution handled by EnsembleManager._ensure_postgres_columns)"
+            )
             return []
         
         self.ensure_migrations_table()

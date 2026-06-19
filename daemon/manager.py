@@ -1673,6 +1673,72 @@ class InstanceManager:
                 "CREATE INDEX IF NOT EXISTS idx_infra_assets_relationships_gin "
                 "ON infra_assets USING gin (relationships)"
             ),
+            # ── Concurrency-remediation migrations (2026-06-19) ──────────
+            # These .sql migration files are skipped by the runner on PostgreSQL
+            # (runner.py lines 446-448). The runner is intentionally a NO-OP for
+            # non-SQLite: PostgreSQL schema evolution is handled here via
+            # _ensure_postgres_columns() and fresh DBs get everything via
+            # SQLModel.metadata.create_all(). See the DUAL-DRIVER NOTES in each
+            # .sql file for the exact equivalent statements.
+            #
+            # STEP 1: Add missing columns (safe to re-run: IF NOT EXISTS)
+            # task.version: optimistic lock counter for ORM-flushed commits
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0",
+            # job_queue_items.version: same, plus partial unique index refinement
+            "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 0",
+            # infra_assets.version: M5 optimistic locking (NOT DEFAULT 1, unlike Task)
+            "ALTER TABLE infra_assets ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1",
+            # job_locks.lock_slot: atomic slot-claim via INSERT ON CONFLICT DO NOTHING
+            "ALTER TABLE job_locks ADD COLUMN IF NOT EXISTS lock_slot INTEGER NOT NULL DEFAULT 0",
+            # STEP 2: Deduplicate pre-existing duplicate rows BEFORE creating
+            # UNIQUE indexes. Uses PostgreSQL ctid (physical row address).
+            # These are safe on dev databases where duplicates are acceptable.
+            (
+                "DELETE FROM instance_mappings "
+                "WHERE ctid NOT IN ("
+                "SELECT max(ctid) FROM instance_mappings "
+                "GROUP BY source_id, external_user_id)"
+            ),
+            (
+                "DELETE FROM job_watchers "
+                "WHERE ctid NOT IN ("
+                "SELECT max(ctid) FROM job_watchers GROUP BY job_id, instance_id)"
+            ),
+            (
+                "DELETE FROM projects "
+                "WHERE ctid NOT IN ("
+                "SELECT max(ctid) FROM projects GROUP BY name)"
+            ),
+            # STEP 3: Add UNIQUE indexes (IF NOT EXISTS = idempotent)
+            # C5: atomic acquire_queue_lock via slot claim
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_locks_slot "
+                "ON job_locks(project_id, queue_id, lock_slot)"
+            ),
+            # C9: atomic create_instance_mapping via upsert
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_instance_mappings_source_user "
+                "ON instance_mappings(source_id, external_user_id)"
+            ),
+            # C7: atomic create_job_watcher via upsert
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_job_watchers_job_instance "
+                "ON job_watchers(job_id, instance_id)"
+            ),
+            # C8 + H14: atomic project create/update via upsert
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_projects_name "
+                "ON projects(name)"
+            ),
+            # STEP 4: Refine idempotency partial unique index (20260619_120000).
+            # The old index predicate WHERE idempotency_key IS NOT NULL blocked
+            # soft-delete → recreate with same key. New predicate adds deleted_at.
+            "DROP INDEX IF EXISTS idx_job_idempotency",
+            (
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_idempotency "
+                "ON job_queue_items(idempotency_key) "
+                "WHERE idempotency_key IS NOT NULL AND deleted_at IS NULL"
+            ),
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
