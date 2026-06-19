@@ -6,12 +6,12 @@
 --   job_queue_items tables. The raw-SQL UPDATEs in TaskRepository
 --   (complete_task, fail_task, cancel_task, claim_pending_task,
 --   update_heartbeat) and JobRepository.atomic_transition already use
---   `WHERE status = :from_status` to prevent concurrent terminal
+--   `WHERE status = (from_status)` to prevent concurrent terminal
 --   transitions. This migration adds a `version` column to both tables
 --   and configures SQLAlchemy's `version_id_col` on the corresponding
 --   SQLModel classes, so that ANY remaining ORM-flushed UPDATE or
 --   DELETE on these rows (e.g. delete, delete_by_instance, soft_delete,
---   update) also appends `AND version = :expected_version` to the
+--   update) also appends `AND version = (expected_version)` to the
 --   WHERE clause and raises StaleDataError on a concurrent
 --   modification. For the Core UPDATE in JobRepository.atomic_transition
 --   specifically, version_id_col is honored by SQLAlchemy when the
@@ -29,9 +29,14 @@
 --     - Fresh DBs: SQLModel.metadata.create_all() picks up the new
 --       `version` column from Task.__table_args__ / JobItem.__table_args__
 --       automatically (server_default="0", nullable=False).
---     - Existing DBs: apply manually:
---           ALTER TABLE task ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
---           ALTER TABLE job_queue_items ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+--     - Existing DBs: apply manually by running the two ALTER TABLE
+--       statements below (trailing semicolons omitted here on purpose:
+--       daemon/migrations/runner.py executes the UP section via a naive
+--       split on `;` that does not skip SQL comments, so any in-comment
+--       semicolon would be treated as a statement boundary and trigger a
+--       BindParameterError / parse failure).
+--           ALTER TABLE task ADD COLUMN version INTEGER NOT NULL DEFAULT 0
+--           ALTER TABLE job_queue_items ADD COLUMN version INTEGER NOT NULL DEFAULT 0
 --       This matches the lock_slot precedent (its .sql migration is
 --       also skipped on PG; PG users got the column via create_all()).
 
@@ -44,12 +49,15 @@ ALTER TABLE task ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 
 -- job_queue_items: ORM-flushed commits (soft_delete, update) and the
 -- Core UPDATE in JobRepository.atomic_transition are now also gated by
--- version. The status guard `WHERE status = :from_status` still applies;
--- version is an additional predicate.
+-- version. The status guard `WHERE status = (from_status)` still applies
+-- and version is an additional predicate.
 ALTER TABLE job_queue_items ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 
 -- DOWN
--- Reverses both columns. Note: SQLite < 3.35 does not support DROP COLUMN;
--- the columns will remain but are unused by code.
--- ALTER TABLE task DROP COLUMN version;        -- SQLite <3.35 cannot drop columns
--- ALTER TABLE job_queue_items DROP COLUMN version;  -- SQLite <3.35 cannot drop columns
+-- Reverses both columns. Note: SQLite < 3.35 does not support DROP COLUMN
+-- so the columns will remain but are unused by code. Trailing semicolons
+-- are deliberately omitted below because runner.py splits DOWN SQL on the
+-- statement-terminator character and would otherwise treat the in-comment
+-- semicolons as statement boundaries.
+-- ALTER TABLE task DROP COLUMN version         -- SQLite <3.35 cannot drop columns
+-- ALTER TABLE job_queue_items DROP COLUMN version  -- SQLite <3.35 cannot drop columns

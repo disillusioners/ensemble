@@ -21,9 +21,12 @@
 --   dialect is sqlite (runner.py skips non-sqlite). For PostgreSQL:
 --     - Fresh DBs: SQLModel.metadata.create_all() picks up the new
 --       ``version`` column from the InfraAsset model automatically.
---     - Existing DBs: apply manually:
+--     - Existing DBs: apply manually by running the following ALTER TABLE
+--       statement (trailing semicolon omitted on purpose: runner.py
+--       splits UP SQL on `;` and would treat an in-comment semicolon as
+--       a statement boundary):
 --           ALTER TABLE infra_assets
---             ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+--             ADD COLUMN version INTEGER NOT NULL DEFAULT 1
 --       This matches the lock_slot / version-column precedents:
 --       those .sql migrations are also skipped on PG; PG users got
 --       the column via create_all() on fresh databases.
@@ -33,6 +36,9 @@
 ALTER TABLE infra_assets ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
 
 -- DOWN
--- Reverses the column. Note: SQLite < 3.35 does not support DROP COLUMN;
--- the column will remain but is unused by code.
--- ALTER TABLE infra_assets DROP COLUMN version;  -- SQLite <3.35 cannot drop columns
+-- Reverses the column. Note: SQLite < 3.35 does not support DROP COLUMN
+-- so the column will remain but is unused by code. Trailing semicolon is
+-- deliberately omitted below because runner.py splits DOWN SQL on the
+-- statement-terminator character and would otherwise treat the
+-- in-comment semicolon as a statement boundary.
+-- ALTER TABLE infra_assets DROP COLUMN version  -- SQLite <3.35 cannot drop columns

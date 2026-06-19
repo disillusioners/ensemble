@@ -12,10 +12,13 @@
 --   For PostgreSQL, SQLModel.metadata.create_all() picks up the
 --   UniqueConstraint on InstanceMapping.__table_args__ automatically (fresh
 --   DBs) — same precedent as the lock_slot and version columns. Existing
---   PostgreSQL DBs need to add the constraint manually:
+--   PostgreSQL DBs need to add the constraint manually by running the
+--   following three-line ALTER TABLE (trailing semicolon on the last line
+--   omitted on purpose: runner.py splits UP SQL on `;` and would treat
+--   an in-comment semicolon as a statement boundary):
 --       ALTER TABLE instance_mappings
 --           ADD CONSTRAINT uq_instance_mappings_source_user
---           UNIQUE (source_id, external_user_id);
+--           UNIQUE (source_id, external_user_id)
 --   This .sql migration is therefore skipped by the runner on PostgreSQL and
 --   applied only on SQLite. SQLite does not honor __table_args__ on existing
 --   tables, so we add a unique INDEX (functionally equivalent for ON
