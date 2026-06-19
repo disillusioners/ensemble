@@ -929,18 +929,20 @@ class SQLModelInfraRepository:
 
                 asset.updated_at = now
                 asset.updated_by = updated_by
-                # M5: monotonic version increment even on the
-                # legacy path. Without this, a caller that
-                # reads version=1, then later opts into
-                # ``expected_version=1`` would see that the
-                # row's version is still 1 (the original value
-                # was never bumped) and the optimistic lock
-                # would falsely succeed — masking concurrent
-                # updates by other legacy callers. By
-                # incrementing on every update, we keep the
-                # counter meaningful so the migration path
-                # from legacy to atomic is safe.
-                asset.version = (asset.version or 0) + 1
+                # Version increment is handled by SQLAlchemy's
+                # ``version_id_col`` mapper config on the
+                # ``InfraAsset`` model — the ORM unit-of-work
+                # emits ``SET version = version + 1`` and the
+                # ``AND version = :expected_version`` predicate
+                # on flush, raising StaleDataError on a concurrent
+                # modification. No manual ``asset.version += 1``
+                # here: doing so would double-increment (version
+                # would land at loaded_value + 2) and/or confuse
+                # the mapper's tracked expected version, leading
+                # to a spurious StaleDataError on the commit
+                # itself. The raw-SQL atomic path above still
+                # increments manually because Core UPDATE bypasses
+                # ORM events entirely.
 
             if changed_fields:
                 history = InfraAssetHistory(

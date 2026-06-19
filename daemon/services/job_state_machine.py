@@ -32,8 +32,15 @@ TRANSITIONS: Dict[Tuple[str | None, str], str] = {
 }
 
 
-class InvalidTransitionError(Exception):
-    """Raised when an invalid state transition is attempted."""
+class InvalidTransitionError(ValueError):
+    """Raised when an invalid state transition is attempted.
+
+    Inheriting from ``ValueError`` (instead of plain ``Exception``) lets
+    callers catch both ``InvalidTransitionError`` and other value-style
+    validation errors with a single ``except ValueError`` clause. Existing
+    ``except InvalidTransitionError`` and ``isinstance(e, InvalidTransitionError)``
+    checks keep working because the subclass relationship is preserved.
+    """
 
     def __init__(self, job_id: str, from_status: str | None, to_status: str) -> None:
         self.job_id = job_id
