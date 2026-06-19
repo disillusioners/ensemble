@@ -71,6 +71,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_job_locks_slot
 
 -- DOWN
 -- Reverses both column and index. Note: SQLite doesn't support DROP COLUMN
--- on older versions; the column will remain but is unused by code.
+-- on older versions so the column will remain but is unused by code.
 DROP INDEX IF EXISTS uq_job_locks_slot;
--- ALTER TABLE job_locks DROP COLUMN lock_slot;  -- SQLite <3.35 cannot drop columns
+-- ALTER TABLE job_locks DROP COLUMN lock_slot  -- SQLite <3.35 cannot drop columns
