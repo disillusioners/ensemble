@@ -601,6 +601,14 @@ class JobQueueService:
         to the instance (cancelling active requests, terminating children,
         releasing locks) before marking the job as CANCELLED.
         
+        For PROCESSING jobs with a dead/terminal instance and for PENDING /
+        FAILED jobs, this delegates to the atomic repository ``cancel_job``,
+        which handles all cancellable states in a single UPDATE-WHERE-IN.
+        The atomic repository method closes the TOCTOU window where a
+        concurrent ``start_job`` would transition PENDING -> PROCESSING
+        between this method's read and its dispatch, causing the cancel
+        to be silently lost.
+        
         For FAILED jobs, this stops any pending retries.
         
         Args:
@@ -614,27 +622,17 @@ class JobQueueService:
         if job is None:
             return False
         
-        # Pre-validate with state machine (for better error messages)
+        # Pre-validate with state machine for better error messages. This
+        # is a best-effort check; the atomic repo.cancel_job is the source
+        # of truth and will raise ValueError for non-cancellable states.
         if not job_state_machine.can_transition(job.status, JobStatus.CANCELLED.value):
             return False
         
-        # Handle based on current status
-        if job.status == JobStatus.PENDING.value:
-            # PENDING: simple transition
-            try:
-                await asyncio.to_thread(
-                    self._repository.atomic_transition,
-                    job_id=job.job_id,
-                    from_status=JobStatus.PENDING.value,
-                    to_status=JobStatus.CANCELLED.value,
-                )
-                # Notify watchers after successful transition
-                await self.notify_watchers(job.job_id, "cancelled")
-                return True
-            except InvalidTransitionError:
-                return False
-        
-        elif job.status == JobStatus.PROCESSING.value:
+        # Special case: PROCESSING with an alive instance requires a
+        # cascade — ``terminate_instance`` will mark the job CANCELLED
+        # itself. Lock release happens first regardless of instance
+        # liveness (matches pre-fix semantics).
+        if job.status == JobStatus.PROCESSING.value:
             instance_id = job.instance_id
             
             # Release any locks held by this job first
@@ -653,43 +651,26 @@ class JobQueueService:
             )
             
             if instance_alive:
-                # Terminate the instance (cascades to children, cancels requests,
-                # releases locks, marks job as CANCELLED via DemandState.CANCELLED)
+                # Terminate the instance (cascades to children, cancels
+                # requests, releases locks, marks job as CANCELLED via
+                # DemandState.CANCELLED).
                 await self._instance_manager.terminate_instance(instance_id)
                 # Job is now CANCELLED by instance_lifecycle, notify watchers
                 await self.notify_watchers(job.job_id, "cancelled")
                 return True
-            else:
-                # Instance already dead or never created — transition directly to CANCELLED
-                try:
-                    await asyncio.to_thread(
-                        self._repository.atomic_transition,
-                        job_id=job.job_id,
-                        from_status=JobStatus.PROCESSING.value,
-                        to_status=JobStatus.CANCELLED.value,
-                    )
-                except InvalidTransitionError:
-                    return False
-                await self.notify_watchers(job.job_id, "cancelled")
-                return True
+            # else: instance already dead/terminal — fall through to atomic
+            # repo.cancel_job which will handle PROCESSING -> CANCELLED.
         
-        elif job.status == JobStatus.FAILED.value:
-            # FAILED: transition to CANCELLED to stop retries
-            try:
-                await asyncio.to_thread(
-                    self._repository.atomic_transition,
-                    job_id=job.job_id,
-                    from_status=JobStatus.FAILED.value,
-                    to_status=JobStatus.CANCELLED.value,
-                )
-                # Notify watchers after successful transition
-                await self.notify_watchers(job.job_id, "cancelled")
-                return True
-            except InvalidTransitionError:
-                return False
-        
-        # Terminal or non-cancellable states
-        return False
+        # All other cancellable states (PENDING, PROCESSING-dead, FAILED):
+        # delegate to the atomic repository cancel_job which covers all
+        # cancellable states in a single UPDATE, eliminating the TOCTOU
+        # race against concurrent start_job transitions.
+        try:
+            await asyncio.to_thread(self._repository.cancel_job, job.job_id)
+        except ValueError:
+            return False
+        await self.notify_watchers(job.job_id, "cancelled")
+        return True
     
     def _is_instance_alive(self, instance_id: str) -> bool:
         """Check if an instance exists and is not in a terminal state.

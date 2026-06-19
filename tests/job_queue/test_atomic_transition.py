@@ -3,10 +3,15 @@
 This module tests the atomic state transition methods in JobRepository.
 """
 
+import threading
+import uuid
+
 import pytest
+from sqlalchemy import create_engine
+from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import JobItem, JobStatus
 from daemon.services.job_state_machine import InvalidTransitionError
 
 
@@ -300,16 +305,25 @@ class TestCancelJob:
         
         assert "Cannot cancel job" in str(exc_info.value)
 
-    def test_cancel_job_failed_raises(self, repository, sample_job_data):
-        """Test cancel_job raises if job already failed."""
+    def test_cancel_job_failed_succeeds(self, repository, sample_job_data):
+        """Test cancel_job from FAILED state succeeds (FAILED is in cancellable set).
+
+        Per H1 fix: repository.cancel_job is now a single atomic UPDATE
+        WHERE status IN ('pending', 'processing', 'failed'). FAILED is
+        cancellable at the repository level (the service uses this to stop
+        pending retries). This replaces the prior read-then-dispatch
+        pattern, which could not handle FAILED via the repository and
+        required the service to call atomic_transition directly.
+        """
         job = repository.create(**sample_job_data)
         repository.start_job_atomic(job.job_id, "test-instance")
         repository.fail_job(job.job_id, "Some error")
-        
-        with pytest.raises(ValueError) as exc_info:
-            repository.cancel_job(job.job_id)
-        
-        assert "Cannot cancel job" in str(exc_info.value)
+
+        result = repository.cancel_job(job.job_id)
+
+        assert result is not None
+        assert result.status == JobStatus.CANCELLED.value
+        assert result.cancelled_at is not None
 
 
 class TestAtomicTransitionPreservesData:
@@ -339,3 +353,162 @@ class TestAtomicTransitionPreservesData:
         result = repository.start_job_atomic(job.job_id, "test-instance")
         
         assert result.job_metadata == sample_job_data["job_metadata"]
+
+
+@pytest.fixture
+def concurrent_engine(tmp_path):
+    """File-backed SQLite engine (default QueuePool) for concurrent tests."""
+    db_path = tmp_path / "cancel_job_toctou.db"
+    eng = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def concurrent_repository(concurrent_engine) -> JobRepository:
+    """JobRepository backed by a file-backed SQLite engine (F11)."""
+    return JobRepository(concurrent_engine)
+
+
+class TestCancelJobToctou:
+    """H1 — cancel_job vs concurrent start_job must NOT lose the cancel.
+
+    Pre-fix: ``cancel_job`` did ``get()`` then dispatched to
+    ``atomic_transition`` based on the READ status. A concurrent
+    ``start_job`` could transition PENDING -> PROCESSING between the read
+    and the UPDATE, causing the dispatched ``PENDING -> CANCELLED``
+    transition to no-op (rowcount=0) and raise ``InvalidTransitionError``.
+    The cancel was silently LOST.
+
+    Post-fix: ``cancel_job`` issues a single atomic
+    ``UPDATE … WHERE status IN ('pending','processing','failed')``. As
+    long as the row is in any cancellable state when the UPDATE commits,
+    the cancel succeeds. The start_job may or may not win the race
+    (depending on commit order), but the cancel is ALWAYS preserved and
+    the final status is always CANCELLED.
+
+    These tests run against a file-backed engine with the default
+    QueuePool so two threads actually get distinct SQLite connections
+    and the cross-connection UPDATE race is observable.
+    """
+
+    def test_cancel_not_lost_under_concurrent_start(
+        self, concurrent_repository: JobRepository, sample_job_data
+    ):
+        """Cancel issued while start_job transitions PENDING->PROCESSING is NOT lost."""
+        repo = concurrent_repository
+        job = repo.create(**sample_job_data)
+        assert job.status == JobStatus.PENDING.value
+
+        results: dict[str, object] = {}
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(2)
+
+        def start_worker() -> None:
+            barrier.wait()
+            try:
+                started = repo.start_job_atomic(job.job_id, "test-instance")
+                with results_lock:
+                    results["start"] = started
+            except InvalidTransitionError as e:
+                with results_lock:
+                    results["start"] = e
+
+        def cancel_worker() -> None:
+            barrier.wait()
+            try:
+                cancelled = repo.cancel_job(job.job_id)
+                with results_lock:
+                    results["cancel"] = cancelled
+            except ValueError as e:
+                with results_lock:
+                    results["cancel"] = e
+
+        t_start = threading.Thread(target=start_worker)
+        t_cancel = threading.Thread(target=cancel_worker)
+        t_start.start()
+        t_cancel.start()
+        t_start.join()
+        t_cancel.join()
+
+        # Cancel must ALWAYS succeed.
+        cancel_result = results["cancel"]
+        assert cancel_result is not None, (
+            f"cancel_job was LOST (got None); results={results}"
+        )
+        assert not isinstance(cancel_result, ValueError), (
+            f"cancel_job raised ValueError; results={results}"
+        )
+        assert isinstance(cancel_result, JobItem)
+        assert cancel_result.status == JobStatus.CANCELLED.value
+        assert cancel_result.cancelled_at is not None
+
+        # Final row state must be CANCELLED.
+        from sqlmodel import Session as SQLModelSession, select
+        with SQLModelSession(repo.engine) as session:
+            final = session.exec(
+                select(JobItem).where(JobItem.job_id == job.job_id)
+            ).one()
+            assert final.status == JobStatus.CANCELLED.value, (
+                f"Final status is {final.status!r}, expected 'cancelled'; "
+                f"results={results}"
+            )
+
+    def test_concurrent_cancels_exactly_one_succeeds(
+        self, concurrent_repository: JobRepository, sample_job_data
+    ):
+        """N concurrent cancels from PENDING: exactly one transitions,
+        the rest raise ValueError (idempotent no-op)."""
+        repo = concurrent_repository
+        job = repo.create(**sample_job_data)
+
+        n = 4
+        results: list[object] = []
+        results_lock = threading.Lock()
+        barrier = threading.Barrier(n)
+
+        def worker() -> None:
+            barrier.wait()
+            try:
+                cancelled = repo.cancel_job(job.job_id)
+                with results_lock:
+                    results.append(cancelled)
+            except ValueError as e:
+                with results_lock:
+                    results.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        from sqlmodel import Session as SQLModelSession, select
+        with SQLModelSession(repo.engine) as session:
+            final = session.exec(
+                select(JobItem).where(JobItem.job_id == job.job_id)
+            ).one()
+            assert final.status == JobStatus.CANCELLED.value
+
+        successful_cancels = [
+            r for r in results
+            if isinstance(r, JobItem) and r.status == JobStatus.CANCELLED.value
+        ]
+        assert len(successful_cancels) == 1, (
+            f"Expected exactly one successful cancel, got {len(successful_cancels)}; "
+            f"results={results}"
+        )
+
+        failed_with_value_error = [
+            r for r in results if isinstance(r, ValueError)
+        ]
+        assert len(failed_with_value_error) == n - 1, (
+            f"Expected {n - 1} ValueErrors, got {len(failed_with_value_error)}; "
+            f"results={results}"
+        )

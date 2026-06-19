@@ -94,7 +94,6 @@ class TestCancelPendingJob:
         # Setup: pending job
         pending_job = MockJobItem(job_id="job-pending", status="pending")
         mock_repository.get.return_value = pending_job
-        mock_repository.atomic_transition.return_value = pending_job
 
         # Create service
         service = JobQueueService(
@@ -110,11 +109,10 @@ class TestCancelPendingJob:
         # Verify: cancellation succeeded
         assert result is True
 
-        # Verify: direct transition PENDING -> CANCELLED
-        mock_repository.atomic_transition.assert_called_once()
-        call_args = mock_repository.atomic_transition.call_args
-        assert call_args.kwargs.get("from_status") == "pending"
-        assert call_args.kwargs.get("to_status") == "cancelled"
+        # Verify: atomic repository cancel_job was called (single UPDATE-WHERE-IN
+        # covering all cancellable states; closes the TOCTOU window against
+        # concurrent start_job transitions).
+        mock_repository.cancel_job.assert_called_once_with("job-pending")
 
         # Verify: instance manager was NOT called (no instance to terminate)
         mock_instance_manager.terminate_instance.assert_not_called()
@@ -203,11 +201,9 @@ class TestCancelProcessingJob:
         # Verify: instance was NOT terminated (already dead)
         mock_instance_manager.terminate_instance.assert_not_called()
 
-        # Verify: direct transition PROCESSING -> CANCELLED
-        mock_repository.atomic_transition.assert_called()
-        call_args = mock_repository.atomic_transition.call_args
-        assert call_args.kwargs.get("from_status") == "processing"
-        assert call_args.kwargs.get("to_status") == "cancelled"
+        # Verify: atomic repository cancel_job was called (single UPDATE-WHERE-IN
+        # that includes PROCESSING in the cancellable set).
+        mock_repository.cancel_job.assert_called_once_with("job-dead")
 
     @pytest.mark.asyncio
     async def test_cancel_processing_job_with_terminal_instance(
@@ -249,11 +245,9 @@ class TestCancelProcessingJob:
         # Verify: instance was NOT terminated (already terminal)
         mock_instance_manager.terminate_instance.assert_not_called()
 
-        # Verify: direct transition PROCESSING -> CANCELLED
-        mock_repository.atomic_transition.assert_called()
-        call_args = mock_repository.atomic_transition.call_args
-        assert call_args.kwargs.get("from_status") == "processing"
-        assert call_args.kwargs.get("to_status") == "cancelled"
+        # Verify: atomic repository cancel_job was called (PROCESSING is in
+        # the cancellable set even when the instance is already terminal).
+        mock_repository.cancel_job.assert_called_once_with("job-terminal")
 
 
 class TestCancelAlreadyTerminalJob:
@@ -305,12 +299,9 @@ class TestCancelAlreadyTerminalJob:
         # Verify: cancellation succeeded
         assert result is True
         
-        # Verify: transition to CANCELLED
-        mock_repository.atomic_transition.assert_called_once_with(
-            job_id="job-failed",
-            from_status="failed",
-            to_status="cancelled",
-        )
+        # Verify: atomic repository cancel_job was called (FAILED is in the
+        # cancellable set; stops any pending retries).
+        mock_repository.cancel_job.assert_called_once_with("job-failed")
 
     @pytest.mark.asyncio
     async def test_cancel_cancelled_job(self, mock_repository, mock_lock_manager, mock_queue_repo, mock_instance_manager):
@@ -539,23 +530,39 @@ class TestCancelNoInstanceManager:
         # Verify: cancellation succeeded (direct transition)
         assert result is True
 
-        # Verify: direct transition PROCESSING -> CANCELLED
-        mock_repository.atomic_transition.assert_called()
-        call_args = mock_repository.atomic_transition.call_args
-        assert call_args.kwargs.get("from_status") == "processing"
-        assert call_args.kwargs.get("to_status") == "cancelled"
+        # Verify: atomic repository cancel_job was called (PROCESSING is in
+        # the cancellable set; single UPDATE-WHERE-IN).
+        mock_repository.cancel_job.assert_called_once_with("job-no-manager")
 
 
 class TestCancelRaceCondition:
-    """Tests for race conditions during cancellation."""
+    """Tests for race conditions during cancellation.
+
+    Under the new atomic repo.cancel_job implementation, races against
+    concurrent transitions are handled by the SQL-level status-IN guard:
+    as long as the job is in any cancellable state (PENDING/PROCESSING/
+    FAILED) when the UPDATE commits, the cancel succeeds. The cancel
+    is only lost if the job has already moved to a non-cancellable
+    terminal state (COMPLETED/CANCELLED) before the UPDATE runs — and
+    in that case the disambiguation SELECT inside cancel_job raises
+    ValueError, which the service maps to a False return.
+    """
 
     @pytest.mark.asyncio
     async def test_cancel_processing_job_already_transitioned(
         self, mock_repository, mock_lock_manager, mock_queue_repo, mock_instance_manager
     ):
-        """Job already transitioned by another actor -> returns False."""
+        """Job already moved to non-cancellable terminal -> cancel returns False.
+
+        Simulates the race where, between the service's get() and the
+        atomic repo.cancel_job() call, another actor transitioned the
+        job out of the cancellable set (e.g. to COMPLETED). The atomic
+        UPDATE in cancel_job will match no rows, the disambiguation
+        SELECT will find the row but in a non-cancellable state, and
+        repo.cancel_job raises ValueError. The service catches it and
+        returns False.
+        """
         from daemon.services.job_queue_service import JobQueueService
-        from daemon.services.job_state_machine import InvalidTransitionError
 
         # Setup: processing job
         processing_job = MockJobItem(
@@ -567,11 +574,11 @@ class TestCancelRaceCondition:
         )
         mock_repository.get.return_value = processing_job
 
-        # Mock atomic_transition to raise InvalidTransitionError
-        mock_repository.atomic_transition.side_effect = InvalidTransitionError(
-            job_id="job-race",
-            from_status="processing",
-            to_status="cancelled",
+        # Mock atomic cancel_job to raise ValueError — simulates a row that
+        # moved to a non-cancellable terminal state between the read and
+        # the UPDATE.
+        mock_repository.cancel_job.side_effect = ValueError(
+            "Cannot cancel job in 'completed' state, must be PENDING, PROCESSING, or FAILED"
         )
 
         # Mock instance dead
@@ -588,7 +595,7 @@ class TestCancelRaceCondition:
         # Cancel
         result = await service.cancel_job("job-race")
 
-        # Verify: cancellation failed due to race condition
+        # Verify: cancellation failed because job was no longer cancellable
         assert result is False
 
 

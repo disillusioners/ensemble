@@ -1027,31 +1027,96 @@ class JobRepository:
         )
 
     def cancel_job(self, job_id: str) -> JobItem | None:
-        """Cancel a job. Works for both PENDING and PROCESSING states."""
-        job = self.get(job_id)
-        if job is None:
-            return None
+        """Cancel a job from any cancellable state in a single atomic UPDATE.
 
+        Replaces the prior read-then-dispatch pattern (read job, branch on
+        ``status`` in Python, then call ``atomic_transition`` with the
+        read ``from_status``). That pattern was vulnerable to a TOCTOU race:
+        a concurrent ``start_job`` could transition PENDING -> PROCESSING
+        between our read and our UPDATE-WHERE-status='pending', causing
+        the dispatched ``PENDING -> CANCELLED`` transition to no-op
+        (rowcount=0), raise ``InvalidTransitionError``, and silently
+        LOSE the cancel even though ``PROCESSING -> CANCELLED`` is a
+        valid transition.
+
+        The new implementation issues a single guarded UPDATE covering
+        all cancellable states (PENDING, PROCESSING, FAILED) in one
+        statement:
+
+            UPDATE job_queue_items
+            SET status='cancelled', cancelled_at=:now
+            WHERE job_id=:job_id AND status IN ('pending','processing','failed')
+
+        On PostgreSQL, EvalPlanQual re-evaluates the status-IN predicate
+        after the row lock is acquired, so a concurrent writer that
+        flipped the status between our check and our write cannot slip
+        past us. On SQLite, the single-statement UPDATE is atomic at
+        the database level. Either way, two concurrent writers cannot
+        both observe the predicate as true.
+
+        A disambiguation SELECT only runs when ``rowcount == 0`` to
+        distinguish "job doesn't exist" (returns ``None``) from "job
+        is in a non-cancellable terminal state" (raises ``ValueError``,
+        preserving the original error contract).
+
+        Args:
+            job_id: Job identifier.
+
+        Returns:
+            Updated JobItem after the UPDATE commits, or ``None`` if the
+            job does not exist.
+
+        Raises:
+            ValueError: If the job exists but is in a non-cancellable
+                state (e.g. COMPLETED, CANCELLED).
+        """
         now = datetime.now(timezone.utc).isoformat()
+        cancellable_states = (
+            JobStatus.PENDING.value,
+            JobStatus.PROCESSING.value,
+            JobStatus.FAILED.value,
+        )
 
-        if job.status == JobStatus.PENDING.value:
-            return self.atomic_transition(
-                job_id,
-                from_status=JobStatus.PENDING.value,
-                to_status=JobStatus.CANCELLED.value,
-                cancelled_at=now,
+        with SQLModelSession(self.engine) as session:
+            # Atomic UPDATE with status-IN guard. Single statement covers
+            # PENDING/PROCESSING/FAILED so a concurrent start_job that
+            # flips PENDING -> PROCESSING between our read and write is
+            # still matched by the guard (PROCESSING is in the cancellable
+            # set) and the cancel is preserved.
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.status.in_(cancellable_states))
+                .values(
+                    status=JobStatus.CANCELLED.value,
+                    cancelled_at=now,
+                )
             )
-        elif job.status == JobStatus.PROCESSING.value:
-            return self.atomic_transition(
-                job_id,
-                from_status=JobStatus.PROCESSING.value,
-                to_status=JobStatus.CANCELLED.value,
-                cancelled_at=now,
-            )
-        else:
-            raise ValueError(
-                f"Cannot cancel job in '{job.status}' state, must be PENDING or PROCESSING"
-            )
+            result = session.exec(stmt)
+            session.commit()
+
+            if result.rowcount == 0:
+                # UPDATE matched no rows. Two possibilities:
+                #   (a) the job_id doesn't exist at all, or
+                #   (b) the job exists but is in a non-cancellable state
+                #       (COMPLETED, CANCELLED).
+                # Disambiguate via follow-up SELECT — same session, so
+                # we see the post-UPDATE state.
+                existing = session.get(JobItem, job_id)
+                if existing is None:
+                    return None
+                raise ValueError(
+                    f"Cannot cancel job in '{existing.status}' state, "
+                    f"must be PENDING, PROCESSING, or FAILED"
+                )
+
+            # Re-read the row to return a fully-populated JobItem.
+            job = session.get(JobItem, job_id)
+            if job is None:
+                # Vanishingly unlikely race: row deleted between UPDATE
+                # and re-read. Surface as "not found" for symmetry.
+                return None
+            return job
 
     def terminate_job(
         self,

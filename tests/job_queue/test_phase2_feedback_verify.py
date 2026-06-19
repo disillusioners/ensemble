@@ -546,9 +546,6 @@ class TestCancellationIntegration:
         result = await service.cancel_job("fail-race-job")
 
         assert result is True
-        # Verify transition from FAILED to CANCELLED
-        mock_repo.atomic_transition.assert_called_once_with(
-            job_id="fail-race-job",
-            from_status="failed",
-            to_status="cancelled",
-        )
+        # Verify atomic cancel_job was called (FAILED is in cancellable set;
+        # single UPDATE-WHERE-IN closes the TOCTOU window).
+        mock_repo.cancel_job.assert_called_once_with("fail-race-job")
