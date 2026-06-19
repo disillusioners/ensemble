@@ -9,9 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func, not_
+from sqlalchemy import delete as sql_delete, func, not_, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
@@ -625,48 +624,152 @@ class SQLModelInstanceRepository:
         return self.update(instance_id, waiting_for=waiting_for)
 
     def update_title(self, instance_id: str, title: str) -> Instance | None:
-        """Update instance title in instance_metadata."""
-        with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
-            if instance is None:
-                return None
+        """Update instance title in instance_metadata.
 
-            instance.instance_metadata["title"] = title
-            flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            db_session.commit()
-            db_session.refresh(instance)
-
-            return self._enrich_instance(db_session, instance)
+        Delegates to :meth:`set_metadata` so the title write uses the same
+        dialect-aware atomic SQL path (single-statement UPDATE with
+        ``jsonb_set`` on PostgreSQL / ``json_set`` on SQLite). This avoids
+        the read-modify-write race where a concurrent ``set_metadata`` on
+        a different key would be silently overwritten.
+        """
+        return self.set_metadata(instance_id, "title", title)
 
     def set_metadata(self, instance_id: str, key: str, value: Any) -> Instance | None:
-        """Set an instance_metadata key-value pair."""
+        """Atomically set an instance_metadata key-value pair.
+
+        Uses a dialect-aware single-statement UPDATE so concurrent calls
+        targeting different keys compose correctly instead of silently
+        overwriting each other:
+
+        * PostgreSQL: ``jsonb_set(COALESCE(metadata, '{}'::jsonb), ...)``
+        * SQLite:     ``json_set(COALESCE(metadata, '{}'), ...)``
+
+        ``COALESCE`` keeps the call safe when the column is NULL.
+
+        Args:
+            instance_id: The instance ID whose metadata to update.
+            key: Top-level JSON key to set.
+            value: JSON-serialisable value to store.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+        """
         with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            json_value = json.dumps(value)
+            now = datetime.now(timezone.utc).isoformat()
+
+            if dialect == "postgresql":
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = jsonb_set(
+                        COALESCE(metadata, '{}'::jsonb),
+                        :path,
+                        CAST(:value AS jsonb),
+                        true
+                    ),
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                path_value = f"{{{key}}}"
+            else:
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = json_set(
+                        COALESCE(metadata, '{}'),
+                        :path,
+                        json(:value)
+                    ),
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                path_value = f"$.{key}"
+
+            db_session.execute(
+                update_sql,
+                {
+                    "path": path_value,
+                    "value": json_value,
+                    "now": now,
+                    "instance_id": instance_id,
+                },
+            )
+            db_session.commit()
+
             instance = db_session.get(Instance, instance_id)
             if instance is None:
                 return None
-
-            instance.instance_metadata[key] = value
-            flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            db_session.commit()
-            db_session.refresh(instance)
-
             return self._enrich_instance(db_session, instance)
 
     def delete_metadata(self, instance_id: str, key: str) -> Instance | None:
-        """Delete an instance_metadata key."""
+        """Atomically delete an instance_metadata key.
+
+        Uses a dialect-aware single-statement UPDATE so the deletion
+        cannot lose concurrent writes to other keys via a stale read:
+
+        * PostgreSQL: ``metadata - :key`` (jsonb delete-by-key)
+        * SQLite:     ``json_remove(metadata, :path)``
+
+        Args:
+            instance_id: The instance ID whose metadata to mutate.
+            key: Top-level JSON key to delete.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+        """
         with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            now = datetime.now(timezone.utc).isoformat()
+
+            if dialect == "postgresql":
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = metadata - :key,
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                params = {
+                    "key": key,
+                    "now": now,
+                    "instance_id": instance_id,
+                }
+            else:
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = json_remove(metadata, :path),
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                params = {
+                    "path": f"$.{key}",
+                    "now": now,
+                    "instance_id": instance_id,
+                }
+
+            db_session.execute(update_sql, params)
+            db_session.commit()
+
             instance = db_session.get(Instance, instance_id)
             if instance is None:
                 return None
-
-            instance.instance_metadata.pop(key, None)
-            flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            db_session.commit()
-            db_session.refresh(instance)
-
             return self._enrich_instance(db_session, instance)
 
     # --------------------------------------------------------

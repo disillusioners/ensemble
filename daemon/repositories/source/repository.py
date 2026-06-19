@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import delete as sql_delete, insert, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, col
@@ -20,10 +21,30 @@ logger = logging.getLogger(__name__)
 
 class SQLModelSourceRepository:
     """SQLModel-based Source repository for source configs, instance mappings, and message deduplication."""
-    
+
     def __init__(self, engine: Engine):
         """Initialize repository with a database engine."""
         self.engine = engine
+
+    def _get_dialect_insert(self, session: Session):
+        """Get dialect-appropriate insert function for upsert operations.
+
+        Generic ``sqlalchemy.insert()`` does not support
+        ``on_conflict_do_update()`` — that method is dialect-specific. This
+        helper returns the dialect-specific insert callable so the caller can
+        chain ``on_conflict_do_update`` for both SQLite and PostgreSQL.
+
+        Args:
+            session: SQLAlchemy Session whose bound engine determines dialect.
+
+        Returns:
+            Dialect-specific insert callable. Both ``sqlite`` and
+            ``postgresql`` dialect inserts support ``on_conflict_do_update``.
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            return pg_insert
+        return sqlite_insert
 
     # ==================== Source Config Operations ====================
 
@@ -261,54 +282,54 @@ class SQLModelSourceRepository:
         metadata: dict[str, Any | None] = None,
         mapping_id: str | None = None,
     ) -> InstanceMapping:
-        """Create or update an instance mapping."""
+        """Create or update an instance mapping (atomic dialect-aware upsert).
+
+        Replaces the previous SELECT-then-INSERT/UPDATE pattern that produced
+        duplicate mappings under concurrent first-message access from the same
+        external user. We rely on the dialect-aware
+        ``INSERT ... ON CONFLICT(source_id, external_user_id) DO UPDATE``,
+        which is a single atomic round trip and is enforced by the
+        ``uq_instance_mappings_source_user`` unique constraint added on the
+        model.
+        """
         with Session(self.engine) as session:
             now = datetime.now(timezone.utc).isoformat()
             mapping_id = mapping_id or str(uuid.uuid4())
-            
-            # Check if mapping exists (upsert logic)
-            existing = session.exec(
-                select(InstanceMapping).where(
-                    InstanceMapping.source_id == source_id,
-                    InstanceMapping.external_user_id == external_user_id
-                )
-            ).first()
-            
-            if existing:
-                # Update existing mapping
-                existing.agent_instance_id = agent_instance_id
-                existing.agent_id = agent_id
-                existing.agent_dir = agent_dir
-                existing.mapping_metadata = metadata or {}
-                existing.last_message_at = now
-                session.commit()
-                session.refresh(existing)
-                logger.info(
-                    f"Updated instance mapping: mapping_id={existing.mapping_id}, "
-                    f"source_id={source_id}, external_user_id={external_user_id}"
-                )
-                return existing
-            
-            # Create new mapping
-            mapping = InstanceMapping(
+            metadata_payload = metadata or {}
+
+            insert_fn = self._get_dialect_insert(session)
+            stmt = insert_fn(InstanceMapping).values(
                 mapping_id=mapping_id,
                 source_id=source_id,
                 external_user_id=external_user_id,
                 agent_instance_id=agent_instance_id,
                 agent_id=agent_id,
                 agent_dir=agent_dir,
-                mapping_metadata=metadata or {},
+                mapping_metadata=metadata_payload,
                 last_message_at=now,
                 created_at=now,
+            ).on_conflict_do_update(
+                index_elements=["source_id", "external_user_id"],
+                set_={
+                    "agent_instance_id": agent_instance_id,
+                    "agent_id": agent_id,
+                    "agent_dir": agent_dir,
+                    "mapping_metadata": metadata_payload,
+                    "last_message_at": now,
+                },
             )
-            
-            session.add(mapping)
+            session.execute(stmt)
             session.commit()
-            session.refresh(mapping)
-            
+
+            mapping = session.exec(
+                select(InstanceMapping).where(
+                    InstanceMapping.source_id == source_id,
+                    InstanceMapping.external_user_id == external_user_id,
+                )
+            ).first()
             logger.info(
-                f"Created instance mapping: mapping_id={mapping_id}, "
-                f"source_id={source_id}, external_user_id={external_user_id}"
+                f"Upserted instance mapping: source_id={source_id}, "
+                f"external_user_id={external_user_id}, mapping_id={mapping.mapping_id if mapping else mapping_id}"
             )
             return mapping
 

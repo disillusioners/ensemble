@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_, cast as sa_cast
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -651,6 +651,7 @@ class SQLModelInfraRepository:
         asset_id: str,
         project_id: str | None = None,
         updated_by: str | None = None,
+        expected_version: int | None = None,
         **updates: Any,
     ) -> InfraAsset | None:
         """Update fields on an existing asset.
@@ -673,22 +674,44 @@ class SQLModelInfraRepository:
             updated_by: Optional ``instance_id`` of the agent
                 making the change; recorded on the row and on
                 the history entry.
+            expected_version: Optional optimistic-locking version
+                (M5 fix). When supplied, the update is gated by
+                ``WHERE id = :id AND version = :expected_version``
+                and ``version`` is atomically set to
+                ``version + 1``; if the row's current version no
+                longer matches (because another caller mutated
+                the asset concurrently), the method raises
+                :class:`ValueError` and no changes are applied.
+                When ``None`` (default), the update falls back to
+                the previous read-modify-write behavior — the
+                ``version`` column is still incremented so a
+                caller that later opts into ``expected_version``
+                sees a meaningful counter. This parameter is
+                OPTIONAL for backward compatibility: existing
+                callers that don't track versions see no
+                behavior change. New callers that want
+                concurrency safety should
+                ``re-read → mutate → update_asset(expected_version=current.version)``.
             **updates: Column values to overwrite. Allowed
                 keys: ``name``, ``type``, ``parent_asset_id``,
                 ``attributes``, ``relationships``. Protected
                 keys (``id``, ``project_id``, ``created_at``,
-                ``created_by``, ``updated_at``, ``updated_by``)
-                are silently dropped with a warning. W1 fix:
-                ``updated_at`` / ``updated_by`` are owned by
-                the repository — ``updated_by`` is passed as
-                a named argument and the timestamp is set
-                internally to ``self._now_iso()``.
+                ``created_by``, ``updated_at``, ``updated_by``,
+                ``version``) are silently dropped with a warning.
+                W1 fix: ``updated_at`` / ``updated_by`` are
+                owned by the repository — ``updated_by`` is
+                passed as a named argument and the timestamp
+                is set internally to ``self._now_iso()``.
+                M5 fix: ``version`` is owned by the repository's
+                optimistic-lock mechanism — callers supply
+                ``expected_version`` (the value they read) as a
+                NAMED arg, not via ``**updates``.
 
         Returns:
             The updated :class:`InfraAsset` instance, or
             ``None`` if no asset with that ID exists, **or** if
-            ``project_id`` was supplied and the asset belongs
-            to a different project.
+            ``project_id`` was supplied and the asset belongs to
+            a different project.
 
         Raises:
             AttributeError: If any ``updates`` key is neither a
@@ -697,7 +720,10 @@ class SQLModelInfraRepository:
             ValueError: If the update would violate the
                 ``UNIQUE(project_id, type, name)`` constraint
                 (i.e. caller is renaming / retyping into a
-                name that's already taken).
+                name that's already taken), OR — M5 — if
+                ``expected_version`` was supplied and the row's
+                current version does not match (concurrent
+                modification detected).
         """
         protected = {
             "id",
@@ -714,10 +740,23 @@ class SQLModelInfraRepository:
             # audit identity on the row.
             "updated_at",
             "updated_by",
+            # M5 fix: ``version`` is owned by the repository's
+            # optimistic-lock mechanism. The caller passes the
+            # expected value as a NAMED arg (``expected_version``)
+            # so it can be applied atomically as part of the
+            # WHERE clause. Injecting ``version`` directly via
+            # ``**updates`` would either be silently dropped (the
+            # legacy ORM path) or fight with the Core UPDATE in
+            # the atomic path — neither is correct, so we drop
+            # it here and route callers through ``expected_version``.
+            "version",
         }
         # JSON column names that need ``flag_modified`` after
         # in-place mutation (no-op when the caller replaces the
-        # whole dict).
+        # whole dict). Only used by the legacy ORM path; the
+        # M5 atomic path sets JSON columns via Core
+        # ``.values()``, which goes through ``JSONBType``'s
+        # ``bind_processor`` automatically.
         json_columns = {"attributes", "relationships"}
 
         with Session(self.engine) as session:
@@ -739,6 +778,24 @@ class SQLModelInfraRepository:
                 )
                 return None
 
+            # Validate the caller's ``**updates`` keys BEFORE any
+            # mutation runs. The original code validated inside the
+            # mutation loop, which works for the legacy path but is
+            # wrong for the M5 atomic path (we want to fail fast on
+            # a typo'd column name rather than issue a Core UPDATE
+            # for half the keys and then raise on the rest).
+            for key in updates:
+                if key in protected:
+                    logger.warning(
+                        f"Ignoring protected field in update_asset: "
+                        f"id={asset_id}, field={key}"
+                    )
+                    continue
+                if not hasattr(asset, key):
+                    raise AttributeError(
+                        f"InfraAsset has no field {key!r}"
+                    )
+
             # Capture the PRE-update snapshot BEFORE the
             # mutation loop runs. The history row's
             # ``snapshot`` column must reflect the asset's
@@ -756,33 +813,104 @@ class SQLModelInfraRepository:
 
             for key, value in updates.items():
                 if key in protected:
-                    logger.warning(
-                        f"Ignoring protected field in update_asset: "
-                        f"id={asset_id}, field={key}"
-                    )
                     continue
-                if not hasattr(asset, key):
-                    raise AttributeError(
-                        f"InfraAsset has no field {key!r}"
-                    )
                 old = getattr(asset, key)
                 # Compare safely — dict / list equality.
                 if old != value:
                     old_values[key] = old
                     new_values[key] = value
                     changed_fields.append(key)
-                setattr(asset, key, value)
-                if key in json_columns:
-                    # Defensive: flag_modified is needed for in-place JSON
-                    # mutation; when replacing the whole dict SQLAlchemy
-                    # already detects the change via the attribute set, but
-                    # we flag anyway to guard against future in-place edits
-                    # (e.g. ``asset.attributes["k"] = v``) silently
-                    # bypassing the change tracker.
-                    flag_modified(asset, key)
 
-            asset.updated_at = self._now_iso()
-            asset.updated_by = updated_by
+            now = self._now_iso()
+
+            if expected_version is not None:
+                # M5 atomic path: raw-SQL check-and-increment.
+                # The Core UPDATE includes
+                # ``WHERE id = :id AND version = :expected_version``
+                # so a concurrent modification between the
+                # caller's read and write is detected at the DB
+                # layer instead of silently clobbering the
+                # concurrent write. ``rowcount == 0`` after the
+                # UPDATE means the WHERE clause did not match —
+                # either the row was deleted or the version moved
+                # (concurrent update). We surface this as
+                # ``ValueError`` so the caller knows to re-read.
+                set_values: dict[str, Any] = {
+                    "version": InfraAsset.version + 1,
+                    "updated_at": now,
+                    "updated_by": updated_by,
+                }
+                for key, value in updates.items():
+                    if key in protected:
+                        continue
+                    set_values[key] = value
+
+                stmt = (
+                    sa_update(InfraAsset)
+                    .where(InfraAsset.id == asset_id)
+                    .where(InfraAsset.version == expected_version)
+                    .values(**set_values)
+                )
+                result = session.execute(stmt)
+                if result.rowcount == 0:
+                    # Either the row was deleted between the
+                    # session.get() above and the UPDATE, or its
+                    # version moved. Roll back so the
+                    # ``session.commit()`` below doesn't try to
+                    # flush any half-applied state, and raise so
+                    # the caller can re-read and decide what to
+                    # do (retry, abort, merge, …).
+                    session.rollback()
+                    raise ValueError(
+                        f"Concurrent modification of asset "
+                        f"{asset_id}: expected_version="
+                        f"{expected_version} no longer matches "
+                        f"the row's current version "
+                        f"(caller has stale data; re-read and "
+                        f"retry)"
+                    )
+                # The Core UPDATE bypasses the ORM session's
+                # change tracker — the in-memory ``asset``
+                # object still holds the pre-update values.
+                # Expire it so any subsequent access (including
+                # the ``session.refresh`` below) re-reads from
+                # the DB. Without this, ``session.refresh``
+                # would still work, but we mark ``expire`` so
+                # the object is unambiguously "stale" in case
+                # another piece of code grabs it before the
+                # final ``refresh``.
+                session.expire(asset)
+            else:
+                # Legacy path: ORM-flush read-modify-write
+                # (backward-compatible with callers that don't
+                # track versions).
+                for key, value in updates.items():
+                    if key in protected:
+                        continue
+                    setattr(asset, key, value)
+                    if key in json_columns:
+                        # Defensive: flag_modified is needed for in-place JSON
+                        # mutation; when replacing the whole dict SQLAlchemy
+                        # already detects the change via the attribute set, but
+                        # we flag anyway to guard against future in-place edits
+                        # (e.g. ``asset.attributes["k"] = v``) silently
+                        # bypassing the change tracker.
+                        flag_modified(asset, key)
+
+                asset.updated_at = now
+                asset.updated_by = updated_by
+                # M5: monotonic version increment even on the
+                # legacy path. Without this, a caller that
+                # reads version=1, then later opts into
+                # ``expected_version=1`` would see that the
+                # row's version is still 1 (the original value
+                # was never bumped) and the optimistic lock
+                # would falsely succeed — masking concurrent
+                # updates by other legacy callers. By
+                # incrementing on every update, we keep the
+                # counter meaningful so the migration path
+                # from legacy to atomic is safe.
+                asset.version = (asset.version or 0) + 1
 
             if changed_fields:
                 history = InfraAssetHistory(
@@ -794,7 +922,7 @@ class SQLModelInfraRepository:
                     old_values=old_values,
                     new_values=new_values,
                     changed_by=updated_by,
-                    timestamp=asset.updated_at,
+                    timestamp=now,
                 )
                 session.add(history)
 
@@ -809,7 +937,8 @@ class SQLModelInfraRepository:
             session.refresh(asset)
             logger.info(
                 f"Updated infra asset: id={asset_id}, "
-                f"changed_fields={changed_fields}"
+                f"changed_fields={changed_fields}, "
+                f"version={asset.version}"
             )
             return asset
 

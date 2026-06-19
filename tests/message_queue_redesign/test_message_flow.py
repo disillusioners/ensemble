@@ -662,6 +662,10 @@ class TestIntegrationScenarios:
 
         # Child processes its messages
         child_msg = message_repo.enqueue(instance_id=child_id, content="Child work", source="api")
+        # Dequeue transitions the message to PROCESSING — required for
+        # the atomic ``complete()`` (status='processing' guard).
+        dequeued = message_repo.dequeue(instance_id=child_id)
+        assert dequeued is not None and dequeued.status == MessageStatus.PROCESSING.value
         child_task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id=child_id,

@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, Index
+from sqlalchemy import Column, Index, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
@@ -84,6 +84,13 @@ class SourceConfig(SQLModel, table=True):
 class InstanceMapping(SQLModel, table=True):
     """SQLModel InstanceMapping table - internal ORM representation."""
     __tablename__ = "instance_mappings"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_id",
+            "external_user_id",
+            name="uq_instance_mappings_source_user",
+        ),
+    )
 
     mapping_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     source_id: str = Field(foreign_key="source_configs.source_id", index=True)

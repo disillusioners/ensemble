@@ -776,7 +776,7 @@ class JobQueueService:
         # If job has queue_id, use per-queue locking with concurrency limit
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
-            
+
             acquired = await self._lock_manager.acquire_queue_lock(
                 project_id=job.project_id,
                 queue_id=job.queue_id,
@@ -784,23 +784,30 @@ class JobQueueService:
                 instance_id=instance_id,
                 concurrency_limit=concurrency_limit,
             )
-            
+
             if not acquired:
                 return False
-            
-            # Atomically start the job
+
+            # C11: try/finally ensures lock is released on ALL failure paths
+            # (not just ValueError — e.g. OperationalError, CancelledError, deadlocks).
+            # The ``except ValueError`` preserves the original "return False"
+            # behavior for callers; the finally block still drops the lock.
+            started_ok = False
             try:
                 await asyncio.to_thread(
                     self._repository.start_job_atomic, job.job_id, instance_id
                 )
+                started_ok = True
                 return True
             except ValueError:
                 # Job state changed (already started/cancelled)
-                await self._lock_manager.release_queue_lock(
-                    job.project_id, job.queue_id, job.job_id
-                )
                 return False
-        
+            finally:
+                if not started_ok:
+                    await self._lock_manager.release_queue_lock(
+                        job.project_id, job.queue_id, job.job_id
+                    )
+
         # If job has project_id but no queue_id, use backward-compatible project-based locking
         if job.project_id:
             acquired = await self._lock_manager.acquire(
@@ -808,20 +815,27 @@ class JobQueueService:
                 job_id=job.job_id,
                 instance_id=instance_id,
             )
-            
+
             if not acquired:
                 return False
-            
+
+            # C11: try/finally ensures lock is released on ALL failure paths.
+            started_ok = False
             try:
                 await asyncio.to_thread(
                     self._repository.start_job_atomic, job.job_id, instance_id
                 )
+                started_ok = True
                 return True
             except ValueError:
-                await self._lock_manager.release(job.project_id, job.job_id)
                 return False
-        
+            finally:
+                if not started_ok:
+                    await self._lock_manager.release(job.project_id, job.job_id)
+
         # No project_id - start immediately without locking
+        # No lock held here; keep the original try/except ValueError semantics
+        # so we still return False (not None) on a state mismatch.
         try:
             await asyncio.to_thread(
                 self._repository.start_job_atomic, job.job_id, instance_id
@@ -832,41 +846,73 @@ class JobQueueService:
     
     async def _complete_job(self, job: JobItem, result_summary: str | None) -> None:
         """Mark a job as completed and release its lock.
-        
+
+        H9 Fix: Status transition FIRST, lock release in finally.
+        The previous order (release → transition) created a race window where
+        a failed transition would leave the job in PROCESSING with no lock,
+        allowing a second worker to double-claim. By holding the lock until
+        the status is committed, the recovery sweep (``recover_stale_locks``)
+        remains the only path that can re-claim a stuck PROCESSING job.
+
         Args:
             job: The processing job to complete.
             result_summary: Optional summary of the job result.
         """
-        # Release the lock first
-        await self._release_job_lock(
-            project_id=job.project_id,
-            queue_id=job.queue_id,
-            job_id=job.job_id,
-            instance_id=job.instance_id,
-            release_by_instance=True,
-        )
+        try:
+            # 1. Transition status FIRST (commit before releasing the lock)
+            await asyncio.to_thread(
+                self._repository.complete_job, job.job_id, result_summary
+            )
+        finally:
+            # 2. Release lock AFTER transition attempt (success OR failure).
+            # On failure, the job stays PROCESSING and the recovery sweep will
+            # pick it up — which is the correct, race-free path.
+            try:
+                await self._release_job_lock(
+                    project_id=job.project_id,
+                    queue_id=job.queue_id,
+                    job_id=job.job_id,
+                    instance_id=job.instance_id,
+                    release_by_instance=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to release lock for job {job.job_id[:8]}...: {e}"
+                )
 
-        # Mark job as completed
-        await asyncio.to_thread(self._repository.complete_job, job.job_id, result_summary)
-    
     async def _fail_job(self, job: JobItem, error_message: str) -> None:
         """Mark a job as failed and release its lock.
-        
+
+        H9 Fix: Status transition FIRST, lock release in finally.
+        Mirrors the ordering in ``_complete_job`` and the public
+        ``complete_job`` (status-first, lock-second in finally). Holding the
+        lock until the transition is committed prevents a failed transition
+        from leaving a job in PROCESSING with no lock — which would let a
+        second worker double-claim during the recovery window.
+
         Args:
             job: The processing job that failed.
             error_message: Error message describing the failure.
         """
-        # Release the lock first
-        await self._release_job_lock(
-            project_id=job.project_id,
-            queue_id=job.queue_id,
-            job_id=job.job_id,
-            instance_id=job.instance_id,
-            release_by_instance=True,
-        )
-
-        # Mark job as failed
-        await asyncio.to_thread(self._repository.fail_job, job.job_id, error_message)
+        try:
+            # 1. Transition status FIRST (commit before releasing the lock)
+            await asyncio.to_thread(
+                self._repository.fail_job, job.job_id, error_message
+            )
+        finally:
+            # 2. Release lock AFTER transition attempt (success OR failure).
+            try:
+                await self._release_job_lock(
+                    project_id=job.project_id,
+                    queue_id=job.queue_id,
+                    job_id=job.job_id,
+                    instance_id=job.instance_id,
+                    release_by_instance=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to release lock for job {job.job_id[:8]}...: {e}"
+                )
     
     async def _get_next_job(
         self,
@@ -1168,17 +1214,35 @@ class JobQueueService:
         
         # Lock acquired (or no locking needed) - now try to start job atomically
         logger.debug(f"[TRACE] start_job: attempting atomic transition PENDING→PROCESSING for job {job_id[:8]}...")
+        # C11: try/finally ensures lock is released on ALL failure paths
+        # (not just ValueError — e.g. OperationalError, CancelledError, deadlocks).
+        # On success, the lock is intentionally kept (JobProcessor holds it until
+        # the job completes/fails). ``started_ok`` guards against releasing on
+        # the success path, matching the original lock-on-success semantics.
+        # The ``except ValueError`` preserves the original "return None" behavior
+        # for callers (lock contention / already-started job) — the lock release
+        # happens in the finally block so we still drop it on the ValueError path.
+        started_ok = False
         try:
             started_job = await asyncio.to_thread(
                 self._repository.start_job_atomic, job_id, instance_id
             )
+            started_ok = True
             logger.debug(
                 f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
             )
             return started_job
         except ValueError:
-            # Job state changed (already started/cancelled) - release the lock we acquired
-            if lock_acquired:
+            # Job state changed (already started/cancelled) — preserve original
+            # behavior of returning None so callers can detect "lock held by
+            # another worker" without having to catch an exception.
+            return None
+        finally:
+            if not started_ok and lock_acquired:
+                # Release the lock on ANY failure path: ValueError (caller
+                # sees None), OperationalError / CancelledError (caller sees
+                # the exception), or any other unexpected error. Without this
+                # finally, a non-ValueError would leak the lock permanently.
                 if job.queue_id and job.project_id:
                     await self._lock_manager.release_queue_lock(
                         project_id=job.project_id,
@@ -1190,7 +1254,6 @@ class JobQueueService:
                         project_id=job.project_id,
                         job_id=job_id,
                     )
-            return None
     
     async def complete_job(
         self,

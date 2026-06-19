@@ -215,7 +215,29 @@ async def lifespan(app: FastAPI):
     # Create LockRepository for job lock persistence
     lock_repo = LockRepository(engine=manager.engine)
     job_lock_manager = JobLockManager(lock_repo=lock_repo)
-    
+
+    # JobLockManager: clear any job locks left behind by a previous
+    # process that died mid-execution (C12). Companion to the
+    # Execution Gate's recover_stale_leases() above — same purpose,
+    # different table. Done HERE (awaited) so the first
+    # ``acquire_queue_lock`` after startup is guaranteed to see a
+    # clean state. Wrapped in try/except so a sweep failure (e.g. a
+    # pre-existing DB state that doesn't match the C12 query) does
+    # not crash startup — the alternative would leave the daemon
+    # unable to recover from a previously-broken state.
+    try:
+        cleared_locks = await job_lock_manager.recover_stale_job_locks()
+        if cleared_locks:
+            daemon_logger.warning(
+                f"[Startup] Cleared {cleared_locks} stale job lock(s) "
+                "from previous process"
+            )
+    except Exception as sweep_err:  # noqa: BLE001
+        daemon_logger.warning(
+            f"[Startup] Job lock recovery sweep failed (non-fatal): "
+            f"{type(sweep_err).__name__}: {sweep_err}"
+        )
+
     # Create queue repository for job queue management
     queue_repo = JobQueueRepository(engine=manager.engine)
 

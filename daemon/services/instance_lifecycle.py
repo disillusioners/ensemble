@@ -1,7 +1,6 @@
 """Instance lifecycle service for managing instance creation and termination."""
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -368,26 +367,19 @@ class InstanceLifecycleService:
                     instance_repository.set_metadata(instance_id, "original_source", parent_original_source)
                     logger.info(f"Inherited original_source '{parent_original_source}' from parent {parent_id[:8]}...")
         
-        # Update parent's children list and waiting_for counter
-        if parent_id:
-            from sqlmodel import Session
-            with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
-                parent = session.get(Instance, parent_id)
-                if parent:
-                    # Add child to parent's denormalized children list
-                    children_list = json.loads(parent.children) if parent.children else []
-                    if instance_id not in children_list:
-                        children_list.append(instance_id)
-                        parent.children = json.dumps(children_list)
-                        logger.info(f"Added child {instance_id} to parent's children list")
-                    # NOTE: waiting_for is NOT incremented here
-                    # Only send_message to a child increments waiting_for
-                    # This ensures waiting_for accurately tracks pending work, not just child existence
-                    session.commit()
-                    logger.info(f"Parent {parent_id} updated: children={children_list}")
-                else:
-                    logger.warning(f"Parent {parent_id} not found in DB when updating children list for child {instance_id}")
-        
+        # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
+        # The ``instance_hierarchy`` junction table is the canonical
+        # source of parent-child relationships — _enrich_instance() in
+        # daemon/repositories/instance/repository.py loads children
+        # from it on every read. Writes to the JSON cache were doubly
+        # broken (RMW races + overridden on read) and persistently
+        # useless (no code ever reads the corrupted value). See C10.
+        #
+        # The junction table row is inserted by ``instance_repository.create()``
+        # above (see repository.py:144-150). waiting_for is also NOT incremented
+        # here — only send_message to a child increments it (that's what makes
+        # the count accurate: it tracks pending work, not just child existence).
+
         # Store in instances dict
         self._manager.instances[instance_id] = (graph, resolved_agent_dir)
 

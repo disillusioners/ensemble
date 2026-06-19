@@ -426,6 +426,14 @@ class TaskRepository:
         Returns:
             Task object.
         """
+        # Coerce boolean columns to Python bool explicitly. Raw SQL via
+        # RETURNING returns INTEGER 0/1 on SQLite (and the value can be
+        # a Python int even on PostgreSQL depending on the driver's
+        # type adapter). The Task model declares these fields as
+        # ``bool``, and downstream assertions like ``is True`` /
+        # ``is False`` rely on actual bool singletons, not ints. The
+        # Pydantic coercion path inside Task() is not always invoked
+        # here because we construct Task with keyword args directly.
         return Task(
             id=row.id,
             task_type=row.task_type,
@@ -435,9 +443,9 @@ class TaskRepository:
             worker_id=row.worker_id,
             retry_count=row.retry_count if hasattr(row, 'retry_count') else 0,
             next_retry_at=row.next_retry_at if hasattr(row, 'next_retry_at') else None,
-            cancel_requested=row.cancel_requested if hasattr(row, 'cancel_requested') else False,
+            cancel_requested=bool(row.cancel_requested) if hasattr(row, 'cancel_requested') else False,
             cancel_requested_at=row.cancel_requested_at if hasattr(row, 'cancel_requested_at') else None,
-            retry_scheduled=row.retry_scheduled if hasattr(row, 'retry_scheduled') else False,
+            retry_scheduled=bool(row.retry_scheduled) if hasattr(row, 'retry_scheduled') else False,
             result=row.result,
             error=row.error,
             created_at=row.created_at,
@@ -453,62 +461,107 @@ class TaskRepository:
     def complete_task(self, task_id: int, result: dict[str, Any]) -> Task | None:
         """Mark task as completed with result.
 
+        Atomic SQL UPDATE with WHERE status=running guard — uses
+        PostgreSQL EvalPlanQual recheck under READ COMMITTED to prevent
+        concurrent transition races (e.g. recovery cancelling the task
+        while the worker thread was committing its completion). Returns
+        None if the task was not found OR was already in a terminal
+        status (COMPLETED/FAILED/CANCELLED) when we tried to update;
+        callers handle None as "already transitioned by another worker".
+
         Args:
             task_id: Task ID.
             result: Result dictionary to store.
 
         Returns:
-            Updated Task object or None if not found.
+            Updated Task object or None if not found or already transitioned.
         """
         now = datetime.now(timezone.utc)
+        result_json = json.dumps(result)
 
-        with SQLModelSession(self.engine) as db_session:
-            task = db_session.get(Task, task_id)
-            if task is None:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE task
+                    SET status = :status_completed,
+                        result = :result,
+                        completed_at = :completed_at
+                    WHERE id = :task_id
+                      AND status = :status_running
+                    RETURNING *
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "status_completed": TaskStatus.COMPLETED.value,
+                    "status_running": TaskStatus.RUNNING.value,
+                    "result": result_json,
+                    "completed_at": now,
+                },
+            ).fetchone()
+
+            if row is None:
                 return None
 
-            task.status = TaskStatus.COMPLETED.value
-            task.result = json.dumps(result)
-            task.completed_at = now
-
-            db_session.commit()
-            db_session.refresh(task)
+            updated = self._row_to_task(row)
 
         # Notify workers that a pending task may now be claimable.
         # (Sibling tasks for the same instance are unblocked by this terminal
         # transition; without notification they'd wait up to 3s for the next poll.)
         self._notify_pending_task()
 
-        return task
+        return updated
 
     def fail_task(self, task_id: int, error: str) -> Task | None:
         """Mark task as failed with error message.
+
+        Atomic SQL UPDATE with WHERE status=running guard — uses
+        PostgreSQL EvalPlanQual recheck under READ COMMITTED to prevent
+        concurrent transition races. Returns None if the task was not
+        found OR was already in a terminal status; callers handle None
+        as "already transitioned by another worker".
 
         Args:
             task_id: Task ID.
             error: Error message.
 
         Returns:
-            Updated Task object or None if not found.
+            Updated Task object or None if not found or already transitioned.
         """
         now = datetime.now(timezone.utc)
 
-        with SQLModelSession(self.engine) as db_session:
-            task = db_session.get(Task, task_id)
-            if task is None:
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE task
+                    SET status = :status_failed,
+                        error = :error,
+                        completed_at = :completed_at
+                    WHERE id = :task_id
+                      AND status = :status_running
+                    RETURNING *
+                    """
+                ),
+                {
+                    "task_id": task_id,
+                    "status_failed": TaskStatus.FAILED.value,
+                    "status_running": TaskStatus.RUNNING.value,
+                    "error": error,
+                    "completed_at": now,
+                },
+            ).fetchone()
+
+            if row is None:
                 return None
 
-            task.status = TaskStatus.FAILED.value
-            task.error = error
-            task.completed_at = now
-
-            db_session.commit()
-            db_session.refresh(task)
+            updated = self._row_to_task(row)
 
         # Notify workers (see complete_task for rationale).
         self._notify_pending_task()
 
-        return task
+        return updated
 
     # --------------------------------------------------------
     # RECOVERY
@@ -749,96 +802,106 @@ class TaskRepository:
 
         All operations are in a single transaction — crash-safe.
 
-        Returns the new retry task, or None if max retries exceeded or parent
-        already has retry_scheduled=True (double-retry guard).
+        Atomicity / concurrency: the parent UPDATE carries the full guard
+        (``retry_scheduled = false``, ``retry_count < max_retries``, and
+        ``status IN ('running','failed')``) directly in the SQL WHERE clause.
+        The child INSERT is gated on ``UPDATE.rowcount == 1`` inside the same
+        ``engine.begin()`` transaction, so two concurrent callers cannot
+        both pass the check and create duplicate retry children — only the
+        first UPDATE will match the row and produce a rowcount of 1, and
+        only that caller will then INSERT the child. If the UPDATE returns
+        0 rows (already retried, max retries exceeded, status not eligible,
+        or task not found), this method returns None and does not INSERT.
+
+        Returns the new retry task, or None if no retry was scheduled.
         """
         retry_task = None  # Will be set inside transaction if successful
+        now = datetime.now(timezone.utc)
 
         with self.engine.begin() as conn:
-            # Get parent task
+            # Atomic UPDATE: gate the WHOLE operation on the row still
+            # matching the preconditions. The status guard
+            # (``IN ('running','failed')``) replaces the prior Python-side
+            # check and also prevents clobbering a concurrent terminal-state
+            # write (e.g. a parallel `complete_task` that set status to
+            # 'completed'). Use Python booleans as bound values so the
+            # comparison works on both SQLite (INTEGER 0/1) and PostgreSQL
+            # (BOOLEAN false/true).
             parent_row = conn.execute(
-                text("SELECT * FROM task WHERE id = :id"),
-                {"id": task_id}
+                text("""
+                    UPDATE task
+                    SET status = :status_cancelled,
+                        cancel_requested = :cancel_requested_true,
+                        cancel_requested_at = :now,
+                        completed_at = :now,
+                        retry_scheduled = :retry_scheduled_true
+                    WHERE id = :task_id
+                      AND retry_scheduled = :retry_scheduled_false
+                      AND retry_count < :max_retries
+                      AND status IN (:status_running, :status_failed)
+                    RETURNING *
+                """),
+                {
+                    "task_id": task_id,
+                    "status_cancelled": TaskStatus.CANCELLED.value,
+                    "cancel_requested_true": True,
+                    "retry_scheduled_true": True,
+                    "retry_scheduled_false": False,
+                    "max_retries": max_retries,
+                    "status_running": TaskStatus.RUNNING.value,
+                    "status_failed": TaskStatus.FAILED.value,
+                    "now": now,
+                },
             ).fetchone()
 
             if parent_row is None:
-                pass  # Let transaction finish, retry_task stays None
-            else:
-                parent = dict(parent_row._mapping)
+                # Either task not found, already retried, max retries
+                # exceeded, or status not in ('running','failed'). In all
+                # cases the safe action is the same: do nothing, return None.
+                return None
 
-                # Check retry_scheduled guard to prevent double-retry.
-                # Use `False` (not `0`) as the dict.get() default so the
-                # truthiness check is unambiguous across dialects — the value
-                # itself is read as a Python bool from both SQLite and
-                # PostgreSQL.
-                if parent.get("retry_scheduled", False):
-                    pass  # Retry already scheduled by another process
-                elif parent.get("retry_count", 0) >= max_retries:
-                    pass  # Max retries exceeded
-                else:
-                    current_retry_count = parent.get("retry_count", 0)
-                    new_retry_count = current_retry_count + 1
+            # The UPDATE didn't modify retry_count, so the RETURNING row
+            # still has the parent's current retry_count.
+            current_retry_count = parent_row.retry_count
+            new_retry_count = current_retry_count + 1
 
-                    # Calculate exponential backoff
-                    delay_seconds = min(
-                        backoff_base * (2 ** current_retry_count),
-                        backoff_max
-                    )
-                    next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
-                    next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
-                    now = datetime.now(timezone.utc)
+            # Calculate exponential backoff
+            delay_seconds = min(
+                backoff_base * (2 ** current_retry_count),
+                backoff_max
+            )
+            next_retry_at = now + timedelta(seconds=delay_seconds)
+            next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
 
-                    # Mark parent as CANCELLED and set retry_scheduled guard.
-                    # Use bound parameters (`:cancel_requested`, `:retry_scheduled`)
-                    # with Python booleans so the comparison works on both
-                    # SQLite (INTEGER 0/1) and PostgreSQL (BOOLEAN false/true).
-                    conn.execute(
-                        text("""
-                            UPDATE task SET
-                                status = :status_cancelled,
-                                cancel_requested = :cancel_requested,
-                                cancel_requested_at = :cancelled_at,
-                                completed_at = :completed_at,
-                                retry_scheduled = :retry_scheduled
-                            WHERE id = :id
-                        """),
-                        {
-                            "status_cancelled": TaskStatus.CANCELLED.value,
-                            "cancel_requested": True,
-                            "cancelled_at": now,
-                            "completed_at": now,
-                            "retry_scheduled": True,
-                            "id": task_id,
-                        }
-                    )
+            # Create new retry task (column is task_type, not type).
+            # Pass Python booleans so the bound parameters are typed
+            # correctly for both SQLite and PostgreSQL. This INSERT is
+            # in the same transaction as the parent UPDATE above, so
+            # both succeed atomically or both roll back.
+            result = conn.execute(
+                text("""
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, next_retry_at, created_at,
+                                      cancel_requested, retry_scheduled)
+                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
+                            :retry_count, :next_retry_at_str, :created_at,
+                            :cancel_requested, :retry_scheduled)
+                    RETURNING *
+                """),
+                {
+                    "task_type": parent_row.task_type,
+                    "instance_id": parent_row.instance_id,
+                    "message_id": parent_row.message_id,
+                    "status_pending": TaskStatus.PENDING.value,
+                    "retry_count": new_retry_count,
+                    "next_retry_at_str": next_retry_at_str,
+                    "created_at": now,
+                    "cancel_requested": False,
+                    "retry_scheduled": False,
+                }
+            ).fetchone()
 
-                    # Create new retry task (column is task_type, not type).
-                    # Pass Python booleans so the bound parameters are typed
-                    # correctly for both SQLite and PostgreSQL.
-                    result = conn.execute(
-                        text("""
-                            INSERT INTO task (task_type, instance_id, message_id, status,
-                                              retry_count, next_retry_at, created_at,
-                                              cancel_requested, retry_scheduled)
-                            VALUES (:task_type, :instance_id, :message_id, :status_pending,
-                                    :retry_count, :next_retry_at_str, :created_at,
-                                    :cancel_requested, :retry_scheduled)
-                            RETURNING *
-                        """),
-                        {
-                            "task_type": parent["task_type"],
-                            "instance_id": parent["instance_id"],
-                            "message_id": parent.get("message_id"),
-                            "status_pending": TaskStatus.PENDING.value,
-                            "retry_count": new_retry_count,
-                            "next_retry_at_str": next_retry_at_str,
-                            "created_at": now,
-                            "cancel_requested": False,
-                            "retry_scheduled": False,
-                        }
-                    ).fetchone()
-
-                    retry_task = self._row_to_task(result)
+            retry_task = self._row_to_task(result)
 
         # AFTER commit — safe to notify workers
         if retry_task is not None:
@@ -926,28 +989,35 @@ class TaskRepository:
     def cancel_task(self, task_id: int, reason: str = "") -> Task | None:
         """Directly cancel a task (mark as CANCELLED).
 
+        Atomic SQL UPDATE with WHERE status IN (running, pending) guard
+        — uses PostgreSQL EvalPlanQual recheck under READ COMMITTED to
+        prevent concurrent transition races (e.g. the worker thread
+        committing its own completion while recovery is force-cancelling
+        the task). Returns None if the task was not found OR was
+        already in a terminal status (COMPLETED/FAILED/CANCELLED);
+        callers handle None as "already transitioned by another worker".
+
+        Replaces the prior read-then-write pattern (SELECT for current
+        status, Python-side check, then blind UPDATE) which was a
+        TOCTOU race under PostgreSQL READ COMMITTED — both writers
+        could observe status='running' and both commits could succeed,
+        producing duplicate / clobbered terminal writes. The single
+        guarded UPDATE is race-free on both SQLite and PostgreSQL.
+
         Used by StaleTaskRecovery when worker doesn't respond to
         cancel_requested flag within grace period.
         """
         now = datetime.now(timezone.utc)
-        result = None
 
         with self.engine.begin() as conn:
-            # Check current status
+            # Single atomic UPDATE — the WHERE status IN (...) guard
+            # makes the conditional read-modify-write a single SQL
+            # statement. Use bound parameter with Python True so the
+            # boolean column write works on both SQLite (INTEGER 0/1)
+            # and PostgreSQL (BOOLEAN false/true).
             row = conn.execute(
-                text("SELECT * FROM task WHERE id = :id"),
-                {"id": task_id}
-            ).fetchone()
-
-            if row is None:
-                return None
-
-            current = self._row_to_task(row)
-            if current.status not in (TaskStatus.RUNNING.value, TaskStatus.PENDING.value):
-                return None
-
-            conn.execute(
-                text("""
+                text(
+                    """
                     UPDATE task SET
                         status = :status_cancelled,
                         cancel_requested = :cancel_requested,
@@ -955,7 +1025,10 @@ class TaskRepository:
                         completed_at = :completed_at,
                         error = :error
                     WHERE id = :id
-                """),
+                      AND status IN (:status_running, :status_pending)
+                    RETURNING *
+                    """
+                ),
                 {
                     "status_cancelled": TaskStatus.CANCELLED.value,
                     "cancel_requested": True,
@@ -963,15 +1036,15 @@ class TaskRepository:
                     "completed_at": now,
                     "error": f"Task cancelled: {reason}",
                     "id": task_id,
-                }
-            )
-
-            # Re-fetch to return updated task
-            updated_row = conn.execute(
-                text("SELECT * FROM task WHERE id = :id"),
-                {"id": task_id}
+                    "status_running": TaskStatus.RUNNING.value,
+                    "status_pending": TaskStatus.PENDING.value,
+                },
             ).fetchone()
-            result = self._row_to_task(updated_row) if updated_row else None
+
+            if row is None:
+                return None
+
+            result = self._row_to_task(row)
 
         # Notify workers (see complete_task for rationale). Notification
         # is safe after the commit; the worst case is a spurious wakeup
@@ -993,97 +1066,106 @@ class TaskRepository:
         Combines cancel_task() + schedule_retry() to prevent the window where
         a crash would leave an orphaned CANCELLED task with no retry child.
 
-        Returns the new retry task, or None if max retries exceeded.
+        Atomicity / concurrency: same atomic-UPDATE-with-guard pattern as
+        ``schedule_retry``. The parent UPDATE is conditional on
+        ``retry_scheduled = False AND retry_count < max_retries AND
+        status IN ('running','failed')`` so concurrent callers can only
+        create one retry child. The child INSERT is gated on
+        ``UPDATE.rowcount == 1`` inside the same ``engine.begin()``
+        transaction. Use Python booleans as bound values so the boolean
+        column writes work on both SQLite (INTEGER 0/1) and PostgreSQL
+        (BOOLEAN false/true).
+
+        Returns the new retry task, or None if the parent is missing,
+        already has ``retry_scheduled=True``, has
+        ``retry_count >= max_retries``, or is not in
+        ``('running', 'failed')`` status.
         """
         retry_task = None  # Will be set inside transaction if successful
         now = datetime.now(timezone.utc)
 
         with self.engine.begin() as conn:
-            # Get parent task
+            # Force-cancel parent and set retry_scheduled guard in a
+            # single atomic UPDATE. Only one concurrent caller wins the
+            # row update; the rest see rowcount=0 and return None.
             parent_row = conn.execute(
-                text("SELECT * FROM task WHERE id = :id"),
-                {"id": task_id}
+                text("""
+                    UPDATE task
+                    SET status = :status_cancelled,
+                        cancel_requested = :cancel_requested_true,
+                        cancel_requested_at = :now,
+                        completed_at = :now,
+                        error = :error,
+                        retry_scheduled = :retry_scheduled_true
+                    WHERE id = :task_id
+                      AND retry_scheduled = :retry_scheduled_false
+                      AND retry_count < :max_retries
+                      AND status IN (:status_running, :status_failed)
+                    RETURNING *
+                """),
+                {
+                    "task_id": task_id,
+                    "status_cancelled": TaskStatus.CANCELLED.value,
+                    "cancel_requested_true": True,
+                    "now": now,
+                    "error": f"Force cancelled: {reason}",
+                    "retry_scheduled_true": True,
+                    "retry_scheduled_false": False,
+                    "max_retries": max_retries,
+                    "status_running": TaskStatus.RUNNING.value,
+                    "status_failed": TaskStatus.FAILED.value,
+                },
             ).fetchone()
 
             if parent_row is None:
-                pass  # Let transaction finish, retry_task stays None
-            else:
-                parent = dict(parent_row._mapping)
+                # Parent missing, already has retry_scheduled, retry
+                # budget exhausted, or status outside (running, failed).
+                # No child inserted; transaction commits empty.
+                return None
 
-                # Check guards. Use `False` (not `0`) as the dict.get()
-                # default so the truthiness check is unambiguous across
-                # dialects — the value itself is read as a Python bool from
-                # both SQLite and PostgreSQL.
-                if parent.get("retry_scheduled", False):
-                    pass  # Already has retry scheduled
-                elif parent.get("retry_count", 0) >= max_retries:
-                    pass  # Max retries exceeded
-                else:
-                    current_retry_count = parent.get("retry_count", 0)
-                    new_retry_count = current_retry_count + 1
+            # The UPDATE didn't modify retry_count, so the RETURNING row
+            # still has the parent's current retry_count.
+            current_retry_count = parent_row.retry_count
+            new_retry_count = current_retry_count + 1
 
-                    # Calculate backoff
-                    delay_seconds = min(
-                        backoff_base * (2 ** current_retry_count),
-                        backoff_max
-                    )
-                    next_retry_at = now + timedelta(seconds=delay_seconds)
-                    next_retry_at_str = next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f") + next_retry_at.strftime("%z")
+            # Calculate backoff
+            delay_seconds = min(
+                backoff_base * (2 ** current_retry_count),
+                backoff_max,
+            )
+            next_retry_at = now + timedelta(seconds=delay_seconds)
+            next_retry_at_str = (
+                next_retry_at.strftime("%Y-%m-%dT%H:%M:%S.%f")
+                + next_retry_at.strftime("%z")
+            )
 
-                    # Force-cancel parent and set retry_scheduled guard.
-                    # Use bound parameters with Python booleans so the
-                    # boolean column writes work on both SQLite
-                    # (INTEGER 0/1) and PostgreSQL (BOOLEAN false/true).
-                    conn.execute(
-                        text("""
-                            UPDATE task SET
-                                status = :status_cancelled,
-                                cancel_requested = :cancel_requested,
-                                cancel_requested_at = :now,
-                                completed_at = :now,
-                                error = :error,
-                                retry_scheduled = :retry_scheduled
-                            WHERE id = :id
-                        """),
-                        {
-                            "status_cancelled": TaskStatus.CANCELLED.value,
-                            "cancel_requested": True,
-                            "now": now,
-                            "error": f"Force cancelled: {reason}",
-                            "retry_scheduled": True,
-                            "id": task_id,
-                        }
-                    )
+            # Create retry child. Same transaction as the parent UPDATE.
+            result = conn.execute(
+                text("""
+                    INSERT INTO task (task_type, instance_id, message_id, status,
+                                      retry_count, next_retry_at, created_at,
+                                      cancel_requested, retry_scheduled)
+                    VALUES (:task_type, :instance_id, :message_id, :status_pending,
+                            :retry_count, :next_retry_at_str, :created_at,
+                            :cancel_requested, :retry_scheduled)
+                    RETURNING *
+                """),
+                {
+                    "task_type": parent_row.task_type,
+                    "instance_id": parent_row.instance_id,
+                    "message_id": parent_row.message_id,
+                    "status_pending": TaskStatus.PENDING.value,
+                    "retry_count": new_retry_count,
+                    "next_retry_at_str": next_retry_at_str,
+                    "created_at": now,
+                    "cancel_requested": False,
+                    "retry_scheduled": False,
+                },
+            ).fetchone()
 
-                    # Create retry child. Pass Python booleans so the
-                    # bound parameters are typed correctly for both
-                    # SQLite and PostgreSQL.
-                    result = conn.execute(
-                        text("""
-                            INSERT INTO task (task_type, instance_id, message_id, status,
-                                              retry_count, next_retry_at, created_at,
-                                              cancel_requested, retry_scheduled)
-                            VALUES (:task_type, :instance_id, :message_id, :status_pending,
-                                    :retry_count, :next_retry_at_str, :created_at,
-                                    :cancel_requested, :retry_scheduled)
-                            RETURNING *
-                        """),
-                        {
-                            "task_type": parent["task_type"],
-                            "instance_id": parent["instance_id"],
-                            "message_id": parent.get("message_id"),
-                            "status_pending": TaskStatus.PENDING.value,
-                            "retry_count": new_retry_count,
-                            "next_retry_at_str": next_retry_at_str,
-                            "created_at": now,
-                            "cancel_requested": False,
-                            "retry_scheduled": False,
-                        }
-                    ).fetchone()
+            retry_task = self._row_to_task(result)
 
-                    retry_task = self._row_to_task(result)
-
-        # AFTER commit — safe to notify workers
+        # AFTER commit — safe to notify workers (see complete_task for rationale).
         if retry_task is not None:
             self._notify_pending_task()
 

@@ -1,7 +1,6 @@
 """Error reporting service for handling and reporting errors to parent instances."""
 
 import asyncio
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -242,23 +241,13 @@ class ErrorReportingService:
                 parent.last_activity_at = datetime.now(timezone.utc)
                 parent.version = (parent.version or 1) + 1
 
-                # e) Update parent's children[] cache
-                if parent.children:
-                    try:
-                        children_list = (
-                            json.loads(parent.children)
-                            if isinstance(parent.children, str)
-                            else parent.children
-                        )
-                        if instance_id in children_list:
-                            children_list = [
-                                c for c in children_list if c != instance_id
-                            ]
-                            parent.children = json.dumps(children_list)
-                    except (json.JSONDecodeError, TypeError):
-                        logger.warning(
-                            f"Failed to parse children JSON for parent {parent_id[:8]}..."
-                        )
+                # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
+                # The ``instance_hierarchy`` junction table is the canonical
+                # source of parent-child relationships — _enrich_instance() in
+                # daemon/repositories/instance/repository.py loads children
+                # from it on every read. Writes to the JSON cache were doubly
+                # broken (RMW races + overridden on read) and persistently
+                # useless (no code ever reads the corrupted value). See C10.
 
                 # f) Delete from instance_hierarchy
                 session.execute(

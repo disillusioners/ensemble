@@ -1,12 +1,55 @@
 """Comprehensive tests for TaskRepository retry and cancellation methods."""
 
+import os
+import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 from sqlmodel import SQLModel, Session as SQLModelSession
 
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
+
+
+def _make_concurrent_engine():
+    """Create a file-based SQLite engine with WAL mode for concurrent tests.
+
+    SQLite's default journal mode serialises writers and rejects
+    concurrent ``commit()`` calls with "cannot commit transaction -
+    SQL statements in progress" when multiple threads share the same
+    connection (StaticPool) or even when they share the in-memory
+    cache. WAL mode + NullPool gives each thread its own sqlite3
+    connection while sharing the underlying DB file, which is what
+    the atomic UPDATE-WHERE guard needs to be exercised under real
+    contention. This is the standard recipe for multi-threaded
+    SQLite testing in Python; the production code targets PostgreSQL
+    which has native row-level locking.
+    """
+    fd, path = tempfile.mkstemp(suffix=".db", prefix="concurrent_test_")
+    os.close(fd)
+    try:
+        engine = create_engine(
+            f"sqlite:///{path}",
+            connect_args={"check_same_thread": False},
+            poolclass=NullPool,
+        )
+        # Enable WAL mode for concurrent reader/writer access.
+        with engine.connect() as conn:
+            conn.execute(text("PRAGMA journal_mode=WAL"))
+            conn.commit()
+        SQLModel.metadata.create_all(engine)
+        # Stash the temp path so the caller can clean it up.
+        engine._test_db_path = path  # type: ignore[attr-defined]
+        return engine
+    except Exception:
+        # Clean up the temp file if engine setup fails.
+        if os.path.exists(path):
+            os.unlink(path)
+        raise
 
 
 # ============================================================================
@@ -337,6 +380,164 @@ class TestScheduleRetry:
         actual_delay = (datetime.fromisoformat(retry.next_retry_at.replace('Z', '+00:00')) - now).total_seconds()
         assert actual_delay <= 3605, f"Expected <=3600s, got {actual_delay}s"
 
+    # --------------------------------------------------------
+    # Atomic guard regression tests (Audit finding H1)
+    # --------------------------------------------------------
+    #
+    # The pre-fix `schedule_retry` had a TOCTOU race: it read
+    # `retry_scheduled` in Python, then issued an unguarded UPDATE and
+    # INSERT. Two concurrent callers could both pass the check and
+    # each create a duplicate retry child. The fix moves all guards
+    # into the WHERE clause of a single atomic UPDATE; the child
+    # INSERT is gated on `rowcount == 1` inside the same
+    # `engine.begin()` transaction. These tests exercise that
+    # atomicity contract.
+
+    def test_schedule_retry_atomic_guard_blocks_second_call(self, engine, repository):
+        """Sequential second call on the same parent returns None — the
+        first call's UPDATE flipped `retry_scheduled=True` via the
+        WHERE guard, so the second UPDATE returns rowcount=0 and no
+        child is inserted."""
+        parent = create_task_with_status(
+            engine,
+            instance_id="instance-atomic-seq",
+            message_id="msg-atomic-seq",
+            status=TaskStatus.RUNNING.value,
+            retry_count=0,
+        )
+
+        first = repository.schedule_retry(task_id=parent.id, max_retries=3)
+        assert first is not None
+        assert first.retry_count == 1
+
+        # Second call: parent now has retry_scheduled=True, so the
+        # atomic UPDATE returns rowcount=0 and no child is inserted.
+        second = repository.schedule_retry(task_id=parent.id, max_retries=3)
+        assert second is None
+
+        # Verify exactly one child exists in the DB.
+        with engine.begin() as conn:
+            count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM task "
+                    "WHERE instance_id = :iid AND retry_count > 0"
+                ),
+                {"iid": "instance-atomic-seq"},
+            ).scalar()
+        assert count == 1, f"Expected exactly 1 retry child, got {count}"
+
+    def test_schedule_retry_concurrent_calls_create_at_most_one_child(self):
+        """Concurrent calls all targeting the same parent produce at
+        most one retry child. This is the real TOCTOU regression
+        test: with a Barrier-synchronized thread pool, the atomic
+        UPDATE-WHERE guard must let exactly one caller win the row
+        update and reject all the rest.
+
+        We use a shared in-memory SQLite engine
+        (``file::memory:?cache=shared``) instead of the default
+        ``StaticPool`` engine because StaticPool shares a single
+        connection across all threads, which doesn't support
+        concurrent transactions. The shared-cache URI gives each
+        thread its own connection while sharing the underlying DB —
+        this is what exercises the atomic UPDATE-WHERE guard under
+        real contention.
+        """
+        concurrent_engine = _make_concurrent_engine()
+        try:
+            concurrent_repo = TaskRepository(concurrent_engine)
+            parent = create_task_with_status(
+                concurrent_engine,
+                instance_id="instance-atomic-concurrent",
+                message_id="msg-atomic-concurrent",
+                status=TaskStatus.RUNNING.value,
+                retry_count=0,
+            )
+
+            n_threads = 10
+            barrier = threading.Barrier(n_threads)
+            results: list = []
+            results_lock = threading.Lock()
+
+            def attempt():
+                # All threads hit the barrier, then race to call
+                # schedule_retry at the same instant.
+                barrier.wait()
+                r = concurrent_repo.schedule_retry(
+                    task_id=parent.id,
+                    max_retries=5,
+                )
+                with results_lock:
+                    results.append(r)
+
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                futures = [pool.submit(attempt) for _ in range(n_threads)]
+                for f in futures:
+                    f.result()  # propagate any exception
+
+            non_none = [r for r in results if r is not None]
+            assert len(non_none) == 1, (
+                f"Expected exactly 1 retry to succeed out of {n_threads} "
+                f"concurrent callers, got {len(non_none)}"
+            )
+
+            # And verify exactly one child row exists in the DB.
+            with concurrent_engine.begin() as conn:
+                count = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM task "
+                        "WHERE instance_id = :iid AND retry_count > 0"
+                    ),
+                    {"iid": "instance-atomic-concurrent"},
+                ).scalar()
+            assert count == 1, f"Expected exactly 1 retry child row, got {count}"
+
+            # Parent should be marked CANCELLED with retry_scheduled=True.
+            parent_after = concurrent_repo.get(parent.id)
+            assert parent_after is not None
+            assert parent_after.status == TaskStatus.CANCELLED.value
+            assert parent_after.retry_scheduled == 1
+        finally:
+            concurrent_engine.dispose()
+
+    def test_schedule_retry_skips_already_cancelled_status(self, engine, repository):
+        """The new WHERE-clause status guard (``status IN
+        ('running','failed')``) prevents schedule_retry from
+        clobbering a parent that is no longer in an active status.
+        A CANCELLED parent with retry_scheduled=False must return
+        None and the parent must remain unchanged."""
+        parent = create_task_with_status(
+            engine,
+            instance_id="instance-status-guard",
+            message_id="msg-status-guard",
+            status=TaskStatus.CANCELLED.value,
+            retry_count=0,
+            retry_scheduled=False,
+        )
+
+        result = repository.schedule_retry(task_id=parent.id, max_retries=3)
+        assert result is None
+
+        # Parent must be unchanged: still CANCELLED, retry_scheduled
+        # Parent must be unchanged: still CANCELLED, retry_scheduled still
+        # False, no child created.
+        parent_after = repository.get(parent.id)
+        assert parent_after is not None
+        assert parent_after.status == TaskStatus.CANCELLED.value
+        assert parent_after.retry_scheduled == 0
+        assert parent_after.retry_count == 0
+
+        with engine.begin() as conn:
+            child_count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM task "
+                    "WHERE instance_id = :iid AND retry_count > 0"
+                ),
+                {"iid": "instance-status-guard"},
+            ).scalar()
+        assert child_count == 0, (
+            f"Expected no retry child, got {child_count}"
+        )
+
 
 # ============================================================================
 # request_cancel Tests
@@ -604,6 +805,152 @@ class TestForceCancelAndScheduleRetry:
         )
 
         assert result is None
+
+    # --------------------------------------------------------
+    # Atomic guard regression tests (Audit finding H2)
+    # --------------------------------------------------------
+    #
+    # Same TOCTOU race as H1, but on `force_cancel_and_schedule_retry`.
+    # The old code did a Python-side `if retry_scheduled: return None`
+    # check then issued an unguarded UPDATE; concurrent callers could
+    # both pass the check and both create duplicate retry children.
+    # The fix moves all guards into the WHERE clause of a single
+    # atomic UPDATE; the child INSERT is gated on `rowcount == 1`
+    # inside the same `engine.begin()` transaction.
+
+    def test_force_cancel_atomic_guard_blocks_second_call(self, engine, repository):
+        """Sequential second call on already-marked parent returns None
+        and creates no extra child. H2 fix."""
+        parent = create_task_with_status(
+            engine,
+            instance_id="instance-h2-seq",
+            message_id="msg-h2-seq",
+            status=TaskStatus.RUNNING.value,
+            retry_count=0,
+        )
+
+        first = repository.force_cancel_and_schedule_retry(
+            task_id=parent.id,
+            max_retries=3,
+            reason="first",
+        )
+        assert first is not None
+        assert first.retry_count == 1
+
+        second = repository.force_cancel_and_schedule_retry(
+            task_id=parent.id,
+            max_retries=3,
+            reason="second",
+        )
+        assert second is None
+
+        # Verify exactly one child exists in the DB.
+        with engine.begin() as conn:
+            count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM task "
+                    "WHERE instance_id = :iid AND retry_count > 0"
+                ),
+                {"iid": "instance-h2-seq"},
+            ).scalar()
+        assert count == 1, f"Expected exactly 1 retry child, got {count}"
+
+    def test_force_cancel_concurrent_calls_create_at_most_one_child(self):
+        """H2 race test: 10 concurrent force_cancel_and_schedule_retry
+        calls produce at most 1 child. The atomic UPDATE-WHERE guard
+        must let exactly one caller win the row update and reject all
+        the rest, preventing duplicate retry children.
+
+        Uses the shared in-memory engine helper (see
+        ``_make_concurrent_engine``) so multiple threads get their
+        own connections and can run concurrent transactions.
+        """
+        concurrent_engine = _make_concurrent_engine()
+        try:
+            concurrent_repo = TaskRepository(concurrent_engine)
+            parent = create_task_with_status(
+                concurrent_engine,
+                instance_id="instance-h2-race",
+                message_id="msg-h2-race",
+                status=TaskStatus.RUNNING.value,
+                retry_count=0,
+            )
+
+            n_threads = 10
+            barrier = threading.Barrier(n_threads)
+            results: list = []
+            results_lock = threading.Lock()
+
+            def attempt():
+                barrier.wait()
+                r = concurrent_repo.force_cancel_and_schedule_retry(
+                    task_id=parent.id,
+                    max_retries=5,
+                    reason="concurrent test",
+                )
+                with results_lock:
+                    results.append(r)
+
+            with ThreadPoolExecutor(max_workers=n_threads) as pool:
+                futures = [pool.submit(attempt) for _ in range(n_threads)]
+                for f in futures:
+                    f.result()
+
+            non_none = [r for r in results if r is not None]
+            assert len(non_none) == 1, (
+                f"Expected exactly 1 retry from {n_threads} concurrent "
+                f"callers, got {len(non_none)}"
+            )
+
+            # And verify exactly one child row exists in the DB.
+            with concurrent_engine.begin() as conn:
+                count = conn.execute(
+                    text(
+                        "SELECT COUNT(*) FROM task "
+                        "WHERE instance_id = :iid AND retry_count > 0"
+                    ),
+                    {"iid": "instance-h2-race"},
+                ).scalar()
+            assert count == 1, f"Expected exactly 1 retry child row, got {count}"
+        finally:
+            concurrent_engine.dispose()
+
+    def test_force_cancel_skips_already_cancelled_status(self, engine, repository):
+        """Status guard: force_cancel_and_schedule_retry returns None
+        if parent is not in (running, failed). H2 fix."""
+        parent = create_task_with_status(
+            engine,
+            instance_id="instance-h2-status",
+            message_id="msg-h2-status",
+            status=TaskStatus.CANCELLED.value,
+            retry_count=0,
+        )
+        parent_id = parent.id
+
+        result = repository.force_cancel_and_schedule_retry(
+            task_id=parent_id,
+            max_retries=3,
+            reason="status guard test",
+        )
+        assert result is None
+
+        # Parent must be unchanged: still CANCELLED, retry_scheduled
+        # still 0, no child created.
+        unchanged = repository.get(parent_id)
+        assert unchanged is not None
+        assert unchanged.status == TaskStatus.CANCELLED.value
+        assert unchanged.retry_scheduled == 0
+
+        with engine.begin() as conn:
+            count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM task "
+                    "WHERE instance_id = :iid AND retry_count > 0"
+                ),
+                {"iid": "instance-h2-status"},
+            ).scalar()
+        assert count == 0, f"Expected 0 retry children, got {count}"
+
 
 
 # ============================================================================

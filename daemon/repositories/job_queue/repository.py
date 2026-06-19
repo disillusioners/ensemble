@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import delete as sql_delete, func, select as sql_select
 from sqlalchemy.engine import Engine
-from sqlmodel import Session as SQLModelSession, select, col
+from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
 from .models import JobItem, JobQueue, JobStatus, QueueType
 
@@ -435,51 +435,107 @@ class JobRepository:
         **extra_updates: Any,
     ) -> JobItem | None:
         """
-        Atomically transition a job's status within a single session.
+        Atomically transition a job's status in a single guarded UPDATE.
 
-        Uses SELECT + UPDATE within the same session to ensure atomicity.
-        Checks current status to detect concurrent modification or stale state.
+        Replaces the prior SELECT → Python status check → ORM setattr →
+        commit pattern (which was racy under PostgreSQL READ COMMITTED
+        isolation — two concurrent callers could both pass the Python
+        check and clobber each other's terminal-status writes).
+
+        The new implementation issues a single
+        ``UPDATE job_queue_items SET status = :to_status, ...extra
+         WHERE job_id = :job_id AND status = :from_status``
+        and inspects ``rowcount``. On PostgreSQL, the EvalPlanQual
+        recheck guarantees the status predicate is re-evaluated after the
+        row lock is acquired, so a concurrent writer that flipped the
+        status between our check and our write cannot slip past us. On
+        SQLite, the single-statement UPDATE is inherently atomic at the
+        database level.
 
         Args:
             job_id: The job to transition.
-            from_status: Current expected status (None for creation).
+            from_status: Current expected status. Acts as the SQL-level
+                guard; if the row's status does not match this value the
+                update is a no-op and ``InvalidTransitionError`` is
+                raised (after disambiguating "row not found" from
+                "status mismatch" via a follow-up SELECT).
+                ``None`` is permitted by the signature for symmetry with
+                the state machine's "create" transition; in practice no
+                caller passes ``None`` and the SQL guard becomes
+                ``status IS NULL`` (always false for persisted rows).
             to_status: Target status.
-            **extra_updates: Additional fields to set in the same statement.
+            **extra_updates: Additional fields to set in the same
+                UPDATE statement. Supported keys observed across
+                callers: ``started_at``, ``completed_at``,
+                ``cancelled_at``, ``instance_id``, ``result_summary``,
+                ``error_message``. All map directly to ``JobItem``
+                columns.
 
         Returns:
-            The updated JobItem, or None if job not found.
+            The updated ``JobItem`` after the UPDATE commits, or
+            ``None`` if the job does not exist.
 
         Raises:
-            InvalidTransitionError: If the transition is invalid or rowcount=0.
+            InvalidTransitionError: If the transition is not allowed by
+                the state machine, or if the row exists but its current
+                status does not match ``from_status`` (a concurrent
+                writer changed it first).
         """
         # Lazy import to avoid circular dependency with services package
         from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 
+        # Validate transition is allowed — cheap fail-fast before opening
+        # a session / issuing the UPDATE. Preserves the original method's
+        # ordering of side-effects.
+        job_state_machine.validate_transition(from_status, to_status)
+
         transition_name = job_state_machine.get_transition_name(from_status, to_status)
 
-        with SQLModelSession(self.engine) as session:
-            job = session.get(JobItem, job_id)
-            if job is None:
-                return None
+        # Build the SET clause dynamically from extra_updates. Caller-supplied
+        # keys override the default ``status`` only if they happen to be
+        # named ``status`` (they shouldn't — ``to_status`` is the canonical
+        # way to change status).
+        set_values: dict[str, Any] = {"status": to_status, **extra_updates}
 
-            # Verify current status matches expected
-            if job.status != from_status:
+        with SQLModelSession(self.engine) as session:
+            # Atomic UPDATE with status guard. PostgreSQL EvalPlanQual
+            # re-evaluates ``status = :from_status`` after the row lock
+            # is acquired; SQLite's single-statement UPDATE is atomic at
+            # the database level. Either way, two concurrent writers
+            # cannot both observe the predicate as true.
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.status == from_status)
+                .values(**set_values)
+            )
+            result = session.exec(stmt)
+            session.commit()
+
+            if result.rowcount == 0:
+                # UPDATE matched no rows. Two possibilities:
+                #   (a) the job_id doesn't exist at all, or
+                #   (b) the job exists but its status no longer matches
+                #       ``from_status`` (concurrent transition).
+                # Disambiguate with a follow-up SELECT — same session,
+                # so we see the post-UPDATE state.
+                existing = session.get(JobItem, job_id)
+                if existing is None:
+                    return None
                 raise InvalidTransitionError(
                     job_id=job_id,
-                    from_status=job.status,
+                    from_status=existing.status,
                     to_status=to_status,
                 )
 
-            # Validate transition is allowed
-            job_state_machine.validate_transition(from_status, to_status)
-
-            # Apply the transition
-            job.status = to_status
-            for key, value in extra_updates.items():
-                setattr(job, key, value)
-
-            session.commit()
-            session.refresh(job)
+            # Re-read the row to return a fully-populated JobItem instance
+            # (mirrors the gold-template `transition_status_if` approach).
+            job = session.get(JobItem, job_id)
+            if job is None:
+                # Vanishingly unlikely race: row was deleted between the
+                # UPDATE and the SELECT. Preserve the "return None for
+                # missing job" contract rather than raising.
+                return None
 
             logger.info(
                 "Job transition: %s | %s -> %s (%s) | extra_fields=%s",
@@ -524,33 +580,87 @@ class JobRepository:
         job_id: str,
         instance_id: str,
     ) -> JobItem | None:
-        """Mark a job as processing (started).
-        
-        Can only be called on PENDING jobs.
-        
+        """Mark a job as processing (started) — atomically.
+
+        Can only be called on PENDING jobs. Uses a single guarded
+        ``UPDATE … WHERE job_id = :job_id AND status = 'pending'`` so
+        two concurrent callers cannot both succeed: the SQL-level
+        status predicate is re-evaluated after the row lock is acquired
+        (PostgreSQL EvalPlanQual) or the entire UPDATE is atomic at
+        the database level (SQLite), eliminating the TOCTOU race the
+        prior ``get()`` + Python check + ORM ``update()`` pattern had
+        under PostgreSQL READ COMMITTED.
+
+        Contract (preserved from the pre-fix implementation):
+          * Job does not exist → returns ``None``.
+          * Job exists but is not PENDING → raises ``ValueError`` with
+            message ``"Cannot start job in '<status>' state, must be
+            PENDING"``. Two production callers in
+            ``job_queue_service.trigger_next_job_sync`` and several
+            tests depend on catching this specific exception class
+            and message — the fix must not change them.
+
         Args:
             job_id: Job identifier.
             instance_id: Instance ID that is processing this job.
-            
+
         Returns:
-            Updated JobItem if found, None otherwise.
-            
+            Updated ``JobItem`` after the UPDATE commits, or ``None``
+            if the job does not exist.
+
         Raises:
-            ValueError: If job is not in PENDING state.
+            ValueError: If the job exists but its current status is not
+                ``pending`` (a concurrent writer changed it first, or it
+                was already started/completed/failed/cancelled).
         """
-        job = self.get(job_id)
-        if job is None:
-            return None
-        if job.status != JobStatus.PENDING.value:
-            raise ValueError(
-                f"Cannot start job in '{job.status}' state, must be PENDING"
+        now_iso = datetime.now(timezone.utc).isoformat()
+        set_values: dict[str, Any] = {
+            "status": JobStatus.PROCESSING.value,
+            "started_at": now_iso,
+            "instance_id": instance_id,
+        }
+
+        with SQLModelSession(self.engine) as session:
+            # Single guarded UPDATE: only matches rows that are still
+            # PENDING. PostgreSQL EvalPlanQual re-evaluates the status
+            # predicate after the row lock is acquired; SQLite's
+            # single-statement UPDATE is atomic at the database level.
+            # Either way, two concurrent writers cannot both observe
+            # the predicate as true — fixes the original H3 race.
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.status == JobStatus.PENDING.value)
+                .values(**set_values)
             )
-        return self.update(
-            job_id,
-            status=JobStatus.PROCESSING.value,
-            started_at=datetime.now(timezone.utc).isoformat(),
-            instance_id=instance_id,
-        )
+            result = session.exec(stmt)
+            session.commit()
+
+            if result.rowcount == 0:
+                # UPDATE matched no rows. Two possibilities:
+                #   (a) the job_id doesn't exist at all, or
+                #   (b) the job exists but its status is no longer
+                #       PENDING (concurrent transition). Disambiguate
+                #       with a follow-up SELECT — same session, so we
+                #       see the post-UPDATE state.
+                existing = session.get(JobItem, job_id)
+                if existing is None:
+                    return None
+                raise ValueError(
+                    f"Cannot start job in '{existing.status}' state, must be PENDING"
+                )
+
+            # Re-read the row to return a fully-populated JobItem
+            # instance (mirrors the gold-template `transition_status_if`
+            # and the in-file `atomic_transition` approach).
+            job = session.get(JobItem, job_id)
+            if job is None:
+                # Vanishingly unlikely race: row was deleted between
+                # the UPDATE and the SELECT. Preserve the "return None
+                # for missing job" contract rather than raising.
+                return None
+
+            return job
 
     def start_job_atomic(
         self,

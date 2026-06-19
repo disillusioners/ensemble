@@ -61,6 +61,14 @@ class Instance(SQLModel, table=True):
     )
     
     # Denormalized cache of child instance IDs (stored as JSON string)
+    # DEPRECATED: This JSON column is no longer written to. The
+    # ``instance_hierarchy`` junction table is the canonical source of
+    # parent-child relationships — _enrich_instance() in
+    # daemon/repositories/instance/repository.py loads children from it
+    # on every read. Writes to this JSON cache were doubly broken (RMW
+    # races at 4 sites AND overridden on every read) and persistently
+    # useless (no code ever reads the corrupted value). See C10.
+    # Kept for backward compatibility; SQLite cannot DROP COLUMN.
     children: str = Field(default="[]")
     # Count of pending child completions
     # REBUILD-ONLY CACHE: This field is written for crash-recovery rebuild only

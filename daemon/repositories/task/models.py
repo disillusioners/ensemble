@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Index
+from sqlalchemy import Column, Index, Integer
 from sqlmodel import SQLModel, Field
 
 
@@ -29,6 +29,16 @@ class TaskStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+# Module-level Column kept as a reference for use in Task.__mapper_args__.
+# SQLAlchemy's mapper_coercions only accepts a Column expression (or a
+# string key) for version_id_col — it rejects the Pydantic-FieldInfo-
+# wrapped attribute that SQLModel exposes as `Task.version`. We can't
+# reference __table__.c.version at class definition time either, so we
+# define the Column once and reuse it as the sa_column= value (which
+# deduplicates it into the Table) and as the version_id_col target.
+_task_version_col = Column("version", Integer, nullable=False, server_default="0")
 
 
 class Task(SQLModel, table=True):
@@ -82,6 +92,25 @@ class Task(SQLModel, table=True):
     # bash tool calls) from crashed ones was impossible with started_at
     # alone, because both look the same in the DB.
     last_heartbeat_at: datetime | None = Field(default=None, index=True)
+
+    # Optimistic locking version. SQLAlchemy's version_id_col makes every
+    # ORM-flushed UPDATE / DELETE on this row append `AND version = :expected`
+    # to the WHERE clause and increment the version on success, raising
+    # StaleDataError on a concurrent modification. The atomic raw-SQL
+    # status guards in TaskRepository (complete_task, fail_task,
+    # cancel_task, claim_pending_task, update_heartbeat) bypass the ORM
+    # session and therefore do NOT interact with this column — those
+    # paths are already protected by the status WHERE clause. The
+    # version_id_col adds defense-in-depth for any remaining ORM-based
+    # commit path (e.g. delete, delete_by_instance) so a stale in-memory
+    # Task instance cannot silently overwrite a row that was concurrently
+    # mutated.
+    version: int = Field(default=0, sa_column=_task_version_col)
+
+    # SQLAlchemy ORM configuration: declare the version column as the
+    # mapper's version_id_col so the unit-of-work machinery auto-emits
+    # `AND version = :expected_version` on UPDATE/DELETE.
+    __mapper_args__ = {"version_id_col": _task_version_col}
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

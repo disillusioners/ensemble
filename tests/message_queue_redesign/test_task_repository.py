@@ -2,9 +2,61 @@
 
 import pytest
 import json
+from datetime import datetime, timezone
+
+from sqlalchemy import text
 
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
+
+
+def _create_task_with_status(
+    engine,
+    task_type: str = TaskType.PROCESS_MESSAGE.value,
+    instance_id: str = "test-instance",
+    message_id: str = "test-message",
+    status: str = TaskStatus.PENDING.value,
+) -> Task:
+    """Insert a task with a specific status directly via raw SQL.
+
+    Used by the status-guard tests to set up rows in non-default
+    statuses (e.g. CANCELLED, FAILED, COMPLETED) without going through
+    the repository's claim/complete/cancel lifecycle. Mirrors the
+    helper in ``test_task_retry_repository.py``; kept local to avoid
+    cross-file test coupling.
+    """
+    created_at = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO task (task_type, instance_id, message_id, status,
+                                  retry_count, created_at, cancel_requested,
+                                  retry_scheduled)
+                VALUES (:task_type, :instance_id, :message_id, :status,
+                        :retry_count, :created_at, :cancel_requested,
+                        :retry_scheduled)
+                """
+            ),
+            {
+                "task_type": task_type,
+                "instance_id": instance_id,
+                "message_id": message_id,
+                "status": status,
+                "retry_count": 0,
+                "created_at": created_at,
+                "cancel_requested": False,
+                "retry_scheduled": False,
+            },
+        )
+        task_id = result.lastrowid
+
+        row = conn.execute(
+            text("SELECT * FROM task WHERE id = :id"),
+            {"id": task_id},
+        ).fetchone()
+        repo = TaskRepository(engine)
+        return repo._row_to_task(row)
 
 
 class TestTaskCreation:
@@ -511,15 +563,67 @@ class TestTaskCompletion:
         assert result is None
 
     def test_complete_already_completed_task(self, repository, sample_task_data):
-        """Test completing an already completed task still works."""
+        """Second complete_task on an already-completed task returns None.
+
+        Pattern A atomicity: complete_task guards on status='running'
+        (PostgreSQL EvalPlanQual recheck, SQLite write serialization).
+        A task already in a terminal status (COMPLETED/FAILED/CANCELLED)
+        cannot be re-completed — the second call returns None to signal
+        "already transitioned by another worker". The original result is
+        preserved (not overwritten).
+        """
         created = repository.create(**sample_task_data)
         repository.claim_pending_task(worker_id="worker-1")
         repository.complete_task(created.id, {"first": "result"})
 
         second = repository.complete_task(created.id, {"second": "result"})
 
-        assert second is not None
-        assert second.status == TaskStatus.COMPLETED.value
+        assert second is None
+
+        # Verify original result is preserved (no clobber).
+        row = repository.get(created.id)
+        assert row.status == TaskStatus.COMPLETED.value
+        assert json.loads(row.result) == {"first": "result"}
+
+    def test_complete_task_returns_none_for_cancelled(self, repository, sample_task_data):
+        """complete_task on a CANCELLED task returns None (terminal status guard)."""
+        task = _create_task_with_status(
+            repository.engine,
+            instance_id="instance-cancelled",
+            message_id="msg-cancelled",
+            status=TaskStatus.CANCELLED.value,
+        )
+
+        result = repository.complete_task(task.id, {"late": "result"})
+
+        assert result is None
+
+    def test_complete_task_returns_none_for_failed(self, repository, sample_task_data):
+        """complete_task on a FAILED task returns None (terminal status guard)."""
+        task = _create_task_with_status(
+            repository.engine,
+            instance_id="instance-failed",
+            message_id="msg-failed",
+            status=TaskStatus.FAILED.value,
+        )
+
+        result = repository.complete_task(task.id, {"late": "result"})
+
+        assert result is None
+
+    def test_complete_task_returns_none_for_pending(self, repository, sample_task_data):
+        """complete_task on a PENDING task returns None (not RUNNING).
+
+        Only a worker that successfully claimed the task (status=running)
+        may complete it. A completion attempt on a PENDING task is
+        rejected — the caller forgot to claim first.
+        """
+        created = repository.create(**sample_task_data)
+        # Don't claim — task is still PENDING.
+
+        result = repository.complete_task(created.id, {"early": "result"})
+
+        assert result is None
 
 
 class TestTaskFailure:
@@ -554,6 +658,129 @@ class TestTaskFailure:
         assert failed.instance_id == created.instance_id
         assert failed.message_id == created.message_id
         assert failed.worker_id == "worker-1"
+
+    def test_fail_task_returns_none_for_completed(self, repository, sample_task_data):
+        """fail_task on a COMPLETED task returns None (terminal status guard)."""
+        created = repository.create(**sample_task_data)
+        repository.claim_pending_task(worker_id="worker-1")
+        repository.complete_task(created.id, {"ok": True})
+
+        result = repository.fail_task(created.id, "late failure")
+
+        assert result is None
+        # Original status preserved.
+        row = repository.get(created.id)
+        assert row.status == TaskStatus.COMPLETED.value
+
+    def test_fail_task_returns_none_for_cancelled(self, repository, sample_task_data):
+        """fail_task on a CANCELLED task returns None (terminal status guard)."""
+        task = _create_task_with_status(
+            repository.engine,
+            instance_id="instance-fail-cancelled",
+            message_id="msg-fail-cancelled",
+            status=TaskStatus.CANCELLED.value,
+        )
+
+        result = repository.fail_task(task.id, "late failure")
+
+        assert result is None
+
+    def test_fail_task_returns_none_for_already_failed(self, repository, sample_task_data):
+        """Second fail_task on an already-FAILED task returns None (status guard).
+
+        Replaces the pre-fix semantics where a second fail_task would
+        silently overwrite the original error message. Pattern A makes
+        the second call a no-op so the original failure record survives.
+        """
+        created = repository.create(**sample_task_data)
+        repository.claim_pending_task(worker_id="worker-1")
+        repository.fail_task(created.id, "first error")
+
+        second = repository.fail_task(created.id, "second error")
+
+        assert second is None
+        # Original error preserved (no clobber).
+        row = repository.get(created.id)
+        assert row.status == TaskStatus.FAILED.value
+        assert row.error == "first error"
+
+    def test_fail_task_returns_none_for_pending(self, repository, sample_task_data):
+        """fail_task on a PENDING task returns None (not RUNNING).
+
+        A worker that hasn't claimed the task can't fail it either —
+        status guard prevents a stray failure from a non-claimer.
+        """
+        created = repository.create(**sample_task_data)
+        # Don't claim — task is still PENDING.
+
+        result = repository.fail_task(created.id, "early failure")
+
+        assert result is None
+
+
+class TestCancelTaskStatusGuard:
+    """Pattern A status-guard tests for cancel_task.
+
+    cancel_task allows transition from RUNNING or PENDING (both
+    non-terminal). COMPLETED, FAILED, and CANCELLED rows must yield
+    None — the row is already in a terminal status and a duplicate
+    cancel would clobber the original terminal record.
+    """
+
+    def test_cancel_task_returns_none_for_completed(self, repository, sample_task_data):
+        """cancel_task on COMPLETED returns None."""
+        task = _create_task_with_status(
+            repository.engine,
+            instance_id="instance-cancel-completed",
+            message_id="msg-cancel-completed",
+            status=TaskStatus.COMPLETED.value,
+        )
+
+        result = repository.cancel_task(task.id, reason="late")
+
+        assert result is None
+        row = repository.get(task.id)
+        assert row.status == TaskStatus.COMPLETED.value
+
+    def test_cancel_task_returns_none_for_failed(self, repository, sample_task_data):
+        """cancel_task on FAILED returns None."""
+        task = _create_task_with_status(
+            repository.engine,
+            instance_id="instance-cancel-failed",
+            message_id="msg-cancel-failed",
+            status=TaskStatus.FAILED.value,
+        )
+
+        result = repository.cancel_task(task.id, reason="late")
+
+        assert result is None
+        row = repository.get(task.id)
+        assert row.status == TaskStatus.FAILED.value
+
+    def test_cancel_task_cancels_running(self, repository, sample_task_data):
+        """cancel_task on RUNNING succeeds (sets CANCELLED + error + completed_at)."""
+        created = repository.create(**sample_task_data)
+        repository.claim_pending_task(worker_id="worker-1")
+        assert repository.get(created.id).status == TaskStatus.RUNNING.value
+
+        result = repository.cancel_task(created.id, reason="shutdown")
+
+        assert result is not None
+        assert result.status == TaskStatus.CANCELLED.value
+        assert result.error == "Task cancelled: shutdown"
+        assert result.cancel_requested is True
+        assert result.cancel_requested_at is not None
+        assert result.completed_at is not None
+
+    def test_cancel_task_cancels_pending(self, repository, sample_task_data):
+        """cancel_task on PENDING succeeds."""
+        created = repository.create(**sample_task_data)
+        # Don't claim — stays PENDING.
+
+        result = repository.cancel_task(created.id, reason="rejected")
+
+        assert result is not None
+        assert result.status == TaskStatus.CANCELLED.value
 
 
 class TestTaskRecovery:

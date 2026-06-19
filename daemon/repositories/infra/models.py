@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from .types import JSONBType
@@ -91,7 +91,17 @@ class InfraAssetType(SQLModel, table=True):
             on every import.
         created_at: ISO-8601 timestamp, immutable.
         updated_at: ISO-8601 timestamp; bumped on every
-            ``register_type`` upsert.
+            ``update_asset`` call (along with ``version``).
+        created_by / updated_by: Audit columns — instance_id of
+            the agent that wrote the row.
+        version: Optimistic-locking counter. Starts at ``1`` on
+            insert and is incremented by every ``update_asset``.
+            Callers that supply ``expected_version`` to
+            :meth:`SQLModelInfraRepository.update_asset` get a
+            check-and-increment; concurrent edits to the same
+            asset then raise ``ValueError`` instead of silently
+            clobbering each other. NOT NULL DEFAULT 1 — backfilled
+            by the M5 migration on existing SQLite rows.
     """
 
     __tablename__ = "infra_asset_types"
@@ -230,6 +240,16 @@ class InfraAsset(SQLModel, table=True):
     )
     created_by: str | None = Field(default=None, max_length=64)
     updated_by: str | None = Field(default=None, max_length=64)
+    # M5: optimistic-locking counter. Bumped by every update_asset
+    # call (atomic check-and-increment when expected_version is
+    # supplied; plain increment otherwise). Starts at 1 on insert
+    # so the first concurrent-modification check sees a stable
+    # initial value regardless of which dialect wrote the row.
+    # Defined as a Python default + sa_column default so that
+    # SQLModel.metadata.create_all() emits ``DEFAULT 1 NOT NULL``
+    # on PostgreSQL fresh-DB creation AND existing SQLite rows
+    # get backfilled to 1 by the 20260619_000004 migration.
+    version: int = Field(default=1, sa_column=Column("version", Integer, nullable=False, default=1))
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe view of the row."""

@@ -590,17 +590,14 @@ Provide a concise summary:"""
         parent.last_activity_at = datetime.now(timezone.utc)
         parent.version = (parent.version or 1) + 1
         
-        # FIX W6: Update parent's children[] denormalized cache
-        # Note: instance_hierarchy is the canonical source; we update the cache here
-        if parent.children:
-            try:
-                children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
-                if instance.instance_id in children_list:
-                    children_list = [c for c in children_list if c != instance.instance_id]
-                    parent.children = json.dumps(children_list)
-            except (json.JSONDecodeError, TypeError):
-                logger.warning(f"Failed to parse children JSON for parent {instance.parent_id[:8]}...")
-        
+        # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
+        # The ``instance_hierarchy`` junction table is the canonical
+        # source of parent-child relationships — _enrich_instance() in
+        # daemon/repositories/instance/repository.py loads children
+        # from it on every read. Writes to the JSON cache were doubly
+        # broken (RMW races + overridden on read) and persistently
+        # useless (no code ever reads the corrupted value). See C10.
+
         # Remove from instance_hierarchy junction table
         # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
         session.execute(
@@ -1283,16 +1280,14 @@ Provide a concise summary:"""
             parent.last_activity_at = datetime.now(timezone.utc)
             parent.version = (parent.version or 1) + 1
             
-            # FIX W6: Update parent's children[] denormalized cache
-            if parent.children:
-                try:
-                    children_list = json.loads(parent.children) if isinstance(parent.children, str) else parent.children
-                    if instance.instance_id in children_list:
-                        children_list = [c for c in children_list if c != instance.instance_id]
-                        parent.children = json.dumps(children_list)
-                except (json.JSONDecodeError, TypeError):
-                    logger.warning(f"Failed to parse children JSON for parent {instance.parent_id[:8]}...")
-            
+            # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
+            # The ``instance_hierarchy`` junction table is the canonical
+            # source of parent-child relationships — _enrich_instance() in
+            # daemon/repositories/instance/repository.py loads children
+            # from it on every read. Writes to the JSON cache were doubly
+            # broken (RMW races + overridden on read) and persistently
+            # useless (no code ever reads the corrupted value). See C10.
+
             # Remove from instance_hierarchy junction table
             session.execute(
                 text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
