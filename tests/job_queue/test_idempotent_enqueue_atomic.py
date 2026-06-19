@@ -66,6 +66,37 @@ def repository(engine) -> JobRepository:
     return JobRepository(engine)
 
 
+# ── File-backed SQLite fixtures for concurrent tests (F11) ────────────────
+#
+# The atomic ``create_or_get_by_idempotency_key`` insert relies on the
+# partial UNIQUE index ``idx_job_idempotency`` to enforce uniqueness.
+# In-memory SQLite + StaticPool serialises threads on a single
+# connection, masking the race we want to exercise. The file-backed
+# engine with the default QueuePool hands each thread its own
+# connection so the cross-connection UNIQUE conflict path is
+# actually exercised.
+
+@pytest.fixture
+def concurrent_engine(tmp_path):
+    """Real file-backed SQLite engine (default QueuePool) for concurrent tests."""
+    db_path = tmp_path / "job_queue_concurrent.db"
+    eng = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def concurrent_repository(concurrent_engine) -> JobRepository:
+    """JobRepository backed by a file-backed SQLite engine (F11)."""
+    return JobRepository(concurrent_engine)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,7 +158,7 @@ class TestCreateOrGetByIdempotencyKey:
         assert second.message == "first"
 
     def test_concurrent_inserts_produce_exactly_one_row(
-        self, repository: JobRepository
+        self, concurrent_repository: JobRepository
     ):
         """Simulated concurrent INSERTs produce exactly one row, not two.
 
@@ -143,7 +174,14 @@ class TestCreateOrGetByIdempotencyKey:
         connection pool the first to commit wins). We assert the
         rowcount invariant instead: there is exactly one row in the
         table after both threads complete.
+
+        F11: switched from the in-memory ``repository`` to the
+        file-backed ``concurrent_repository`` so each thread gets its
+        own SQLite connection. StaticPool serialises cursor access
+        and would mask the cross-connection UNIQUE conflict we want
+        to exercise.
         """
+        repository = concurrent_repository
         key = f"race-key-{uuid.uuid4().hex[:8]}"
         results: list[tuple[JobItem | None, bool]] = []
         results_lock = threading.Lock()
@@ -184,14 +222,20 @@ class TestCreateOrGetByIdempotencyKey:
         assert len(job_ids) == 1
 
     def test_concurrent_inserts_leave_exactly_one_row_in_table(
-        self, repository: JobRepository
+        self, concurrent_repository: JobRepository
     ):
         """After concurrent INSERTs, the table has exactly one row for the key.
 
         This is a stronger invariant than the job_id check above: we
         verify the table itself contains exactly one row, proving the
         unique index prevented a duplicate at the storage level.
+
+        F11: switched from the in-memory ``repository`` to the
+        file-backed ``concurrent_repository`` — see the docstring on
+        ``test_concurrent_inserts_produce_exactly_one_row`` for the
+        rationale.
         """
+        repository = concurrent_repository
         from sqlmodel import Session as SQLModelSession, select
 
         key = f"storage-key-{uuid.uuid4().hex[:8]}"

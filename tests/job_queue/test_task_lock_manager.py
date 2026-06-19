@@ -162,32 +162,55 @@ class TestLockManagerConcurrentAccess:
     """Tests for concurrent lock acquisition attempts."""
 
     @pytest.mark.asyncio
-    async def test_concurrent_acquire_same_project(self, lock_manager):
-        """Test concurrent attempts to acquire same project lock."""
-        acquired_count = 0
-        
+    async def test_concurrent_acquire_same_project(
+        self, concurrent_lock_manager
+    ):
+        """Test the NEW slot-claim contract under contention.
+
+        F10: rewrote from the old single-slot ``acquire()`` semantics
+        (3 callers → 1 wins, 2 lose) to the new
+        ``acquire_queue_lock`` contract with ``concurrency_limit=2``.
+
+        Five concurrent callers race for the same (project_id,
+        queue_id). The DB-level ``uq_job_locks_slot`` UNIQUE
+        constraint enforces that at most ``concurrency_limit`` rows
+        can exist per (project_id, queue_id). Exactly 2 acquire must
+        succeed; the remaining 3 must fail. The DB lock count must
+        equal 2 — proves the cap is held under fan-out, not just in
+        the happy path.
+
+        Uses ``concurrent_lock_manager`` (file-backed SQLite with
+        default QueuePool) instead of the regular ``lock_manager``
+        (in-memory + StaticPool) so each task gets its own SQLite
+        connection. StaticPool shares one connection across tasks,
+        which serialises cursor access and masks the race we want
+        to exercise.
+        """
+        manager = concurrent_lock_manager
+
         async def try_acquire(job_id: str):
-            nonlocal acquired_count
-            result = await lock_manager.acquire(
+            return await manager.acquire_queue_lock(
                 project_id="project-1",
+                queue_id="queue-1",
                 job_id=job_id,
-                instance_id=f"instance-{job_id}"
+                instance_id=f"instance-{job_id}",
+                concurrency_limit=2,
             )
-            if result:
-                acquired_count += 1
-            return result
-        
-        # Run multiple concurrent acquisitions
+
         results = await asyncio.gather(
             try_acquire("job-1"),
             try_acquire("job-2"),
             try_acquire("job-3"),
+            try_acquire("job-4"),
+            try_acquire("job-5"),
         )
-        
-        # Only one should succeed
-        assert acquired_count == 1
-        assert results.count(True) == 1
-        assert results.count(False) == 2
+
+        # Exactly 2 successes, 3 failures (concurrency_limit=2).
+        assert results.count(True) == 2
+        assert results.count(False) == 3
+        # DB-level invariant: at most 2 lock rows exist for the
+        # (project_id, queue_id) pair.
+        assert manager._lock_repo.get_lock_count("project-1", "queue-1") == 2
 
     @pytest.mark.asyncio
     async def test_concurrent_acquire_different_projects(self, lock_manager):
@@ -730,9 +753,10 @@ class TestLockManagerPerQueueLocking:
         assert await lock_manager.get_queue_lock_count("project-1", "queue-2") == 1
 
     @pytest.mark.asyncio
-    async def test_acquire_queue_lock_concurrent_safety(self, lock_manager):
+    async def test_acquire_queue_lock_concurrent_safety(self, concurrent_lock_manager):
         """Test that multiple concurrent acquires don't exceed the concurrency limit."""
         acquired_count = 0
+        lock_manager = concurrent_lock_manager
 
         async def try_acquire(job_id: str):
             nonlocal acquired_count
@@ -1086,7 +1110,7 @@ class TestAcquireQueueLockCrossProcessSafety:
         assert lock_manager._lock_repo.get_lock_count("p1", "qB") == 1
 
     @pytest.mark.asyncio
-    async def test_concurrent_acquires_never_exceed_limit(self, lock_manager):
+    async def test_concurrent_acquires_never_exceed_limit(self, concurrent_lock_manager):
         """Several concurrent acquires for a queue with limit=2 yield
         exactly 2 successes.
 
@@ -1104,6 +1128,8 @@ class TestAcquireQueueLockCrossProcessSafety:
         ``TestTryAcquireSlot`` tests cover the high-concurrency
         atomicity property directly.
         """
+        lock_manager = concurrent_lock_manager
+
         async def try_acquire(job_id: str):
             return await lock_manager.acquire_queue_lock(
                 project_id="p1", queue_id="q1", job_id=job_id,

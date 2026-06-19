@@ -29,6 +29,26 @@
 --   file is safe.
 
 -- UP
+
+-- STEP 1: Dedupe pre-existing duplicates. SQLite has no ALTER TABLE
+-- ADD CONSTRAINT syntax, so we use a unique INDEX (equivalent for ON
+-- CONFLICT DO UPDATE purposes). The DELETE must run before the index
+-- is created, otherwise the CREATE UNIQUE INDEX would fail.
+-- This dedup is needed because legacy C9 race may have produced
+-- duplicate (source_id, external_user_id) rows before the repository
+-- was switched to dialect-aware INSERT ... ON CONFLICT DO UPDATE.
+DELETE FROM instance_mappings
+WHERE rowid NOT IN (
+    SELECT MAX(rowid) FROM instance_mappings GROUP BY source_id, external_user_id
+);
+
+-- STEP 2: Enforce at most one mapping per (source_id, external_user_id).
+-- Together with the ON CONFLICT DO UPDATE upsert in
+-- SQLModelSourceRepository.create_instance_mapping, this makes the
+-- upsert atomic across processes. Two concurrent callers attempting
+-- to create a mapping for the same pair both reach the INSERT, the
+-- loser gets a UNIQUE constraint violation, and the dialect-specific
+-- INSERT compiles that into a re-write of the loser's row.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_instance_mappings_source_user
     ON instance_mappings (source_id, external_user_id);
 

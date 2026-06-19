@@ -328,31 +328,6 @@ class SQLModelProjectRepository:
                     result.append(p)
             return self._enrich_projects(session, result)
 
-    def get_by_directory(self, directory: str) -> list[Project]:
-        """Get all projects that reference a directory."""
-        with Session(self.engine) as session:
-            # JSON containment is dialect-aware: PostgreSQL JSONB uses ``@>``,
-            # SQLite keeps the LIKE-based ``contains`` (with Python-side correction).
-            if session.bind is not None and session.bind.dialect.name == "postgresql":
-                from sqlalchemy import cast
-                from sqlalchemy.dialects.postgresql import JSONB
-
-                stmt = select(Project).where(
-                    (Project.main_directory == directory)
-                    | cast(Project.related_directories, JSONB).contains([directory])
-                )
-            else:
-                stmt = select(Project).where(
-                    (Project.main_directory == directory)
-                    | col(Project.related_directories).contains(f'"{directory}"')
-                )
-            projects = list(session.exec(stmt))
-            result = []
-            for p in projects:
-                if p.main_directory == directory or directory in p.related_directories:
-                    result.append(p)
-            return self._enrich_projects(session, result)
-
     # --------------------------------------------------------
     # LIST
     # --------------------------------------------------------
@@ -473,7 +448,26 @@ class SQLModelProjectRepository:
         ``uq_projects_name`` UNIQUE constraint; concurrent renames race on
         the UPDATE and the loser is caught via ``IntegrityError`` and
         translated into a clean ``ValueError``.
+
+        ``relationships`` and ``related_directories`` are rejected because
+        plain ORM setattr on a JSON column is a read-modify-write at the
+        column level (the ORM replaces the whole JSON blob) and clobbers
+        concurrent writers. Use :meth:`add_relationship` /
+        :meth:`remove_relationship` and :meth:`add_related_directory` /
+        :meth:`remove_related_directory` (dialect-aware JSONB / json_set
+        UPDATE) instead.
         """
+        if "relationships" in updates:
+            raise ValueError(
+                "Use add_relationship / remove_relationship for relationship edits "
+                "(see SQLModelProjectRepository.add_relationship / remove_relationship)"
+            )
+        if "related_directories" in updates:
+            raise ValueError(
+                "Use add_related_directory / remove_related_directory for directory edits "
+                "(see SQLModelProjectRepository.add_related_directory / remove_related_directory)"
+            )
+
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:

@@ -1309,9 +1309,13 @@ class JobQueueService:
         # On success, the lock is intentionally kept (JobProcessor holds it until
         # the job completes/fails). ``started_ok`` guards against releasing on
         # the success path, matching the original lock-on-success semantics.
-        # The ``except ValueError`` preserves the original "return None" behavior
-        # for callers (lock contention / already-started job) — the lock release
-        # happens in the finally block so we still drop it on the ValueError path.
+        # The ``except (ValueError, InvalidTransitionError)`` preserves the
+        # original "return None" behavior for callers (lock contention /
+        # already-started job / invalid status transition) — the lock release
+        # happens in the finally block so we still drop it on the caught-exception
+        # paths. ``InvalidTransitionError`` is NOT a ValueError subclass (see
+        # daemon/services/job_state_machine.py:35), so it must be caught
+        # explicitly when ``start_job_atomic`` raises it instead of ValueError.
         started_ok = False
         try:
             started_job = await asyncio.to_thread(
@@ -1322,7 +1326,7 @@ class JobQueueService:
                 f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
             )
             return started_job
-        except ValueError:
+        except (ValueError, InvalidTransitionError):
             # Job state changed (already started/cancelled) — preserve original
             # behavior of returning None so callers can detect "lock held by
             # another worker" without having to catch an exception.

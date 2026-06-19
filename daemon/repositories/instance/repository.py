@@ -551,14 +551,53 @@ class SQLModelInstanceRepository:
     # --------------------------------------------------------
 
     def update(self, instance_id: str, **updates) -> Instance | None:
-        """Update an instance's fields."""
+        """Update an instance's fields.
+
+        Defense-in-depth guard: callers must NOT pass ``status=`` here.
+        Status changes are routed through :meth:`transition_status_if`
+        so the SQL-level ``WHERE status IN (:allowed_from)`` predicate
+        prevents concurrent clobbering of terminal statuses. Bypassing
+        that path by writing ``status`` directly here would reintroduce
+        the very race the atomic-transition fix was designed to
+        eliminate.
+
+        ``instance_metadata`` is also rejected because writes to the
+        JSON column via plain ORM setattr are a read-modify-write at
+        the column level (the ORM replaces the whole JSON blob) and
+        clobber concurrent writers. Use :meth:`set_metadata` /
+        :meth:`delete_metadata` (dialect-aware JSONB / json_set
+        UPDATE) instead.
+
+        Args:
+            instance_id: Instance identifier.
+            **updates: Fields to update. ``status`` and
+                ``instance_metadata`` are rejected — use
+                :meth:`transition_status_if` for status changes and
+                :meth:`set_metadata` / :meth:`delete_metadata` for
+                metadata edits.
+
+        Returns:
+            Updated Instance if found, None otherwise.
+
+        Raises:
+            ValueError: If ``status`` or ``instance_metadata`` is
+                supplied via ``updates``.
+        """
+        if "status" in updates:
+            raise ValueError(
+                "Use transition_status_if for status changes "
+                "(see InstanceRepository.transition_status_if)"
+            )
+        if "instance_metadata" in updates:
+            raise ValueError(
+                "Use set_metadata / delete_metadata for metadata edits "
+                "(see InstanceRepository.set_metadata / delete_metadata)"
+            )
+
         with SQLModelSession(self.engine) as db_session:
             instance = db_session.get(Instance, instance_id)
             if instance is None:
                 return None
-
-            if 'status' in updates and not InstanceStatus.is_valid(updates['status']):
-                raise ValueError(f"Invalid status: {updates['status']}")
 
             for key, value in updates.items():
                 if hasattr(instance, key):

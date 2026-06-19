@@ -189,7 +189,14 @@ class Project(SQLModel, table=True):
     __tablename__ = "projects"
 
     project_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    name: str = Field(index=True, unique=True)
+    # F15: removed `unique=True` here. The UniqueConstraint in
+    # ``__table_args__`` below is the authoritative source for the
+    # UNIQUE(name) constraint. Keeping both would create two UNIQUE
+    # constraints on the column (one declared inline on Field, one
+    # declared via UniqueConstraint), which is wasteful and
+    # confusing — and on some dialects generates two separate
+    # index names, complicating IntegrityError inspection.
+    name: str = Field(index=True)
     project_type: str = Field(default="general")
     status: str = Field(default=ProjectStatus.ACTIVE.value)
 

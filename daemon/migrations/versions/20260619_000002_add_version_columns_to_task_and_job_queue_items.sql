@@ -13,10 +13,12 @@
 --   DELETE on these rows (e.g. delete, delete_by_instance, soft_delete,
 --   update) also appends `AND version = (expected_version)` to the
 --   WHERE clause and raises StaleDataError on a concurrent
---   modification. For the Core UPDATE in JobRepository.atomic_transition
---   specifically, version_id_col is honored by SQLAlchemy when the
---   target model declares it, so the existing status guard is
---   strengthened with the version predicate automatically.
+--   modification. Note: version_id_col only applies to ORM-flushed
+--   commits. The Core UPDATE in JobRepository.atomic_transition
+--   composes its own raw SQL (with explicit `WHERE status =
+--   :from_status`) and does NOT go through the ORM, so the version
+--   predicate is NOT auto-appended there — the explicit status guard
+--   is the sole concurrency gate for that path.
 --
 --   The column is NOT NULL with DEFAULT 0 so existing rows backfill
 --   cleanly on both SQLite and PostgreSQL. The migration runner
@@ -47,10 +49,12 @@
 -- because they bypass the ORM session.
 ALTER TABLE task ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 
--- job_queue_items: ORM-flushed commits (soft_delete, update) and the
--- Core UPDATE in JobRepository.atomic_transition are now also gated by
--- version. The status guard `WHERE status = (from_status)` still applies
--- and version is an additional predicate.
+-- job_queue_items: ORM-flushed commits (soft_delete, update) are now
+-- also gated by version. The Core UPDATE in
+-- JobRepository.atomic_transition composes raw SQL with an explicit
+-- `WHERE status = :from_status` guard and does NOT route through the
+-- ORM, so version_id_col does not apply to that path — the explicit
+-- status guard is the sole concurrency gate there.
 ALTER TABLE job_queue_items ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 
 -- DOWN

@@ -1723,6 +1723,12 @@ class InstanceLifecycleService:
             # expanded into the ``IN`` clause via SQLAlchemy's
             # ``expanding=True`` parameter. SQLite and PostgreSQL both
             # accept the expanded IN list.
+            #
+            # F03 status guard: mirror the resume helper's predicate
+            # pattern so a concurrent pause/resume that already flipped
+            # the status is a no-op on that row (rowcount drops). Only
+            # non-terminal, non-paused states are eligible for pause
+            # — pausing a terminal row would lose the terminal write.
             session.execute(
                 text(
                     "UPDATE instances "
@@ -1730,7 +1736,8 @@ class InstanceLifecycleService:
                     "    waiting_for = 0, "
                     "    paused_at = :paused_at, "
                     "    updated_at = :paused_at "
-                    "WHERE instance_id IN :tree_ids"
+                    "WHERE instance_id IN :tree_ids "
+                    "  AND status IN (:running_status, :idle_status, :waiting_children_status)"
                 ).bindparams(
                     bindparam("tree_ids", expanding=True),
                 ),
@@ -1738,6 +1745,9 @@ class InstanceLifecycleService:
                     "paused_status": InstanceStatus.PAUSED.value,
                     "paused_at": paused_at_iso,
                     "tree_ids": updated_ids,
+                    "running_status": InstanceStatus.RUNNING.value,
+                    "idle_status": InstanceStatus.IDLE.value,
+                    "waiting_children_status": InstanceStatus.WAITING_CHILDREN.value,
                 },
             )
             session.commit()

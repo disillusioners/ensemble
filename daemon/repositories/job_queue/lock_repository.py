@@ -43,40 +43,69 @@ class LockRepository:
             return lock
 
     def release(self, lock_id: str) -> bool:
-        """Release a specific lock by ID. Returns True if found and deleted."""
-        with SQLModelSession(self.engine) as session:
-            lock = session.get(JobLock, lock_id)
-            if lock is None:
-                return False
-            session.delete(lock)
-            session.commit()
-            return True
+        """Release a specific lock by ID. Returns True if found and deleted.
+
+        F09 fix: converted from SELECT-then-DELETE to a single
+        ``DELETE ... WHERE ... RETURNING lock_id`` statement. The
+        previous pattern held the row in the ORM identity map between
+        read and write, which under concurrent callers could observe
+        a row that another caller had already deleted (or fail to
+        observe a row another caller had just inserted with the same
+        id, depending on isolation level). Atomic DELETE...RETURNING
+        makes the read+write a single statement so the result is
+        consistent. RETURNING works on SQLite 3.35+ and PostgreSQL.
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM job_locks "
+                    "WHERE lock_id = :lock_id "
+                    "RETURNING lock_id"
+                ),
+                {"lock_id": lock_id},
+            )
+            return result.first() is not None
 
     def release_by_job(self, project_id: str, queue_id: str, job_id: str) -> bool:
-        """Release lock by job identity. Returns True if found and deleted."""
-        with SQLModelSession(self.engine) as session:
-            stmt = select(JobLock).where(
-                JobLock.project_id == project_id,
-                JobLock.queue_id == queue_id,
-                JobLock.job_id == job_id,
+        """Release lock by job identity. Returns True if found and deleted.
+
+        F09 fix: atomic ``DELETE ... RETURNING lock_id`` instead of
+        SELECT-then-DELETE — see :meth:`release` for the rationale.
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM job_locks "
+                    "WHERE project_id = :project_id "
+                    "  AND queue_id = :queue_id "
+                    "  AND job_id = :job_id "
+                    "RETURNING lock_id"
+                ),
+                {
+                    "project_id": project_id,
+                    "queue_id": queue_id,
+                    "job_id": job_id,
+                },
             )
-            lock = session.exec(stmt).first()
-            if lock is None:
-                return False
-            session.delete(lock)
-            session.commit()
-            return True
+            return result.first() is not None
 
     def release_by_instance(self, instance_id: str) -> int:
-        """Release all locks held by an instance. Returns count of released locks."""
-        with SQLModelSession(self.engine) as session:
-            stmt = select(JobLock).where(JobLock.instance_id == instance_id)
-            locks = session.exec(stmt).all()
-            count = len(locks)
-            for lock in locks:
-                session.delete(lock)
-            session.commit()
-            return count
+        """Release all locks held by an instance. Returns count of released locks.
+
+        F09 fix: atomic ``DELETE ... RETURNING lock_id`` instead of
+        SELECT-then-DELETE — see :meth:`release` for the rationale.
+        Counts the rows returned by RETURNING.
+        """
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "DELETE FROM job_locks "
+                    "WHERE instance_id = :instance_id "
+                    "RETURNING lock_id"
+                ),
+                {"instance_id": instance_id},
+            )
+            return result.rowcount or 0
 
     def get_active_locks(self, project_id: str, queue_id: str) -> List[JobLock]:
         """Get all active locks for a queue."""
