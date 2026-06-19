@@ -46,31 +46,45 @@ class LockRepository:
         """Release a specific lock by ID. Returns True if found and deleted.
 
         F09 fix: converted from SELECT-then-DELETE to a single
-        ``DELETE ... WHERE ... RETURNING lock_id`` statement. The
-        previous pattern held the row in the ORM identity map between
-        read and write, which under concurrent callers could observe
-        a row that another caller had already deleted (or fail to
-        observe a row another caller had just inserted with the same
-        id, depending on isolation level). Atomic DELETE...RETURNING
-        makes the read+write a single statement so the result is
-        consistent. RETURNING works on SQLite 3.35+ and PostgreSQL.
+        ``DELETE ... WHERE ...`` statement. The previous pattern held
+        the row in the ORM identity map between read and write, which
+        under concurrent callers could observe a row that another
+        caller had already deleted (or fail to observe a row another
+        caller had just inserted with the same id, depending on
+        isolation level). Atomic DELETE makes the read+write a single
+        statement so the result is consistent across SQLite and
+        PostgreSQL.
+
+        Returns True iff ``rowcount > 0``. We deliberately do NOT use
+        ``DELETE ... RETURNING lock_id`` here even though both SQLite
+        3.35+ and PostgreSQL support it: with the pysqlite driver,
+        RETURNING leaves a cursor open on the connection, and when
+        SQLAlchemy commits the transaction at the end of the
+        ``engine.begin()`` block it raises
+        ``sqlite3.OperationalError: cannot commit transaction - SQL
+        statements in progress``. Using ``rowcount`` avoids the
+        cursor entirely while preserving atomicity (it is still a
+        single DELETE statement, no SELECT first).
         """
         with self.engine.begin() as conn:
             result = conn.execute(
                 text(
                     "DELETE FROM job_locks "
-                    "WHERE lock_id = :lock_id "
-                    "RETURNING lock_id"
+                    "WHERE lock_id = :lock_id"
                 ),
                 {"lock_id": lock_id},
             )
-            return result.first() is not None
+            return (result.rowcount or 0) > 0
 
     def release_by_job(self, project_id: str, queue_id: str, job_id: str) -> bool:
         """Release lock by job identity. Returns True if found and deleted.
 
-        F09 fix: atomic ``DELETE ... RETURNING lock_id`` instead of
+        F09 fix: atomic ``DELETE ... WHERE ...`` instead of
         SELECT-then-DELETE — see :meth:`release` for the rationale.
+        Uses ``rowcount`` rather than ``RETURNING`` because the
+        pysqlite/SQLite driver errors with "cannot commit
+        transaction - SQL statements in progress" when a RETURNING
+        cursor is still open at commit time.
         """
         with self.engine.begin() as conn:
             result = conn.execute(
@@ -78,8 +92,7 @@ class LockRepository:
                     "DELETE FROM job_locks "
                     "WHERE project_id = :project_id "
                     "  AND queue_id = :queue_id "
-                    "  AND job_id = :job_id "
-                    "RETURNING lock_id"
+                    "  AND job_id = :job_id"
                 ),
                 {
                     "project_id": project_id,
@@ -87,21 +100,23 @@ class LockRepository:
                     "job_id": job_id,
                 },
             )
-            return result.first() is not None
+            return (result.rowcount or 0) > 0
 
     def release_by_instance(self, instance_id: str) -> int:
         """Release all locks held by an instance. Returns count of released locks.
 
-        F09 fix: atomic ``DELETE ... RETURNING lock_id`` instead of
+        F09 fix: atomic ``DELETE ... WHERE ...`` instead of
         SELECT-then-DELETE — see :meth:`release` for the rationale.
-        Counts the rows returned by RETURNING.
+        Uses ``rowcount`` rather than ``RETURNING`` because the
+        pysqlite/SQLite driver errors with "cannot commit
+        transaction - SQL statements in progress" when a RETURNING
+        cursor is still open at commit time.
         """
         with self.engine.begin() as conn:
             result = conn.execute(
                 text(
                     "DELETE FROM job_locks "
-                    "WHERE instance_id = :instance_id "
-                    "RETURNING lock_id"
+                    "WHERE instance_id = :instance_id"
                 ),
                 {"instance_id": instance_id},
             )
