@@ -22,6 +22,8 @@
 -- ``SQLModel.metadata.create_all`` get the correct index without
 -- running this migration.
 
+-- UP
+
 -- Drop the old index (both dialects use the same DROP syntax).
 DROP INDEX IF EXISTS idx_job_idempotency;
 

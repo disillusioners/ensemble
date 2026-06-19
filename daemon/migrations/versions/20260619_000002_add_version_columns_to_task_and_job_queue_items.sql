@@ -52,7 +52,7 @@ ALTER TABLE task ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
 -- job_queue_items: ORM-flushed commits (soft_delete, update) are now
 -- also gated by version. The Core UPDATE in
 -- JobRepository.atomic_transition composes raw SQL with an explicit
--- `WHERE status = :from_status` guard and does NOT route through the
+-- `WHERE status = (from_status)` guard and does NOT route through the
 -- ORM, so version_id_col does not apply to that path — the explicit
 -- status guard is the sole concurrency gate there.
 ALTER TABLE job_queue_items ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
