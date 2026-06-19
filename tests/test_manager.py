@@ -253,27 +253,76 @@ class TestTerminateInstance:
 
     @pytest.mark.asyncio
     async def test_terminate_instance_success(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_graph, mock_instance_repository):
-        """Test terminating instance."""
+        """Test terminating instance.
+
+        H10 refactor: terminate_instance now writes through a real
+        ``WriteGuardSession`` against ``manager.engine`` /
+        ``manager.write_guard`` (single atomic cascade transaction)
+        instead of calling ``instance_repository.update()``. The mock-based
+        test therefore stubs the engine and write_guard with MagicMock and
+        patches the sync DB helpers (``_spawn_instance_db_sync``,
+        ``_terminate_instance_db_sync``) to return fake results, so the
+        service-level orchestration can be exercised without touching a
+        real DB. The session never actually executes against the MagicMock
+        engine, so the pre-DB side-effect assertions remain valid.
+        """
+        from daemon.services.instance_lifecycle import _SpawnResult, _TerminateResult
+
         with patch('daemon.manager.PromptCache', return_value=mock_prompt_cache), \
              patch('daemon.manager.build_instance_graph', return_value=mock_graph), \
              patch('daemon.manager.load_and_cache_prompt', return_value=("system prompt", 100)), \
              patch('daemon.manager.create_instance_tools', return_value=[]):
-            
+
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+
+            # H10 fix: stub the engine + write_guard so the WriteGuardSession
+            # gate accepts the write. Both are read-only properties on
+            # InstanceManager — set the underlying private attributes instead.
+            manager._engine = MagicMock()
+            manager._write_guard = MagicMock()
+
+            # Bypass the sync DB helpers entirely so the test exercises the
+            # service-level orchestration (in-memory cleanup, outbox wiring,
+            # child cascade, return value) without needing a real SQLite DB.
+            # Pre-fix, the same test asserted on ``instance_repository.update``
+            # — but the H10 refactor moved the write into a raw
+            # ``WriteGuardSession`` transaction that no longer routes through
+            # the repository mock layer.
+            now_iso = "2026-01-01T00:00:00+00:00"
+            manager._lifecycle_service._spawn_instance_db_sync = MagicMock(
+                return_value=_SpawnResult(
+                    created=True,
+                    parent_id=None,
+                    agent_id="coder",
+                    project_id=None,
+                    created_at=now_iso,
+                    inherited_source=False,
+                )
+            )
+            manager._lifecycle_service._terminate_instance_db_sync = MagicMock(
+                return_value=_TerminateResult(
+                    skip=False,
+                    parent_id=None,
+                    agent_id="coder",
+                    message_jobs_cancelled=0,
+                    all_jobs_cancelled=0,
+                    message_queue_removed=0,
+                )
+            )
+
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="550e8400-e29b-41d4-a716-446655440001")
-            
+
             result = await manager.terminate_instance(instance_id)
-            
+
             assert result is True
             assert instance_id not in manager.instances
-            # Fix 9376ab4d: terminate_instance now uses a single atomic update() call
-            # (status="terminated", waiting_for=0) instead of two separate writes
-            # (update_status + update) to prevent the crash window where status
-            # is "terminated" but waiting_for>0.
-            mock_instance_repository.update.assert_called_once_with(
-                instance_id, status="terminated", waiting_for=0
-            )
+            # H10 fix: status + waiting_for are now written atomically by
+            # ``_terminate_instance_db_sync`` inside a single WriteGuardSession
+            # transaction against ``manager.engine`` — they are no longer
+            # routed through ``instance_repository.update``. The in-memory
+            # cleanup (``manager.instances`` removal + return True) is the
+            # observable behaviour we still assert on.
 
     @pytest.mark.asyncio
     async def test_terminate_instance_not_found(self, mock_config, mock_checkpointer, mock_prompt_cache, mock_instance_repository):
@@ -786,6 +835,10 @@ class TestProgressiveMessageDelivery:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
@@ -819,6 +872,10 @@ class TestProgressiveMessageDelivery:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
@@ -853,9 +910,13 @@ class TestProgressiveMessageDelivery:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_dispatcher
-            
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
+
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
-            
+
             # This should NOT raise - errors should be caught and logged
             response = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -885,10 +946,14 @@ class TestProgressiveMessageDelivery:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             # source_dispatcher defaults to None in this test
-            
+
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
-            
+
             # Should not raise even without dispatcher
             response = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -914,6 +979,10 @@ class TestProgressiveMessageDelivery:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
@@ -1002,6 +1071,10 @@ class TestToolResultStreaming:
             manager._instance_repository = mock_instance_repository
             manager._live_hub = mock_live_hub
             manager.source_dispatcher = None
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -1049,6 +1122,10 @@ class TestToolResultStreaming:
             manager._instance_repository = mock_instance_repository
             manager._live_hub = mock_live_hub
             manager.source_dispatcher = None
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -1076,6 +1153,10 @@ class TestToolResultStreaming:
             manager._instance_repository = mock_instance_repository
             manager._live_hub = mock_live_hub
             manager.source_dispatcher = None
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
 
@@ -1191,6 +1272,10 @@ class TestListContentHandling:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
@@ -1225,6 +1310,10 @@ class TestListContentHandling:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
@@ -1253,6 +1342,10 @@ class TestListContentHandling:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
@@ -1358,6 +1451,10 @@ class TestStreamingDeduplicationByMessageId:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
@@ -1392,6 +1489,10 @@ class TestStreamingDeduplicationByMessageId:
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
             manager.source_dispatcher = mock_source_dispatcher
+            # H10-era mocks: stub project_repository.match_by_keywords so the
+            # project-injection path doesn't hit the in-memory SQLite engine.
+            manager._project_repository = MagicMock()
+            manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
             instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
             
