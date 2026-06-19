@@ -60,6 +60,7 @@ dev = [
 [tool.pytest.ini_options]
 markers = [
     "integration: integration tests that require a live OpenCode server (run with `pytest -m integration`)",
+    "postgres: PostgreSQL-only tests that require a live PostgreSQL server (run with `pytest -m postgres`)",
 ]
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration and not postgres'"
 asyncio_mode = "auto"
