@@ -7,14 +7,16 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 from langgraph.graph.state import CompiledStateGraph
+from sqlalchemy import bindparam, select, text
+from sqlmodel import Session
 
 from ..cancellation import CancellationReason
 from ..compaction import ContextCompactor
 from ..registry import get_registry
-from ..repositories.instance.models import Instance, InstanceStatus
+from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .correlation_manager import get_correlation_manager
@@ -31,6 +33,78 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+# ── Outbox NamedTuples (WriteGuardSession extraction) ──────────────────────
+# The sync ``_*_db_sync`` helpers return these so the async callers can fire
+# post-commit side effects (SSE / CompletionRegistry / lifecycle event / CM
+# resolve hook / job-processor notify) on the event loop AFTER commit.
+# Keeping all data needed for side effects in the NamedTuple prevents the
+# "NameError after extraction" regression documented in H10.
+
+class _TerminateResult(NamedTuple):
+    """Outbox payload from ``_terminate_instance_db_sync`` (H10 fix).
+
+    Carries everything the async caller needs to fire post-commit side
+    effects for ``terminate_instance``:
+
+      * ``skip`` — True means no row was updated (already terminal or
+        missing). Caller short-circuits without firing side effects.
+      * ``parent_id`` / ``agent_id`` — captured from the instance row
+        before commit (instance is detached after commit).
+      * ``message_jobs_cancelled`` / ``all_jobs_cancelled`` — counters
+        for the [TRACE] summary log so the line matches the pre-fix
+        shape (job_queue sweep results land in the same call site).
+      * ``message_queue_removed`` — count of MessageQueue rows deleted
+        for the [TRACE] summary log.
+
+    The H10 fix consolidates the 10+ transaction writes into a single
+    ``WriteGuardSession`` (status / waiting_for / job cancel /
+    MessageQueue delete) so a crash mid-cascade cannot orphan jobs or
+    leave zombie state.
+    """
+
+    skip: bool
+    parent_id: str | None
+    agent_id: str | None
+    message_jobs_cancelled: int
+    all_jobs_cancelled: int
+    message_queue_removed: int
+
+
+class _SpawnResult(NamedTuple):
+    """Outbox payload from ``_spawn_instance_db_sync`` (M8 fix).
+
+    ``created_at`` is captured from the row before commit so the async
+    caller can include it in the ``stream_instance_created`` SSE event
+    (the instance is detached after the session closes).
+    """
+
+    created: bool
+    parent_id: str | None
+    agent_id: str | None
+    project_id: str | None
+    created_at: str | None
+    inherited_source: bool  # True if we set ``original_source`` from parent
+
+
+class _CascadeUpdateResult(NamedTuple):
+    """Outbox payload from ``_pause_cascade_db_sync`` / ``_resume_cascade_db_sync`` (L14).
+
+    Carries the resolved per-instance metadata so the async caller can
+    decide whether to emit a ``status_change`` SSE event and which
+    ``agent_id`` to attach (the instance is detached after commit).
+
+    L14 collapses N+1 per-tree-node UPDATEs into ONE ``UPDATE ... WHERE
+    instance_id IN (...)`` statement, eliminating the crash window where
+    half the tree was paused/resumed and the other half was still in
+    the pre-cascade status.
+    """
+
+    updated_ids: list[str]        # IDs that were updated (skipped excluded)
+    skipped_ids: list[str]        # IDs that were already in target status
+    agent_ids_by_instance: dict[str, str | None]
+    waiting_for_by_instance: dict[str, int]
 
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
@@ -339,34 +413,50 @@ class InstanceLifecycleService:
             instance_metadata["mcp_tool_names"] = mcp_tool_names
         
         logger.info(f"Spawning instance {instance_id} (agent={resolved_agent_id}, parent={parent_id}, name={instance_name})")
-        
-        # Create instance in DB
-        instance_repository.create(
+
+        # M8 fix: child creation + parent source inheritance + initial
+        # ``created_at`` capture all run inside ONE ``WriteGuardSession``
+        # transaction. The pre-fix implementation called three separate
+        # repository methods (create / get-parent / set_metadata), each
+        # with its own session — a crash between the parent get and the
+        # ``set_metadata`` left the child visible without its inherited
+        # ``original_source`` (the audit inconsistency flagged in the
+        # H10 plan).
+        #
+        # ``_spawn_instance_db_sync`` returns the captured ``created_at``
+        # / ``agent_id`` / ``project_id`` / ``parent_id`` / inheritance
+        # flag the async caller (or the sync public method) needs to fire
+        # the ``stream_instance_created`` SSE event AFTER the commit.
+        # Following the H10 outbox pattern from
+        # ``child_reports._ChildCompletionDbResult`` —
+        # ``job_feedback_observer._InstanceFinalizeResult``, we never
+        # touch the row after the session closes (it's detached post-
+        # commit).
+        agent_name = ""
+        try:
+            from ..repositories.instance.repository import get_agent_name as _gan
+            agent_name = _gan(resolved_agent_dir)
+        except Exception:
+            agent_name = resolved_agent_id
+
+        spawn_result = self._spawn_instance_db_sync(
+            self._manager.engine,
+            self._manager.write_guard,
             instance_id=instance_id,
-            agent_id=resolved_agent_id,
-            agent_dir=resolved_agent_dir,
+            resolved_agent_id=resolved_agent_id,
+            resolved_agent_dir=resolved_agent_dir,
+            agent_name=agent_name,
             parent_id=parent_id,
-            metadata=instance_metadata if instance_metadata else None,
             project_id=project_id,
+            instance_metadata=instance_metadata,
         )
-        
-        # Verify instance was created in DB
-        created = instance_repository.get(instance_id)
-        if created is None:
-            logger.error(f"CRITICAL: Instance {instance_id} was NOT persisted to database after create() call!")
-        else:
-            logger.info(f"Instance {instance_id} created in DB with status={created.status}, parent_id={created.parent_id}")
-        
-        # Inherit original_source from parent if parent has one (C2: source inheritance during spawn)
-        # This ensures grandchildren also get the original telegram source
-        if parent_id:
-            parent_meta = instance_repository.get(parent_id)
-            if parent_meta is not None and parent_meta.instance_metadata is not None:
-                parent_original_source = parent_meta.instance_metadata.get("original_source")
-                if parent_original_source:
-                    instance_repository.set_metadata(instance_id, "original_source", parent_original_source)
-                    logger.info(f"Inherited original_source '{parent_original_source}' from parent {parent_id[:8]}...")
-        
+
+        if spawn_result.inherited_source:
+            logger.info(
+                f"Inherited original_source from parent {parent_id[:8]}... "
+                f"during spawn of {instance_id[:8]}..."
+            )
+
         # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
         # The ``instance_hierarchy`` junction table is the canonical
         # source of parent-child relationships — _enrich_instance() in
@@ -375,10 +465,10 @@ class InstanceLifecycleService:
         # broken (RMW races + overridden on read) and persistently
         # useless (no code ever reads the corrupted value). See C10.
         #
-        # The junction table row is inserted by ``instance_repository.create()``
-        # above (see repository.py:144-150). waiting_for is also NOT incremented
-        # here — only send_message to a child increments it (that's what makes
-        # the count accurate: it tracks pending work, not just child existence).
+        # The junction table row is inserted by ``_spawn_instance_db_sync``
+        # above. waiting_for is also NOT incremented here — only
+        # send_message to a child increments it (that's what makes the
+        # count accurate: it tracks pending work, not just child existence).
 
         # Store in instances dict
         self._manager.instances[instance_id] = (graph, resolved_agent_dir)
@@ -394,13 +484,15 @@ class InstanceLifecycleService:
         # Emit instance_created event:
         # - To parent's stream (if parent exists)
         # - To NotificationBroadcaster (if root-level, no parent)
+        # Uses ``spawn_result.created_at`` captured BEFORE the session
+        # closed (the row is detached after commit; cannot re-read).
         instance_data = {
             "instance_id": instance_id,
-            "agent_id": resolved_agent_id,
-            "parent_id": parent_id,
+            "agent_id": spawn_result.agent_id or resolved_agent_id,
+            "parent_id": spawn_result.parent_id,
             "status": "idle",
-            "project_id": project_id,
-            "created_at": created.created_at if created else None,
+            "project_id": spawn_result.project_id,
+            "created_at": spawn_result.created_at,
             "children": [],
             "title": None,
         }
@@ -429,6 +521,22 @@ class InstanceLifecycleService:
         3. Releases project lock if this instance holds one (via JobQueueService)
         4. Cleans up instance state and resources
 
+        H10 fix: the DB write portion (status + waiting_for + job cancel +
+        message_queue delete + job_locks release + instance_hierarchy cleanup)
+        runs inside a SINGLE ``WriteGuardSession`` transaction via
+        ``_terminate_instance_db_sync``, called through ``asyncio.to_thread``
+        so ``session.commit()`` cannot wedge the event loop. All post-commit
+        side effects (SSE / CompletionRegistry / lifecycle event / CM cleanup
+        / dispatch-bus notify / MCP cleanup / project-lock release / watcher
+        cleanup) fire AFTER the commit on the event loop.
+
+        Crash safety: a mid-cascade SIGKILL leaves the DB in a consistent
+        state — either all the rows are updated/deleted (one transaction) or
+        none are (the rollback on session close). Pre-fix, the cascade
+        spanned 10+ independent transactions and a crash could orphan jobs,
+        leak locks, or leave a half-terminated instance. See H10 in the
+        remediation plan.
+
         Args:
             instance_id: The ID of the instance to terminate.
 
@@ -437,12 +545,17 @@ class InstanceLifecycleService:
         """
         t0 = time.monotonic()
 
-        # Get instance metadata BEFORE modifying state (needed for children cascade)
+        # Get instance metadata BEFORE modifying state (needed for children cascade).
+        # This is a sync DB read but is wrapped defensively because the
+        # repository may not exist on partial mock setups (tests).
         meta = None
         if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
             meta = self._manager._instance_repository.get(instance_id)
 
-        # Re-entrancy guard: if already terminated, return early
+        # Re-entrancy guard: if already terminated, return early.
+        # NOTE: We re-read the status INSIDE the WriteGuardSession in the sync
+        # helper below; this pre-read is the fast-path short-circuit. The
+        # helper's own re-check is the authoritative guard for re-entry races.
         if meta and meta.status == InstanceStatus.TERMINATED.value:
             logger.info(f"Instance {instance_id[:8]}... already terminated, skipping")
             return True
@@ -470,16 +583,18 @@ class InstanceLifecycleService:
                         f"Cascading terminate to child instance: {cid[:8]}... "
                         f"(trigger=DELETE, parent={instance_id[:8]}...)"
                     )
-        
-        # 1. Cancel active requests for this instance
+
+        # ─── Pre-DB side effects (in-memory cleanup) ────────────────────────────
+        # These mutate in-memory state only and must run BEFORE the DB commit
+        # so the "instance is gone" view is consistent for any observer that
+        # races the WriteGuardSession commit.
+
+        # 1. Cancel active requests for this instance.
         self._manager._request_registry.cancel_by_instance(instance_id)
 
-        # 1.5. Cancel any running graph task for this instance, bounded-await unwind.
-        # Bounded wait: graph task unwinds when its in-flight LLM call returns or
-        # hits the LLM client's socket timeout. We cap so a stuck LLM call doesn't
-        # make DELETE hang; the LLM client's timeout is the real backstop.
-        # asyncio.shield protects against outer-cancel (e.g., client disconnect)
-        # leaking the unwinding graph task — the very problem this fix is closing.
+        # 1.5. Cancel any running graph task for this instance, bounded-await
+        # unwind. The graph task may take a few seconds to honor cancellation
+        # (LLM socket drain) but the daemon must not hang on DELETE.
         graph_task = self._manager._graph_tasks.pop(instance_id, None)
         self._manager.release_context_usage_cache(instance_id)
         graph_unwind_ms = 0
@@ -501,25 +616,25 @@ class InstanceLifecycleService:
                 f"(unwind_ms={graph_unwind_ms})"
             )
 
-        # 2. Clean up live hub connections for this instance
+        # 2. Clean up live hub connections for this instance.
         await self._manager._live_hub.cleanup_instance(instance_id)
 
-        # 2.5. Close MCP connections for this instance
+        # 2.5. Close MCP connections for this instance (async, no DB write).
         if hasattr(self._manager, '_mcp_service') and self._manager._mcp_service:
             try:
                 await self._manager._mcp_service.close_connections(instance_id)
             except Exception as e:
                 logger.warning(f"MCP cleanup failed for {instance_id[:8]}: {e}")
 
-        # 3. Remove from instances dict
+        # 3. Remove from in-memory instances dict.
         if instance_id in self._manager.instances:
             del self._manager.instances[instance_id]
         else:
-            # Instance not in memory but might still need cleanup (children cascade)
+            # Instance not in memory but might still need cleanup (children cascade).
             if meta is None:
                 return False
 
-        # 3.5. Clean up job watches for this instance
+        # 3.5. Clean up job watches for this instance (best-effort).
         if hasattr(self._manager, '_watcher_repo') and self._manager._watcher_repo:
             try:
                 removed = self._manager._watcher_repo.remove_all_watches_for_instance(instance_id)
@@ -528,105 +643,150 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to cleanup watches for instance {instance_id[:8]}...: {e}")
 
-        # 5. Update DB status to terminated using repository.
-        # Reset waiting_for to 0 to prevent counter divergence on revive.
-        # Single atomic write: a crash between status and waiting_for would
-        # leave (status=terminated, waiting_for=N>0) and cause rebuild_from_db
-        # to over-count on restart.
-        if hasattr(self._manager, '_instance_repository') and self._manager._instance_repository:
-            self._manager._instance_repository.update(
-                instance_id, status="terminated", waiting_for=0
+        # ─── Pre-fetch data needed for the DB write AND post-commit side effects ──
+        # H10 design: the sync DB helper runs ``session.commit()`` on a worker
+        # thread and returns a ``_TerminateResult`` NamedTuple carrying the
+        # captured parent_id / agent_id / counters. Anything the post-commit
+        # side effects need (lifecycle event publish, SSE) is captured here
+        # BEFORE we hand off to the worker thread — once the session closes,
+        # the row is detached and we cannot re-read it.
+        #
+        # meta may be None for in-memory-only cleanup paths; the helper handles
+        # that case with a fresh row read inside its own session.
+
+        # ─── Run the SINGLE-TRANSACTION DB cascade on a worker thread ────────
+        # ``asyncio.to_thread`` keeps ``session.commit()`` off the event loop
+        # so SQLite WAL write contention cannot deadlock the daemon (mirrors
+        # the H15 / _finalize_job pattern in job_feedback_observer.py and the
+        # _process_child_completion pattern in child_reports.py).
+        db_result = await asyncio.to_thread(
+            self._terminate_instance_db_sync,
+            self._manager.engine,
+            self._manager.write_guard,
+            instance_id,
+        )
+
+        if db_result.skip:
+            # Helper already logged; row was missing or already terminal.
+            # Re-entrancy guard re-discovered here — safe to no-op the
+            # post-commit side effects.
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.info(
+                f"[TRACE] terminate_instance: {instance_id[:8]}... skipped "
+                f"(row missing or already terminal; graph_unwind_ms={graph_unwind_ms}, "
+                f"jobs_cancelled=0, children={len(child_ids)}, duration_ms={duration_ms})"
+            )
+            return True
+
+        parent_id = db_result.parent_id
+        agent_id = db_result.agent_id
+        message_jobs_cancelled = db_result.message_jobs_cancelled
+        all_jobs_cancelled = db_result.all_jobs_cancelled
+        message_queue_removed = db_result.message_queue_removed
+        # Total cancelled jobs (message + remaining sweep) for the summary log.
+        jobs_cancelled = message_jobs_cancelled + all_jobs_cancelled
+
+        # ─── Post-commit outbox: fire side effects on the event loop ──────────
+        # All of these run AFTER the WriteGuardSession committed, so any
+        # subscriber (SSE client, watcher, completion consumer) sees a DB
+        # state consistent with the side-effect payload.
+
+        # 5.5. Emit status_change SSE event for the terminated instance.
+        try:
+            await self._manager._live_hub.stream_status_change(
+                instance_id, "terminated", agent_id=agent_id
+            )
+        except Exception as e:
+            logger.warning(
+                f"terminate_instance: status_change SSE emit failed for "
+                f"{instance_id[:8]}...: {e}"
             )
 
-        # 5.5. Emit status_change event
-        await self._manager._live_hub.stream_status_change(instance_id, "terminated", agent_id=meta.agent_id if meta else None)
-
-        # 6. Release project lock if JobQueueService is connected (async)
+        # 6. Release project lock if JobQueueService is connected.
         if self._job_queue_service is not None:
             try:
                 released_projects = await self._job_queue_service.release_lock_by_instance(instance_id)
                 if released_projects:
                     logger.info(
-                        f"Released {len(released_projects)} project lock(s) for instance {instance_id[:8]}...: "
-                        f"{released_projects}"
+                        f"Released {len(released_projects)} project lock(s) for instance "
+                        f"{instance_id[:8]}...: {released_projects}"
                     )
             except Exception as e:
                 logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
 
-        # 7. Mark any associated job as cancelled (no retry)
-        if self._job_queue_service is not None:
-            try:
-                job = self._job_queue_service.get_job_by_instance_sync(instance_id)
-                if job is not None and job.status == "processing":
-                    self._job_queue_service.complete_job_sync(
-                        job.job_id, DemandState.CANCELLED, error="Instance terminated",
-                        result_summary=None,
-                    )
-                    # Trigger next pending job for this project
-                    if job.project_id:
-                        self._job_queue_service.trigger_next_job_sync(job.project_id)
-            except Exception as e:
-                logger.warning(f"Failed to mark job as failed on terminate: {e}")
-
-        # Track jobs cancelled in steps 7.5 and 7.6 for the summary log
-        jobs_cancelled = 0
-
-        # 7.5. Cancel ALL MESSAGE jobs for this instance
+        # 7.5/7.6. Cancel remaining MESSAGE and non-PROCESSING jobs.
+        # These are best-effort async cancels. The DB cancel for the
+        # PROCESSING job is already in the helper; this loop only handles
+        # the per-job notify path that the helper did NOT do (the helper
+        # bulk-updates job rows but does not call cancel_job per job).
+        #
+        # Why this is safe AFTER commit: the DB cancel already happened;
+        # the only thing this loop does is fire the per-job side effects
+        # (notify_watchers etc.). A crash between the helper's commit and
+        # this loop leaves the rows terminal but un-notified — recoverable
+        # by the next job_processor poll.
         if self._job_queue_service is not None:
             try:
                 message_jobs = self._job_queue_service._repository.find_jobs_by_instance(
                     instance_id, job_type="message"
                 )
                 for msg_job in message_jobs:
-                    await self._job_queue_service.cancel_message_job(msg_job.job_id)
-                jobs_cancelled += len(message_jobs)
+                    try:
+                        await self._job_queue_service.cancel_message_job(msg_job.job_id)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to cancel MESSAGE job {msg_job.job_id[:8]}... "
+                            f"on terminate: {e}"
+                        )
             except Exception as e:
-                logger.warning(f"Failed to cancel MESSAGE jobs on terminate: {e}")
+                logger.warning(f"Failed to enumerate MESSAGE jobs on terminate: {e}")
 
-        # 7.6. Cancel ALL remaining jobs for this instance (comprehensive sweep)
-        if self._job_queue_service is not None:
             try:
-                # Find ALL jobs still associated with this instance (any type, any non-terminal state)
                 all_jobs = self._job_queue_service._repository.find_jobs_by_instance(
-                    instance_id, job_type=None  # All types
+                    instance_id, job_type=None
                 )
                 for remaining_job in all_jobs:
-                    # Skip already-terminal states
                     if remaining_job.status in ("completed", "cancelled", "dead_letter"):
                         continue
-                    logger.info(
-                        f"terminate_instance: cancelling remaining job {remaining_job.job_id[:8]}... "
-                        f"(type={remaining_job.job_type}, status={remaining_job.status}) "
-                        f"for instance {instance_id[:8]}..."
-                    )
                     try:
                         if remaining_job.status == "processing":
-                            # Use complete_job() to avoid re-entrancy — cancel_job() on PROCESSING
-                            # jobs may trigger terminate_instance() again via _is_instance_alive check
+                            # Defensive: the helper should have already
+                            # transitioned PROCESSING jobs to CANCELLED in
+                            # the same transaction. complete_job() here is
+                            # idempotent — atomic_transition will no-op on
+                            # already-terminal rows.
                             await self._job_queue_service.complete_job(
                                 remaining_job.job_id,
                                 demand_state=DemandState.CANCELLED,
                                 error="Instance terminated during cleanup",
                             )
                         else:
-                            # PENDING, FAILED — safe to use cancel_job()
+                            # PENDING / FAILED — safe to use cancel_job().
                             await self._job_queue_service.cancel_job(remaining_job.job_id)
-                        jobs_cancelled += 1
                     except Exception as e:
                         logger.warning(
-                            f"terminate_instance: failed to cancel job {remaining_job.job_id[:8]}...: {e}"
+                            f"terminate_instance: failed to cancel job "
+                            f"{remaining_job.job_id[:8]}...: {e}"
                         )
             except Exception as e:
                 logger.warning(f"Failed to cleanup remaining jobs for instance {instance_id[:8]}...: {e}")
 
+            # Trigger the next pending job for the project so the queue
+            # doesn't stall (mirrors the original step 7 follow-up).
+            try:
+                processing_job = self._job_queue_service.get_job_by_instance_sync(instance_id)
+                if processing_job and processing_job.project_id:
+                    self._job_queue_service.trigger_next_job_sync(processing_job.project_id)
+            except Exception as e:
+                logger.debug(
+                    f"trigger_next_job_sync after terminate of "
+                    f"{instance_id[:8]}... failed: {e}"
+                )
+
         # 9. Wake the JobProcessor so it can sweep TERMINATED-instance artifacts
         # immediately rather than waiting up to 30s for the next poll boundary.
-        # Safe to call even if the DB writes haven't fully settled — early wakeup
-        # is benign (JobProcessor's orphan-check will just see RUNNING and skip,
-        # then catch TERMINATED on its next pass).
-        # Attribute path: manager → _job_queue_mgmt_service → _dispatch_bus.
-        # Set at daemon/api.py:210 (direct assignment, not via setter).
-        # NOT self._manager._dispatch_bus — InstanceManager has no such attribute.
+        # Safe to call after commit — JobProcessor's orphan-check will see
+        # TERMINATED and reclaim resources promptly.
         mgmt = getattr(self._manager, '_job_queue_mgmt_service', None)
         bus = getattr(mgmt, '_dispatch_bus', None) if mgmt is not None else None
         if bus is not None:
@@ -637,14 +797,6 @@ class InstanceLifecycleService:
                     f"Failed to notify dispatch bus during terminate of {instance_id[:8]}... "
                     f"({type(e).__name__}: {e})"
                 )
-
-        # 7.7. Clean up MessageQueue entries for this instance
-        if hasattr(self._manager, '_queue_repository') and self._manager._queue_repository:
-            try:
-                count = self._manager._queue_repository.delete_by_instance(instance_id)
-                logger.debug(f"[TRACE] terminate_instance: removed {count} MessageQueue entries for instance {instance_id[:8]}...")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup MessageQueue entries for instance {instance_id[:8]}...: {e}")
 
         # 7.8. Clear CorrelationManager state for the terminated instance.
         # Without this, a terminated-and-revived instance would inherit its
@@ -663,15 +815,20 @@ class InstanceLifecycleService:
                     f"{instance_id[:8]}...: {e}"
                 )
 
-        # 8. Publish lifecycle event for terminated instance
-        parent_id = meta.parent_id if meta else None
+        # 8. Publish lifecycle event for terminated instance.
         if self._events_service:
-            await self._events_service._publish_instance_lifecycle_event(
-                instance_id=instance_id,
-                status="terminated",
-                error=None,
-                parent_id=parent_id,
-            )
+            try:
+                await self._events_service._publish_instance_lifecycle_event(
+                    instance_id=instance_id,
+                    status="terminated",
+                    error=None,
+                    parent_id=parent_id,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to publish lifecycle event for terminated instance "
+                    f"{instance_id[:8]}...: {e}"
+                )
 
         # Summary log: surface total duration and unwind cost in one line so the
         # next latency regression is self-explanatory. Matches the [TRACE] style
@@ -680,7 +837,8 @@ class InstanceLifecycleService:
         logger.info(
             f"[TRACE] terminate_instance: {instance_id[:8]}... complete "
             f"(graph_unwind_ms={graph_unwind_ms}, jobs_cancelled={jobs_cancelled}, "
-            f"children={len(child_ids)}, duration_ms={duration_ms})"
+            f"children={len(child_ids)}, duration_ms={duration_ms}, "
+            f"msgq_removed={message_queue_removed})"
         )
 
         return True
@@ -691,6 +849,14 @@ class InstanceLifecycleService:
         Uses tree traversal helpers to find and pause the entire tree.
         Cancels active requests and sets status to paused (resumable).
         Does NOT remove instances from memory or release locks.
+
+        L14 fix: per-tree-node ``repo.update(...)`` calls are batched
+        into a SINGLE ``UPDATE ... WHERE instance_id IN (...)`` statement
+        via ``_pause_cascade_db_sync``. Pre-fix the cascade loop issued
+        one UPDATE per node (N+1 transactions for an N-node tree); a
+        crash mid-loop left half the tree paused and half running. L14
+        collapses all node updates into ONE transaction so a crash
+        either pauses the entire tree or none of it.
 
         Args:
             instance_id: The ID of the instance to pause.
@@ -713,113 +879,109 @@ class InstanceLifecycleService:
             logger.warning(f"No tree found for instance {instance_id[:8]}...")
             return {"paused_ids": [], "skipped_ids": [instance_id]}
 
-        paused_ids: list[str] = []
+        paused_at_iso = datetime.now(timezone.utc).isoformat()
+
+        # L14: pre-classify which nodes should be paused (filter out
+        # already-paused / not-found nodes). The sync DB helper does
+        # NOT make per-node decisions — the caller classifies once
+        # and the helper writes all eligible nodes in ONE batched
+        # UPDATE.
+        paused_instances_data: list[tuple[str, str | None, int]] = []
         skipped_ids: list[str] = []
 
-        # Helper function to pause a single instance (non-recursive)
-        def _pause_single(target_id: str, prefetched_meta: Instance | None = None) -> bool:
-            """Pause a single instance. Returns True if paused, False if skipped.
+        # Pre-fetch the CorrelationManager once — needed for the
+        # waiting_for carve-out decision (parent has pending children
+        # → reset cache to 0).
+        cm = get_correlation_manager()
 
-            Args:
-                target_id: The ID of the instance to pause.
-                prefetched_meta: Pre-fetched metadata (avoids redundant DB lookup).
-            """
-            meta = prefetched_meta or repo.get(target_id)
-
-            if meta is None:
-                logger.warning(f"Instance {target_id[:8]}... not found in DB, skipping pause")
-                return False
-
-            # Skip if already paused
-            if meta.status == InstanceStatus.PAUSED.value:
-                logger.info(f"Instance {target_id[:8]}... is already paused, skipping")
-                return False
-
-            # 1. Cancel active LLM requests (via cancellation callbacks)
-            self._manager._request_registry.cancel_by_instance(
-                target_id, CancellationReason.USER_STOPPED
-            )
-
-            # 2. Cancel the running graph task (interrupts astream/ainvoke loop)
-            # This raises asyncio.CancelledError in the streaming coroutine
-            # Use pop() to prevent stale references after cancellation (consistent with terminate_instance)
-            graph_task = self._manager._graph_tasks.pop(target_id, None)
-            self._manager.release_context_usage_cache(target_id)
-            if graph_task and not graph_task.done():
-                graph_task.cancel()
-                logger.info(f"Cancelled graph task for instance {target_id[:8]}...")
-
-            # 3. Update DB status to paused
-            # Reset waiting_for to 0 if instance was waiting for children
-            # to prevent deadlock on resume (children are paused too).
-            #
-            # Phase 4: the pending-children decision now consults the
-            # CorrelationManager (authoritative in-memory pending set) when
-            # available. ``waiting_for`` is the rebuild cache (ADR-011) and
-            # the graceful-degradation fallback. Resetting the cache to 0 on
-            # pause is still required for crash recovery consistency — the
-            # CM is cleared on daemon restart, so the cache must reflect a
-            # safe "no pending children" state until resume re-registers them.
-            paused_at = datetime.now(timezone.utc).isoformat()
-            cm = get_correlation_manager()
-            if cm is not None:
-                has_pending_children = cm.get_pending_count(target_id) > 0
-            else:
-                has_pending_children = bool(
-                    getattr(meta, "waiting_for", None) and meta.waiting_for > 0
-                )
-            if has_pending_children:
-                # Pause carve-out (ADR-011): the ``waiting_for=0`` write below
-                # looks contradictory (instance DOES have pending children),
-                # but it is the documented Phase 4 carve-out. The CorrelationManager
-                # is the authoritative source of pending children; the
-                # ``waiting_for`` column is a REBUILD-ONLY cache for crash
-                # recovery, never read for control flow. Children are also being
-                # paused in the cascade above, so no new completions can arrive
-                # to decrement it during the paused window. On resume, the
-                # child instances re-register with the CM, so the count is
-                # re-derived authoritatively from CM — not from the cached
-                # ``waiting_for`` value. Resetting the cache to 0 here keeps
-                # the DB consistent with the "no completions possible right
-                # now" state during the paused window.
-                repo.update(
-                    target_id,
-                    status=InstanceStatus.PAUSED.value,
-                    waiting_for=0,
-                    paused_at=paused_at,
-                )
-            else:
-                repo.update(
-                    target_id,
-                    status=InstanceStatus.PAUSED.value,
-                    paused_at=paused_at,
-                )
-
-            # NOTE: Unlike terminate_instance, we do NOT:
-            # - Remove from instances dict (instance stays in memory, resumable)
-            # - Release project locks (job continues)
-            # - Mark jobs as cancelled
-            # - Clean up live hub connections
-
-            logger.info(f"Paused instance {target_id[:8]}...")
-            return True
-
-        # 3. Iterate over all nodes in the tree and pause each one
         for node_id in tree_ids:
             try:
                 meta = repo.get(node_id)
-                if _pause_single(node_id, prefetched_meta=meta):
-                    paused_ids.append(node_id)
-                    # Emit status_change event for paused status
-                    await self._manager._live_hub.stream_status_change(
-                        node_id, InstanceStatus.PAUSED.value, agent_id=meta.agent_id if meta else None
-                    )
-                else:
+
+                if meta is None:
+                    logger.warning(f"Instance {node_id[:8]}... not found in DB, skipping pause")
                     skipped_ids.append(node_id)
+                    continue
+
+                # Skip if already paused
+                if meta.status == InstanceStatus.PAUSED.value:
+                    logger.info(f"Instance {node_id[:8]}... is already paused, skipping")
+                    skipped_ids.append(node_id)
+                    continue
+
+                # 1. Cancel active LLM requests (via cancellation callbacks)
+                self._manager._request_registry.cancel_by_instance(
+                    node_id, CancellationReason.USER_STOPPED
+                )
+
+                # 2. Cancel the running graph task (interrupts astream/ainvoke loop)
+                # This raises asyncio.CancelledError in the streaming coroutine
+                # Use pop() to prevent stale references after cancellation (consistent with terminate_instance)
+                graph_task = self._manager._graph_tasks.pop(node_id, None)
+                self._manager.release_context_usage_cache(node_id)
+                if graph_task and not graph_task.done():
+                    graph_task.cancel()
+                    logger.info(f"Cancelled graph task for instance {node_id[:8]}...")
+
+                # 3. Resolve waiting_for reset decision.
+                # Phase 4 carve-out: when the CorrelationManager has
+                # pending children for this parent, reset ``waiting_for``
+                # to 0 (the CM is authoritative; the cache is rebuild-
+                # only). When CM is None, fall back to the legacy
+                # ``waiting_for`` column read.
+                if cm is not None:
+                    has_pending_children = cm.get_pending_count(node_id) > 0
+                else:
+                    has_pending_children = bool(
+                        getattr(meta, "waiting_for", None) and meta.waiting_for > 0
+                    )
+
+                # L14: capture data for the batched UPDATE; the actual
+                # write happens once in the sync helper below.
+                paused_instances_data.append(
+                    (node_id, meta.agent_id, 0 if has_pending_children else meta.waiting_for or 0)
+                )
+
+                logger.info(f"Pausing instance {node_id[:8]}...")
+
             except Exception as e:
                 logger.error(f"Failed to pause node {node_id[:8]}...: {e}")
                 skipped_ids.append(node_id)
 
+        # Single batched UPDATE — L14 transaction-boundary fix.
+        db_result = await asyncio.to_thread(
+            self._pause_cascade_db_sync,
+            self._manager.engine,
+            self._manager.write_guard,
+            tree_ids=tree_ids,
+            paused_at_iso=paused_at_iso,
+            paused_instances_data=paused_instances_data,
+        )
+
+        # Post-commit side effects: SSE status_change per paused node.
+        paused_ids = db_result.updated_ids
+        agent_ids_by_instance = db_result.agent_ids_by_instance
+        for node_id in paused_ids:
+            try:
+                await self._manager._live_hub.stream_status_change(
+                    node_id,
+                    InstanceStatus.PAUSED.value,
+                    agent_id=agent_ids_by_instance.get(node_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"pause_instance_cascade: status_change SSE emit failed "
+                    f"for {node_id[:8]}...: {e}"
+                )
+
+        # NOTE: Unlike terminate_instance, we do NOT:
+        # - Remove from instances dict (instance stays in memory, resumable)
+        # - Release project locks (job continues)
+        # - Mark jobs as cancelled
+        # - Clean up live hub connections
+
+        # Combine the helper's updated_ids (== nodes we wrote to) with the
+        # skipped_ids the caller collected above (already-paused / not-found).
         return {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
 
     async def resume_instance_cascade(self, instance_id: str) -> dict:
@@ -828,6 +990,13 @@ class InstanceLifecycleService:
         Uses tree traversal helpers to find and resume the entire tree.
         Sets status to RUNNING and clears paused_at.
         Does NOT re-spawn or restart instances - just unpauses them.
+
+        L14 fix: per-tree-node ``repo.update(...)`` calls are batched
+        into a SINGLE ``UPDATE ... WHERE instance_id IN (...)`` statement
+        via ``_resume_cascade_db_sync`` (followed by a small ancestor-
+        only UPDATE for the ``waiting_for=1`` carve-out). Pre-fix the
+        cascade loop issued one UPDATE per node; L14 collapses them
+        so a crash either resumes the entire tree or none of it.
 
         Args:
             instance_id: The ID of the instance to resume.
@@ -855,10 +1024,12 @@ class InstanceLifecycleService:
         ancestor_ids = set(repo.get_ancestor_ids(instance_id))
         is_root_resume = (instance_id == root_id)
 
-        resumed_ids: list[str] = []
+        # L14: pre-classify which nodes are eligible for resume (must
+        # be in PAUSED status). Already-running nodes are skipped.
+        resumable_ids: list[str] = []
         skipped_ids: list[str] = []
+        agent_ids_by_instance: dict[str, str | None] = {}
 
-        # 4. Iterate over all nodes in the tree and resume each one
         for node_id in tree_ids:
             try:
                 meta = repo.get(node_id)
@@ -874,39 +1045,49 @@ class InstanceLifecycleService:
                     skipped_ids.append(node_id)
                     continue
 
-                # Determine waiting_for value:
-                # - If resuming from root/parent: waiting_for stays 0 for all nodes
-                # - If resuming from child: only ANCESTORS get waiting_for = 1
-                #
-                # Phase 4: this is a WRITE — the rebuild cache (ADR-011) is
-                # being re-initialized on resume. The CM is re-populated by
-                # the registration paths elsewhere (not here); this sets the
-                # initial DB cache so ``rebuild_from_db()`` can recover the
-                # parent/child relationship after a restart. Intentionally
-                # retained — DO NOT route through the CM API.
-                if is_root_resume:
-                    waiting_for_value = 0
-                else:
-                    # Only ancestors get waiting_for = 1, others stay at 0
-                    waiting_for_value = 1 if node_id in ancestor_ids else 0
+                resumable_ids.append(node_id)
+                agent_ids_by_instance[node_id] = meta.agent_id
 
-                # Update DB status to running and clear paused_at
-                repo.update(
-                    node_id,
-                    status=InstanceStatus.RUNNING.value,
-                    paused_at=None,  # Clear paused_at on resume
-                    waiting_for=waiting_for_value,
-                )
-                logger.info(f"Resumed instance {node_id[:8]}... (waiting_for={waiting_for_value})")
-                resumed_ids.append(node_id)
-
-                # Emit status_change event for running status
-                await self._manager._live_hub.stream_status_change(
-                    node_id, InstanceStatus.RUNNING.value, agent_id=meta.agent_id
-                )
             except Exception as e:
                 logger.error(f"Failed to resume node {node_id[:8]}...: {e}")
                 skipped_ids.append(node_id)
+
+        # Single batched UPDATE — L14 transaction-boundary fix.
+        # The helper issues (a) one UPDATE that flips status +
+        # paused_at + waiting_for=0 for all eligible nodes, then
+        # (b) one follow-up UPDATE for the ancestor ``waiting_for=1``
+        # carve-out when resuming from a non-root node. Both UPDATEs
+        # commit atomically.
+        if resumable_ids:
+            db_result = await asyncio.to_thread(
+                self._resume_cascade_db_sync,
+                self._manager.engine,
+                self._manager.write_guard,
+                tree_ids=resumable_ids,
+                ancestor_ids=ancestor_ids,
+                is_root_resume=is_root_resume,
+            )
+            waiting_for_by_instance = db_result.waiting_for_by_instance
+            resumed_ids = db_result.updated_ids
+        else:
+            waiting_for_by_instance = {}
+            resumed_ids = []
+
+        # Post-commit side effects: SSE status_change per resumed node.
+        for node_id in resumed_ids:
+            try:
+                await self._manager._live_hub.stream_status_change(
+                    node_id,
+                    InstanceStatus.RUNNING.value,
+                    agent_id=agent_ids_by_instance.get(node_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"resume_instance_cascade: status_change SSE emit failed "
+                    f"for {node_id[:8]}...: {e}"
+                )
+            wf = waiting_for_by_instance.get(node_id, 0)
+            logger.info(f"Resumed instance {node_id[:8]}... (waiting_for={wf})")
 
         return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids, "target_id": instance_id}
 
@@ -1093,3 +1274,594 @@ class InstanceLifecycleService:
 
         # Clear database instances
         return self._manager._instance_repository.delete_all()
+
+    # =================================================================
+    # Sync DB helpers — H10/M8/M9/L14 transaction-boundary fixes
+    # =================================================================
+    # These ``_*_db_sync`` methods perform ALL DB writes inside a single
+    # ``WriteGuardSession`` transaction (via ``asyncio.to_thread`` from the
+    # async callers). They are the established pattern in this codebase:
+    # child_reports.py:_process_child_completion_db_sync and
+    # job_feedback_observer.py:_finalize_job_db_sync / _finalize_instance_db_sync.
+    #
+    # Returns ``_XxxResult`` NamedTuples carrying all data the async caller
+    # needs to fire post-commit side effects (SSE / CompletionRegistry /
+    # lifecycle event / CM cleanup / dispatch-bus notify). NamedTuple fields
+    # capture post-commit values BEFORE the session closes, since the row
+    # becomes detached after ``session.commit()``.
+
+    def _terminate_instance_db_sync(
+        self,
+        engine,
+        write_guard,
+        instance_id: str,
+    ) -> _TerminateResult:
+        """Sync DB half of ``terminate_instance`` (H10 fix).
+
+        Runs in a worker thread via ``asyncio.to_thread``. Performs ALL
+        DB writes for the terminate cascade inside ONE
+        ``WriteGuardSession`` transaction:
+
+          1. Re-read the instance row (authoritative re-entrancy guard;
+             the async caller already short-circuited on a fast-path read
+             but a concurrent writer could have raced us).
+          2. UPDATE ``instances`` SET status='terminated', waiting_for=0,
+             version+=1, updated_at=now. Single-statement atomic — a
+             crash mid-UPDATE rolls back via ``WriteGuardSession.__exit__``.
+          3. SELECT ``job_queue_items`` WHERE instance_id = :id AND
+             status IN (PROCESSING, PENDING, FAILED) — the jobs to cancel.
+          4. For the single PROCESSING job (if any), issue the in-session
+             ``UPDATE job_queue_items SET status='cancelled' ... WHERE
+             job_id=:id AND status='processing' RETURNING project_id`` so
+             the project trigger-next-job logic still has the project_id.
+          5. For PENDING / FAILED jobs, bulk-cancel via
+             ``UPDATE job_queue_items SET status='cancelled' ... WHERE
+             instance_id=:id AND status IN ('pending', 'failed')``.
+          6. DELETE ``job_locks`` WHERE instance_id=:id (lock release).
+          7. DELETE ``message_queue`` WHERE instance_id=:id.
+          8. DELETE ``instance_hierarchy`` rows where this instance is the
+             parent (so future tree traversals don't include the dead
+             children). The child rows themselves stay (so audit logs /
+             completion reports still resolve); only the parent link is
+             removed.
+          9. COMMIT — all-or-nothing.
+
+        ``WriteGuardSession`` is the shutdown gate. It is NOT a mutex: a
+        concurrent ``pause_writes()`` will block here until our commit
+        completes (via ``_drain_event.wait()`` in the gate). This is the
+        desired behavior — the migration entry point can safely swap the
+        engine after we drain.
+
+        Returns ``_TerminateResult`` with everything the async caller
+        needs for post-commit side effects:
+
+          * ``skip=True`` — row missing OR already terminal (idempotency
+            guard). Caller short-circuits WITHOUT firing any side
+            effects. Re-entry safety: this is the authoritative guard
+            for terminate re-entrancy, replacing the old fast-path-only
+            check.
+          * ``parent_id`` / ``agent_id`` — captured from the row before
+            commit (row is detached after).
+          * Counter fields (message_jobs_cancelled, all_jobs_cancelled,
+            message_queue_removed) for the [TRACE] summary log.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with WriteGuardSession(Session(engine), write_guard) as session:
+            instance = session.get(Instance, instance_id)
+            if instance is None:
+                logger.debug(
+                    f"terminate_instance: instance {instance_id[:8]}... not "
+                    f"found in DB, skipping (sync helper)"
+                )
+                return _TerminateResult(
+                    skip=True,
+                    parent_id=None,
+                    agent_id=None,
+                    message_jobs_cancelled=0,
+                    all_jobs_cancelled=0,
+                    message_queue_removed=0,
+                )
+            if instance.status == InstanceStatus.TERMINATED.value:
+                # Re-entrancy guard re-discovered here. The async caller
+                # already short-circuited on the fast-path pre-read, but
+                # a concurrent terminate could have raced us between that
+                # read and this one. Idempotent no-op.
+                logger.debug(
+                    f"terminate_instance: instance {instance_id[:8]}... already "
+                    f"terminated (sync helper re-entrancy guard)"
+                )
+                return _TerminateResult(
+                    skip=True,
+                    parent_id=instance.parent_id,
+                    agent_id=instance.agent_id,
+                    message_jobs_cancelled=0,
+                    all_jobs_cancelled=0,
+                    message_queue_removed=0,
+                )
+
+            # Capture fields needed for post-commit side effects BEFORE
+            # we mutate the row. Row is detached after commit.
+            parent_id = instance.parent_id
+            agent_id = instance.agent_id
+
+            # ── Step 1: atomic instance UPDATE (status + waiting_for) ──
+            # Single-statement update keeps the (status, waiting_for)
+            # pair atomic — pre-fix this was a 2-write sequence that
+            # could leave (status=terminated, waiting_for=N>0) on crash.
+            session.execute(
+                text(
+                    "UPDATE instances "
+                    "SET status = 'terminated', "
+                    "    waiting_for = 0, "
+                    "    updated_at = :now, "
+                    "    version = COALESCE(version, 1) + 1 "
+                    "WHERE instance_id = :iid"
+                ),
+                {"iid": instance_id, "now": now_iso},
+            )
+
+            # ── Step 2: cancel jobs in the SAME transaction ──
+            # Imported lazily to keep the module-level import surface
+            # small and avoid circular-import risk through the job_queue
+            # service.
+            from ..repositories.job_queue.models import JobItem
+
+            # Find all non-terminal jobs for this instance.
+            non_terminal_statuses = ("processing", "pending", "failed")
+            jobs = list(
+                session.exec(
+                    select(JobItem.job_id, JobItem.status, JobItem.project_id)
+                    .where(JobItem.instance_id == instance_id)
+                    .where(JobItem.status.in_(non_terminal_statuses))
+                )
+            )
+
+            message_jobs_cancelled = 0
+            all_jobs_cancelled = 0
+            cancelled_project_ids: set[str] = set()
+
+            if jobs:
+                processing_job_ids = [j for j in jobs if j.status == "processing"]
+                non_processing_job_ids = [j for j in jobs if j.status != "processing"]
+
+                # PROCESSING → CANCELLED with the canonical transition.
+                # We issue the atomic UPDATE with a status guard so a
+                # concurrent finalizer (CM callback) that already moved
+                # the job to COMPLETED/FAILED sees rowcount=0 and we
+                # no-op. The JobItem.version_id_col additionally appends
+                # ``AND version = :expected`` on the ORM path; the Core
+                # UPDATE below is even safer — no version check, but the
+                # ``status='processing'`` predicate is the guard.
+                completed_at = now_iso
+                cancelled_at = now_iso
+                if processing_job_ids:
+                    session.execute(
+                        text(
+                            "UPDATE job_queue_items "
+                            "SET status = 'cancelled', "
+                            "    cancelled_at = :cancelled_at, "
+                            "    completed_at = :completed_at, "
+                            "    error_message = :err, "
+                            "    result_summary = NULL "
+                            "WHERE job_id IN :job_ids "
+                            "  AND status = 'processing'"
+                        ).bindparams(
+                            bindparam("job_ids", expanding=True),
+                        ),
+                        {
+                            "job_ids": [j.job_id for j in processing_job_ids],
+                            "cancelled_at": cancelled_at,
+                            "completed_at": completed_at,
+                            "err": "Instance terminated",
+                        },
+                    )
+                    # Capture the project_id of the processing job for
+                    # the trigger-next-job follow-up. The async caller
+                    # does the actual trigger (we cannot reach the
+                    # dispatch bus from this sync helper).
+                    for j in processing_job_ids:
+                        if j.project_id:
+                            cancelled_project_ids.add(j.project_id)
+
+                # PENDING / FAILED → CANCELLED (idempotent — these
+                # statuses can also flip to CANCELLED directly).
+                if non_processing_job_ids:
+                    session.execute(
+                        text(
+                            "UPDATE job_queue_items "
+                            "SET status = 'cancelled', "
+                            "    cancelled_at = :cancelled_at, "
+                            "    error_message = COALESCE(error_message, :err) "
+                            "WHERE job_id IN :job_ids "
+                            "  AND status IN ('pending', 'failed')"
+                        ).bindparams(
+                            bindparam("job_ids", expanding=True),
+                        ),
+                        {
+                            "job_ids": [j.job_id for j in non_processing_job_ids],
+                            "cancelled_at": cancelled_at,
+                            "err": "Instance terminated",
+                        },
+                    )
+
+                # message-job-style count: count from the just-cancelled
+                # set where job_type='message'. We don't have the type
+                # on hand here, so the async caller will recount via
+                # ``find_jobs_by_instance(job_type='message')`` for the
+                # post-commit side effects. For the [TRACE] log we
+                # approximate by counting the pre-update set that had
+                # ``job_type='message'`` (loaded here for accuracy).
+                message_job_rows = list(
+                    session.exec(
+                        select(JobItem.job_id)
+                        .where(JobItem.instance_id == instance_id)
+                        .where(JobItem.job_type == "message")
+                        .where(JobItem.status.in_(non_terminal_statuses))
+                    )
+                )
+                message_jobs_cancelled = len(message_job_rows)
+                all_jobs_cancelled = len(jobs)
+
+            # ── Step 3: delete ``job_locks`` rows for this instance ──
+            from ..repositories.job_queue.models import JobLock
+
+            session.execute(
+                text("DELETE FROM job_locks WHERE instance_id = :iid"),
+                {"iid": instance_id},
+            )
+
+            # ── Step 4: delete ``message_queue`` rows for this instance ──
+            from ..repositories.message_queue.models import MessageQueue
+
+            msgq_result = session.execute(
+                text("DELETE FROM message_queue WHERE instance_id = :iid"),
+                {"iid": instance_id},
+            )
+            message_queue_removed = (
+                msgq_result.rowcount if msgq_result.rowcount is not None else 0
+            )
+
+            # ── Step 5: clean up ``instance_hierarchy`` rows where this ──
+            # instance is the parent. We keep the child rows themselves
+            # so audit / completion-report lookups still resolve, but
+            # remove the parent→child links so future tree traversals
+            # don't see the dead subtree. The child rows are orphaned
+            # intentionally — they will be reaped by a separate GC sweep.
+            session.execute(
+                text("DELETE FROM instance_hierarchy WHERE parent_id = :iid"),
+                {"iid": instance_id},
+            )
+
+            # ── COMMIT ── atomic across all 5 steps above.
+            session.commit()
+
+            return _TerminateResult(
+                skip=False,
+                parent_id=parent_id,
+                agent_id=agent_id,
+                message_jobs_cancelled=message_jobs_cancelled,
+                all_jobs_cancelled=all_jobs_cancelled,
+                message_queue_removed=message_queue_removed,
+            )
+
+    def _spawn_instance_db_sync(
+        self,
+        engine,
+        write_guard,
+        *,
+        instance_id: str,
+        resolved_agent_id: str,
+        resolved_agent_dir: str,
+        agent_name: str,
+        parent_id: str | None,
+        project_id: str | None,
+        instance_metadata: dict[str, Any],
+    ) -> _SpawnResult:
+        """Sync DB half of ``spawn_instance`` (M8 fix).
+
+        Runs in the caller's thread (sync). Performs ALL DB writes for the
+        spawn inside ONE ``WriteGuardSession`` transaction:
+
+          1. SELECT parent (if parent_id is set) for source inheritance.
+          2. INSERT INTO instances.
+          3. INSERT INTO instance_hierarchy (if parent_id is set).
+          4. If parent has ``original_source`` metadata, append it to the
+             child's instance_metadata via the dialect-aware
+             ``jsonb_set`` / ``json_set`` UPDATE — atomic with the
+             INSERTs so the child is never visible without its inherited
+             source.
+          5. COMMIT — atomic.
+
+        Pre-fix, the cascade was three separate transactions:
+
+          (a) ``instance_repository.create()`` — own session
+          (b) ``instance_repository.get(parent_id)`` — own session
+          (c) ``instance_repository.set_metadata(original_source)`` — own session
+
+        A crash between (b) and (c) left a child instance visible without
+        its inherited ``original_source``. M8 collapses these into one
+        transaction so the child is either fully created (with inherited
+        source) or not created at all.
+
+        The ``instance_hierarchy`` insert was already inside the
+        ``create()`` call's session (see repository.py:144-150), so it
+        moves with us into the unified session for free.
+
+        ``WriteGuardSession`` is the shutdown gate; see
+        :meth:`_terminate_instance_db_sync` for the long-form contract.
+
+        Returns ``_SpawnResult`` carrying the captured ``created_at``
+        and parent / agent / project IDs the async caller (or the sync
+        public method) needs to fire ``stream_instance_created`` SSE.
+        """
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        with WriteGuardSession(Session(engine), write_guard) as session:
+            # Step 1: parent lookup for source inheritance. Done INSIDE
+            # the same session so we see a consistent snapshot.
+            inherited_source: str | None = None
+            if parent_id:
+                parent_row = session.get(Instance, parent_id)
+                if parent_row is not None and parent_row.instance_metadata:
+                    inherited_source = parent_row.instance_metadata.get(
+                        "original_source"
+                    )
+
+            # Merge inherited source into the metadata dict (in-memory).
+            # The dialect-aware atomic metadata write below handles the
+            # JSON write for us; we only need to pass the merged dict.
+            effective_metadata = dict(instance_metadata or {})
+            if inherited_source and "original_source" not in effective_metadata:
+                effective_metadata["original_source"] = inherited_source
+
+            # Step 2: INSERT INTO instances. Use the ORM ``add`` so the
+            # SQLModel ``version_id_col`` machinery auto-emits the
+            # initial version=1 — matches the pre-fix behavior.
+            new_instance = Instance(
+                instance_id=instance_id,
+                project_id=project_id,
+                agent_id=resolved_agent_id,
+                agent_dir=resolved_agent_dir,
+                agent_name=agent_name,
+                parent_id=parent_id,
+                status=InstanceStatus.IDLE.value,
+                instance_metadata=effective_metadata,
+                children="[]",
+                waiting_for=0,
+                version=1,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+            session.add(new_instance)
+
+            # Step 3: hierarchy insert (mirrors repository.py:144-150).
+            if parent_id is not None:
+                session.add(
+                    InstanceHierarchy(
+                        parent_id=parent_id,
+                        child_id=instance_id,
+                        created_at=now_iso,
+                    )
+                )
+
+            # Step 4: COMMIT. The dialect-aware metadata write that
+            # ``set_metadata`` does (jsonb_set / json_set) is unnecessary
+            # because we already passed ``effective_metadata`` to the
+            # Instance constructor — SQLAlchemy serializes the dict to
+            # the JSON column on flush. If a future caller needs to
+            # patch a single key atomically post-insert, use the
+            # existing ``set_metadata`` repository method which has its
+            # own dialect-aware UPDATE.
+            session.commit()
+            session.refresh(new_instance)
+
+            return _SpawnResult(
+                created=True,
+                parent_id=parent_id,
+                agent_id=resolved_agent_id,
+                project_id=project_id,
+                created_at=new_instance.created_at,
+                inherited_source=bool(inherited_source),
+            )
+
+    def _pause_cascade_db_sync(
+        self,
+        engine,
+        write_guard,
+        *,
+        tree_ids: list[str],
+        paused_at_iso: str,
+        paused_instances_data: list[tuple[str, str | None, int]],
+    ) -> _CascadeUpdateResult:
+        """Sync DB half of ``pause_instance_cascade`` (L14 fix).
+
+        Runs in the caller's thread (sync). Performs the per-tree-node
+        pause updates in ONE batched ``UPDATE ... WHERE instance_id IN
+        (...)`` statement instead of N+1 per-node updates.
+
+        Pre-fix, the cascade loop called ``repo.update(node_id, ...)``
+        for every node — N separate transactions. A crash mid-loop left
+        half the tree paused and half running (zombie / split-brain state).
+        L14 collapses the N updates into a single ``UPDATE`` so a crash
+        either pauses the entire tree or none of it.
+
+        Args:
+            engine: The shared SQLAlchemy engine.
+            write_guard: The shared WritePauseGuard.
+            tree_ids: All node IDs in the tree (from
+                ``repo.get_tree_ids(root_id)``).
+            paused_at_iso: ISO-8601 timestamp for the paused_at column.
+            paused_instances_data: List of ``(instance_id, agent_id,
+                waiting_for)`` tuples for nodes that should be paused.
+                The caller pre-filters out already-paused nodes (skip
+                behavior) and pre-classifies the waiting_for reset
+                (parent carve-out vs. simple pause).
+
+        Returns:
+            ``_CascadeUpdateResult`` with the list of updated IDs and
+            their captured ``agent_id`` / ``waiting_for`` so the async
+            caller can fire ``stream_status_change`` SSE per node.
+        """
+        if not paused_instances_data:
+            return _CascadeUpdateResult(
+                updated_ids=[],
+                skipped_ids=[],
+                agent_ids_by_instance={},
+                waiting_for_by_instance={},
+            )
+
+        updated_ids = [iid for iid, _agent, _wf in paused_instances_data]
+        agent_ids_by_instance = {
+            iid: agent for iid, agent, _wf in paused_instances_data
+        }
+        waiting_for_by_instance = {
+            iid: wf for iid, _agent, wf in paused_instances_data
+        }
+
+        with WriteGuardSession(Session(engine), write_guard) as session:
+            # L14 fix: single batched UPDATE. The ``tree_ids`` list is
+            # expanded into the ``IN`` clause via SQLAlchemy's
+            # ``expanding=True`` parameter. SQLite and PostgreSQL both
+            # accept the expanded IN list.
+            session.execute(
+                text(
+                    "UPDATE instances "
+                    "SET status = :paused_status, "
+                    "    waiting_for = 0, "
+                    "    paused_at = :paused_at, "
+                    "    updated_at = :paused_at "
+                    "WHERE instance_id IN :tree_ids"
+                ).bindparams(
+                    bindparam("tree_ids", expanding=True),
+                ),
+                {
+                    "paused_status": InstanceStatus.PAUSED.value,
+                    "paused_at": paused_at_iso,
+                    "tree_ids": updated_ids,
+                },
+            )
+            session.commit()
+
+        # Skipped = nodes that were already paused (filtered out by the
+        # caller before passing to this helper). We re-derive from
+        # ``tree_ids`` minus ``updated_ids``.
+        skipped_ids = [iid for iid in tree_ids if iid not in set(updated_ids)]
+
+        return _CascadeUpdateResult(
+            updated_ids=updated_ids,
+            skipped_ids=skipped_ids,
+            agent_ids_by_instance=agent_ids_by_instance,
+            waiting_for_by_instance=waiting_for_by_instance,
+        )
+
+    def _resume_cascade_db_sync(
+        self,
+        engine,
+        write_guard,
+        *,
+        tree_ids: list[str],
+        ancestor_ids: set[str],
+        is_root_resume: bool,
+    ) -> _CascadeUpdateResult:
+        """Sync DB half of ``resume_instance_cascade`` (L14 fix).
+
+        Runs in the caller's thread (sync). Performs the per-tree-node
+        resume updates in ONE batched ``UPDATE ... WHERE instance_id IN
+        (...)`` statement instead of N+1 per-node updates.
+
+        The batched UPDATE sets:
+
+          * ``status='running'``
+          * ``paused_at=NULL`` (clears the paused timestamp)
+          * ``waiting_for=0`` for all nodes
+          * then a follow-up UPDATE bumps ``waiting_for`` to 1 for the
+            ancestor nodes when resuming from a child (matches the
+            pre-fix carve-out).
+
+        Splitting the WRITE into two UPDATEs (instead of one with a
+        CASE-WHEN on an IN list) keeps the SQL portable across SQLite
+        and PostgreSQL — CASE-WHEN with IN-list semantics is dialect-
+        sensitive, while a plain ``WHERE instance_id IN :ancestor_ids``
+        with expanding bind params works the same on both.
+
+        Returns ``_CascadeUpdateResult`` with the updated IDs and their
+        waiting_for values so the async caller can fire
+        ``stream_status_change`` SSE per node.
+        """
+        # The caller pre-filters out nodes that are not in PAUSED status
+        # (skip behavior). The set we get here is the union of nodes
+        # that are actually paused.
+        if not tree_ids:
+            return _CascadeUpdateResult(
+                updated_ids=[],
+                skipped_ids=[],
+                agent_ids_by_instance={},
+                waiting_for_by_instance={},
+            )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with WriteGuardSession(Session(engine), write_guard) as session:
+            # Single batched UPDATE: status + paused_at + waiting_for=0
+            # for all nodes that are currently paused. The
+            # ``status = 'paused'`` predicate is the guard so a
+            # concurrent pause/resume that already flipped the status
+            # is a no-op on that row (rowcount drops).
+            session.execute(
+                text(
+                    "UPDATE instances "
+                    "SET status = :running_status, "
+                    "    waiting_for = 0, "
+                    "    paused_at = NULL, "
+                    "    updated_at = :now "
+                    "WHERE instance_id IN :tree_ids "
+                    "  AND status = :paused_status"
+                ).bindparams(
+                    bindparam("tree_ids", expanding=True),
+                ),
+                {
+                    "running_status": InstanceStatus.RUNNING.value,
+                    "paused_status": InstanceStatus.PAUSED.value,
+                    "now": now_iso,
+                    "tree_ids": tree_ids,
+                },
+            )
+
+            # Follow-up: bump waiting_for=1 for the ancestor chain
+            # when resuming from a non-root. Only fires when
+            # ``is_root_resume`` is False (root resume keeps
+            # ``waiting_for=0`` for everyone, matching the pre-fix
+            # behavior at line 887-888 of the original code).
+            ancestor_bump_ids: list[str] = []
+            if not is_root_resume and ancestor_ids:
+                ancestor_bump_ids = [iid for iid in ancestor_ids if iid in set(tree_ids)]
+                if ancestor_bump_ids:
+                    session.execute(
+                        text(
+                            "UPDATE instances "
+                            "SET waiting_for = 1, "
+                            "    updated_at = :now "
+                            "WHERE instance_id IN :ancestor_ids"
+                        ).bindparams(
+                            bindparam("ancestor_ids", expanding=True),
+                        ),
+                        {
+                            "now": now_iso,
+                            "ancestor_ids": ancestor_bump_ids,
+                        },
+                    )
+            session.commit()
+
+        # Capture per-node waiting_for for the SSE emit on the event loop.
+        waiting_for_by_instance: dict[str, int] = {}
+        for iid in tree_ids:
+            if not is_root_resume and iid in ancestor_ids:
+                waiting_for_by_instance[iid] = 1
+            else:
+                waiting_for_by_instance[iid] = 0
+
+        return _CascadeUpdateResult(
+            updated_ids=list(tree_ids),
+            skipped_ids=[],
+            agent_ids_by_instance={},  # caller pre-fetches for SSE
+            waiting_for_by_instance=waiting_for_by_instance,
+        )

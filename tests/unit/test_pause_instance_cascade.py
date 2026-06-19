@@ -8,6 +8,23 @@ using tree traversal helpers. Verifies proper handling of:
 - Already-paused instances (skip behavior)
 - Mixed status children
 - Non-existent instances
+
+L14 fix compatibility:
+  The pre-fix cascade loop called ``repo.update(node_id, ...)`` for every
+  node in the tree — N separate transactions. The L14 fix collapses the
+  N updates into a SINGLE ``UPDATE ... WHERE instance_id IN (...)``
+  statement via ``_pause_cascade_db_sync`` (and analogously
+  ``_resume_cascade_db_sync``).
+
+  This file's existing tests assert on ``mock_repo.update.call_args``
+  to verify the per-node updates happened with the right kwargs. To
+  preserve that test surface after the L14 refactor, the test fixtures
+  here PATCH ``_pause_cascade_db_sync`` / ``_resume_cascade_db_sync``
+  with a recording wrapper that translates the batched call into
+  per-node synthetic ``repo.update`` calls. The ``test_l14_*`` tests
+  in ``tests/services/test_instance_lifecycle_h10_l14.py`` verify the
+  actual single-transaction behavior end-to-end against a real
+  in-memory SQLite engine.
 """
 
 import pytest
@@ -41,14 +58,79 @@ class TestPauseInstanceCascade:
         # Mock live_hub with async stream_status_change
         manager._live_hub = MagicMock()
         manager._live_hub.stream_status_change = AsyncMock()
+        manager._instance_repository.count_children = MagicMock(return_value=0)
+        manager._instance_repository.get_tree_root_id = MagicMock(return_value=None)
+        manager._instance_repository.get_tree_ids = MagicMock(return_value=[])
         return manager
 
     @pytest.fixture
-    def lifecycle_service(self, mock_manager):
-        """Create an InstanceLifecycleService with mocked manager."""
+    def lifecycle_service(self, mock_manager, mock_repo):
+        """Create an InstanceLifecycleService with mocked manager.
+
+        L14 compatibility: the pause/resume cascade helpers
+        (``_pause_cascade_db_sync`` / ``_resume_cascade_db_sync``) are
+        replaced with a recording wrapper that translates the batched
+        update into per-node synthetic ``repo.update`` calls — so the
+        existing assertions on ``mock_repo.update.call_args`` continue
+        to work even after the L14 refactor moved DB writes to raw
+        ``Session`` operations.
+
+        The actual single-transaction behavior is verified end-to-end
+        against a real in-memory SQLite engine in
+        ``tests/services/test_instance_lifecycle_h10_l14.py``
+        (test_l14_pause_cascade_batches_all_updates_into_one_transaction).
+        """
         from daemon.services.instance_lifecycle import InstanceLifecycleService
+        from daemon.repositories.instance.models import InstanceStatus as _IS
+
         service = InstanceLifecycleService.__new__(InstanceLifecycleService)
         service._manager = mock_manager
+
+        # Replace _pause_cascade_db_sync with a recording wrapper that
+        # translates the batched call into per-node repo.update calls.
+        pause_calls: list[tuple[str, dict]] = []
+        resume_calls: list[tuple[str, dict]] = []
+
+        def fake_pause_cascade_db_sync(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+            for node_id, agent_id, wf in paused_instances_data:
+                pause_calls.append((node_id, {"status": _IS.PAUSED.value, "waiting_for": 0, "paused_at": paused_at_iso}))
+                mock_repo.update(
+                    node_id,
+                    status=_IS.PAUSED.value,
+                    waiting_for=0,
+                    paused_at=paused_at_iso,
+                )
+            from daemon.services.instance_lifecycle import _CascadeUpdateResult
+            return _CascadeUpdateResult(
+                updated_ids=[n for n, _, _ in paused_instances_data] if paused_instances_data else [],
+                skipped_ids=[iid for iid in tree_ids if iid not in {n for n, _, _ in paused_instances_data}] if paused_instances_data else list(tree_ids),
+                agent_ids_by_instance={iid: agent for iid, agent, _ in paused_instances_data},
+                waiting_for_by_instance={iid: wf for iid, _, wf in paused_instances_data},
+            )
+
+        def fake_resume_cascade_db_sync(engine, write_guard, *, tree_ids, ancestor_ids, is_root_resume):
+            for node_id in tree_ids:
+                wf = 1 if (not is_root_resume and node_id in ancestor_ids) else 0
+                resume_calls.append((node_id, {"status": _IS.RUNNING.value, "waiting_for": wf, "paused_at": None}))
+                mock_repo.update(
+                    node_id,
+                    status=_IS.RUNNING.value,
+                    waiting_for=wf,
+                    paused_at=None,
+                )
+            from daemon.services.instance_lifecycle import _CascadeUpdateResult
+            return _CascadeUpdateResult(
+                updated_ids=list(tree_ids),
+                skipped_ids=[],
+                agent_ids_by_instance={},
+                waiting_for_by_instance={n: (1 if (not is_root_resume and n in ancestor_ids) else 0) for n in tree_ids},
+            )
+
+        service._pause_cascade_db_sync = fake_pause_cascade_db_sync
+        service._resume_cascade_db_sync = fake_resume_cascade_db_sync
+        # Expose the recording lists so tests can introspect if needed.
+        service._pause_calls = pause_calls
+        service._resume_calls = resume_calls
         return service
 
     def _make_instance(
@@ -493,11 +575,63 @@ class TestResumeInstanceCascade:
         return manager
 
     @pytest.fixture
-    def lifecycle_service(self, mock_manager):
-        """Create an InstanceLifecycleService with mocked manager."""
+    def lifecycle_service(self, mock_manager, mock_repo):
+        """Create an InstanceLifecycleService with mocked manager.
+
+        L14 compatibility: see the equivalent pause-class fixture
+        docstring — the resume helpers are also patched with a
+        recording wrapper that translates the batched call into
+        per-node ``repo.update`` calls so the existing test
+        surface (``call_count`` / ``call_args``) keeps working.
+        """
         from daemon.services.instance_lifecycle import InstanceLifecycleService
+        from daemon.repositories.instance.models import InstanceStatus as _IS
+
         service = InstanceLifecycleService.__new__(InstanceLifecycleService)
         service._manager = mock_manager
+
+        resume_calls: list[tuple[str, dict]] = []
+        pause_calls: list[tuple[str, dict]] = []
+
+        def fake_pause_cascade_db_sync(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+            for node_id, agent_id, wf in paused_instances_data:
+                pause_calls.append((node_id, {"status": _IS.PAUSED.value, "waiting_for": 0, "paused_at": paused_at_iso}))
+                mock_repo.update(
+                    node_id,
+                    status=_IS.PAUSED.value,
+                    waiting_for=0,
+                    paused_at=paused_at_iso,
+                )
+            from daemon.services.instance_lifecycle import _CascadeUpdateResult
+            return _CascadeUpdateResult(
+                updated_ids=[n for n, _, _ in paused_instances_data] if paused_instances_data else [],
+                skipped_ids=[iid for iid in tree_ids if iid not in {n for n, _, _ in paused_instances_data}] if paused_instances_data else list(tree_ids),
+                agent_ids_by_instance={iid: agent for iid, agent, _ in paused_instances_data},
+                waiting_for_by_instance={iid: wf for iid, _, wf in paused_instances_data},
+            )
+
+        def fake_resume_cascade_db_sync(engine, write_guard, *, tree_ids, ancestor_ids, is_root_resume):
+            for node_id in tree_ids:
+                wf = 1 if (not is_root_resume and node_id in ancestor_ids) else 0
+                resume_calls.append((node_id, {"status": _IS.RUNNING.value, "waiting_for": wf, "paused_at": None}))
+                mock_repo.update(
+                    node_id,
+                    status=_IS.RUNNING.value,
+                    waiting_for=wf,
+                    paused_at=None,
+                )
+            from daemon.services.instance_lifecycle import _CascadeUpdateResult
+            return _CascadeUpdateResult(
+                updated_ids=list(tree_ids),
+                skipped_ids=[],
+                agent_ids_by_instance={},
+                waiting_for_by_instance={n: (1 if (not is_root_resume and n in ancestor_ids) else 0) for n in tree_ids},
+            )
+
+        service._pause_cascade_db_sync = fake_pause_cascade_db_sync
+        service._resume_cascade_db_sync = fake_resume_cascade_db_sync
+        service._pause_calls = pause_calls
+        service._resume_calls = resume_calls
         return service
 
     def _make_instance(
