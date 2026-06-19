@@ -668,20 +668,36 @@ class TestPausedAtField:
 
     @pytest.mark.asyncio
     async def test_pause_single_sets_paused_at_field(self, mock_manager):
-        """Verify _pause_single() sets paused_at field via repository update."""
+        """Verify pause_instance_cascade sets paused_at field via the batched SQL UPDATE.
+
+        L14 note: the OLD per-node ``repo.update(...)`` path no longer
+        exists — pause now goes through ``_pause_cascade_db_sync``
+        which runs a single ``UPDATE ... SET paused_at = :paused_at``.
+        We verify ``paused_at`` was set by capturing the helper's
+        ``paused_at_iso`` keyword argument.
+        """
         instance_id = "test-pause-instance"
 
-        # Track calls to update
-        update_calls = []
-        def track_update(*args, **kwargs):
-            update_calls.append(kwargs)
-            # Return mock instance
-            result = MagicMock()
-            result.instance_id = instance_id
-            return result
-        mock_manager._instance_repository.update = track_update
+        # Capture calls to the batched db_sync helper
+        captured: dict = {"pause_calls": []}
 
-        # Mock the new tree traversal methods
+        from daemon.services.instance_lifecycle import _CascadeUpdateResult
+
+        def _mock_pause_db_sync(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+            captured["pause_calls"].append(
+                {"tree_ids": list(tree_ids), "paused_at_iso": paused_at_iso,
+                 "paused_instances_data": list(paused_instances_data)}
+            )
+            return _CascadeUpdateResult(
+                updated_ids=[iid for iid, _a, _w in paused_instances_data],
+                skipped_ids=[],
+                agent_ids_by_instance={iid: a for iid, a, _w in paused_instances_data},
+                waiting_for_by_instance={iid: w for iid, _a, w in paused_instances_data},
+            )
+
+        mock_manager._lifecycle_service._pause_cascade_db_sync = _mock_pause_db_sync
+
+        # Mock the tree traversal methods on the repository
         mock_manager._instance_repository.get_tree_root_id.return_value = instance_id
         mock_manager._instance_repository.get_tree_ids.return_value = [instance_id]
 
@@ -696,20 +712,19 @@ class TestPausedAtField:
         from daemon.manager import InstanceManager
         await InstanceManager.pause_instance_cascade(mock_manager, instance_id)
 
-        # Verify update was called with paused_at set
-        assert len(update_calls) >= 1, "update() should have been called"
-
-        # Find the call that updates status to paused
-        pause_update = None
-        for call in update_calls:
-            if call.get('status') == 'paused':
-                pause_update = call
-                break
-
-        assert pause_update is not None, "update() should have been called with status='paused'"
-        assert 'paused_at' in pause_update, "paused_at should be included in update"
-        assert pause_update['paused_at'] is not None, "paused_at should not be None"
-        assert pause_update['paused_at'] != "", "paused_at should not be empty"
+        # L14: verify the batched db_sync helper was called with a
+        # non-empty paused_at_iso timestamp and the single instance
+        # in paused_instances_data.
+        assert len(captured["pause_calls"]) == 1, (
+            "_pause_cascade_db_sync should have been called exactly once"
+        )
+        pause_call = captured["pause_calls"][0]
+        assert pause_call["paused_at_iso"], "paused_at_iso should be a non-empty ISO timestamp"
+        assert pause_call["paused_at_iso"] is not None
+        assert pause_call["paused_at_iso"] != ""
+        # The single running instance should be in the batch payload
+        data_ids = {iid for iid, _a, _w in pause_call["paused_instances_data"]}
+        assert data_ids == {instance_id}
 
     def test_paused_at_cleared_on_resume(self, mock_manager):
         """Verify paused_at is cleared when instance transitions from paused to running."""
