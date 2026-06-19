@@ -24,6 +24,26 @@ except ImportError:  # pragma: no cover - psycopg3 is always a project dep
 
 logger = logging.getLogger(__name__)
 
+# Ensure all SQLModel table classes are registered in metadata before
+# ``pg_engine`` calls ``SQLModel.metadata.create_all``. Without these
+# imports, ``create_all`` produces an empty schema and the autouse
+# ``_pg_truncate_tables`` fixture below fails on
+# ``UndefinedTable: relation "..." does not exist`` for any model
+# registered by test-file imports after the session-scoped engine is built.
+import daemon.repositories.instance.models  # noqa: F401
+import daemon.repositories.message_queue.models  # noqa: F401
+import daemon.repositories.task.models  # noqa: F401
+import daemon.repositories.event.models  # noqa: F401
+import daemon.repositories.db_connection.models  # noqa: F401
+import daemon.repositories.execution_lease.models  # noqa: F401
+import daemon.repositories.job_queue.models  # noqa: F401
+import daemon.repositories.job_queue.watcher_models  # noqa: F401
+import daemon.repositories.mcp_server.models  # noqa: F401
+import daemon.repositories.infra.models  # noqa: F401
+import daemon.repositories.project.models  # noqa: F401
+import daemon.repositories.source.models  # noqa: F401
+import daemon.migrations.models  # noqa: F401
+
 # Default PG connection — overridable via env vars for CI / Docker setups.
 # Matches ``docker-compose.test.yml`` (user/pass: ensemble/ensemble_dev).
 PG_HOST = os.environ.get("PG_TEST_HOST", "localhost")
