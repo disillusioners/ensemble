@@ -37,9 +37,15 @@
 -- This dedup is needed because legacy C9 race may have produced
 -- duplicate (source_id, external_user_id) rows before the repository
 -- was switched to dialect-aware INSERT ... ON CONFLICT DO UPDATE.
+-- Use the primary key (mapping_id) instead of SQLite's implicit `rowid`
+-- so the same dedup runs unchanged on PostgreSQL once the runner is
+-- ever taught to execute UP SQL on PG. The exact survivor is
+-- deterministic (lexicographically smallest mapping_id per group) but
+-- not insertion-order dependent (all duplicate rows are equivalent
+-- for the eventual UNIQUE constraint).
 DELETE FROM instance_mappings
-WHERE rowid NOT IN (
-    SELECT MAX(rowid) FROM instance_mappings GROUP BY source_id, external_user_id
+WHERE mapping_id NOT IN (
+    SELECT MIN(mapping_id) FROM instance_mappings GROUP BY source_id, external_user_id
 );
 
 -- STEP 2: Enforce at most one mapping per (source_id, external_user_id).

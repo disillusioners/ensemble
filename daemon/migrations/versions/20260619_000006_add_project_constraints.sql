@@ -36,11 +36,13 @@
 --   ``CREATE UNIQUE INDEX`` would fail with
 --   "UNIQUE constraint failed: projects.name" and the runner would
 --   treat that as a real error rather than the idempotent
---   "already exists" case. We keep the row with the largest ``rowid``
---   per ``name`` group, which is the most recently inserted project
---   under normal operation. FKs from ``project_metadata_records``,
---   ``instances``, etc. cascade on delete per the
---   ``ondelete="CASCADE"`` declarations in those models.
+--   "already exists" case. We keep the row with the lexicographically
+--   smallest ``project_id`` per ``name`` group. The exact survivor is
+--   deterministic but not insertion-order dependent; all duplicate
+--   rows are equivalent for the eventual UNIQUE constraint. FKs from
+--   ``project_metadata_records``, ``instances``, etc. cascade on
+--   delete per the ``ondelete="CASCADE"`` declarations in those
+--   models.
 --
 --   H12: The ``project_tags`` and ``project_shortnames`` junction
 --   tables already enforce ``(project_id, tag)`` / ``(project_id,
@@ -70,9 +72,15 @@
 
 -- STEP 1: Dedupe pre-existing duplicates. The DELETE must run before
 -- the index is created, otherwise the CREATE UNIQUE INDEX would fail.
+-- Use the primary key (project_id) instead of SQLite's implicit `rowid`
+-- so the same dedup runs unchanged on PostgreSQL once the runner is
+-- ever taught to execute UP SQL on PG. The exact survivor is
+-- deterministic (lexicographically smallest project_id per group) but
+-- not insertion-order dependent (all duplicate rows are equivalent
+-- for the eventual UNIQUE constraint).
 DELETE FROM projects
-WHERE rowid NOT IN (
-    SELECT MAX(rowid) FROM projects GROUP BY name
+WHERE project_id NOT IN (
+    SELECT MIN(project_id) FROM projects GROUP BY name
 );
 
 -- STEP 2: Enforce at most one project per name. Together with the

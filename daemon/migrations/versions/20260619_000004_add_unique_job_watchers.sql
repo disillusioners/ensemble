@@ -27,11 +27,11 @@
 --   "UNIQUE constraint failed: job_watchers.job_id, job_watchers.instance_id"
 --   and the migration runner would (incorrectly) treat that as a real
 --   error rather than the idempotent "already exists" case. We keep the
---   row with the largest rowid per (job_id, instance_id) group. Under
---   normal operation, a successful add_watch races with at most one or
---   two duplicates, so MAX(rowid) keeps the most recently written row,
---   which is the same row the upsert would have settled on given
---   equivalent `watch_events`.
+--   row with the lexicographically smallest watch_id per (job_id,
+--   instance_id) group. The exact survivor is deterministic but not
+--   insertion-order dependent; any consistent pick works because the
+--   upsert's `watch_events` semantics don't require preserving a
+--   particular duplicate.
 --
 --   The migration runner (daemon/migrations/runner.py) treats "already
 --   exists" errors as idempotent, so re-running this file is safe.
@@ -48,9 +48,15 @@
 -- ADD CONSTRAINT syntax, so we use a unique INDEX (equivalent for ON
 -- CONFLICT DO UPDATE purposes). The DELETE must run before the index
 -- is created, otherwise the CREATE UNIQUE INDEX would fail.
+-- Use the primary key (watch_id) instead of SQLite's implicit `rowid`
+-- so the same dedup runs unchanged on PostgreSQL once the runner is
+-- ever taught to execute UP SQL on PG. The exact survivor is
+-- deterministic (lexicographically smallest watch_id per group) but
+-- not insertion-order dependent (all duplicate rows are equivalent
+-- for the eventual UNIQUE constraint).
 DELETE FROM job_watchers
-WHERE rowid NOT IN (
-    SELECT MAX(rowid) FROM job_watchers GROUP BY job_id, instance_id
+WHERE watch_id NOT IN (
+    SELECT MIN(watch_id) FROM job_watchers GROUP BY job_id, instance_id
 );
 
 -- STEP 2: Enforce at most one watch per (job_id, instance_id). Together
