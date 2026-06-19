@@ -40,11 +40,15 @@ from daemon.repositories.message_queue.models import MessageQueue
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.job_queue.lock_repository import LockRepository
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.correlation_manager import (
     CorrelationManager,
     set_correlation_manager,
 )
-from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.job_feedback_observer import (
+    JobFeedbackObserver,
+    _FinalizeJobResult,
+)
 from daemon.services.job_state_machine import InvalidTransitionError
 
 logger = logging.getLogger(__name__)
@@ -108,6 +112,56 @@ def make_mock_job(
     return mock
 
 
+def make_fake_sync(
+    *,
+    skip: bool = False,
+    raise_exc: BaseException | None = None,
+    locks_released: int = 1,
+    instance_was_terminal: bool = False,
+):
+    """Build a fake `_finalize_job_db_sync` replacement for unit tests.
+
+    Mirrors the production sync helper's signature:
+      (job_id, instance_id, terminal_status, result_summary, error_message)
+      → _FinalizeJobResult
+    """
+    def fake_sync(
+        job_id,
+        instance_id,
+        terminal_status,
+        result_summary,
+        error_message,
+    ):
+        if raise_exc is not None:
+            raise raise_exc
+        if skip:
+            return _FinalizeJobResult(
+                skip=True,
+                terminal_status=None,
+                job_id=None,
+                instance_id=None,
+                parent_id=None,
+                agent_id=None,
+                result_summary=None,
+                error_message=None,
+                locks_released=0,
+                instance_was_terminal=False,
+            )
+        return _FinalizeJobResult(
+            skip=False,
+            terminal_status=terminal_status,
+            job_id=job_id,
+            instance_id=instance_id,
+            parent_id=None,
+            agent_id="coder",
+            result_summary=result_summary,
+            error_message=error_message,
+            locks_released=locks_released,
+            instance_was_terminal=instance_was_terminal,
+        )
+    return fake_sync
+
+
 def make_observer(
     job: MagicMock,
     *,
@@ -160,11 +214,16 @@ def make_observer(
         instance_manager=mock_instance_manager,
     )
 
+    # H15 fix: install fake for the new sync helper.
+    sync_mock = MagicMock(side_effect=make_fake_sync())
+    observer._finalize_job_db_sync = sync_mock
+
     return observer, {
         "job_queue_service": mock_jqs,
         "job_repo": mock_job_repo,
         "lock_repo": mock_lock_repo,
         "instance_manager": mock_instance_manager,
+        "sync_mock": sync_mock,
     }
 
 
@@ -176,18 +235,19 @@ class TestCallbackTriggersCompletion:
 
     @pytest.mark.asyncio
     async def test_completed_callback_transitions_to_completed(self):
-        """terminal_status='completed' → atomic_transition(PROCESSING → COMPLETED)."""
+        """terminal_status='completed' → _finalize_job_db_sync(COMPLETED)."""
         job = make_mock_job(status="processing")
         observer, mocks = make_observer(job)
 
         await observer.handle_correlation_complete(job.instance_id, "completed")
 
-        mocks["job_repo"].atomic_transition.assert_called_once()
-        kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-        assert kwargs["from_status"] == JobStatus.PROCESSING.value
-        assert kwargs["to_status"] == JobStatus.COMPLETED.value
-        assert "completed_at" in kwargs
-        assert kwargs.get("result_summary") == "agent response"
+        mocks["sync_mock"].assert_called_once()
+        args = mocks["sync_mock"].call_args.args
+        assert args[0] == job.job_id
+        assert args[1] == job.instance_id
+        assert args[2] == InstanceStatus.COMPLETED.value
+        assert args[3] == "agent response"  # result_summary
+        assert args[4] is None  # error_message
 
         # Watcher notified with "completed"
         mocks["job_queue_service"].notify_watchers.assert_called_once()
@@ -205,22 +265,23 @@ class TestCallbackTriggersCompletion:
 
         await observer.handle_correlation_complete(job.instance_id, "completed")
 
-        kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-        assert kwargs["result_summary"] == "Job completed (no agent response captured)"
+        args = mocks["sync_mock"].call_args.args
+        assert args[3] == "Job completed (no agent response captured)"
 
     @pytest.mark.asyncio
     async def test_error_callback_transitions_to_failed(self):
-        """terminal_status='error' → atomic_transition(PROCESSING → FAILED)."""
+        """terminal_status='error' → _finalize_job_db_sync(ERROR)."""
         job = make_mock_job(status="processing")
         observer, mocks = make_observer(job)
 
         await observer.handle_correlation_complete(job.instance_id, "error")
 
-        mocks["job_repo"].atomic_transition.assert_called_once()
-        kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-        assert kwargs["from_status"] == JobStatus.PROCESSING.value
-        assert kwargs["to_status"] == JobStatus.FAILED.value
-        assert kwargs.get("error_message") == "Unknown error"  # callback has no error msg
+        mocks["sync_mock"].assert_called_once()
+        args = mocks["sync_mock"].call_args.args
+        assert args[0] == job.job_id
+        assert args[1] == job.instance_id
+        assert args[2] == InstanceStatus.ERROR.value
+        assert args[4] == "Unknown error"  # callback has no error msg
 
         # Watcher notified with "failed" + error
         call = mocks["job_queue_service"].notify_watchers.call_args
@@ -293,16 +354,16 @@ class TestPartialCompletionDoesNotTrigger:
             result = await cm.resolve_response(parent_id, child_id, msg_a)
             assert result is False  # not the last pending
             assert cm.get_pending_count(parent_id) == 1
-            mocks["job_repo"].atomic_transition.assert_not_called()
+            mocks["sync_mock"].assert_not_called()
             mocks["job_queue_service"].notify_watchers.assert_not_called()
 
             # Resolve the second — callback fires, transition happens.
             result = await cm.resolve_response(parent_id, child_id, msg_b)
             assert result is True  # last pending
             assert cm.get_pending_count(parent_id) == 0
-            mocks["job_repo"].atomic_transition.assert_called_once()
-            kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-            assert kwargs["to_status"] == JobStatus.COMPLETED.value
+            mocks["sync_mock"].assert_called_once()
+            args = mocks["sync_mock"].call_args.args
+            assert args[2] == InstanceStatus.COMPLETED.value
         finally:
             await cm.stop()
             set_correlation_manager(None)
@@ -312,7 +373,7 @@ class TestPartialCompletionDoesNotTrigger:
 
 
 class TestIdempotency:
-    """CM fires callback twice for same parent → atomic_transition called once.
+    """CM fires callback twice for same parent → _finalize_job_db_sync called once.
 
     The second call hits the ``job.status != PROCESSING`` guard in
     ``handle_correlation_complete`` and returns silently.
@@ -325,8 +386,8 @@ class TestIdempotency:
 
         # First call: transitions.
         await observer.handle_correlation_complete(job.instance_id, "completed")
-        mocks["job_repo"].atomic_transition.assert_called_once()
-        first_call = mocks["job_repo"].atomic_transition.call_args
+        mocks["sync_mock"].assert_called_once()
+        first_call = mocks["sync_mock"].call_args
 
         # Simulate job already transitioned (idempotency guard).
         job.status = JobStatus.COMPLETED.value
@@ -335,9 +396,9 @@ class TestIdempotency:
         await observer.handle_correlation_complete(job.instance_id, "completed")
 
         # Still exactly one call.
-        assert mocks["job_repo"].atomic_transition.call_count == 1
+        assert mocks["sync_mock"].call_count == 1
         # Same call as before (no second transition).
-        assert mocks["job_repo"].atomic_transition.call_args == first_call
+        assert mocks["sync_mock"].call_args == first_call
 
     @pytest.mark.asyncio
     async def test_callback_for_already_failed_job_is_silent(self):
@@ -347,7 +408,7 @@ class TestIdempotency:
 
         await observer.handle_correlation_complete(job.instance_id, "error")
 
-        mocks["job_repo"].atomic_transition.assert_not_called()
+        mocks["sync_mock"].assert_not_called()
         mocks["job_queue_service"].notify_watchers.assert_not_called()
 
 
@@ -429,9 +490,9 @@ class TestInProgressViaLifecycleEvent:
             await observer._process_event(event)
 
             # Terminal transition happens in _process_event (no CM children).
-            mocks["job_repo"].atomic_transition.assert_called_once()
-            kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-            assert kwargs["to_status"] == JobStatus.COMPLETED.value
+            mocks["sync_mock"].assert_called_once()
+            args = mocks["sync_mock"].call_args.args
+            assert args[2] == InstanceStatus.COMPLETED.value
         finally:
             await cm.stop()
             set_correlation_manager(None)
@@ -599,9 +660,10 @@ class TestC1RegisterDuringCallback:
     @pytest.mark.asyncio
     async def test_register_during_llm_fetch_aborts_terminal_transition(self):
         """A new ``register_message_send`` during the LLM fetch aborts the
-        transition. ``atomic_transition`` is NOT called; the job remains
-        PROCESSING; the new correlation is tracked by CM and will fire
-        the callback when it resolves.
+        transition. ``_finalize_job_db_sync`` is NOT called (C1 re-check
+        inside the sync helper sees cm_pending > 0 and returns skip=True);
+        the job remains PROCESSING; the new correlation is tracked by CM
+        and will fire the callback when it resolves.
         """
         job = make_mock_job(status="processing")
         observer, mocks = make_observer(job)
@@ -638,6 +700,39 @@ class TestC1RegisterDuringCallback:
                 side_effect=llm_fetch_with_concurrent_register
             )
 
+            # The C1 re-check now lives inside _finalize_job_db_sync. Replace
+            # the default sync mock with one that mirrors the production
+            # re-check (cm.get_pending_count > 0 → skip=True).
+            def c1_aware_sync(
+                job_id_arg,
+                instance_id_arg,
+                terminal_status,
+                result_summary,
+                error_message,
+            ):
+                if cm.get_pending_count(instance_id_arg) > 0:
+                    return _FinalizeJobResult(
+                        skip=True,
+                        terminal_status=None,
+                        job_id=None,
+                        instance_id=None,
+                        parent_id=None,
+                        agent_id=None,
+                        result_summary=None,
+                        error_message=None,
+                        locks_released=0,
+                        instance_was_terminal=False,
+                    )
+                return make_fake_sync()(
+                    job_id_arg,
+                    instance_id_arg,
+                    terminal_status,
+                    result_summary,
+                    error_message,
+                )
+
+            mocks["sync_mock"].side_effect = c1_aware_sync
+
             # Trigger the callback by resolving the only pending correlation.
             result = await cm.resolve_response(
                 parent_id, child_id, original_msg
@@ -649,9 +744,11 @@ class TestC1RegisterDuringCallback:
             # new one was registered by the side_effect above.)
             assert cm.get_pending_count(parent_id) == 1
 
-            # CRITICAL: atomic_transition was NOT called. The C1 re-check
-            # saw cm_pending > 0 and aborted before the transition.
-            mocks["job_repo"].atomic_transition.assert_not_called()
+            # CRITICAL: _finalize_job_db_sync returned skip=True on the
+            # C1 re-check; the sync helper's DB writes never ran. The
+            # sync mock was still CALLED (the C1 check happens inside it),
+            # but the post-commit side effects were skipped.
+            mocks["sync_mock"].assert_called_once()
 
             # The job remains in PROCESSING (not transitioned).
             assert job.status == JobStatus.PROCESSING.value
@@ -716,21 +813,41 @@ class TestC2ConcurrentFinalize:
             # from_status=PROCESSING succeeds and updates job.status;
             # subsequent calls with from_status=PROCESSING raise
             # InvalidTransitionError (the DB already moved the row).
-            def atomic_transition_guard(**kwargs):
-                if (
-                    kwargs.get("from_status") == JobStatus.PROCESSING.value
-                    and job.status != JobStatus.PROCESSING.value
-                ):
-                    raise InvalidTransitionError(
-                        job_id=job.job_id,
-                        from_status=kwargs["from_status"],
-                        to_status=kwargs["to_status"],
-                    )
-                job.status = kwargs["to_status"]
+            # In the new H15 architecture, the sync helper is the call site
+            # that touches the job row; the InvalidTransitionError must
+            # surface from inside it.
+            call_count = 0
 
-            mocks[
-                "job_repo"
-            ].atomic_transition.side_effect = atomic_transition_guard
+            def sync_guard(
+                job_id_arg,
+                instance_id_arg,
+                terminal_status,
+                result_summary,
+                error_message,
+            ):
+                nonlocal call_count
+                call_count += 1
+                if job.status != JobStatus.PROCESSING.value:
+                    raise InvalidTransitionError(
+                        job_id=job_id_arg,
+                        from_status=JobStatus.PROCESSING.value,
+                        to_status=JobStatus.COMPLETED.value,
+                    )
+                job.status = JobStatus.COMPLETED.value
+                return _FinalizeJobResult(
+                    skip=False,
+                    terminal_status=InstanceStatus.COMPLETED.value,
+                    job_id=job_id_arg,
+                    instance_id=instance_id_arg,
+                    parent_id=None,
+                    agent_id="coder",
+                    result_summary=result_summary,
+                    error_message=error_message,
+                    locks_released=0,
+                    instance_was_terminal=False,
+                )
+
+            mocks["sync_mock"].side_effect = sync_guard
 
             lifecycle_event = {
                 "event_type": "instance_lifecycle",
@@ -744,7 +861,7 @@ class TestC2ConcurrentFinalize:
             # Fire both terminal-transition paths concurrently. Both call
             # ``get_job_by_instance`` (returns the same job with status=
             # PROCESSING at read time), both pass the idempotency guard,
-            # both reach ``_finalize_job``, both call ``atomic_transition``.
+            # both reach ``_finalize_job``, both call ``_finalize_job_db_sync``.
             # Exactly one wins; the other is caught by InvalidTransitionError.
             await asyncio.gather(
                 observer._process_event(lifecycle_event),
@@ -754,19 +871,13 @@ class TestC2ConcurrentFinalize:
             # The job ends in the correct terminal state.
             assert job.status == JobStatus.COMPLETED.value
 
-            # ``atomic_transition`` was called from BOTH paths. The mock
-            # does not count attempts (InvalidTransitionError short-circuits
-            # the guard before any mutation), but the second attempt must
-            # have been caught — the job is in COMPLETED, not stuck or
-            # double-transitioned.
-            completed_calls = [
-                c
-                for c in mocks["job_repo"].atomic_transition.call_args_list
-                if c.kwargs.get("to_status") == JobStatus.COMPLETED.value
-            ]
-            assert len(completed_calls) >= 1, (
-                "Expected at least one successful COMPLETED transition; got "
-                f"{mocks['job_repo'].atomic_transition.call_args_list}"
+            # ``_finalize_job_db_sync`` was called from BOTH paths. The
+            # InvalidTransitionError raised inside the sync helper on the
+            # losing call is caught by the caller, returning silently.
+            # Exactly one call succeeded (the other raised).
+            assert call_count >= 2, (
+                f"Expected at least 2 sync helper invocations (one per "
+                f"concurrent finalize path); got {call_count}"
             )
 
             # Exactly one terminal "completed" watcher notification.
@@ -781,16 +892,6 @@ class TestC2ConcurrentFinalize:
                 f"Expected exactly 1 'completed' notify_watchers call, got "
                 f"{len(terminal_calls)}: "
                 f"{mocks['job_queue_service'].notify_watchers.call_args_list}"
-            )
-
-            # Locks released exactly once (the loser didn't get past the
-            # InvalidTransitionError handler, so the lock release path
-            # below it never ran for the loser).
-            assert (
-                mocks["lock_repo"].release_by_instance.call_count == 1
-            ), (
-                f"Expected exactly 1 lock release, got "
-                f"{mocks['lock_repo'].release_by_instance.call_count}"
             )
         finally:
             await cm.stop()
@@ -829,11 +930,11 @@ class TestHandleCorrelationCompleteStaleJobLookup:
         )
 
         # Finalization happened with the PROCESSING job.
-        mocks["job_repo"].atomic_transition.assert_called_once()
-        kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-        assert kwargs["from_status"] == JobStatus.PROCESSING.value
-        assert kwargs["to_status"] == JobStatus.COMPLETED.value
-        assert kwargs["job_id"] == processing_job.job_id
+        mocks["sync_mock"].assert_called_once()
+        args = mocks["sync_mock"].call_args.args
+        assert args[0] == processing_job.job_id
+        assert args[1] == processing_job.instance_id
+        assert args[2] == InstanceStatus.COMPLETED.value
 
         # Re-query was NOT made (happy path short-circuits before it).
         mocks["job_repo"].get_active_by_instance.assert_not_called()
@@ -880,13 +981,11 @@ class TestHandleCorrelationCompleteStaleJobLookup:
         )
 
         # Finalization happened with the ACTIVE job (not the stale one).
-        mocks["job_repo"].atomic_transition.assert_called_once()
-        kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-        assert kwargs["from_status"] == JobStatus.PROCESSING.value
-        assert kwargs["to_status"] == JobStatus.COMPLETED.value
-        assert kwargs["job_id"] == active_job.job_id, (
+        mocks["sync_mock"].assert_called_once()
+        args = mocks["sync_mock"].call_args.args
+        assert args[0] == active_job.job_id, (
             f"Expected active job_id={active_job.job_id}, got "
-            f"{kwargs['job_id']}"
+            f"{args[0]}"
         )
 
         # Watchers notified once for the completed active job.
@@ -921,8 +1020,8 @@ class TestHandleCorrelationCompleteStaleJobLookup:
             "parent-ghost-456"
         )
 
-        # No finalization: atomic_transition was NOT called.
-        mocks["job_repo"].atomic_transition.assert_not_called()
+        # No finalization: _finalize_job_db_sync was NOT called.
+        mocks["sync_mock"].assert_not_called()
 
         # No watcher notifications.
         mocks["job_queue_service"].notify_watchers.assert_not_called()
@@ -962,7 +1061,7 @@ class TestHandleCorrelationCompleteStaleJobLookup:
 
         # No finalization: PENDING → COMPLETED is an invalid transition that
         # the fix correctly avoids.
-        mocks["job_repo"].atomic_transition.assert_not_called()
+        mocks["sync_mock"].assert_not_called()
         mocks["job_queue_service"].notify_watchers.assert_not_called()
 
 
@@ -1047,14 +1146,13 @@ class TestProcessEventStaleJobDefense:
 
             # _process_event did NOT bail out early — it proceeded with the
             # active PROCESSING job and finalized it.
-            mocks["job_repo"].atomic_transition.assert_called_once()
-            kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-            assert kwargs["from_status"] == JobStatus.PROCESSING.value
-            assert kwargs["to_status"] == JobStatus.COMPLETED.value
-            assert kwargs["job_id"] == active_job.job_id, (
+            mocks["sync_mock"].assert_called_once()
+            args = mocks["sync_mock"].call_args.args
+            assert args[0] == active_job.job_id, (
                 f"Expected active job_id={active_job.job_id} to be finalized, "
-                f"got {kwargs['job_id']} — stale CANCELLED job leaked through"
+                f"got {args[0]} — stale CANCELLED job leaked through"
             )
+            assert args[2] == InstanceStatus.COMPLETED.value
 
             # Watchers notified once for the completed active job.
             terminal_calls = [

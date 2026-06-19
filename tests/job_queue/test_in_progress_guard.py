@@ -34,11 +34,16 @@ from daemon.repositories.job_queue.watcher_models import (
 )
 from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService, DemandState
-from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.job_feedback_observer import (
+    JobFeedbackObserver,
+    _FinalizeJobResult,
+)
 from daemon.services.job_processor import JobProcessor
 from daemon.services.message_job_handler import MessageJobHandler
+from daemon.services.correlation_manager import set_correlation_manager
 from daemon.manager import MessageResult
 
 
@@ -64,6 +69,56 @@ def make_mock_job(
     mock_job.project_id = "test-project"
     mock_job.queue_id = "system_fifo_queue"
     return mock_job
+
+
+def make_fake_sync(
+    *,
+    skip: bool = False,
+    raise_exc: BaseException | None = None,
+    locks_released: int = 1,
+    instance_was_terminal: bool = False,
+):
+    """Build a fake `_finalize_job_db_sync` replacement for unit tests.
+
+    Mirrors the production sync helper's signature:
+      (job_id, instance_id, terminal_status, result_summary, error_message)
+      → _FinalizeJobResult
+    """
+    def fake_sync(
+        job_id,
+        instance_id,
+        terminal_status,
+        result_summary,
+        error_message,
+    ):
+        if raise_exc is not None:
+            raise raise_exc
+        if skip:
+            return _FinalizeJobResult(
+                skip=True,
+                terminal_status=None,
+                job_id=None,
+                instance_id=None,
+                parent_id=None,
+                agent_id=None,
+                result_summary=None,
+                error_message=None,
+                locks_released=0,
+                instance_was_terminal=False,
+            )
+        return _FinalizeJobResult(
+            skip=False,
+            terminal_status=terminal_status,
+            job_id=job_id,
+            instance_id=instance_id,
+            parent_id=None,
+            agent_id="coder",
+            result_summary=result_summary,
+            error_message=error_message,
+            locks_released=locks_released,
+            instance_was_terminal=instance_was_terminal,
+        )
+    return fake_sync
 
 
 def make_instance_meta(
@@ -178,6 +233,9 @@ class TestJobFeedbackObserverWaitingForGuard:
         waiting_for: int,
     ) -> tuple[JobFeedbackObserver, MagicMock, MagicMock, MagicMock]:
         """Build a JobFeedbackObserver with a real instance_meta stub."""
+        # Ensure CM is None (a leftover CM would route via cm_pending branch).
+        set_correlation_manager(None)
+
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
         mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
@@ -205,6 +263,10 @@ class TestJobFeedbackObserverWaitingForGuard:
             project_repo=MagicMock(),
             instance_manager=mock_instance_manager,
         )
+        # H15 fix: install fake for the new sync helper so the test does
+        # not need a real SQLModel engine.
+        sync_mock = MagicMock(side_effect=make_fake_sync())
+        observer._finalize_job_db_sync = sync_mock
         return observer, mock_job_queue_service, mock_job_repo, mock_instance_manager
 
     @pytest.mark.asyncio
@@ -225,7 +287,12 @@ class TestJobFeedbackObserverWaitingForGuard:
         }
         await observer._process_event(event)
 
-        # atomic_transition must NOT have been called (no job completion)
+        # _finalize_job_db_sync must NOT have been called (no job completion).
+        # Use the local sync_mock attribute on the observer.
+        sync_mock = observer._finalize_job_db_sync
+        sync_mock.assert_not_called()
+        # Backward-compat: the test originally asserted atomic_transition
+        # wasn't called. That still holds in the H15 architecture.
         mock_jrepo.atomic_transition.assert_not_called()
 
         # notify_watchers must have been called once with in_progress
@@ -257,6 +324,8 @@ class TestJobFeedbackObserverWaitingForGuard:
         }
         await observer._process_event(event)
 
+        sync_mock = observer._finalize_job_db_sync
+        sync_mock.assert_not_called()
         mock_jrepo.atomic_transition.assert_not_called()
         mock_jqs.notify_watchers.assert_called_once()
         assert mock_jqs.notify_watchers.call_args.kwargs.get("status") == "in_progress"
@@ -280,15 +349,14 @@ class TestJobFeedbackObserverWaitingForGuard:
         }
         await observer._process_event(event)
 
-        # Normal completion path: atomic_transition to COMPLETED
-        mock_jrepo.atomic_transition.assert_called_once()
-        kwargs = mock_jrepo.atomic_transition.call_args.kwargs
-        assert kwargs["to_status"] == JobStatus.COMPLETED.value
-        assert kwargs["from_status"] == JobStatus.PROCESSING.value
+        # Normal completion path: _finalize_job_db_sync was called.
+        sync_mock = observer._finalize_job_db_sync
+        sync_mock.assert_called_once()
+        args = sync_mock.call_args.args
+        assert args[2] == InstanceStatus.COMPLETED.value
+        assert args[0] == mock_job.job_id
 
         # notify_watchers was called with "completed" (terminal), not in_progress.
-        # The normal-completion path passes status as a positional arg
-        # (see daemon/services/job_feedback_observer.py line 314).
         mock_jqs.notify_watchers.assert_called_once()
         call = mock_jqs.notify_watchers.call_args
         # call.args[0] is job_id, call.args[1] is "completed"
@@ -315,7 +383,8 @@ class TestJobFeedbackObserverWaitingForGuard:
         await observer._process_event(event)
 
         # Normal path runs because wf=0
-        mock_jrepo.atomic_transition.assert_called_once()
+        sync_mock = observer._finalize_job_db_sync
+        sync_mock.assert_called_once()
         assert mock_jqs.notify_watchers.call_args.args[1] == "completed"
 
 
