@@ -16,6 +16,102 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
+from daemon.services.instance_lifecycle import _CascadeUpdateResult
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# L14 batching: test-helpers
+#
+# The L14 fix replaced per-node ``repo.update(...)`` calls inside
+# ``pause_instance_cascade`` / ``resume_instance_cascade`` with a SINGLE
+# batched SQL ``UPDATE ... WHERE instance_id IN (...)`` issued via the
+# ``_pause_cascade_db_sync`` / ``_resume_cascade_db_sync`` helpers. The old
+# tests asserted on ``mock_repo.update.call_count`` and per-call kwargs,
+# which are now implementation details of the batched SQL path — not
+# observable behavior.
+#
+# The public *behavior* these tests actually want to verify is:
+#   1. The right set of instance IDs ends up in ``paused_ids`` /
+#      ``resumed_ids`` / ``skipped_ids`` / ``target_id``.
+#   2. The per-instance ``waiting_for`` values are computed correctly
+#      (reset to 0 on pause; 1 for ancestors on non-root resume).
+#   3. Already-paused / already-running nodes are skipped, not re-written.
+#   4. Per-node exceptions don't block siblings.
+#
+# To verify (2) without coupling to the SQL layer, the fixtures below
+# monkey-patch ``_pause_cascade_db_sync`` and ``_resume_cascade_db_sync``
+# on the service instance. The mocks capture the helper's arguments
+# (which carry the per-instance ``waiting_for`` decisions made by the
+# cascade loop) and return a ``_CascadeUpdateResult`` that mirrors what
+# the real helper would return. Tests then assert on the captured data.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_pause_db_sync_mock(captured: dict) -> MagicMock:
+    """Build a mock ``_pause_cascade_db_sync`` that captures batch args.
+
+    The real helper takes ``(engine, write_guard, *, tree_ids,
+    paused_at_iso, paused_instances_data)`` and runs a batched SQL
+    UPDATE. This mock captures the args and synthesizes the result the
+    real helper would return (updated_ids from paused_instances_data,
+    skipped_ids = tree_ids − updated_ids, plus per-node agent_id /
+    waiting_for maps).
+    """
+
+    def _mock(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+        updated_ids = [iid for iid, _agent, _wf in paused_instances_data]
+        updated_set = set(updated_ids)
+        result = _CascadeUpdateResult(
+            updated_ids=updated_ids,
+            skipped_ids=[iid for iid in tree_ids if iid not in updated_set],
+            agent_ids_by_instance={
+                iid: agent for iid, agent, _wf in paused_instances_data
+            },
+            waiting_for_by_instance={
+                iid: wf for iid, _agent, wf in paused_instances_data
+            },
+        )
+        captured["pause_calls"].append(
+            {"tree_ids": list(tree_ids), "paused_at_iso": paused_at_iso,
+             "paused_instances_data": list(paused_instances_data), "result": result}
+        )
+        return result
+
+    return MagicMock(side_effect=_mock)
+
+
+def _build_resume_db_sync_mock(captured: dict) -> MagicMock:
+    """Build a mock ``_resume_cascade_db_sync`` that captures batch args.
+
+    The real helper takes ``(engine, write_guard, *, tree_ids,
+    ancestor_ids, is_root_resume)`` and runs a batched SQL UPDATE
+    (status=paused→running, waiting_for=0 for everyone, then a follow-up
+    UPDATE bumping ``waiting_for=1`` for ancestors on non-root resume).
+    This mock captures the args and synthesizes the result with the
+    correct ``waiting_for_by_instance`` map so SSE / logger side
+    effects receive the right values.
+    """
+
+    def _mock(engine, write_guard, *, tree_ids, ancestor_ids, is_root_resume):
+        waiting_for_by_instance: dict[str, int] = {}
+        for iid in tree_ids:
+            if not is_root_resume and iid in ancestor_ids:
+                waiting_for_by_instance[iid] = 1
+            else:
+                waiting_for_by_instance[iid] = 0
+        result = _CascadeUpdateResult(
+            updated_ids=list(tree_ids),
+            skipped_ids=[],
+            agent_ids_by_instance={},
+            waiting_for_by_instance=waiting_for_by_instance,
+        )
+        captured["resume_calls"].append(
+            {"tree_ids": list(tree_ids), "ancestor_ids": set(ancestor_ids),
+             "is_root_resume": is_root_resume, "result": result}
+        )
+        return result
+
+    return MagicMock(side_effect=_mock)
 
 
 class TestTreeAwarePauseCascade:
@@ -46,10 +142,20 @@ class TestTreeAwarePauseCascade:
 
     @pytest.fixture
     def lifecycle_service(self, mock_manager):
-        """Create an InstanceLifecycleService with mocked manager."""
+        """Create an InstanceLifecycleService with mocked manager.
+
+        L14: ``_pause_cascade_db_sync`` is monkey-patched with a mock
+        that captures ``paused_instances_data`` (which carries the
+        per-node ``waiting_for`` decisions) and synthesizes the result.
+        """
         from daemon.services.instance_lifecycle import InstanceLifecycleService
+
         service = InstanceLifecycleService.__new__(InstanceLifecycleService)
         service._manager = mock_manager
+        captured: dict = {"pause_calls": [], "resume_calls": []}
+        service._pause_cascade_db_sync = _build_pause_db_sync_mock(captured)
+        service._resume_cascade_db_sync = _build_resume_db_sync_mock(captured)
+        service._captured_db_sync = captured
         return service
 
     def _make_instance(
@@ -108,7 +214,15 @@ class TestTreeAwarePauseCascade:
         # Entire tree should be paused
         assert set(result["paused_ids"]) == {root_id, child1_id, child2_id, grandchild_id}
         assert result["skipped_ids"] == []
-        assert mock_repo.update.call_count == 4
+
+        # L14: verify the batched db_sync helper was called once with
+        # all 4 nodes in ``paused_instances_data`` (no skipped IDs since
+        # every node was running).
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        data_ids = {iid for iid, _agent, _wf in pause_call["paused_instances_data"]}
+        assert data_ids == {root_id, child1_id, child2_id, grandchild_id}
 
     @pytest.mark.asyncio
     async def test_pause_from_leaf_pauses_entire_tree(self, lifecycle_service, mock_repo, mock_registry):
@@ -149,7 +263,13 @@ class TestTreeAwarePauseCascade:
         # Entire tree should be paused
         assert set(result["paused_ids"]) == {root_id, child1_id, child2_id, grandchild_id}
         assert result["skipped_ids"] == []
-        assert mock_repo.update.call_count == 4
+
+        # L14: single batched UPDATE carries all 4 nodes
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        data_ids = {iid for iid, _agent, _wf in pause_call["paused_instances_data"]}
+        assert data_ids == {root_id, child1_id, child2_id, grandchild_id}
 
     @pytest.mark.asyncio
     async def test_pause_wide_tree_with_many_siblings(self, lifecycle_service, mock_repo, mock_registry):
@@ -181,7 +301,13 @@ class TestTreeAwarePauseCascade:
 
         assert set(result["paused_ids"]) == set(all_ids)
         assert result["skipped_ids"] == []
-        assert mock_repo.update.call_count == 6
+
+        # L14: single batched UPDATE carries all 6 nodes
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        data_ids = {iid for iid, _agent, _wf in pause_call["paused_instances_data"]}
+        assert data_ids == set(all_ids)
 
     @pytest.mark.asyncio
     async def test_pause_with_mixed_status_children(self, lifecycle_service, mock_repo, mock_registry):
@@ -219,7 +345,15 @@ class TestTreeAwarePauseCascade:
         assert set(result["paused_ids"]) == {root_id, child1_id}
         # Already paused child should be skipped
         assert set(result["skipped_ids"]) == {child2_id}
-        assert mock_repo.update.call_count == 2
+
+        # L14: batched UPDATE only carries the 2 nodes we actually want
+        # to pause — child2 (already paused) is filtered out by the
+        # cascade loop before the helper runs and reported in skipped_ids.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        data_ids = {iid for iid, _agent, _wf in pause_call["paused_instances_data"]}
+        assert data_ids == {root_id, child1_id}
 
     @pytest.mark.asyncio
     async def test_pause_resets_waiting_for_when_positive(self, lifecycle_service, mock_repo, mock_registry):
@@ -257,16 +391,24 @@ class TestTreeAwarePauseCascade:
         result = await lifecycle_service.pause_instance_cascade(root_id)
 
         assert set(result["paused_ids"]) == {root_id, child1_id, child2_id, child3_id}
-        assert mock_repo.update.call_count == 4
 
-        # Verify that instances with waiting_for > 0 get waiting_for=0
-        # Note: child2 already had waiting_for=0, so waiting_for is not passed for it
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[root_id]["waiting_for"] == 0
-        assert update_calls[child1_id]["waiting_for"] == 0
-        assert update_calls[child3_id]["waiting_for"] == 0
-        # child2 had waiting_for=0, so waiting_for is not in kwargs
-        assert "waiting_for" not in update_calls[child2_id]
+        # L14: verify the batched db_sync was called with all 4 nodes,
+        # and that each node carries the correct per-instance waiting_for.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        assert len(pause_call["paused_instances_data"]) == 4
+        # The cascade loop encodes per-node waiting_for in the third
+        # tuple element. child2 had waiting_for=0 already, so the loop
+        # still includes it (it gets reset to 0 on pause, which is a
+        # no-op write but keeps the SQL single-shot).
+        waiting_for_by_id = {
+            iid: wf for iid, _agent, wf in pause_call["paused_instances_data"]
+        }
+        assert waiting_for_by_id[root_id] == 0
+        assert waiting_for_by_id[child1_id] == 0
+        assert waiting_for_by_id[child2_id] == 0
+        assert waiting_for_by_id[child3_id] == 0
 
     @pytest.mark.asyncio
     async def test_pause_single_instance_no_tree(self, lifecycle_service, mock_repo, mock_registry):
@@ -284,9 +426,17 @@ class TestTreeAwarePauseCascade:
 
         assert result["paused_ids"] == [instance_id]
         assert result["skipped_ids"] == []
-        mock_repo.update.assert_called_once()
-        call_kwargs = mock_repo.update.call_args[1]
-        assert call_kwargs["status"] == "paused"
+
+        # L14: batched UPDATE was called exactly once with the single
+        # instance. The helper carries ``paused_instances_data`` with
+        # one tuple (instance_id, agent_id, waiting_for=0).
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        assert len(pause_call["paused_instances_data"]) == 1
+        iid, _agent, wf = pause_call["paused_instances_data"][0]
+        assert iid == instance_id
+        assert wf == 0
 
     @pytest.mark.asyncio
     async def test_pause_already_paused_entire_tree_skipped(self, lifecycle_service, mock_repo, mock_registry):
@@ -339,10 +489,21 @@ class TestTreeAwareResumeCascade:
 
     @pytest.fixture
     def lifecycle_service(self, mock_manager):
-        """Create an InstanceLifecycleService with mocked manager."""
+        """Create an InstanceLifecycleService with mocked manager.
+
+        L14: ``_resume_cascade_db_sync`` is monkey-patched with a mock
+        that captures ``tree_ids`` / ``ancestor_ids`` / ``is_root_resume``
+        (which carry the per-node ``waiting_for`` decisions made by the
+        cascade logic) and synthesizes the result.
+        """
         from daemon.services.instance_lifecycle import InstanceLifecycleService
+
         service = InstanceLifecycleService.__new__(InstanceLifecycleService)
         service._manager = mock_manager
+        captured: dict = {"pause_calls": [], "resume_calls": []}
+        service._pause_cascade_db_sync = _build_pause_db_sync_mock(captured)
+        service._resume_cascade_db_sync = _build_resume_db_sync_mock(captured)
+        service._captured_db_sync = captured
         return service
 
     def _make_instance(
@@ -388,9 +549,21 @@ class TestTreeAwareResumeCascade:
         assert set(result["resumed_ids"]) == {root_id, child1_id, child2_id}
         assert result["target_id"] == root_id
 
-        # ALL should have waiting_for=0 when resuming from root
-        for call in mock_repo.update.call_args_list:
-            assert call[1]["waiting_for"] == 0
+        # L14: verify the batched resume helper was called with all 3
+        # nodes and ``is_root_resume=True``. The helper's contract is
+        # ``waiting_for=0`` for everyone when resuming from root (no
+        # ancestors exist).
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        assert set(resume_call["tree_ids"]) == {root_id, child1_id, child2_id}
+        assert resume_call["is_root_resume"] is True
+        assert resume_call["ancestor_ids"] == set()
+        # Synthesized waiting_for map mirrors the real helper: all 0
+        # when resuming from root.
+        wf_map = resume_call["result"].waiting_for_by_instance
+        for iid in {root_id, child1_id, child2_id}:
+            assert wf_map[iid] == 0
 
     @pytest.mark.asyncio
     async def test_resume_from_child_only_ancestors_get_waiting_for_one(self, lifecycle_service, mock_repo):
@@ -428,11 +601,18 @@ class TestTreeAwareResumeCascade:
         assert set(result["resumed_ids"]) == {root_id, child1_id, child2_id}
         assert result["target_id"] == child2_id
 
-        # Check waiting_for values
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[root_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[child1_id]["waiting_for"] == 0  # Sibling
-        assert update_calls[child2_id]["waiting_for"] == 0  # Resumed node
+        # L14: verify the batched resume helper received the correct
+        # ancestor_ids and the synthesized waiting_for map matches the
+        # contract: ancestors=1, siblings/resumed_node=0.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        assert resume_call["ancestor_ids"] == {root_id}
+        assert resume_call["is_root_resume"] is False
+        wf_map = resume_call["result"].waiting_for_by_instance
+        assert wf_map[root_id] == 1   # Ancestor
+        assert wf_map[child1_id] == 0  # Sibling
+        assert wf_map[child2_id] == 0  # Resumed node
 
     @pytest.mark.asyncio
     async def test_resume_from_leaf_full_ancestor_chain_gets_waiting_for_one(self, lifecycle_service, mock_repo):
@@ -477,13 +657,19 @@ class TestTreeAwareResumeCascade:
         assert set(result["resumed_ids"]) == {root_id, level1_id, level2_id, level3_id, leaf_id}
         assert result["target_id"] == leaf_id
 
-        # Check waiting_for values
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[root_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[level1_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[level2_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[level3_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[leaf_id]["waiting_for"] == 0  # Resumed node
+        # L14: verify the full ancestor chain was passed and the waiting_for
+        # map correctly bumps every ancestor to 1.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        assert resume_call["ancestor_ids"] == {level3_id, level2_id, level1_id, root_id}
+        assert resume_call["is_root_resume"] is False
+        wf_map = resume_call["result"].waiting_for_by_instance
+        assert wf_map[root_id] == 1    # Ancestor
+        assert wf_map[level1_id] == 1  # Ancestor
+        assert wf_map[level2_id] == 1  # Ancestor
+        assert wf_map[level3_id] == 1  # Ancestor
+        assert wf_map[leaf_id] == 0    # Resumed node
 
     @pytest.mark.asyncio
     async def test_resume_deep_tree_five_plus_levels(self, lifecycle_service, mock_repo):
@@ -513,12 +699,15 @@ class TestTreeAwareResumeCascade:
         assert set(result["resumed_ids"]) == set(ids)
         assert result["target_id"] == "l5"
 
-        # All ancestors should get waiting_for=1
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
+        # L14: all ancestors get waiting_for=1 in the synthesized map.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        wf_map = resume_call["result"].waiting_for_by_instance
         for ancestor in ids[:-1]:
-            assert update_calls[ancestor]["waiting_for"] == 1, f"{ancestor} should have waiting_for=1"
-        # Resumed node should get waiting_for=0
-        assert update_calls["l5"]["waiting_for"] == 0
+            assert wf_map[ancestor] == 1, f"{ancestor} should have waiting_for=1"
+        # Resumed node gets waiting_for=0
+        assert wf_map["l5"] == 0
 
     @pytest.mark.asyncio
     async def test_resume_from_middle_of_wide_tree(self, lifecycle_service, mock_repo):
@@ -555,12 +744,17 @@ class TestTreeAwareResumeCascade:
         assert set(result["resumed_ids"]) == {root_id} | set(child_ids)
         assert result["target_id"] == "c2"
 
-        # Check waiting_for values
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[root_id]["waiting_for"] == 1  # Only ancestor
+        # L14: only root is an ancestor; siblings and resumed node get
+        # waiting_for=0.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        assert resume_call["ancestor_ids"] == {root_id}
+        wf_map = resume_call["result"].waiting_for_by_instance
+        assert wf_map[root_id] == 1  # Only ancestor
         for sibling in ["c1", "c3", "c4"]:
-            assert update_calls[sibling]["waiting_for"] == 0  # Siblings
-        assert update_calls["c2"]["waiting_for"] == 0  # Resumed node
+            assert wf_map[sibling] == 0  # Siblings
+        assert wf_map["c2"] == 0  # Resumed node
 
     @pytest.mark.asyncio
     async def test_resume_when_some_already_running(self, lifecycle_service, mock_repo):
@@ -801,10 +995,20 @@ class TestWaitingForSemantics:
 
     @pytest.fixture
     def lifecycle_service(self, mock_manager):
-        """Create an InstanceLifecycleService with mocked manager."""
+        """Create an InstanceLifecycleService with mocked manager.
+
+        L14: ``_pause_cascade_db_sync`` and ``_resume_cascade_db_sync``
+        are monkey-patched with mocks that capture the per-instance
+        waiting_for decisions made by the cascade logic.
+        """
         from daemon.services.instance_lifecycle import InstanceLifecycleService
+
         service = InstanceLifecycleService.__new__(InstanceLifecycleService)
         service._manager = mock_manager
+        captured: dict = {"pause_calls": [], "resume_calls": []}
+        service._pause_cascade_db_sync = _build_pause_db_sync_mock(captured)
+        service._resume_cascade_db_sync = _build_resume_db_sync_mock(captured)
+        service._captured_db_sync = captured
         return service
 
     def _make_instance(
@@ -847,10 +1051,16 @@ class TestWaitingForSemantics:
 
         await lifecycle_service.pause_instance_cascade(root_id)
 
-        # Both should have waiting_for=0
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[root_id]["waiting_for"] == 0
-        assert update_calls[child_id]["waiting_for"] == 0
+        # L14: pause ALWAYS resets waiting_for to 0, regardless of the
+        # previous value. The cascade loop encodes the post-pause
+        # waiting_for in the ``paused_instances_data`` tuple (the third
+        # element), so we verify it there.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        wf_by_id = {iid: wf for iid, _agent, wf in pause_call["paused_instances_data"]}
+        assert wf_by_id[root_id] == 0
+        assert wf_by_id[child_id] == 0
 
     @pytest.mark.asyncio
     async def test_resume_from_root_all_waiting_for_stay_zero(self, lifecycle_service, mock_repo):
@@ -876,10 +1086,15 @@ class TestWaitingForSemantics:
 
         await lifecycle_service.resume_instance_cascade(root_id)
 
-        # Both should have waiting_for=0
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[root_id]["waiting_for"] == 0
-        assert update_calls[child_id]["waiting_for"] == 0
+        # L14: resume from root → no ancestors → all waiting_for=0.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        assert resume_call["is_root_resume"] is True
+        assert resume_call["ancestor_ids"] == set()
+        wf_map = resume_call["result"].waiting_for_by_instance
+        assert wf_map[root_id] == 0
+        assert wf_map[child_id] == 0
 
     @pytest.mark.asyncio
     async def test_resume_from_child_ancestors_get_waiting_for_one(self, lifecycle_service, mock_repo):
@@ -908,15 +1123,16 @@ class TestWaitingForSemantics:
 
         await lifecycle_service.resume_instance_cascade(child2_id)
 
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-
-        # Only root (ancestor) gets waiting_for=1
-        assert update_calls[root_id]["waiting_for"] == 1
-        # Siblings get waiting_for=0
-        assert update_calls[child1_id]["waiting_for"] == 0
-        assert update_calls[child3_id]["waiting_for"] == 0
-        # Resumed node gets waiting_for=0
-        assert update_calls[child2_id]["waiting_for"] == 0
+        # L14: only root is an ancestor → waiting_for=1; siblings/resumed
+        # node get 0.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        wf_map = resume_call["result"].waiting_for_by_instance
+        assert wf_map[root_id] == 1
+        assert wf_map[child1_id] == 0
+        assert wf_map[child3_id] == 0
+        assert wf_map[child2_id] == 0
 
     @pytest.mark.asyncio
     async def test_resume_from_leaf_full_ancestor_chain_waiting_for_one(self, lifecycle_service, mock_repo):
@@ -947,14 +1163,15 @@ class TestWaitingForSemantics:
 
         await lifecycle_service.resume_instance_cascade(leaf_id)
 
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-
-        # All ancestors get waiting_for=1
-        assert update_calls[root_id]["waiting_for"] == 1
-        assert update_calls[l1_id]["waiting_for"] == 1
-        assert update_calls[l2_id]["waiting_for"] == 1
-        # Resumed node gets waiting_for=0
-        assert update_calls[leaf_id]["waiting_for"] == 0
+        # L14: full ancestor chain → waiting_for=1 for each ancestor.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        wf_map = resume_call["result"].waiting_for_by_instance
+        assert wf_map[root_id] == 1
+        assert wf_map[l1_id] == 1
+        assert wf_map[l2_id] == 1
+        assert wf_map[leaf_id] == 0
 
     @pytest.mark.asyncio
     async def test_waiting_for_semantics_in_complex_tree(self, lifecycle_service, mock_repo):
@@ -1001,18 +1218,18 @@ class TestWaitingForSemantics:
 
         await lifecycle_service.resume_instance_cascade(m2_id)
 
-        update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-
-        # Ancestors get waiting_for=1
-        assert update_calls[root_id]["waiting_for"] == 1
-        assert update_calls[l1_id]["waiting_for"] == 1
-        # Non-ancestors get waiting_for=0
-        assert update_calls[l2_id]["waiting_for"] == 0
-        assert update_calls[l3_id]["waiting_for"] == 0
-        assert update_calls[m1_id]["waiting_for"] == 0
-        assert update_calls[m3_id]["waiting_for"] == 0
-        # Resumed node gets waiting_for=0
-        assert update_calls[m2_id]["waiting_for"] == 0
+        # L14: ancestors [l1, root] → waiting_for=1; everyone else → 0.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        wf_map = resume_call["result"].waiting_for_by_instance
+        assert wf_map[root_id] == 1
+        assert wf_map[l1_id] == 1
+        assert wf_map[l2_id] == 0
+        assert wf_map[l3_id] == 0
+        assert wf_map[m1_id] == 0
+        assert wf_map[m3_id] == 0
+        assert wf_map[m2_id] == 0
 
 
 class TestEdgeCases:
@@ -1036,10 +1253,21 @@ class TestEdgeCases:
 
     @pytest.fixture
     def lifecycle_service(self, mock_manager):
-        """Create an InstanceLifecycleService with mocked manager."""
+        """Create an InstanceLifecycleService with mocked manager.
+
+        L14: ``_pause_cascade_db_sync`` and ``_resume_cascade_db_sync``
+        are monkey-patched with mocks that capture the batched
+        arguments so exception-handling and empty-tree tests can verify
+        which nodes survive to the helper.
+        """
         from daemon.services.instance_lifecycle import InstanceLifecycleService
+
         service = InstanceLifecycleService.__new__(InstanceLifecycleService)
         service._manager = mock_manager
+        captured: dict = {"pause_calls": [], "resume_calls": []}
+        service._pause_cascade_db_sync = _build_pause_db_sync_mock(captured)
+        service._resume_cascade_db_sync = _build_resume_db_sync_mock(captured)
+        service._captured_db_sync = captured
         return service
 
     def _make_instance(
@@ -1120,13 +1348,28 @@ class TestEdgeCases:
         # root and child2 should be paused, child1 should be skipped
         assert set(result["paused_ids"]) == {root_id, child2_id}
         assert result["skipped_ids"] == [child1_id]
-        assert mock_repo.update.call_count == 2
+
+        # L14: batched db_sync was called once with the 2 surviving
+        # nodes (root and child2). child1 was filtered out by the
+        # cascade loop's try/except before the helper ran.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        data_ids = {iid for iid, _agent, _wf in pause_call["paused_instances_data"]}
+        assert data_ids == {root_id, child2_id}
 
     @pytest.mark.asyncio
     async def test_resume_exception_handling_does_not_block_siblings(self, lifecycle_service, mock_repo):
         """Test that exception during resume doesn't block siblings.
 
         The implementation catches exceptions per-instance, so siblings should still be processed.
+
+        L14 note: the OLD per-node ``repo.update(...)`` failure path no
+        longer exists — the L14 batched SQL UPDATE bypasses
+        ``repo.update`` entirely. To exercise the per-node exception
+        path we now fail ``repo.get(child1_id)`` (which the cascade
+        loop's ``try/except`` catches), and verify the batched helper
+        still receives the surviving siblings.
         """
         root_id = "root"
         child1_id = "child1"
@@ -1136,40 +1379,30 @@ class TestEdgeCases:
         mock_repo.get_tree_ids.return_value = [root_id, child1_id, child2_id]
         mock_repo.get_ancestor_ids.return_value = []
 
-        call_count = [0]
-
         def get_side_effect(instance_id):
             if instance_id == root_id:
                 return self._make_instance(root_id, status="paused", children=[child1_id, child2_id])
             elif instance_id == child1_id:
-                call_count[0] += 1
-                # First call for child1 returns instance, second call throws
-                if call_count[0] == 1:
-                    return self._make_instance(child1_id, status="paused")
-                else:
-                    raise RuntimeError("Database error")
+                # Simulate a failure fetching child1 — the cascade
+                # loop's try/except adds child1 to skipped_ids.
+                raise RuntimeError("Database error")
             elif instance_id == child2_id:
                 return self._make_instance(child2_id, status="paused")
             return None
 
         mock_repo.get.side_effect = get_side_effect
 
-        # Make update raise exception for child1
-        update_results = {}
-        def update_side_effect(*args, **kwargs):
-            instance_id = args[0]
-            if instance_id == child1_id:
-                raise RuntimeError("Database error")
-            update_results[instance_id] = kwargs
-            return None
-
-        mock_repo.update.side_effect = update_side_effect
-
         result = await lifecycle_service.resume_instance_cascade(root_id)
 
         # root and child2 should be resumed, child1 skipped due to exception
         assert set(result["resumed_ids"]) == {root_id, child2_id}
         assert result["skipped_ids"] == [child1_id]
+
+        # L14: batched db_sync was called once with the 2 surviving nodes.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        assert set(resume_call["tree_ids"]) == {root_id, child2_id}
 
     @pytest.mark.asyncio
     async def test_pause_with_already_paused_children_skips_them(self, lifecycle_service, mock_repo):
@@ -1222,17 +1455,31 @@ class TestEdgeCases:
 
         assert result["paused_ids"] == [instance_id]
         assert result["skipped_ids"] == []
-        mock_repo.update.assert_called_once()
 
-        # Reset mock for resume test
+        # L14: batched db_sync was called exactly once with the single
+        # instance in ``paused_instances_data``.
+        captured = lifecycle_service._captured_db_sync
+        assert len(captured["pause_calls"]) == 1
+        pause_call = captured["pause_calls"][0]
+        assert len(pause_call["paused_instances_data"]) == 1
+        assert pause_call["paused_instances_data"][0][0] == instance_id
+
+        # Reset for resume test
         mock_repo.get.return_value = self._make_instance(instance_id, status="paused")
-        mock_repo.update.reset_mock()
         mock_repo.get_ancestor_ids.return_value = []
+        captured["pause_calls"].clear()
+        captured["resume_calls"].clear()
 
         result = await lifecycle_service.resume_instance_cascade(instance_id)
 
         assert result["resumed_ids"] == [instance_id]
         assert result["skipped_ids"] == []
         assert result["target_id"] == instance_id
-        mock_repo.update.assert_called_once()
-        assert mock_repo.update.call_args[1]["waiting_for"] == 0
+
+        # L14: batched resume db_sync was called exactly once with the
+        # single instance; synthesized waiting_for=0 (is_root_resume=True).
+        assert len(captured["resume_calls"]) == 1
+        resume_call = captured["resume_calls"][0]
+        assert resume_call["tree_ids"] == [instance_id]
+        assert resume_call["is_root_resume"] is True
+        assert resume_call["result"].waiting_for_by_instance[instance_id] == 0

@@ -12,8 +12,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, field_validator, model_validator
-from sqlalchemy import CheckConstraint, Column, Index, UniqueConstraint
-from sqlalchemy.types import JSON, Text
+from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
+from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 
 
@@ -37,6 +37,16 @@ class QueueType(str, enum.Enum):
     FIFO = "fifo"
     PARALLEL = "parallel"
     DEFER = "defer"
+
+
+# Module-level Column kept as a reference for use in JobItem.__mapper_args__.
+# SQLAlchemy's mapper_coercions only accepts a Column expression (or a
+# string key) for version_id_col — it rejects the Pydantic-FieldInfo-
+# wrapped attribute that SQLModel exposes as `JobItem.version`. We can't
+# reference __table__.c.version at class definition time either, so we
+# define the Column once and reuse it as the sa_column= value (which
+# deduplicates it into the Table) and as the version_id_col target.
+_job_item_version_col = Column("version", Integer, nullable=False, server_default="0")
 
 
 class JobQueue(SQLModel, table=True):
@@ -98,7 +108,7 @@ class JobQueue(SQLModel, table=True):
 
 class JobItem(SQLModel, table=True):
     """Job queue item - persisted for crash recovery.
-    
+
     Jobs are serialized per-project to ensure only one job runs
     per project at a time.
     """
@@ -110,6 +120,31 @@ class JobItem(SQLModel, table=True):
         Index("idx_job_queue_items_queue", "queue_id"),
         Index("idx_job_queue_items_project_status_deleted", "project_id", "status", "deleted_at"),
         Index("idx_job_queue_items_status_type_instance", "status", "job_type", "instance_id"),
+        # M6 fix: partial UNIQUE index on ``idempotency_key`` so that
+        # ``create_or_get_by_idempotency_key`` can use
+        # ``INSERT ... ON CONFLICT DO NOTHING`` to atomically claim the
+        # key. The ``WHERE idempotency_key IS NOT NULL`` predicate lets
+        # multiple rows with NULL keys coexist (NULL ≠ NULL in unique
+        # index semantics), which preserves the old "no key, no
+        # constraint" behavior. The ``AND deleted_at IS NULL`` predicate
+        # extends the index to also exclude soft-deleted rows — this
+        # matches ``find_by_idempotency_key`` (which already filters on
+        # ``deleted_at IS NULL``) and allows the soft-delete → recreate
+        # pattern where a caller deletes a job then submits a fresh
+        # enqueue with the same key. The same index is also created in
+        # the ``20260420_000001_add_job_system_improvements`` migration
+        # (without the ``deleted_at`` clause), so the
+        # ``20260619_120000_fix_idempotency_index_include_deleted_at``
+        # migration drops and recreates the index with the refined
+        # predicate. ``create_all`` will create the correct index on
+        # fresh databases.
+        Index(
+            "idx_job_idempotency",
+            "idempotency_key",
+            unique=True,
+            sqlite_where=text("idempotency_key IS NOT NULL AND deleted_at IS NULL"),
+            postgresql_where=text("idempotency_key IS NOT NULL AND deleted_at IS NULL"),
+        ),
     )
 
     # Primary identification
@@ -161,8 +196,27 @@ class JobItem(SQLModel, table=True):
     retry_count: int = Field(default=0, ge=0)
     max_retries: int | None = Field(default=None)
     idempotency_key: str | None = Field(default=None, max_length=255)
-    failed_at: str | None = None
-    next_retry_at: str | None = None
+    failed_at: str | None = Field(default=None)
+    next_retry_at: str | None = Field(default=None)
+
+    # Optimistic locking version. SQLAlchemy's version_id_col makes every
+    # ORM-flushed UPDATE / DELETE on this row append `AND version = :expected`
+    # to the WHERE clause and increment the version on success, raising
+    # StaleDataError on a concurrent modification. The atomic status
+    # transitions in JobRepository.atomic_transition (used by
+    # complete_job, fail_job, cancel_job, terminate_job, start_job) issue
+    # a Core UPDATE that already enforces status via WHERE status = :from
+    # — with version_id_col configured, SQLAlchemy additionally appends
+    # `AND version = :expected` to the WHERE, providing defense-in-depth
+    # for that path. The version_id_col also protects any remaining
+    # ORM-based commit path (e.g. update, soft_delete) from silently
+    # overwriting a row that was concurrently mutated.
+    version: int = Field(default=0, sa_column=_job_item_version_col)
+
+    # SQLAlchemy ORM configuration: declare the version column as the
+    # mapper's version_id_col so the unit-of-work machinery auto-emits
+    # `AND version = :expected_version` on UPDATE/DELETE.
+    __mapper_args__ = {"version_id_col": _job_item_version_col}
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -208,14 +262,49 @@ class JobLockInfo(BaseModel):
 
 
 class JobLock(SQLModel, table=True):
-    """Persistent lock tracking for active jobs."""
+    """Persistent lock tracking for active jobs.
+
+    The (project_id, queue_id, lock_slot) UNIQUE constraint is the
+    cross-process atomicity primitive that makes
+    ``JobLockManager.acquire_queue_lock`` safe when two daemons race.
+    Each acquire tries slot 0, then 1, ... up to concurrency_limit-1
+    via ``INSERT OR IGNORE`` (SQLite) / ``INSERT ... ON CONFLICT DO
+    NOTHING`` (PostgreSQL). Because at most one row can exist per
+    (project_id, queue_id, lock_slot) tuple, at most
+    concurrency_limit rows can exist per queue, and two processes
+    racing for the same slot cannot both succeed. See migration
+    ``20260619_000001_add_lock_slot_to_job_locks.sql`` and the
+    ``ExecutionLeaseRepository.try_acquire`` pattern for the same
+    idea generalised from "1 lease keyed by PK" to "N slots keyed
+    by (project_id, queue_id, lock_slot)".
+
+    NOTE: ``lock_slot`` is not user-meaningful — it exists purely to
+    give the DB a uniqueness key that lets atomic INSERTs enforce the
+    per-queue capacity invariant. Callers should not branch on its
+    value; the only relevant query is "does a row exist for this
+    (project_id, queue_id, lock_slot)?".
+    """
     __tablename__ = "job_locks"
+    __table_args__ = (
+        # C5: enforces cross-process atomicity of acquire_queue_lock.
+        UniqueConstraint(
+            "project_id", "queue_id", "lock_slot",
+            name="uq_job_locks_slot",
+        ),
+        Index("idx_job_locks_project_id", "project_id"),
+        Index("idx_job_locks_queue_id", "queue_id"),
+        Index("idx_job_locks_instance_id", "instance_id"),
+    )
 
     lock_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
     project_id: str = Field(index=True)
     queue_id: str = Field(index=True)
     job_id: str = Field(index=True)
     instance_id: str | None = Field(default=None, index=True)
+    # C5: integer slot key. Acquire tries slots 0..limit-1 atomically;
+    # release is by (project_id, queue_id, job_id) so slot value is
+    # unused at release time.
+    lock_slot: int = Field(default=0)
     acquired_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 

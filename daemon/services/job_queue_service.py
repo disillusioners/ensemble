@@ -355,49 +355,139 @@ class JobQueueService:
         if project_id is None:
             raise ValueError("project_id must be normalized before enqueue. This indicates a normalization gap.")
 
-        # Idempotency check: if idempotency_key provided, check for existing job
+        # M6 fix: use atomic ``INSERT ... ON CONFLICT DO NOTHING`` instead
+        # of the previous read-then-insert pattern. Two concurrent
+        # ``enqueue`` calls with the same key would BOTH pass the
+        # ``find_by_idempotency_key`` check, and the loser's INSERT
+        # would raise an unhandled ``IntegrityError`` (surfacing as a
+        # 500 to the caller). The atomic insert claims the partial
+        # unique index ``idx_job_idempotency`` in one round trip.
         if idempotency_key:
-            existing = await asyncio.to_thread(
-                self._repository.find_by_idempotency_key, idempotency_key
+            # Derive agent_dir from agent_id using registry before the
+            # atomic insert — we still need it for both the insert path
+            # and the registry validation below.
+            registry = get_registry()
+            agent_meta = registry.get(agent_id)
+            if agent_meta is None:
+                raise ValueError(f"Agent not found: {agent_id}")
+            agent_dir = str(agent_meta.path)
+
+            # Resolve queue_id for projects (needed for the INSERT row)
+            resolved_queue_id = queue_id
+            if resolved_queue_id is None:
+                if job_type == "message":
+                    queue = await asyncio.to_thread(
+                        self._queue_repo.get_by_name, project_id, "system_parallel_queue"
+                    )
+                    queue_kind = "parallel"
+                else:
+                    queue = await asyncio.to_thread(
+                        self._queue_repo.get_by_name, project_id, "system_fifo_queue"
+                    )
+                    queue_kind = "fifo"
+                if queue is not None:
+                    resolved_queue_id = queue.queue_id
+                else:
+                    raise ValueError(
+                        f"No system {queue_kind} queue found for project {project_id}. "
+                        f"Ensure system queues are provisioned."
+                    )
+            elif queue_id and project_id:
+                # Validate queue exists and belongs to project
+                queue = await asyncio.to_thread(self._queue_repo.get, queue_id)
+                if queue is None:
+                    logger.warning(
+                        f"Queue '{queue_id}' not found, job will be created without queue assignment"
+                    )
+                    resolved_queue_id = None
+                elif queue.project_id != project_id:
+                    # C4: Queue belongs to different project - reject the request
+                    raise ValueError(
+                        f"Queue {queue_id} does not belong to project {project_id}"
+                    )
+
+            # Atomically claim the key. ``created`` is True iff we
+            # inserted a fresh row.
+            job, created = await asyncio.to_thread(
+                self._repository.create_or_get_by_idempotency_key,
+                agent_id=agent_id,
+                agent_dir=agent_dir,
+                message=message,
+                source=source,
+                project_id=project_id,
+                priority=priority,
+                job_metadata=metadata,
+                queue_id=resolved_queue_id,
+                idempotency_key=idempotency_key,
+                job_type=job_type,
+                instance_id=instance_id,
             )
-            if existing is not None:
-                # Check TTL - jobs older than TTL are treated as new
+
+            if not created and job is not None:
+                # Another writer beat us. Apply the same terminal-vs-TTL
+                # policy as the previous read-then-insert code: if the
+                # existing job is non-terminal AND within TTL, return it
+                # (idempotent); otherwise fall through to a fresh insert.
                 try:
-                    created_time = datetime.fromisoformat(existing.created_at)
-                    ttl_cutoff = datetime.now(timezone.utc) - timedelta(hours=self._idempotency_key_ttl_hours)
+                    created_time = datetime.fromisoformat(job.created_at)
+                    ttl_cutoff = datetime.now(timezone.utc) - timedelta(
+                        hours=self._idempotency_key_ttl_hours
+                    )
                     if created_time < ttl_cutoff:
-                        # Job is older than TTL, treat as new
                         logger.info(
-                            f"Idempotency key '{idempotency_key}' matched job {existing.job_id} "
-                            f"but exceeded TTL ({self._idempotency_key_ttl_hours}h), creating new"
+                            f"Idempotency key '{idempotency_key}' matched job {job.job_id} "
+                            f"but exceeded TTL ({self._idempotency_key_ttl_hours}h), retrying insert"
                         )
-                        existing = None  # Reset so new job is created below
+                        job = None  # fall through to a fresh insert below
                 except (ValueError, TypeError):
-                    # If timestamp parsing fails, treat as existing
+                    # If timestamp parsing fails, keep the existing job.
                     pass
-                
-                if existing is not None:
-                    terminal_statuses = {JobStatus.COMPLETED.value, JobStatus.CANCELLED.value, JobStatus.DEAD_LETTER.value}
-                    if existing.status not in terminal_statuses:
-                        # Return existing non-terminal job (idempotent behavior)
+
+                if job is not None:
+                    terminal_statuses = {
+                        JobStatus.COMPLETED.value,
+                        JobStatus.CANCELLED.value,
+                        JobStatus.DEAD_LETTER.value,
+                    }
+                    if job.status not in terminal_statuses:
                         logger.debug(
-                            f"Idempotency key '{idempotency_key}' matched existing job {existing.job_id} "
-                            f"(status={existing.status})"
+                            f"Idempotency key '{idempotency_key}' matched existing job {job.job_id} "
+                            f"(status={job.status})"
                         )
-                        return existing
-                    # Terminal job with same key: allow creating new
+                        return job
                     logger.info(
-                        f"Idempotency key '{idempotency_key}' matched terminal job {existing.job_id}, "
+                        f"Idempotency key '{idempotency_key}' matched terminal job {job.job_id}, "
                         "creating new job"
                     )
-        
-        # Derive agent_dir from agent_id using registry
+
+            if created and job is not None:
+                # Fresh insert succeeded — notify and return.
+                if self._dispatch_bus is not None:
+                    self._dispatch_bus.notify_new_job(project_id)
+                return job
+
+            # Fallthrough: existing job was terminal / TTL-expired and
+            # we need a brand-new insert. Drop into the regular create
+            # path below by clearing idempotency_key (otherwise the
+            # legacy code below would loop on the same key).
+            if job is not None:
+                # Terminal existing job — bypass the unique index by
+                # using a synthetic suffix so the new row has a unique
+                # non-null key. This preserves the previous behavior
+                # where a terminal job does NOT block a fresh submit.
+                idempotency_key = f"{idempotency_key}#{uuid.uuid4().hex[:8]}"
+            else:
+                # TTL-expired job — same treatment.
+                idempotency_key = f"{idempotency_key}#{uuid.uuid4().hex[:8]}"
+
+        # Non-idempotency path (or terminal-fallback path above).
+        # Derive agent_dir from agent_id using registry.
         registry = get_registry()
         agent_meta = registry.get(agent_id)
         if agent_meta is None:
             raise ValueError(f"Agent not found: {agent_id}")
         agent_dir = str(agent_meta.path)
-        
+
         # Resolve queue_id for projects
         resolved_queue_id = queue_id
         if queue_id is None:
@@ -511,6 +601,14 @@ class JobQueueService:
         to the instance (cancelling active requests, terminating children,
         releasing locks) before marking the job as CANCELLED.
         
+        For PROCESSING jobs with a dead/terminal instance and for PENDING /
+        FAILED jobs, this delegates to the atomic repository ``cancel_job``,
+        which handles all cancellable states in a single UPDATE-WHERE-IN.
+        The atomic repository method closes the TOCTOU window where a
+        concurrent ``start_job`` would transition PENDING -> PROCESSING
+        between this method's read and its dispatch, causing the cancel
+        to be silently lost.
+        
         For FAILED jobs, this stops any pending retries.
         
         Args:
@@ -524,27 +622,17 @@ class JobQueueService:
         if job is None:
             return False
         
-        # Pre-validate with state machine (for better error messages)
+        # Pre-validate with state machine for better error messages. This
+        # is a best-effort check; the atomic repo.cancel_job is the source
+        # of truth and will raise ValueError for non-cancellable states.
         if not job_state_machine.can_transition(job.status, JobStatus.CANCELLED.value):
             return False
         
-        # Handle based on current status
-        if job.status == JobStatus.PENDING.value:
-            # PENDING: simple transition
-            try:
-                await asyncio.to_thread(
-                    self._repository.atomic_transition,
-                    job_id=job.job_id,
-                    from_status=JobStatus.PENDING.value,
-                    to_status=JobStatus.CANCELLED.value,
-                )
-                # Notify watchers after successful transition
-                await self.notify_watchers(job.job_id, "cancelled")
-                return True
-            except InvalidTransitionError:
-                return False
-        
-        elif job.status == JobStatus.PROCESSING.value:
+        # Special case: PROCESSING with an alive instance requires a
+        # cascade — ``terminate_instance`` will mark the job CANCELLED
+        # itself. Lock release happens first regardless of instance
+        # liveness (matches pre-fix semantics).
+        if job.status == JobStatus.PROCESSING.value:
             instance_id = job.instance_id
             
             # Release any locks held by this job first
@@ -563,43 +651,26 @@ class JobQueueService:
             )
             
             if instance_alive:
-                # Terminate the instance (cascades to children, cancels requests,
-                # releases locks, marks job as CANCELLED via DemandState.CANCELLED)
+                # Terminate the instance (cascades to children, cancels
+                # requests, releases locks, marks job as CANCELLED via
+                # DemandState.CANCELLED).
                 await self._instance_manager.terminate_instance(instance_id)
                 # Job is now CANCELLED by instance_lifecycle, notify watchers
                 await self.notify_watchers(job.job_id, "cancelled")
                 return True
-            else:
-                # Instance already dead or never created — transition directly to CANCELLED
-                try:
-                    await asyncio.to_thread(
-                        self._repository.atomic_transition,
-                        job_id=job.job_id,
-                        from_status=JobStatus.PROCESSING.value,
-                        to_status=JobStatus.CANCELLED.value,
-                    )
-                except InvalidTransitionError:
-                    return False
-                await self.notify_watchers(job.job_id, "cancelled")
-                return True
+            # else: instance already dead/terminal — fall through to atomic
+            # repo.cancel_job which will handle PROCESSING -> CANCELLED.
         
-        elif job.status == JobStatus.FAILED.value:
-            # FAILED: transition to CANCELLED to stop retries
-            try:
-                await asyncio.to_thread(
-                    self._repository.atomic_transition,
-                    job_id=job.job_id,
-                    from_status=JobStatus.FAILED.value,
-                    to_status=JobStatus.CANCELLED.value,
-                )
-                # Notify watchers after successful transition
-                await self.notify_watchers(job.job_id, "cancelled")
-                return True
-            except InvalidTransitionError:
-                return False
-        
-        # Terminal or non-cancellable states
-        return False
+        # All other cancellable states (PENDING, PROCESSING-dead, FAILED):
+        # delegate to the atomic repository cancel_job which covers all
+        # cancellable states in a single UPDATE, eliminating the TOCTOU
+        # race against concurrent start_job transitions.
+        try:
+            await asyncio.to_thread(self._repository.cancel_job, job.job_id)
+        except ValueError:
+            return False
+        await self.notify_watchers(job.job_id, "cancelled")
+        return True
     
     def _is_instance_alive(self, instance_id: str) -> bool:
         """Check if an instance exists and is not in a terminal state.
@@ -776,7 +847,7 @@ class JobQueueService:
         # If job has queue_id, use per-queue locking with concurrency limit
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
-            
+
             acquired = await self._lock_manager.acquire_queue_lock(
                 project_id=job.project_id,
                 queue_id=job.queue_id,
@@ -784,23 +855,30 @@ class JobQueueService:
                 instance_id=instance_id,
                 concurrency_limit=concurrency_limit,
             )
-            
+
             if not acquired:
                 return False
-            
-            # Atomically start the job
+
+            # C11: try/finally ensures lock is released on ALL failure paths
+            # (not just ValueError — e.g. OperationalError, CancelledError, deadlocks).
+            # The ``except ValueError`` preserves the original "return False"
+            # behavior for callers; the finally block still drops the lock.
+            started_ok = False
             try:
                 await asyncio.to_thread(
                     self._repository.start_job_atomic, job.job_id, instance_id
                 )
+                started_ok = True
                 return True
             except ValueError:
                 # Job state changed (already started/cancelled)
-                await self._lock_manager.release_queue_lock(
-                    job.project_id, job.queue_id, job.job_id
-                )
                 return False
-        
+            finally:
+                if not started_ok:
+                    await self._lock_manager.release_queue_lock(
+                        job.project_id, job.queue_id, job.job_id
+                    )
+
         # If job has project_id but no queue_id, use backward-compatible project-based locking
         if job.project_id:
             acquired = await self._lock_manager.acquire(
@@ -808,20 +886,27 @@ class JobQueueService:
                 job_id=job.job_id,
                 instance_id=instance_id,
             )
-            
+
             if not acquired:
                 return False
-            
+
+            # C11: try/finally ensures lock is released on ALL failure paths.
+            started_ok = False
             try:
                 await asyncio.to_thread(
                     self._repository.start_job_atomic, job.job_id, instance_id
                 )
+                started_ok = True
                 return True
             except ValueError:
-                await self._lock_manager.release(job.project_id, job.job_id)
                 return False
-        
+            finally:
+                if not started_ok:
+                    await self._lock_manager.release(job.project_id, job.job_id)
+
         # No project_id - start immediately without locking
+        # No lock held here; keep the original try/except ValueError semantics
+        # so we still return False (not None) on a state mismatch.
         try:
             await asyncio.to_thread(
                 self._repository.start_job_atomic, job.job_id, instance_id
@@ -832,41 +917,73 @@ class JobQueueService:
     
     async def _complete_job(self, job: JobItem, result_summary: str | None) -> None:
         """Mark a job as completed and release its lock.
-        
+
+        H9 Fix: Status transition FIRST, lock release in finally.
+        The previous order (release → transition) created a race window where
+        a failed transition would leave the job in PROCESSING with no lock,
+        allowing a second worker to double-claim. By holding the lock until
+        the status is committed, the recovery sweep (``recover_stale_locks``)
+        remains the only path that can re-claim a stuck PROCESSING job.
+
         Args:
             job: The processing job to complete.
             result_summary: Optional summary of the job result.
         """
-        # Release the lock first
-        await self._release_job_lock(
-            project_id=job.project_id,
-            queue_id=job.queue_id,
-            job_id=job.job_id,
-            instance_id=job.instance_id,
-            release_by_instance=True,
-        )
+        try:
+            # 1. Transition status FIRST (commit before releasing the lock)
+            await asyncio.to_thread(
+                self._repository.complete_job, job.job_id, result_summary
+            )
+        finally:
+            # 2. Release lock AFTER transition attempt (success OR failure).
+            # On failure, the job stays PROCESSING and the recovery sweep will
+            # pick it up — which is the correct, race-free path.
+            try:
+                await self._release_job_lock(
+                    project_id=job.project_id,
+                    queue_id=job.queue_id,
+                    job_id=job.job_id,
+                    instance_id=job.instance_id,
+                    release_by_instance=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to release lock for job {job.job_id[:8]}...: {e}"
+                )
 
-        # Mark job as completed
-        await asyncio.to_thread(self._repository.complete_job, job.job_id, result_summary)
-    
     async def _fail_job(self, job: JobItem, error_message: str) -> None:
         """Mark a job as failed and release its lock.
-        
+
+        H9 Fix: Status transition FIRST, lock release in finally.
+        Mirrors the ordering in ``_complete_job`` and the public
+        ``complete_job`` (status-first, lock-second in finally). Holding the
+        lock until the transition is committed prevents a failed transition
+        from leaving a job in PROCESSING with no lock — which would let a
+        second worker double-claim during the recovery window.
+
         Args:
             job: The processing job that failed.
             error_message: Error message describing the failure.
         """
-        # Release the lock first
-        await self._release_job_lock(
-            project_id=job.project_id,
-            queue_id=job.queue_id,
-            job_id=job.job_id,
-            instance_id=job.instance_id,
-            release_by_instance=True,
-        )
-
-        # Mark job as failed
-        await asyncio.to_thread(self._repository.fail_job, job.job_id, error_message)
+        try:
+            # 1. Transition status FIRST (commit before releasing the lock)
+            await asyncio.to_thread(
+                self._repository.fail_job, job.job_id, error_message
+            )
+        finally:
+            # 2. Release lock AFTER transition attempt (success OR failure).
+            try:
+                await self._release_job_lock(
+                    project_id=job.project_id,
+                    queue_id=job.queue_id,
+                    job_id=job.job_id,
+                    instance_id=job.instance_id,
+                    release_by_instance=True,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to release lock for job {job.job_id[:8]}...: {e}"
+                )
     
     async def _get_next_job(
         self,
@@ -1090,18 +1207,32 @@ class JobQueueService:
                         # Fall through to normal start logic below (don't return None)
                     else:
                         # MESSAGE: reactivate any terminal instance (COMPLETED/TERMINATED/ERROR/FAILED)
+                        # Use transition_status_if (atomic WHERE status IN guard) instead of
+                        # update_status — F-04 made update() reject status= with ValueError, and
+                        # transition_status_if avoids clobbering a concurrent terminal write.
                         logger.info(
                             f"[TRACE] start_job: attempting reactivation of {instance.status} instance "
                             f"{job.instance_id[:8]}... for MESSAGE job {job.job_id[:8]}..."
                         )
-                        await asyncio.to_thread(
-                            self._instance_manager._instance_repository.update_status,
-                            job.instance_id, InstanceStatus.RUNNING.value
+                        reactivated = await asyncio.to_thread(
+                            self._instance_manager._instance_repository.transition_status_if,
+                            job.instance_id,
+                            InstanceStatus.RUNNING.value,
+                            tuple(TERMINAL_STATUSES),
                         )
-                        await self._instance_manager._live_hub.stream_status_change(
-                            job.instance_id, InstanceStatus.RUNNING.value,
-                            agent_id=instance.agent_id
-                        )
+                        if reactivated is None:
+                            # Concurrent writer changed status between our read and the
+                            # atomic UPDATE, or the row no longer exists. Don't stream
+                            # RUNNING — the actual status is whatever the writer set.
+                            logger.info(
+                                f"[TRACE] start_job: reactivation no-op for job {job_id[:8]}... "
+                                f"(instance {job.instance_id[:8]}... no longer in terminal state)"
+                            )
+                        else:
+                            await self._instance_manager._live_hub.stream_status_change(
+                                job.instance_id, InstanceStatus.RUNNING.value,
+                                agent_id=instance.agent_id
+                            )
                         logger.info(
                             f"start_job: reactivating {instance.status} instance {job.instance_id[:8]}... "
                             f"for MESSAGE job {job.job_id[:8]}..."
@@ -1168,17 +1299,39 @@ class JobQueueService:
         
         # Lock acquired (or no locking needed) - now try to start job atomically
         logger.debug(f"[TRACE] start_job: attempting atomic transition PENDING→PROCESSING for job {job_id[:8]}...")
+        # C11: try/finally ensures lock is released on ALL failure paths
+        # (not just ValueError — e.g. OperationalError, CancelledError, deadlocks).
+        # On success, the lock is intentionally kept (JobProcessor holds it until
+        # the job completes/fails). ``started_ok`` guards against releasing on
+        # the success path, matching the original lock-on-success semantics.
+        # The ``except (ValueError, InvalidTransitionError)`` preserves the
+        # original "return None" behavior for callers (lock contention /
+        # already-started job / invalid status transition) — the lock release
+        # happens in the finally block so we still drop it on the caught-exception
+        # paths. ``InvalidTransitionError`` is NOT a ValueError subclass (see
+        # daemon/services/job_state_machine.py:35), so it must be caught
+        # explicitly when ``start_job_atomic`` raises it instead of ValueError.
+        started_ok = False
         try:
             started_job = await asyncio.to_thread(
                 self._repository.start_job_atomic, job_id, instance_id
             )
+            started_ok = True
             logger.debug(
                 f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
             )
             return started_job
-        except ValueError:
-            # Job state changed (already started/cancelled) - release the lock we acquired
-            if lock_acquired:
+        except (ValueError, InvalidTransitionError):
+            # Job state changed (already started/cancelled) — preserve original
+            # behavior of returning None so callers can detect "lock held by
+            # another worker" without having to catch an exception.
+            return None
+        finally:
+            if not started_ok and lock_acquired:
+                # Release the lock on ANY failure path: ValueError (caller
+                # sees None), OperationalError / CancelledError (caller sees
+                # the exception), or any other unexpected error. Without this
+                # finally, a non-ValueError would leak the lock permanently.
                 if job.queue_id and job.project_id:
                     await self._lock_manager.release_queue_lock(
                         project_id=job.project_id,
@@ -1190,7 +1343,6 @@ class JobQueueService:
                         project_id=job.project_id,
                         job_id=job_id,
                     )
-            return None
     
     async def complete_job(
         self,

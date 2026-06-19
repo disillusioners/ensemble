@@ -46,13 +46,14 @@ import asyncio
 from datetime import datetime, timezone
 import logging
 import time
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-from sqlmodel import Session
+from sqlmodel import Session, select, update as sqlmodel_update
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
+from daemon.repositories.job_queue.models import JobLock
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.services.correlation_manager import get_correlation_manager
 from daemon.services.job_queue_service import DemandState, JobQueueService
@@ -94,6 +95,44 @@ class _InstanceFinalizeResult(NamedTuple):
     skip: bool
     parent_id: str | None
     agent_id: str | None
+
+
+class _FinalizeJobResult(NamedTuple):
+    """Result of the sync DB half of ``_finalize_job`` (H15 fix).
+
+    Outbox-style payload: carries everything the async caller needs to fire
+    post-commit side effects (SSE / notify_watchers / CompletionRegistry /
+    lifecycle event / _trigger_next_job) on the event loop after the
+    WriteGuardSession commits.
+
+    * ``skip`` — True means no-op (unknown terminal_status, CM re-check
+      aborted, job not found). Caller returns silently without firing any
+      side effects.
+    * ``terminal_status`` — ``"completed"`` or ``"error"`` (for SSE /
+      CompletionRegistry).
+    * ``job_id`` / ``instance_id`` — IDs for side effects.
+    * ``parent_id`` / ``agent_id`` — captured from the instance row before
+      the session closes (instance is detached after commit).
+    * ``result_summary`` / ``error_message`` — for ``notify_watchers``.
+    * ``locks_released`` — count of ``job_locks`` rows deleted (for DEBUG log).
+    * ``instance_was_terminal`` — True when the instance row was already
+      in a terminal status before this transition (or missing). The caller
+      uses this to decide whether to fire instance-side side effects (SSE
+      / CompletionRegistry / lifecycle event): they were already fired by
+      whoever set the instance terminal first, OR the instance row is
+      missing and there is no consumer to notify.
+    """
+
+    skip: bool
+    terminal_status: str | None
+    job_id: str | None
+    instance_id: str | None
+    parent_id: str | None
+    agent_id: str | None
+    result_summary: str | None
+    error_message: str | None
+    locks_released: int
+    instance_was_terminal: bool
 
 
 class JobFeedbackObserver:
@@ -550,14 +589,29 @@ class JobFeedbackObserver:
         values. Race conditions (job already transitioned by another actor) are
         caught by ``InvalidTransitionError`` and logged at DEBUG.
 
-        Side effects on success:
-          1. ``atomic_transition`` moves the job from PROCESSING to COMPLETED
-             or FAILED.
-          2. ``notify_watchers`` fires the terminal watcher event.
-          3. ``lock_repo.release_by_instance`` releases any DB-backed locks
-             held by this instance.
-          4. The next pending job for the same project is admitted and
-             spawned (zero-delay handoff).
+        H15 fix: consolidates the 5-step terminal cascade into a single
+        WriteGuardSession transaction. The sequence is:
+
+          1. Pre-fetch ``result_summary`` / ``error_message`` on the event loop
+             (needed by both the job row and post-commit side effects).
+          2. Call ``_finalize_job_db_sync`` via ``asyncio.to_thread`` — this
+             is the single WriteGuardSession that atomically performs: job
+             atomic transition (PROCESSING → COMPLETED/FAILED), instance status
+             update, and lock release. C1 TOCTOU re-check happens INSIDE the
+             sync helper, immediately before the in-session UPDATE.
+          3. Fire post-commit outbox side effects on the event loop after the
+             thread returns: ``notify_watchers`` (terminal notification),
+             SSE/CompletionRegistry/lifecycle event (via the extracted dispatcher),
+             and ``_trigger_next_job`` (zero-delay handoff).
+
+        This eliminates the partial-failure gap where ``atomic_transition``
+        succeeded but ``release_by_instance`` failed — the queue slot would be
+        leaked permanently.
+
+        W3 fix (fail-safe) is preserved: if the sync helper or any pre-fetch
+        raises, the method attempts a fail-safe ``atomic_transition`` to FAILED
+        via ``asyncio.to_thread`` (C1 TOCTOU invariant does not apply here —
+        the CM has already cleaned up its pending state for this parent).
 
         Args:
             job: The JobItem to transition (must be in PROCESSING).
@@ -565,9 +619,11 @@ class JobFeedbackObserver:
             terminal_status: ``"completed"`` or ``"error"``.
             error: Error message for FAILED transitions (ignored for COMPLETED).
         """
-        now = datetime.now(timezone.utc).isoformat()
-        try:
-            if terminal_status == InstanceStatus.COMPLETED.value:
+        # ─── Pre-fetch data needed for the DB write and post-commit side effects ───
+        result_summary: str | None = None
+        error_message: str | None = None
+        if terminal_status == InstanceStatus.COMPLETED.value:
+            try:
                 result_summary = (
                     await self._instance_manager._get_last_assistant_message_raw(
                         instance_id
@@ -575,89 +631,89 @@ class JobFeedbackObserver:
                 )
                 if not result_summary:
                     result_summary = "Job completed (no agent response captured)"
-                # C1 fix (TOCTOU race introduced by W1): after the LLM fetch
-                # (last await before the transition), re-check the CM pending
-                # count. A concurrent ``register_message_send`` could have
-                # fired during the fetch (parent agent spawned another child
-                # via a tool call while the callback was running). If new
-                # pending correlations appeared, abort the terminal transition
-                # — the CM will fire the callback again when those new
-                # children resolve. The check itself is synchronous and is the
-                # LAST operation before ``atomic_transition`` (no await in
-                # between), so no new registrations can sneak past.
-                cm = get_correlation_manager()
-                if cm is not None:
-                    cm_pending = cm.get_pending_count(instance_id)
-                    if cm_pending > 0:
-                        logger.info(
-                            f"Observer: aborting terminal transition for "
-                            f"{instance_id[:8]}... — {cm_pending} new "
-                            f"pending correlations appeared during callback"
-                        )
-                        return
-                self._job_repo.atomic_transition(
-                    job_id=job.job_id,
-                    from_status=JobStatus.PROCESSING.value,
-                    to_status=JobStatus.COMPLETED.value,
-                    completed_at=now,
-                    result_summary=result_summary,
-                )
-                # NOTE: ``atomic_transition`` above is intentionally NOT
-                # wrapped in ``asyncio.to_thread`` because the C1 TOCTOU
-                # comment block above requires it to be the LAST operation
-                # before the notification — no ``await`` between the CM
-                # re-check and the write. Wrapping the write in a thread
-                # would re-introduce a window where new ``register_message_send``
-                # calls can sneak past. The C1 invariant is the trade-off;
-                # this single sync write is a fast indexed UPDATE and has not
-                # been observed to deadlock in practice (the deadlock chain
-                # documented in the experience docs is the WriteGuardSession
-                # commit in ``_finalize_instance``, which IS wrapped).
-                logger.info(
-                    f"Observer: completed job {job.job_id[:8]}... "
-                    f"for instance {instance_id[:8]}..."
-                )
-                await self._job_queue_service.notify_watchers(
-                    job.job_id, "completed"
-                )
-            elif terminal_status == InstanceStatus.ERROR.value:
-                error_message = error if error else "Unknown error"
-                # C1 fix (TOCTOU race introduced by W1): same re-check as the
-                # completed branch. New pending correlations may have been
-                # registered during the path between CM callback dispatch and
-                # our arrival here. Abort if so; CM will fire the callback
-                # again when the new children resolve. No ``await`` between
-                # this check and ``atomic_transition``.
-                cm = get_correlation_manager()
-                if cm is not None:
-                    cm_pending = cm.get_pending_count(instance_id)
-                    if cm_pending > 0:
-                        logger.info(
-                            f"Observer: aborting terminal transition for "
-                            f"{instance_id[:8]}... — {cm_pending} new "
-                            f"pending correlations appeared during callback"
-                        )
-                        return
-                self._job_repo.atomic_transition(
-                    job_id=job.job_id,
-                    from_status=JobStatus.PROCESSING.value,
-                    to_status=JobStatus.FAILED.value,
-                    completed_at=now,
-                    error_message=error_message,
-                )
-                logger.info(
-                    f"Observer: failed job {job.job_id[:8]}... "
-                    f"for instance {instance_id[:8]}... error: {error_message}"
-                )
-                await self._job_queue_service.notify_watchers(
-                    job.job_id, "failed", error_message
-                )
-            else:
-                logger.warning(
-                    f"Unknown terminal status '{terminal_status}' for "
-                    f"instance {instance_id[:8]}..."
+            except Exception as e:
+                # LLM fetch failed — use the fallback; the W3 fail-safe below
+                # will transition the job to FAILED if even the DB write fails.
+                result_summary = "Job completed (no agent response captured)"
+                error = f"LLM fetch failed during finalization: {e}"
+                terminal_status = InstanceStatus.ERROR.value
+                error_message = error
+        elif terminal_status == InstanceStatus.ERROR.value:
+            error_message = error if error else "Unknown error"
+        else:
+            logger.warning(
+                f"Unknown terminal status '{terminal_status}' for "
+                f"instance {instance_id[:8]}..."
+            )
+            return
+
+        # ─── Call the unified sync helper — single WriteGuardSession transaction ───
+        try:
+            db_result = await asyncio.to_thread(
+                self._finalize_job_db_sync,
+                job.job_id,
+                instance_id,
+                terminal_status,
+                result_summary,
+                error_message,
+            )
+
+            # ─── Handle skip (CM re-check aborted, job not found, etc.) ───
+            if db_result.skip:
+                logger.debug(
+                    f"Observer: _finalize_job skipped for job "
+                    f"{job.job_id[:8]}... instance {instance_id[:8]}..."
                 )
                 return
+
+            # ─── Post-commit outbox: fire side effects on the event loop ───
+            # notify_watchers (terminal notification) — fires AFTER commit so
+            # watchers see a consistent state.
+            if db_result.terminal_status == InstanceStatus.COMPLETED.value:
+                try:
+                    await self._job_queue_service.notify_watchers(
+                        job.job_id, "completed"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Observer: notify_watchers failed for job "
+                        f"{job.job_id[:8]}...: {e}"
+                    )
+            elif db_result.terminal_status == InstanceStatus.ERROR.value:
+                try:
+                    await self._job_queue_service.notify_watchers(
+                        job.job_id, "failed", db_result.error_message
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Observer: notify_watchers failed for job "
+                        f"{job.job_id[:8]}...: {e}"
+                    )
+
+            # ─── Instance-side post-commit (SSE / CompletionRegistry / lifecycle) ───
+            # Only fire if the instance was NOT already terminal when we wrote it.
+            # If ``instance_was_terminal=True``, the side effects were already fired
+            # by whoever set the instance terminal first (CM-disabled inline cascade
+            # or a prior callback). If the instance row was missing, there is no
+            # consumer to notify.
+            if not db_result.instance_was_terminal:
+                await self._dispatch_instance_post_commit_side_effects(
+                    instance_id=instance_id,
+                    terminal_status=db_result.terminal_status,
+                    error=error,
+                    parent_id=db_result.parent_id,
+                    agent_id=db_result.agent_id,
+                    last_content=result_summary,
+                )
+
+            # ─── Trigger next job (zero-delay handoff) ───
+            await self._trigger_next_job(job)
+
+            logger.info(
+                f"Observer: finalized job {job.job_id[:8]}... "
+                f"status={db_result.terminal_status} for instance {instance_id[:8]}... "
+                f"(released {db_result.locks_released} lock(s))"
+            )
 
         except InvalidTransitionError as e:
             # Race condition: another actor (e.g., terminate_instance, a
@@ -670,27 +726,19 @@ class JobFeedbackObserver:
             return
         except Exception as e:
             logger.error(
-                f"Failed to transition job {job.job_id[:8]}... "
+                f"Failed to finalize job {job.job_id[:8]}... "
                 f"status={terminal_status}: {e}",
                 exc_info=True,
             )
-            # W3 fix (fail-safe): if finalization failed (e.g., the LLM fetch
-            # raised, the DB write failed), the CM has already deleted
-            # ``_pending[parent_id]`` — the callback will not fire again.
+            # W3 fix (fail-safe): if finalization failed, the CM has already
+            # deleted ``_pending[parent_id]`` — the callback will not fire again.
             # Without a fail-safe, the job would sit in PROCESSING forever.
-            # Transition to FAILED so the queue can advance and watchers see
-            # a terminal state. If even this fails (e.g., job is already in a
-            # terminal state from another actor), swallow silently — there
-            # is nothing more we can do.
+            # Transition to FAILED so the queue can advance and watchers see a
+            # terminal state. Wrapped in ``asyncio.to_thread`` to keep sync
+            # DB off the event loop (C1 TOCTOU invariant does NOT apply here —
+            # the primary finalization has already failed, so there is no
+            # ``register_message_send`` race to defend against).
             try:
-                # Wrap this fail-safe write in ``asyncio.to_thread`` — unlike
-                # the COMPLETED/FAILED happy-path writes above, the C1 TOCTOU
-                # invariant does NOT apply here: the primary finalization has
-                # already failed and the CM has deleted ``_pending[parent_id]``,
-                # so there is no ``register_message_send`` race to defend
-                # against. Under SQLite WAL write contention this recovery
-                # write would otherwise wedge the event loop on the same
-                # deadlock chain documented for the happy paths.
                 await asyncio.to_thread(
                     self._job_repo.atomic_transition,
                     job_id=job.job_id,
@@ -706,46 +754,6 @@ class JobFeedbackObserver:
             except Exception:
                 pass  # atomic_transition itself failed — nothing more we can do
             return
-
-        # Phase 3 (Cascade Unification): perform the FULL instance terminal
-        # transition now that the JOB is terminal. Mirrors the inline cascade
-        # in ``child_reports.py`` and ``error_reporting.py`` (CM-disabled
-        # path) on the CM-active path — sets ``instance.status``, signals
-        # ``CompletionRegistry`` (unblocks ``invoke_agent_and_wait()``),
-        # publishes the lifecycle event, and emits the SSE ``status_change``.
-        # Wrapped in its own try/except so an instance-side failure does NOT
-        # trigger the W3 fail-safe above (the job is already terminal).
-        try:
-            await self._finalize_instance(instance_id, terminal_status, error=error)
-        except Exception as e:
-            logger.warning(
-                f"Observer: instance finalization failed for "
-                f"{instance_id[:8]}...: {e}"
-            )
-
-        # Release locks held by this instance. Wrap the sync DB write in
-        # ``asyncio.to_thread`` so SQLite WAL write contention cannot block
-        # the event loop (the deadlock chain documented in the experience
-        # docs is rooted in sync writes on the loop thread).
-        try:
-            released_count = await asyncio.to_thread(
-                self._lock_repo.release_by_instance, instance_id
-            )
-            if released_count > 0:
-                logger.debug(
-                    f"Released {released_count} lock(s) for instance "
-                    f"{instance_id[:8]}..."
-                )
-        except Exception as e:
-            logger.warning(
-                f"Failed to release locks for instance "
-                f"{instance_id[:8]}...: {e}"
-            )
-
-        # Trigger the next pending job immediately instead of waiting for
-        # the JobProcessor polling interval. This ensures zero-delay handoff
-        # between consecutive jobs in the same queue.
-        await self._trigger_next_job(job)
 
     async def _finalize_instance(
         self,
@@ -772,6 +780,16 @@ class JobFeedbackObserver:
         (CM-disabled path) and :class:`ErrorReportingService._send_error_report`
         (CM-disabled path), so the CM-active path is now symmetrical with
         the CM-disabled path.
+
+        H15 refactor: this method is kept for backwards-compat (it is
+        exercised by ``test_finalize_instance.py`` and may be called
+        standalone by future code paths). It still performs its own DB
+        write via ``_finalize_instance_db_sync`` and then dispatches the
+        post-commit side effects via the shared
+        ``_dispatch_instance_post_commit_side_effects`` helper. The
+        ``_finalize_job`` path no longer calls this method — it does the
+        instance DB write inside the unified ``_finalize_job_db_sync``
+        and calls the dispatcher directly (avoiding a redundant DB write).
 
         Idempotency: if the instance is already in a terminal status
         (``COMPLETED`` / ``ERROR`` / ``TERMINATED`` / ``FAILED``), the method
@@ -843,6 +861,54 @@ class JobFeedbackObserver:
             )
             raise
 
+        # Steps 2-4: post-commit side effects (SSE / CompletionRegistry /
+        # lifecycle event) via the shared dispatcher. For the COMPLETED path,
+        # ``last_content=None`` triggers an on-demand fetch in the dispatcher
+        # (we don't have it cached here because this method does not pre-fetch
+        # the way ``_finalize_job`` does).
+        await self._dispatch_instance_post_commit_side_effects(
+            instance_id=instance_id,
+            terminal_status=terminal_status,
+            error=error,
+            parent_id=parent_id,
+            agent_id=agent_id,
+            last_content=None,
+        )
+
+    async def _dispatch_instance_post_commit_side_effects(
+        self,
+        *,
+        instance_id: str,
+        terminal_status: str,
+        error: str | None,
+        parent_id: str | None,
+        agent_id: str | None,
+        last_content: str | None,
+    ) -> None:
+        """Fire post-commit instance-side side effects after the DB transition.
+
+        Extracted from the original ``_finalize_instance`` body so both
+        ``_finalize_instance`` (standalone path) and ``_finalize_job``
+        (H15 unified-transaction path) can call it without re-doing the
+        DB write.
+
+        Each step is wrapped in its own ``try/except`` so a failure in one
+        side effect does not block the others (Step 2 SSE / Step 3
+        CompletionRegistry / Step 4 lifecycle event). Best-effort throughout
+        — the DB is already committed, so the worst case is a missing
+        notification (recoverable by the orphan-detector / recovery sweep).
+
+        Args:
+            instance_id: The instance ID for SSE / CompletionRegistry / lifecycle.
+            terminal_status: ``"completed"`` or ``"error"``.
+            error: Optional error message (for the ERROR path).
+            parent_id: Captured from the instance row before commit.
+            agent_id: Captured from the instance row before commit.
+            last_content: Pre-fetched last assistant message (for the
+                CompletionRegistry COMPLETED path). If ``None``, the
+                dispatcher fetches it on-demand via
+                ``_get_last_assistant_message_raw``.
+        """
         # Step 2: SSE status_change — fire AFTER commit so subscribers see
         # a state consistent with the DB. Best-effort.
         live_hub = getattr(self._instance_manager, "_live_hub", None)
@@ -872,13 +938,15 @@ class JobFeedbackObserver:
                     is_error=True,
                 )
             else:
-                last_content = (
-                    await self._instance_manager._get_last_assistant_message_raw(
-                        instance_id
+                content = last_content
+                if content is None:
+                    content = (
+                        await self._instance_manager._get_last_assistant_message_raw(
+                            instance_id
+                        )
                     )
-                )
                 get_completion_registry().complete(
-                    instance_id, result=last_content
+                    instance_id, result=content
                 )
         except Exception as e:
             logger.warning(
@@ -979,12 +1047,267 @@ class JobFeedbackObserver:
                 skip=False, parent_id=parent_id, agent_id=agent_id
             )
 
+    def _finalize_job_db_sync(
+        self,
+        job_id: str,
+        instance_id: str,
+        terminal_status: str,
+        result_summary: str | None,
+        error_message: str | None,
+    ) -> _FinalizeJobResult:
+        """Sync DB half of ``_finalize_job`` (H15 fix).
+
+        Consolidates the 5-step terminal cascade into a SINGLE
+        ``WriteGuardSession`` transaction so partial failures cannot leave
+        inconsistent state (job COMPLETED but lock leaked, etc.). The
+        three DB operations commit together:
+
+          1. Job atomic transition PROCESSING → COMPLETED/FAILED (in-session
+             UPDATE, same semantics as ``JobRepository.atomic_transition`` but
+             inside our ``WriteGuardSession`` so it commits atomically with
+             steps 2/3).
+          2. Instance status update to COMPLETED/ERROR (status, updated_at,
+             last_activity_at, version bump). Skipped if already terminal
+             OR if the row is missing.
+          3. Lock release — DELETE every ``job_locks`` row where
+             ``instance_id`` matches. Inlined here (instead of calling
+             ``LockRepository.release_by_instance`` which opens its own
+             session — a separate transaction that would defeat the
+             atomicity we need).
+
+        If any step raises, none of them commit (the
+        ``WriteGuardSession.__exit__`` rolls back via the underlying
+        ``Session.close``).
+
+        C1 TOCTOU invariant (Phase 2): ``get_pending_count`` is re-checked
+        INSIDE this sync helper, immediately before the in-session UPDATE.
+        There is no ``await`` between this re-check and the transition
+        (both run on the same worker thread). This preserves the original
+        invariant from ``_finalize_job`` even though the call is now
+        off-loaded to a worker thread via ``asyncio.to_thread``. The check
+        reads ``_pending`` (a Python dict, GIL-protected) so the read is
+        safe from any thread; the per-parent ``asyncio.Lock`` in the CM is
+        NOT taken (would raise ``RuntimeError`` off the event loop).
+
+        Returns ``skip=True`` for the following cases (caller returns
+        silently without firing side effects):
+          * Unknown ``terminal_status`` (caller already validated; defensive).
+          * CM ``get_pending_count > 0`` — new pending correlations appeared
+            during the callback (C1 abort). The CM will fire the callback
+            again when those resolve.
+          * Job not found (deleted concurrently).
+
+        Raises ``InvalidTransitionError`` for the concurrent-transition
+        case (job status no longer PROCESSING — race with another actor).
+        The caller logs at DEBUG and returns silently (idempotency).
+
+        Any other exception propagates to the caller, which fires the W3
+        fail-safe transition.
+
+        Args:
+            job_id: The job to transition.
+            instance_id: The parent instance ID (instance update + lock release).
+            terminal_status: ``"completed"`` or ``"error"``.
+            result_summary: Pre-fetched result summary for the COMPLETED path.
+            error_message: Pre-fetched error message for the ERROR path.
+
+        Returns:
+            ``_FinalizeJobResult`` carrying the data the async caller needs
+            to fire post-commit side effects.
+        """
+        # ─── Validate terminal_status (caller already validated; defensive) ───
+        if terminal_status == InstanceStatus.COMPLETED.value:
+            to_status = JobStatus.COMPLETED.value
+        elif terminal_status == InstanceStatus.ERROR.value:
+            to_status = JobStatus.FAILED.value
+        else:
+            return _FinalizeJobResult(
+                skip=True,
+                terminal_status=None,
+                job_id=None,
+                instance_id=None,
+                parent_id=None,
+                agent_id=None,
+                result_summary=None,
+                error_message=None,
+                locks_released=0,
+                instance_was_terminal=False,
+            )
+
+        # ─── C1 TOCTOU re-check (Phase 2 invariant preserved) ───
+        # Sync, inside the worker thread, IMMEDIATELY before the UPDATE.
+        # No await between this read and the UPDATE below.
+        cm = get_correlation_manager()
+        if cm is not None:
+            cm_pending = cm.get_pending_count(instance_id)
+            if cm_pending > 0:
+                logger.info(
+                    f"Observer: aborting terminal transition for "
+                    f"{instance_id[:8]}... — {cm_pending} new pending "
+                    f"correlations appeared during callback"
+                )
+                return _FinalizeJobResult(
+                    skip=True,
+                    terminal_status=None,
+                    job_id=None,
+                    instance_id=None,
+                    parent_id=None,
+                    agent_id=None,
+                    result_summary=None,
+                    error_message=None,
+                    locks_released=0,
+                    instance_was_terminal=False,
+                )
+
+        now = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
+        released = 0
+
+        # ─── Single WriteGuardSession for ALL three DB writes ───
+        with WriteGuardSession(
+            Session(self._instance_manager.engine),
+            self._instance_manager.write_guard,
+        ) as session:
+            # ─── Step 1: Job atomic transition (in-session UPDATE) ───
+            # Mirrors ``JobRepository.atomic_transition`` but inside our
+            # WriteGuardSession so it commits with steps 2/3 below. The UPDATE
+            # uses the same ``status = :from_status`` SQL guard — concurrent
+            # writers cannot both observe the predicate as true.
+            update_values: dict[str, Any] = {
+                "status": to_status,
+                "completed_at": now,
+            }
+            if terminal_status == InstanceStatus.COMPLETED.value:
+                summary = result_summary or "Job completed (no agent response captured)"
+                update_values["result_summary"] = summary
+            else:
+                update_values["error_message"] = error_message or "Unknown error"
+
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.status == JobStatus.PROCESSING.value)
+                .values(**update_values)
+            )
+            result = session.exec(stmt)
+
+            if result.rowcount == 0:
+                # UPDATE matched no rows. Disambiguate with a follow-up SELECT.
+                existing = session.get(JobItem, job_id)
+                if existing is None:
+                    # Job gone — idempotency skip (no side effects).
+                    logger.debug(
+                        f"Observer: job {job_id[:8]}... not found during "
+                        f"finalize (deleted concurrently), skipping"
+                    )
+                    return _FinalizeJobResult(
+                        skip=True,
+                        terminal_status=None,
+                        job_id=None,
+                        instance_id=None,
+                        parent_id=None,
+                        agent_id=None,
+                        result_summary=None,
+                        error_message=None,
+                        locks_released=0,
+                        instance_was_terminal=False,
+                    )
+                # Status mismatch — concurrent transition. Raise so the
+                # caller treats it as the idempotency-race case (DEBUG log,
+                # silent return).
+                raise InvalidTransitionError(
+                    job_id=job_id,
+                    from_status=existing.status,
+                    to_status=to_status,
+                )
+
+            # ─── Step 2: Instance status update ───
+            # Read the instance inside the SAME session so the status change
+            # commits with steps 1 and 3. Captures parent_id / agent_id before
+            # the session closes (instance is detached after commit).
+            instance = session.get(Instance, instance_id)
+            if instance is None:
+                # Instance missing — job transitioned but instance row gone.
+                # Continue with lock release (step 3); instance-side side
+                # effects are skipped downstream (instance_was_terminal=True
+                # signals the caller to skip SSE / CompletionRegistry / event).
+                parent_id = None
+                agent_id = None
+                instance_was_terminal = True
+            elif instance.status in _TERMINAL_INSTANCE_STATUSES:
+                # Already terminal — CM-disabled inline cascade or prior
+                # callback already completed the instance. Skip the write
+                # but capture parent_id / agent_id (caller may still need
+                # them for the lifecycle event — though side effects should
+                # have fired already, so instance_was_terminal=True).
+                parent_id = instance.parent_id
+                agent_id = instance.agent_id
+                instance_was_terminal = True
+            else:
+                parent_id = instance.parent_id
+                agent_id = instance.agent_id
+                instance.status = terminal_status
+                instance.updated_at = now
+                instance.last_activity_at = now_dt
+                instance.version = (instance.version or 1) + 1
+                instance_was_terminal = False
+
+            # ─── Step 3: Lock release ───
+            # Inline the SQL instead of calling
+            # ``LockRepository.release_by_instance`` (which opens its own
+            # session — a separate transaction that would defeat the
+            # atomicity we need). Same SELECT + DELETE pattern.
+            lock_stmt = select(JobLock).where(JobLock.instance_id == instance_id)
+            locks = session.exec(lock_stmt).all()
+            released = len(locks)
+            for lock in locks:
+                session.delete(lock)
+
+            # ─── Single commit for ALL three DB writes ───
+            session.commit()
+
+        logger.info(
+            f"Observer: finalized job {job_id[:8]}... status={terminal_status} "
+            f"for instance {instance_id[:8]}... (released {released} lock(s), "
+            f"instance_was_terminal={instance_was_terminal})"
+        )
+
+        return _FinalizeJobResult(
+            skip=False,
+            terminal_status=terminal_status,
+            job_id=job_id,
+            instance_id=instance_id,
+            parent_id=parent_id,
+            agent_id=agent_id,
+            result_summary=result_summary,
+            error_message=error_message,
+            locks_released=released,
+            instance_was_terminal=instance_was_terminal,
+        )
+
     async def _trigger_next_job(self, job) -> None:
         """Admit and spawn the next pending job for the same project.
 
         Best-effort: any failure is logged at WARNING and swallowed. The
         :class:`JobProcessor` polling loop is a safety net that will eventually
         pick up the next job even if this handoff fails.
+
+        M10 fix: the 4-step pipeline ``_get_next_job`` → ``start_job`` →
+        ``spawn_instance_with_mcp`` → ``enqueue_message`` had an
+        instance-orphaning gap. If ``enqueue_message`` failed AFTER
+        ``spawn_instance_with_mcp`` succeeded, the spawned instance sat in
+        ``IDLE`` with no message queued — never picked up by any worker.
+        The old code only marked the job FAILED but left the instance
+        orphaned (now using a DB row + MCP connections + an in-process
+        :class:`InstanceManager` entry with no consumer).
+
+        The fix rolls back by calling :meth:`InstanceManager.terminate_instance`
+        on the orphaned instance before marking the job FAILED. ``terminate_instance``
+        cascades: cancels active requests, terminates children, releases
+        project lock, cleans up MCP, and removes the in-memory instance
+        entry. Best-effort: any cleanup failure is logged at WARNING and
+        the job still gets marked FAILED (the JobProcessor safety net
+        will eventually retry the spawn).
 
         Args:
             job: The job that just completed (used for ``project_id``).
@@ -1006,12 +1329,17 @@ class JobFeedbackObserver:
                 return
 
             instance_id = started_job.instance_id
+            # Track whether ``spawn_instance_with_mcp`` actually created an
+            # instance. If it raised, there is no in-process instance to
+            # clean up — just mark the job FAILED.
+            spawn_succeeded = False
             try:
                 instance_id = await self._instance_manager.spawn_instance_with_mcp(
                     agent_id=started_job.agent_id,
                     instance_id=instance_id,
                     project_id=started_job.project_id,
                 )
+                spawn_succeeded = True
             except Exception as e:
                 logger.error(
                     f"Observer: failed to spawn instance for job "
@@ -1024,6 +1352,11 @@ class JobFeedbackObserver:
                 )
                 return
 
+            # M10: ``enqueue_message`` is the rollback boundary. If it fails
+            # AFTER ``spawn_instance_with_mcp`` succeeded, the spawned
+            # instance is orphaned — terminate it before marking the job
+            # FAILED so we don't leave a no-consumer instance in the DB +
+            # in-memory manager.
             try:
                 await self._instance_manager.enqueue_message(
                     instance_id=instance_id,
@@ -1035,6 +1368,26 @@ class JobFeedbackObserver:
                     f"Observer: failed to enqueue message for job "
                     f"{started_job.job_id[:8]}...: {e}"
                 )
+                # Terminate the orphaned instance (best-effort). If
+                # termination itself fails, log and proceed — the
+                # JobProcessor safety net will eventually retry.
+                if spawn_succeeded:
+                    try:
+                        await self._instance_manager.terminate_instance(
+                            instance_id=instance_id
+                        )
+                        logger.info(
+                            f"Observer: M10 cleanup — terminated orphaned "
+                            f"instance {instance_id[:8]}... after "
+                            f"enqueue_message failure for job "
+                            f"{started_job.job_id[:8]}..."
+                        )
+                    except Exception as cleanup_err:
+                        logger.warning(
+                            f"Observer: M10 cleanup failed to terminate "
+                            f"orphaned instance {instance_id[:8]}... after "
+                            f"enqueue_message failure: {cleanup_err}"
+                        )
                 await self._job_queue_service.complete_job(
                     started_job.job_id,
                     demand_state=DemandState.FAILED,

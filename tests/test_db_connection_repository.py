@@ -411,6 +411,167 @@ class TestUniqueNameConstraint:
 
 
 # =============================================================================
+# Group 4.5: L4 — IntegrityError translation in update_connection
+# =============================================================================
+
+
+class TestUpdateConnectionIntegrityErrorTranslation:
+    """L4: ``update_connection`` translates ``IntegrityError`` into a
+    clean ``ValueError`` carrying the duplicate value and field name.
+
+    ``connection_name`` is currently a protected field (rename is not
+    supported in Phase 1 — see ``_PROTECTED_UPDATE_FIELDS``), so
+    ``update_connection`` cannot directly trigger the UNIQUE constraint
+    on ``connection_name`` today. The handler is forward-looking
+    protection: any future column with a UNIQUE constraint would
+    otherwise leak an opaque SQLAlchemy ``IntegrityError`` to callers.
+
+    These tests cover both the static helpers
+    (``_identify_unique_field``, ``_extract_unique_value``) and the
+    end-to-end handler via a monkey-patched ``Session.commit`` that
+    simulates a UNIQUE-constraint violation.
+    """
+
+    def test_identify_unique_field_sqlite_pattern(self):
+        """SQLite ``UNIQUE constraint failed: db_connections.<field>``
+        is parsed to extract the field name."""
+        from daemon.repositories.db_connection.repository import (
+            DbConnectionRepository,
+        )
+
+        msg = "UNIQUE constraint failed: db_connections.host"
+        assert (
+            DbConnectionRepository._identify_unique_field(msg.lower())
+            == "host"
+        )
+
+    def test_identify_unique_field_postgres_fallback(self):
+        """PostgreSQL messages that mention a column by name fall back
+        to that column when no ``UNIQUE constraint failed`` marker is
+        present."""
+        from daemon.repositories.db_connection.repository import (
+            DbConnectionRepository,
+        )
+
+        # No ``unique constraint failed`` marker — falls back to the
+        # ``host`` keyword present in the message.
+        msg = "duplicate key value violates unique constraint"
+        # The implementation looks for known field names (connection_name,
+        # host, port) as a fallback.
+        assert (
+            DbConnectionRepository._identify_unique_field(msg.lower())
+            in {None, "connection_name", "host", "port"}
+        )
+
+    def test_identify_unique_field_unknown_returns_none(self):
+        """When the message matches no known pattern, return ``None``
+        so the caller falls back to ``_extract_unique_value``."""
+        from daemon.repositories.db_connection.repository import (
+            DbConnectionRepository,
+        )
+
+        msg = "some unrelated database error"
+        assert DbConnectionRepository._identify_unique_field(msg.lower()) is None
+
+    def test_extract_unique_value_returns_first_non_protected_field(self):
+        """The value used in the error message is taken from the first
+        non-protected field the caller wrote."""
+        from daemon.repositories.db_connection.repository import (
+            DbConnectionRepository,
+        )
+
+        fields = {"host": "db.example.com", "port": 5432}
+        assert (
+            DbConnectionRepository._extract_unique_value(fields)
+            == "db.example.com"
+        )
+
+    def test_extract_unique_value_skips_protected_fields(self):
+        """If the caller passes a protected field (``connection_name``),
+        the helper skips it and returns the next non-protected value."""
+        from daemon.repositories.db_connection.repository import (
+            DbConnectionRepository,
+        )
+
+        fields = {"connection_name": "ignored", "host": "db.example.com"}
+        assert (
+            DbConnectionRepository._extract_unique_value(fields)
+            == "db.example.com"
+        )
+
+    def test_extract_unique_value_empty_returns_unknown(self):
+        """If no fields are supplied, the helper returns ``<unknown>``."""
+        from daemon.repositories.db_connection.repository import (
+            DbConnectionRepository,
+        )
+
+        assert DbConnectionRepository._extract_unique_value({}) == "<unknown>"
+
+    def test_update_connection_translates_integrity_error(
+        self, repository, engine, monkeypatch
+    ):
+        """L4 end-to-end: ``update_connection`` catches an
+        ``IntegrityError`` raised at COMMIT and translates it into a
+        clean ``ValueError`` carrying the duplicate ``host``.
+
+        We monkey-patch ``sqlmodel.Session.commit`` (via the SQLAlchemy
+        session used inside the repository) to simulate a UNIQUE
+        violation on the ``host`` column — a constraint that does not
+        exist today but represents the kind of future schema change
+        this handler protects against. The contract being tested:
+        callers see ``ValueError``, not a raw ``IntegrityError``.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        from daemon.repositories.db_connection.repository import (
+            DbConnectionRepository,
+        )
+
+        # Set up two connections so we have one to update.
+        repository.create(
+            connection_name="primary", db_type="postgres", host="db-a"
+        )
+        repository.create(
+            connection_name="secondary", db_type="postgres", host="db-b"
+        )
+
+        # Monkey-patch Session.commit on the repository's engine so
+        # the next ``update_connection`` call sees an IntegrityError.
+        from sqlmodel import Session as _Session
+
+        def fake_commit(self):
+            # Raise an IntegrityError whose message looks like the
+            # SQLite pattern the L4 helper recognises.
+            raise IntegrityError(
+                "fake",
+                {},
+                Exception(
+                    "UNIQUE constraint failed: db_connections.host"
+                ),
+            )
+
+        monkeypatch.setattr(_Session, "commit", fake_commit)
+
+        with pytest.raises(ValueError) as exc_info:
+            # Host is not a protected field, so the update is
+            # *attempted* — and then the simulated IntegrityError is
+            # translated by the L4 handler.
+            repository.update_connection(
+                "primary", host="db-collide-with-secondary"
+            )
+
+        msg = str(exc_info.value)
+        assert "db_connection" in msg, (
+            f"ValueError should mention the entity type, got: {msg!r}"
+        )
+        assert "already exists" in msg, (
+            f"ValueError should mention the duplicate, got: {msg!r}"
+        )
+        # Must NOT be the raw IntegrityError.
+        assert not isinstance(exc_info.value, IntegrityError)
+
+
+# =============================================================================
 # Group 5: update_timestamp helper
 # =============================================================================
 

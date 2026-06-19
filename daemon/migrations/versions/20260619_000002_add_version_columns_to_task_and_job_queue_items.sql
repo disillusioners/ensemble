@@ -1,0 +1,67 @@
+-- Migration: add version column to task and job_queue_items tables
+-- Created: 2026-06-19
+-- Author: system
+-- Description:
+--   Defense-in-depth for the raw-SQL status guards on the task and
+--   job_queue_items tables. The raw-SQL UPDATEs in TaskRepository
+--   (complete_task, fail_task, cancel_task, claim_pending_task,
+--   update_heartbeat) and JobRepository.atomic_transition already use
+--   `WHERE status = (from_status)` to prevent concurrent terminal
+--   transitions. This migration adds a `version` column to both tables
+--   and configures SQLAlchemy's `version_id_col` on the corresponding
+--   SQLModel classes, so that ANY remaining ORM-flushed UPDATE or
+--   DELETE on these rows (e.g. delete, delete_by_instance, soft_delete,
+--   update) also appends `AND version = (expected_version)` to the
+--   WHERE clause and raises StaleDataError on a concurrent
+--   modification. Note: version_id_col only applies to ORM-flushed
+--   commits. The Core UPDATE in JobRepository.atomic_transition
+--   composes its own raw SQL (with explicit `WHERE status =
+--   :from_status`) and does NOT go through the ORM, so the version
+--   predicate is NOT auto-appended there — the explicit status guard
+--   is the sole concurrency gate for that path.
+--
+--   The column is NOT NULL with DEFAULT 0 so existing rows backfill
+--   cleanly on both SQLite and PostgreSQL. The migration runner
+--   (daemon/migrations/runner.py) treats "duplicate column name"
+--   errors as idempotent, so re-running this file is safe.
+--
+-- DUAL-DRIVER NOTES:
+--   This .sql is applied by MigrationRunner ONLY when the engine
+--   dialect is sqlite (runner.py skips non-sqlite). For PostgreSQL:
+--     - Fresh DBs: SQLModel.metadata.create_all() picks up the new
+--       `version` column from Task.__table_args__ / JobItem.__table_args__
+--       automatically (server_default="0", nullable=False).
+--     - Existing DBs: apply manually by running the two ALTER TABLE
+--       statements below (trailing semicolons omitted here on purpose:
+--       daemon/migrations/runner.py executes the UP section via a naive
+--       split on `;` that does not skip SQL comments, so any in-comment
+--       semicolon would be treated as a statement boundary and trigger a
+--       BindParameterError / parse failure).
+--           ALTER TABLE task ADD COLUMN version INTEGER NOT NULL DEFAULT 0
+--           ALTER TABLE job_queue_items ADD COLUMN version INTEGER NOT NULL DEFAULT 0
+--       This matches the lock_slot precedent (its .sql migration is
+--       also skipped on PG; PG users got the column via create_all()).
+
+-- UP
+
+-- task: ORM-flushed commits (delete, delete_by_instance) now also gated
+-- by version. Raw-SQL status guards in TaskRepository are unaffected
+-- because they bypass the ORM session.
+ALTER TABLE task ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+
+-- job_queue_items: ORM-flushed commits (soft_delete, update) are now
+-- also gated by version. The Core UPDATE in
+-- JobRepository.atomic_transition composes raw SQL with an explicit
+-- `WHERE status = (from_status)` guard and does NOT route through the
+-- ORM, so version_id_col does not apply to that path — the explicit
+-- status guard is the sole concurrency gate there.
+ALTER TABLE job_queue_items ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+
+-- DOWN
+-- Reverses both columns. Note: SQLite < 3.35 does not support DROP COLUMN
+-- so the columns will remain but are unused by code. Trailing semicolons
+-- are deliberately omitted below because runner.py splits DOWN SQL on the
+-- statement-terminator character and would otherwise treat the in-comment
+-- semicolons as statement boundaries.
+-- ALTER TABLE task DROP COLUMN version         -- SQLite <3.35 cannot drop columns
+-- ALTER TABLE job_queue_items DROP COLUMN version  -- SQLite <3.35 cannot drop columns

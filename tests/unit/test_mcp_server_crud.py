@@ -582,6 +582,63 @@ class TestRepositoryDuplicateName:
                 session.add(second_server)
                 session.commit()
 
+    def test_rename_to_duplicate_name_raises_clean_valueerror(self, repository, engine):
+        """L5: update_mcp_server() with a duplicate name raises a clean
+        ValueError, not a raw ``sqlalchemy.exc.IntegrityError``.
+
+        The ``name`` column carries a UNIQUE constraint, so renaming a
+        server to a name already held by another row triggers
+        ``IntegrityError`` at COMMIT time. The repository must
+        translate that into a domain-friendly ``ValueError`` whose
+        message names the duplicate value — not leak the dialect-
+        specific SQLAlchemy error (constraint name, table name,
+        pgcode) to API callers.
+
+        This test exercises the happy-path rename race: two servers
+        exist; renaming ``server2`` to ``server1``'s name collides
+        on the UNIQUE index and must surface as ``ValueError``.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        server1 = repository.create_mcp_server(name="server-1")
+        server2 = repository.create_mcp_server(name="server-2")
+
+        with pytest.raises(ValueError) as exc_info:
+            repository.update_mcp_server(server2.id, name="server-1")
+
+        # ValueError must NOT be wrapping the raw IntegrityError
+        # without translation — it should be a clean, named message.
+        msg = str(exc_info.value)
+        assert "server-1" in msg, (
+            f"ValueError message should name the duplicate value, got: {msg!r}"
+        )
+        # Make sure we did NOT get the raw IntegrityError leaking through.
+        assert not isinstance(exc_info.value, IntegrityError), (
+            "IntegrityError leaked through update_mcp_server — must be translated to ValueError"
+        )
+
+        # And server2's name should be unchanged in the DB (the failed
+        # update must have been rolled back, not partially applied).
+        reloaded = repository.get_mcp_server(server2.id)
+        assert reloaded is not None
+        assert reloaded.name == "server-2", (
+            "Failed rename must roll back — server2.name should still be 'server-2'"
+        )
+
+    def test_rename_to_same_name_is_idempotent(self, repository, engine):
+        """L5: renaming a server to its own current name succeeds.
+
+        No UNIQUE collision is triggered (the row is updating its own
+        value to the value it already has). This guards against an
+        over-eager IntegrityError handler that would reject "no-op"
+        renames.
+        """
+        server = repository.create_mcp_server(name="keep-me")
+        # Renaming to its own name should NOT raise.
+        result = repository.update_mcp_server(server.id, name="keep-me")
+        assert result is not None
+        assert result.name == "keep-me"
+
 
 class TestConfigJsonRoundtrip:
     """Tests for config JSON roundtrip through repository."""

@@ -15,7 +15,7 @@ import pytest
 
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import JobItem, JobStatus
-from daemon.services.job_queue_service import JobQueueService, DemandState
+from daemon.services.job_queue_service import JobQueueService, DemandState, TERMINAL_STATUSES
 
 
 # =============================================================================
@@ -82,6 +82,11 @@ def mock_instance_manager_with_repo():
     """Create mock instance manager with instance_repository."""
     manager = MagicMock()
     manager._instance_repository = MagicMock()
+    # transition_status_if returns Instance | None — return a truthy mock so the
+    # "reactivation succeeded" branch fires in production code.
+    manager._instance_repository.transition_status_if = MagicMock(
+        return_value=MagicMock()
+    )
     return manager
 
 
@@ -487,9 +492,9 @@ class TestStartJobInstanceStatusChecks:
 
         # Job should be reactivated and proceed to processing (not cancelled)
         assert result is not None
-        # Instance status should be updated to RUNNING
-        mock_instance_manager_with_repo._instance_repository.update_status.assert_called_once_with(
-            instance_id, InstanceStatus.RUNNING.value
+        # Instance status should be transitioned to RUNNING via atomic guard
+        mock_instance_manager_with_repo._instance_repository.transition_status_if.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value, tuple(TERMINAL_STATUSES)
         )
         # stream_status_change should be called
         mock_instance_manager_with_repo._live_hub.stream_status_change.assert_called_once_with(

@@ -245,6 +245,13 @@ class CorrelationManager:
         should_validate = False
         should_complete = False  # W1 fix: defer completion_callback past lock release
         terminal_status: str | None = None
+        # H7 fix: capture the ParentCorrelation reference before deletion so
+        # the completion_callback path can restore _pending[parent_id] if the
+        # callback raises. The dict entry is removed below under the lock,
+        # but the local reference (and therefore the object) survives until
+        # restored on the failure path. None when correlation is not yet
+        # complete — in which case no restoration is needed.
+        parent_state_to_restore: ParentCorrelation | None = None
         async with self._get_lock(parent_id):
             if parent_id not in self._pending:
                 logger.debug(
@@ -285,6 +292,12 @@ class CorrelationManager:
                     f"status={terminal_status}, had_error={parent_state.had_error}"
                 )
                 # Clean up in-memory state while still holding the lock
+                # H7 fix: capture the reference for potential restoration on
+                # callback exception. Without this, a callback that throws
+                # would leave the parent permanently wedged (orphan job in
+                # PROCESSING forever) because _pending[parent_id] is already
+                # gone before the callback fires.
+                parent_state_to_restore = parent_state
                 del self._pending[parent_id]
                 # S3 fix: also drop the per-parent lock entry to prevent
                 # unbounded growth of the _locks dict across many sessions.
@@ -310,10 +323,41 @@ class CorrelationManager:
             if self._completion_callback is not None:
                 try:
                     await self._completion_callback(parent_id, terminal_status)
-                except Exception as e:
-                    logger.error(
-                        f"CM completion_callback failed for parent={parent_id[:8]}: {e}"
+                except Exception:
+                    # H7 fix: state was cleared under the lock above, so an
+                    # exception here would normally leave the parent
+                    # permanently wedged (orphan job in PROCESSING forever).
+                    # Restore _pending[parent_id] so external retry (or a
+                    # subsequent register_message_send) can recover the
+                    # completion. The original lock was popped from _locks by
+                    # the S3 fix above; _get_lock() lazily recreates it, so
+                    # the restoration lock is a fresh per-parent asyncio.Lock
+                    # bound to the current event loop (N3 constraint preserved).
+                    #
+                    # Conditional restore: only restore if no concurrent
+                    # register_message_send has already populated
+                    # _pending[parent_id] — clobbering would lose new
+                    # pending state and leave the parent in an even worse
+                    # inconsistency than the original orphan.
+                    logger.exception(
+                        f"CM completion_callback failed for parent={parent_id[:8]}; "
+                        f"attempting to restore _pending for retry"
                     )
+                    async with self._get_lock(parent_id):
+                        if parent_id not in self._pending:
+                            self._pending[parent_id] = parent_state_to_restore
+                            logger.warning(
+                                f"CM restored _pending[parent={parent_id[:8]}] "
+                                f"(had_error={parent_state_to_restore.had_error}, "
+                                f"terminal_status={terminal_status}) — "
+                                f"callback failure, state preserved for retry"
+                            )
+                        else:
+                            logger.info(
+                                f"CM restore skipped for parent={parent_id[:8]} — "
+                                f"concurrent register_message_send already "
+                                f"populated _pending, leaving as-is"
+                            )
             return True
 
         # Lock released: do shadow validation outside the per-parent lock

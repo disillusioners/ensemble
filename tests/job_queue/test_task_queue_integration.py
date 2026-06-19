@@ -609,15 +609,16 @@ class TestIntegrationCrashRecovery:
         current_job = await integration_service.get_job(job.job_id)
         assert current_job.status == JobStatus.PROCESSING.value
         
-        # We should be able to cancel it
-        cancelled = await integration_service.cancel_job(job.job_id)
-        assert cancelled is True
-        
-        # Or we could manually reset it
-        updated = integration_service._repository.update(
+        # Crash recovery: reset orphaned PROCESSING job back to PENDING so
+        # it can be re-processed. Uses ``atomic_transition`` (the
+        # SQL-guarded PROCESSING→PENDING "requeue" transition) instead of
+        # ``update(status=...)`` — the L1 guard in ``update()`` now forbids
+        # direct status writes, and the atomic variant is race-safe.
+        updated = integration_service._repository.atomic_transition(
             job.job_id,
-            status=JobStatus.PENDING.value,
-            instance_id=None  # Clear instance
+            from_status=JobStatus.PROCESSING.value,
+            to_status=JobStatus.PENDING.value,
+            instance_id=None,  # Clear instance
         )
         assert updated is not None
         assert updated.status == JobStatus.PENDING.value

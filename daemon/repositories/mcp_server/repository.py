@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, col
 
 from .models import McpServer
@@ -136,6 +137,21 @@ class SQLModelMcpServerRepository:
     ) -> McpServer | None:
         """Update an MCP server configuration.
 
+        Unlike :class:`DbConnectionRepository.update_connection`, this
+        method **does** allow renaming (``name`` is a first-class field
+        of ``McpServer`` and is *not* protected). The ``name`` column
+        carries a UNIQUE constraint, so two concurrent renames can race
+        on the UPDATE and the loser would otherwise crash with an
+        opaque SQLAlchemy :class:`IntegrityError` whose message embeds
+        dialect internals (constraint name, table name, pgcode).
+
+        L5 fix: ``session.commit()`` is wrapped in a try/except
+        :class:`IntegrityError`. UNIQUE-constraint violations are
+        translated into a clean :class:`ValueError` carrying the
+        duplicate ``name`` and a stable message. Non-UNIQUE
+        IntegrityErrors (FK / NOT NULL / CHECK) are re-raised so the
+        caller still sees the underlying database error.
+
         Args:
             server_id: The server ID.
             name: New name (optional).
@@ -147,6 +163,11 @@ class SQLModelMcpServerRepository:
 
         Returns:
             Updated McpServer instance or None if not found.
+
+        Raises:
+            ValueError: If the rename to ``name`` collides with an
+                existing row's UNIQUE constraint. Message:
+                ``"An mcp_server with name='<name>' already exists"``.
         """
         with Session(self.engine) as session:
             mcp_server = session.get(McpServer, server_id)
@@ -167,7 +188,32 @@ class SQLModelMcpServerRepository:
                 mcp_server.config_schema_version = config_schema_version
 
             mcp_server.updated_at = datetime.now(timezone.utc).isoformat()
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                # Translate UNIQUE-constraint violations on ``name``
+                # into a clean ValueError. The dialect-specific
+                # message would otherwise leak the constraint name
+                # (e.g. ``uq_mcp_servers_name``) and table name to
+                # the API caller. We match by constraint name first,
+                # then by the literal column name ``name`` as a
+                # fallback for dialects where the constraint name
+                # doesn't carry the column hint.
+                err_text = str(exc).lower()
+                is_name_unique = (
+                    "uq_mcp_servers_name" in err_text
+                    or "mcp_servers.name" in err_text
+                    or ("unique" in err_text and "name" in err_text)
+                )
+                if is_name_unique:
+                    raise ValueError(
+                        f"An mcp_server with name={name!r} already exists"
+                    ) from exc
+                # Non-UNIQUE integrity errors (FK / NOT NULL / CHECK)
+                # are surfaced unchanged — they are real bugs or
+                # misuse, not concurrent-rename races.
+                raise
             session.refresh(mcp_server)
 
             logger.info(f"Updated MCP server: id={server_id}")

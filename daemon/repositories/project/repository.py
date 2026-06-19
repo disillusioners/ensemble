@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, insert, func, or_, cast
+from sqlalchemy import delete as sql_delete, insert, func, or_, cast, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session, select, col
 
@@ -19,6 +21,17 @@ from daemon.repositories.job_queue.models import JobItem, JobStatus, JobLock, De
 from daemon.repositories.task.models import Task
 from daemon.repositories.event.models import Event
 from daemon.repositories.message_queue.models import MessageQueue
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_postgres(session: Session) -> bool:
+    """Return True when the bound engine is PostgreSQL."""
+    return (
+        session.bind is not None
+        and session.bind.dialect.name == "postgresql"
+    )
 
 
 class SQLModelProjectRepository:
@@ -130,12 +143,22 @@ class SQLModelProjectRepository:
         creator_instance_id: str | None = None,
         creator_agent_id: str | None = None,
     ) -> Project:
-        """Create a new project."""
+        """Create a new project.
+
+        The pre-flight ``SELECT WHERE name = ?`` check is kept as an
+        optimisation (returns a clean error without burning a UNIQUE
+        constraint violation on the caller), but the *real* uniqueness
+        guard is the ``uq_projects_name`` UNIQUE constraint added to
+        ``Project.__table_args__`` (H14 fix). Concurrent callers with
+        the same name race on the INSERT — the loser sees an
+        ``IntegrityError`` which we translate into a clean
+        ``ValueError``.
+        """
         if not ProjectType.is_valid(project_type):
             raise ValueError(f"Invalid project_type: {project_type}")
-        
+
         with Session(self.engine) as session:
-            # Check within the SAME session for atomic uniqueness check
+            # Pre-flight check — fast path, but NOT the authoritative guard.
             existing = session.exec(
                 select(Project).where(Project.name == name)
             ).first()
@@ -163,8 +186,17 @@ class SQLModelProjectRepository:
                 updated_at=now,
             )
 
-            session.add(project)
-            session.commit()
+            try:
+                session.add(project)
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                # Translate UNIQUE(name) violation into a clean error.
+                # This is the authoritative guard for the H14 race window
+                # between the SELECT above and the INSERT here.
+                if "uq_projects_name" in str(exc).lower() or "name" in str(exc).lower():
+                    raise ValueError(f"Project with name '{name}' already exists") from exc
+                raise
             session.refresh(project)
 
             # Store initial metadata in dedicated table
@@ -268,31 +300,6 @@ class SQLModelProjectRepository:
                 if p.creator_instance_id == instance_id:
                     result.append(p)
                 elif "instances" in p.relationships and instance_id in p.relationships.get("instances", []):
-                    result.append(p)
-            return self._enrich_projects(session, result)
-
-    def get_by_directory(self, directory: str) -> list[Project]:
-        """Get all projects that reference a directory."""
-        with Session(self.engine) as session:
-            # JSON containment is dialect-aware: PostgreSQL JSONB uses ``@>``,
-            # SQLite keeps the LIKE-based ``contains`` (with Python-side correction).
-            if session.bind is not None and session.bind.dialect.name == "postgresql":
-                from sqlalchemy import cast
-                from sqlalchemy.dialects.postgresql import JSONB
-
-                stmt = select(Project).where(
-                    (Project.main_directory == directory)
-                    | cast(Project.related_directories, JSONB).contains([directory])
-                )
-            else:
-                stmt = select(Project).where(
-                    (Project.main_directory == directory)
-                    | col(Project.related_directories).contains(f'"{directory}"')
-                )
-            projects = list(session.exec(stmt))
-            result = []
-            for p in projects:
-                if p.main_directory == directory or directory in p.related_directories:
                     result.append(p)
             return self._enrich_projects(session, result)
 
@@ -434,7 +441,33 @@ class SQLModelProjectRepository:
     # --------------------------------------------------------
 
     def update(self, project_id: str, **updates) -> Project | None:
-        """Update a project's fields."""
+        """Update a project's fields.
+
+        The pre-flight ``get_by_name`` check on a name change is kept as a
+        fast path, but the authoritative guard for H14 is the
+        ``uq_projects_name`` UNIQUE constraint; concurrent renames race on
+        the UPDATE and the loser is caught via ``IntegrityError`` and
+        translated into a clean ``ValueError``.
+
+        ``relationships`` and ``related_directories`` are rejected because
+        plain ORM setattr on a JSON column is a read-modify-write at the
+        column level (the ORM replaces the whole JSON blob) and clobbers
+        concurrent writers. Use :meth:`add_relationship` /
+        :meth:`remove_relationship` and :meth:`add_related_directory` /
+        :meth:`remove_related_directory` (dialect-aware JSONB / json_set
+        UPDATE) instead.
+        """
+        if "relationships" in updates:
+            raise ValueError(
+                "Use add_relationship / remove_relationship for relationship edits "
+                "(see SQLModelProjectRepository.add_relationship / remove_relationship)"
+            )
+        if "related_directories" in updates:
+            raise ValueError(
+                "Use add_related_directory / remove_related_directory for directory edits "
+                "(see SQLModelProjectRepository.add_related_directory / remove_related_directory)"
+            )
+
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
@@ -458,7 +491,15 @@ class SQLModelProjectRepository:
                     flag_modified(project, key)
 
             project.updated_at = datetime.now(timezone.utc).isoformat()
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                if "uq_projects_name" in str(exc).lower() or "name" in str(exc).lower():
+                    raise ValueError(
+                        f"Project with name '{updates.get('name')}' already exists"
+                    ) from exc
+                raise
             session.refresh(project)
 
             if tags_update is not None:
@@ -492,36 +533,60 @@ class SQLModelProjectRepository:
         return self.update(project_id, tags=tags)
 
     def add_tag(self, project_id: str, tag: str) -> Project | None:
-        """Add a tag to a project."""
+        """Atomically add a tag to a project.
+
+        H12 fix: the previous implementation loaded all tags, mutated the
+        list in Python, and called ``_sync_tags_bulk`` (DELETE all → INSERT
+        all). Two concurrent ``add_tag`` calls with different tags would
+        each see only their own tag after the loser's commit. We now issue
+        a single dialect-aware ``INSERT ... ON CONFLICT DO NOTHING`` keyed
+        on the composite primary key ``(project_id, tag)``, which is a
+        single atomic round trip and is safe under concurrent writers.
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            current_tags = self._load_tags(session, project_id)
-            if tag not in current_tags:
-                current_tags.append(tag)
-                self._sync_tags_bulk(session, project_id, current_tags)
-                project.updated_at = datetime.now(timezone.utc).isoformat()
-                session.commit()
-                session.refresh(project)
+            insert_fn = self._get_dialect_insert(session)
+            # The composite primary key on (project_id, tag) is the
+            # conflict target. DO NOTHING makes the call a no-op when the
+            # tag is already present.
+            stmt = (
+                insert_fn(ProjectTagLink)
+                .values(project_id=project_id, tag=tag)
+                .on_conflict_do_nothing(
+                    index_elements=["project_id", "tag"],
+                )
+            )
+            session.execute(stmt)
+            project.updated_at = datetime.now(timezone.utc).isoformat()
+            session.commit()
+            session.refresh(project)
 
             return self._enrich_project(session, project)
 
     def remove_tag(self, project_id: str, tag: str) -> Project | None:
-        """Remove a tag from a project."""
+        """Atomically remove a tag from a project.
+
+        H12 fix: single ``DELETE WHERE (project_id, tag)`` instead of the
+        previous load-mutate-resync cycle. No read-modify-write, safe under
+        concurrent writers.
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            current_tags = self._load_tags(session, project_id)
-            if tag in current_tags:
-                current_tags.remove(tag)
-                self._sync_tags_bulk(session, project_id, current_tags)
-                project.updated_at = datetime.now(timezone.utc).isoformat()
-                session.commit()
-                session.refresh(project)
+            session.exec(
+                sql_delete(ProjectTagLink).where(
+                    ProjectTagLink.project_id == project_id,
+                    ProjectTagLink.tag == tag,
+                )
+            )
+            project.updated_at = datetime.now(timezone.utc).isoformat()
+            session.commit()
+            session.refresh(project)
 
             return self._enrich_project(session, project)
 
@@ -534,36 +599,52 @@ class SQLModelProjectRepository:
         return self.update(project_id, shortnames=shortnames)
 
     def add_shortname(self, project_id: str, shortname: str) -> Project | None:
-        """Add a shortname to a project."""
+        """Atomically add a shortname to a project.
+
+        H12 fix: see :meth:`add_tag` — same dialect-aware
+        ``INSERT ... ON CONFLICT DO NOTHING`` pattern on the composite
+        primary key ``(project_id, shortname)``.
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            current_shortnames = self._load_shortnames(session, project_id)
-            if shortname not in current_shortnames:
-                current_shortnames.append(shortname)
-                self._sync_shortnames_bulk(session, project_id, current_shortnames)
-                project.updated_at = datetime.now(timezone.utc).isoformat()
-                session.commit()
-                session.refresh(project)
+            insert_fn = self._get_dialect_insert(session)
+            stmt = (
+                insert_fn(ProjectShortnameLink)
+                .values(project_id=project_id, shortname=shortname)
+                .on_conflict_do_nothing(
+                    index_elements=["project_id", "shortname"],
+                )
+            )
+            session.execute(stmt)
+            project.updated_at = datetime.now(timezone.utc).isoformat()
+            session.commit()
+            session.refresh(project)
 
             return self._enrich_project(session, project)
 
     def remove_shortname(self, project_id: str, shortname: str) -> Project | None:
-        """Remove a shortname from a project."""
+        """Atomically remove a shortname from a project.
+
+        H12 fix: see :meth:`remove_tag` — single ``DELETE`` statement
+        keyed on the composite primary key.
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            current_shortnames = self._load_shortnames(session, project_id)
-            if shortname in current_shortnames:
-                current_shortnames.remove(shortname)
-                self._sync_shortnames_bulk(session, project_id, current_shortnames)
-                project.updated_at = datetime.now(timezone.utc).isoformat()
-                session.commit()
-                session.refresh(project)
+            session.exec(
+                sql_delete(ProjectShortnameLink).where(
+                    ProjectShortnameLink.project_id == project_id,
+                    ProjectShortnameLink.shortname == shortname,
+                )
+            )
+            project.updated_at = datetime.now(timezone.utc).isoformat()
+            session.commit()
+            session.refresh(project)
 
             return self._enrich_project(session, project)
 
@@ -572,35 +653,134 @@ class SQLModelProjectRepository:
     # --------------------------------------------------------
 
     def add_related_directory(self, project_id: str, directory: str) -> Project | None:
-        """Add a related directory to a project."""
+        """Atomically add a related directory to a project.
+
+        H11 fix: the previous implementation mutated
+        ``project.related_directories`` in Python and committed — under
+        concurrent calls each writer's RMW would clobber the other. We
+        now issue a single dialect-aware UPDATE that composes correctly:
+
+        * PostgreSQL: ``COALESCE(related_directories, '[]'::jsonb)
+          || to_jsonb(:dir::text)`` guarded by
+          ``AND NOT ... @> to_jsonb(:dir::text)``
+        * SQLite: ``json_insert(COALESCE(..., json('[]')), '$[#]', :dir)``
+          guarded by ``AND NOT EXISTS (... json_each ... value = :dir)``
+
+        The guard makes the call idempotent on duplicates.
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            if directory not in project.related_directories:
-                project.related_directories.append(directory)
-                project.updated_at = datetime.now(timezone.utc).isoformat()
-                flag_modified(project, "related_directories")
-                session.commit()
-                session.refresh(project)
+            now = datetime.now(timezone.utc).isoformat()
+            if _is_postgres(session):
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET related_directories = (
+                        COALESCE(related_directories, '[]'::jsonb)
+                        || to_jsonb(CAST(:directory AS text))
+                    ),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                      AND NOT (
+                          COALESCE(related_directories, '[]'::jsonb)
+                          @> to_jsonb(CAST(:directory AS text))
+                      )
+                    """
+                )
+            else:
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET related_directories = json_insert(
+                        COALESCE(related_directories, json('[]')),
+                        '$[#]',
+                        :directory
+                    ),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM json_each(
+                              COALESCE(related_directories, json('[]'))
+                          )
+                          WHERE value = :directory
+                      )
+                    """
+                )
 
+            session.execute(
+                update_sql,
+                {
+                    "directory": directory,
+                    "now": now,
+                    "project_id": project_id,
+                },
+            )
+            session.commit()
+            session.refresh(project)
             return self._enrich_project(session, project)
 
     def remove_related_directory(self, project_id: str, directory: str) -> Project | None:
-        """Remove a related directory from a project."""
+        """Atomically remove a related directory from a project.
+
+        H11 fix: dialect-aware UPDATE that filters the JSON array by
+        value in SQL rather than reading + mutating + writing in Python:
+
+        * PostgreSQL: ``jsonb_agg(elem) FILTER (WHERE elem != :dir)``
+          over ``jsonb_array_elements_text``
+        * SQLite: ``json_group_array(value) FILTER (WHERE value != :dir)``
+          over ``json_each``
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            if directory in project.related_directories:
-                project.related_directories.remove(directory)
-                project.updated_at = datetime.now(timezone.utc).isoformat()
-                flag_modified(project, "related_directories")
-                session.commit()
-                session.refresh(project)
+            now = datetime.now(timezone.utc).isoformat()
+            if _is_postgres(session):
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET related_directories = COALESCE((
+                        SELECT jsonb_agg(elem)
+                        FROM jsonb_array_elements_text(
+                            COALESCE(related_directories, '[]'::jsonb)
+                        ) AS elem
+                        WHERE elem != :directory
+                    ), '[]'::jsonb),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                    """
+                )
+            else:
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET related_directories = COALESCE((
+                        SELECT json_group_array(value)
+                        FROM json_each(
+                            COALESCE(related_directories, json('[]'))
+                        )
+                        WHERE value != :directory
+                    ), json('[]')),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                    """
+                )
 
+            session.execute(
+                update_sql,
+                {
+                    "directory": directory,
+                    "now": now,
+                    "project_id": project_id,
+                },
+            )
+            session.commit()
+            session.refresh(project)
             return self._enrich_project(session, project)
 
     # --------------------------------------------------------
@@ -689,41 +869,190 @@ class SQLModelProjectRepository:
     def add_relationship(
         self, project_id: str, entity_type: str, entity_id: str
     ) -> Project | None:
-        """Add a relationship to another entity."""
+        """Atomically add a relationship to another entity.
+
+        C8 fix: the previous implementation mutated
+        ``project.relationships[entity_type].append(entity_id)`` in
+        Python — two concurrent ``add_relationship`` calls with different
+        ``entity_id`` values would each see only their own append after
+        the loser's commit. We now issue a single dialect-aware UPDATE
+        that composes correctly:
+
+        * PostgreSQL: ``jsonb_set(COALESCE(relationships, '{}'::jsonb),
+          :array_path, COALESCE(relationships -> :entity_type, '[]'::jsonb)
+          || to_jsonb(:entity_id::text), true)`` guarded by ``AND NOT
+          (... -> :entity_type) @> to_jsonb(:entity_id::text)``
+        * SQLite: ``json_set(COALESCE(relationships, '{}'), :path,
+          json_insert(COALESCE(json_extract(relationships, :path),
+          json('[]')), '$[#]', :entity_id))`` guarded by ``AND NOT
+          EXISTS (... json_each ... value = :entity_id)``
+
+        The guard makes the call idempotent on duplicates.
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            if entity_type not in project.relationships:
-                project.relationships[entity_type] = []
+            now = datetime.now(timezone.utc).isoformat()
+            if _is_postgres(session):
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET relationships = jsonb_set(
+                        COALESCE(relationships, '{}'::jsonb),
+                        ARRAY[CAST(:entity_type AS text)],
+                        COALESCE(
+                            relationships -> :entity_type,
+                            '[]'::jsonb
+                        ) || to_jsonb(CAST(:entity_id AS text)),
+                        true
+                    ),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                      AND NOT (
+                          COALESCE(
+                              relationships -> :entity_type,
+                              '[]'::jsonb
+                          ) @> to_jsonb(CAST(:entity_id AS text))
+                      )
+                    """
+                )
+                params = {
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "now": now,
+                    "project_id": project_id,
+                }
+            else:
+                path = f"$.{entity_type}"
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET relationships = json_set(
+                        COALESCE(relationships, '{}'),
+                        :path,
+                        json_insert(
+                            COALESCE(
+                                json_extract(relationships, :path),
+                                json('[]')
+                            ),
+                            '$[#]',
+                            :entity_id
+                        )
+                    ),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM json_each(
+                              COALESCE(
+                                  json_extract(relationships, :path),
+                                  json('[]')
+                              )
+                          )
+                          WHERE value = :entity_id
+                      )
+                    """
+                )
+                params = {
+                    "path": path,
+                    "entity_id": entity_id,
+                    "now": now,
+                    "project_id": project_id,
+                }
 
-            if entity_id not in project.relationships[entity_type]:
-                project.relationships[entity_type].append(entity_id)
-                project.updated_at = datetime.now(timezone.utc).isoformat()
-                flag_modified(project, "relationships")
-                session.commit()
-                session.refresh(project)
-
+            session.execute(update_sql, params)
+            session.commit()
+            session.refresh(project)
             return self._enrich_project(session, project)
 
     def remove_relationship(
         self, project_id: str, entity_type: str, entity_id: str
     ) -> Project | None:
-        """Remove a relationship to another entity."""
+        """Atomically remove a relationship to another entity.
+
+        C8 fix: dialect-aware UPDATE that filters the inner JSON array
+        by value in SQL:
+
+        * PostgreSQL: ``jsonb_agg(elem) FILTER (WHERE elem != :entity_id)``
+          over ``jsonb_array_elements_text(relationships -> :entity_type)``
+        * SQLite: ``json_group_array(value) FILTER (WHERE value != :entity_id)``
+          over ``json_each(json_extract(relationships, :path))``
+
+        If the ``entity_type`` key is absent, the result is the empty
+        array — we use ``create_if_missing=false`` on PostgreSQL so we
+        don't create a phantom key.
+        """
         with Session(self.engine) as session:
             project = session.get(Project, project_id)
             if project is None:
                 return None
 
-            if entity_type in project.relationships:
-                if entity_id in project.relationships[entity_type]:
-                    project.relationships[entity_type].remove(entity_id)
-                    project.updated_at = datetime.now(timezone.utc).isoformat()
-                    flag_modified(project, "relationships")
-                    session.commit()
-                    session.refresh(project)
+            now = datetime.now(timezone.utc).isoformat()
+            if _is_postgres(session):
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET relationships = jsonb_set(
+                        relationships,
+                        ARRAY[CAST(:entity_type AS text)],
+                        COALESCE((
+                            SELECT jsonb_agg(elem)
+                            FROM jsonb_array_elements_text(
+                                COALESCE(
+                                    relationships -> :entity_type,
+                                    '[]'::jsonb
+                                )
+                            ) AS elem
+                            WHERE elem != :entity_id
+                        ), '[]'::jsonb),
+                        false
+                    ),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                    """
+                )
+                params = {
+                    "entity_type": entity_type,
+                    "entity_id": entity_id,
+                    "now": now,
+                    "project_id": project_id,
+                }
+            else:
+                path = f"$.{entity_type}"
+                update_sql = text(
+                    """
+                    UPDATE projects
+                    SET relationships = json_set(
+                        relationships,
+                        :path,
+                        COALESCE((
+                            SELECT json_group_array(value)
+                            FROM json_each(
+                                COALESCE(
+                                    json_extract(relationships, :path),
+                                    json('[]')
+                                )
+                            )
+                            WHERE value != :entity_id
+                        ), json('[]'))
+                    ),
+                        updated_at = :now
+                    WHERE project_id = :project_id
+                      AND json_extract(relationships, :path) IS NOT NULL
+                    """
+                )
+                params = {
+                    "path": path,
+                    "entity_id": entity_id,
+                    "now": now,
+                    "project_id": project_id,
+                }
 
+            session.execute(update_sql, params)
+            session.commit()
+            session.refresh(project)
             return self._enrich_project(session, project)
 
     # --------------------------------------------------------

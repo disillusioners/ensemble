@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func, and_, or_
+from sqlalchemy import delete as sql_delete, func, and_, or_, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select, col
 
@@ -14,6 +15,55 @@ from .models import MessageQueue, MessageStatus
 
 # Configuration constants
 MESSAGE_TIMEOUT_SECONDS = 3600  # 1 hour
+
+
+def _coerce_datetime(value: Any) -> datetime | None:
+    """Coerce a RETURNING column value to a ``datetime`` (or ``None``).
+
+    - ``None`` passes through.
+    - ``datetime`` instances pass through (PostgreSQL native).
+    - ISO-8601 strings (SQLite storage format) are parsed; values
+      without a timezone offset are assumed UTC because the
+      ``MessageQueue`` model writes ``datetime.now(timezone.utc)``
+      everywhere.
+    """
+    if value is None or isinstance(value, datetime):
+        return value
+    raw = str(value)
+    # Python's fromisoformat accepts "+00:00" suffixes in 3.11+ but
+    # not "Z"; normalise "Z" -> "+00:00" for cross-version safety.
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _coerce_json(value: Any, *, as_dict: bool = False, as_list: bool = False) -> Any:
+    """Coerce a RETURNING JSON column value to its expected Python type.
+
+    - ``None`` passes through.
+    - ``dict`` / ``list`` (PostgreSQL native) pass through.
+    - JSON-encoded strings (SQLite storage format) are parsed. If
+      the column is empty text (some SQLite/JSON adapter edge
+      cases) we treat it as the default — empty dict for
+      ``message_metadata``, ``None`` for ``images`` — matching
+      the model's declared defaults.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    raw = str(value)
+    if raw == "":
+        return {} if as_dict else (None if as_list else None)
+    parsed = json.loads(raw)
+    if as_dict and not isinstance(parsed, dict):
+        return {}
+    if as_list and not isinstance(parsed, list):
+        return None
+    return parsed
 
 
 class SQLModelMessageQueueRepository:
@@ -87,79 +137,101 @@ class SQLModelMessageQueueRepository:
     # --------------------------------------------------------
 
     def dequeue(self, instance_id: str | None = None) -> MessageQueue | None:
-        """Get the next ready message for processing.
-        
-        Args:
-            instance_id: Optional instance ID to filter by. If provided, only
-                        messages for this instance will be considered.
-        
-        Returns the highest priority ready message that is due for processing.
+        """Atomically claim and return the next ready message for processing.
+
+        Selection criteria (a message is eligible when ALL are true):
+        - ``status = 'ready'``
+        - ``next_retry_at IS NULL OR next_retry_at <= now`` (due)
+        - ``instance_id = :instance_id`` when provided
+
+        Ordered by ``priority ASC, enqueued_at ASC``; ``LIMIT 1``.
+
+        Atomic claim: ``UPDATE ... WHERE message_id = (SELECT ...) AND
+        status = 'ready' RETURNING *``. The outer ``AND status = 'ready'``
+        is the EvalPlanQual guard — under PostgreSQL READ COMMITTED, if
+        a concurrent worker has already claimed the candidate row, the
+        outer guard re-evaluates against the post-lock row state and the
+        UPDATE matches zero rows. SQLite achieves the same end via
+        write serialisation. Either way, at most one worker observes a
+        non-None result for any given message.
+
+        Returns:
+            The claimed message in ``processing`` status, or ``None``
+            if no eligible message is currently available.
         """
         now = datetime.now(timezone.utc)
-        
-        # Find ready messages that are either:
-        # 1. Not scheduled for retry (next_retry_at is null)
-        # 2. Scheduled for retry in the past
-        stmt = (
-            select(MessageQueue)
-            .where(MessageQueue.status == MessageStatus.READY.value)
-            .where(
-                (MessageQueue.next_retry_at.is_(None))
-                | (MessageQueue.next_retry_at <= now)
-            )
-        )
-        
-        # Filter by instance_id if provided
+
+        # Subquery selects the next eligible message. Built with
+        # string concatenation rather than SQLAlchemy ORM so the
+        # ``ORDER BY priority ASC, enqueued_at ASC LIMIT 1`` semantics
+        # are crystal-clear and identical between SQLite and PostgreSQL.
+        select_parts = [
+            "SELECT message_id FROM message_queue",
+            "WHERE status = :status_ready",
+            "AND (next_retry_at IS NULL OR next_retry_at <= :now)",
+        ]
+        params: dict[str, Any] = {
+            "status_ready": MessageStatus.READY.value,
+            "status_ready_guard": MessageStatus.READY.value,
+            "status_processing": MessageStatus.PROCESSING.value,
+            "now": now,
+            "processing_started_at": now,
+            "last_activity_at": now,
+        }
         if instance_id is not None:
-            stmt = stmt.where(MessageQueue.instance_id == instance_id)
-        
-        # Lock the row to prevent race conditions (TOCTOU)
-        # SQLite will serialize access to the same row
-        stmt = stmt.with_for_update()
-        
-        stmt = stmt.order_by(
-            col(MessageQueue.priority).asc(),
-            col(MessageQueue.enqueued_at).asc()
-        ).limit(1)
-        
-        with Session(self.engine) as session:
-            message = session.exec(stmt).first()
-            
-            # Atomically claim the message by setting status to PROCESSING
-            if message is not None:
-                message.status = MessageStatus.PROCESSING.value
-                message.processing_started_at = now
-                message.last_activity_at = now
-                session.commit()
-                session.refresh(message)
-            
-            return message
+            select_parts.append("AND instance_id = :instance_id")
+            params["instance_id"] = instance_id
+        select_parts.append("ORDER BY priority ASC, enqueued_at ASC LIMIT 1")
+        select_subquery = " ".join(select_parts)
+
+        update_sql = (
+            "UPDATE message_queue "
+            "SET status = :status_processing, "
+            "    processing_started_at = :processing_started_at, "
+            "    last_activity_at = :last_activity_at "
+            f"WHERE message_id = ({select_subquery}) "
+            "  AND status = :status_ready_guard "
+            "RETURNING *"
+        )
+
+        with self.engine.begin() as conn:
+            row = conn.execute(text(update_sql), params).fetchone()
+            if row is None:
+                return None
+            return self._row_to_message(row)
     
     def find_stuck_messages(self) -> list[MessageQueue]:
         """Find all stuck processing messages.
-        
-        A message is stuck if:
-        - status is 'processing'
-        - last_activity_at is NULL AND processing_started_at < timeout_threshold
-        - OR last_activity_at < timeout_threshold
-        
+
+        A message is stuck when status='processing' AND:
+        - ``last_activity_at IS NULL`` (the worker never reported any
+          activity since claiming the message), OR
+        - ``last_activity_at < timeout_threshold`` (no heartbeat within
+          ``MESSAGE_TIMEOUT_SECONDS`` of now)
+
+        Both branches of the OR are evaluated against the SAME
+        timestamp column (``last_activity_at``). The previous
+        implementation OR'd ``last_activity_at IS NULL`` with
+        ``processing_started_at < threshold`` and then AND'd the whole
+        expression with ``last_activity_at < threshold``, which made
+        the NULL branch unreachable (``NULL < threshold`` evaluates to
+        NULL, which fails the AND).
+
         Args:
             timeout_seconds: Timeout threshold in seconds.
-            
+
         Returns:
             List of stuck messages.
         """
         timeout_threshold = datetime.now(timezone.utc) - timedelta(seconds=MESSAGE_TIMEOUT_SECONDS)
-        
+
         with Session(self.engine) as session:
             stmt = select(MessageQueue).where(
-                MessageQueue.status == MessageStatus.PROCESSING.value
-            ).where(
+                MessageQueue.status == MessageStatus.PROCESSING.value,
                 or_(
                     MessageQueue.last_activity_at.is_(None),
-                    MessageQueue.processing_started_at < timeout_threshold
+                    MessageQueue.last_activity_at < timeout_threshold,
                 ),
-                MessageQueue.last_activity_at < timeout_threshold
             )
             return list(session.exec(stmt))
     
@@ -265,100 +337,257 @@ class SQLModelMessageQueueRepository:
         return self.dequeue(instance_id=instance_id)
 
     # --------------------------------------------------------
+    # ROW MAPPING
+    # --------------------------------------------------------
+
+    def _row_to_message(self, row) -> MessageQueue:
+        """Convert a database row (UPDATE-RETURNING / SELECT) to a
+        ``MessageQueue`` model instance.
+
+        The model declares ``message_metadata`` as a Python attribute
+        that maps to the DB column ``metadata`` (via
+        ``sa_column=Column("metadata", JSON)``) — we read the value
+        from ``row._mapping`` to avoid the ``Row.metadata`` shadow
+        attribute that SQLAlchemy reserves on Row objects.
+
+        Type coercion: raw SQL via ``RETURNING`` returns
+        ``datetime``/``JSON`` columns as native Python types on
+        PostgreSQL, but as raw strings on SQLite (which has no
+        native datetime/JSON types and stores them as text). The
+        helpers below normalise both shapes into proper ``datetime``
+        / ``dict`` / ``list`` objects so callers (and the model
+        itself) see a consistent API regardless of dialect.
+        """
+        mapping = row._mapping
+        return MessageQueue(
+            message_id=mapping["message_id"],
+            instance_id=mapping["instance_id"],
+            content=mapping["content"],
+            type=mapping["type"],
+            source=mapping["source"],
+            root_source=mapping["root_source"],
+            status=mapping["status"],
+            priority=mapping["priority"],
+            retry_count=mapping["retry_count"],
+            max_retries=mapping["max_retries"],
+            error_message=mapping["error_message"],
+            last_error=mapping["last_error"],
+            message_metadata=_coerce_json(mapping["metadata"], as_dict=True),
+            images=_coerce_json(mapping["images"], as_list=True),
+            enqueued_at=_coerce_datetime(mapping["enqueued_at"]),
+            processing_started_at=_coerce_datetime(mapping["processing_started_at"]),
+            last_activity_at=_coerce_datetime(mapping["last_activity_at"]),
+            completed_at=_coerce_datetime(mapping["completed_at"]),
+            next_retry_at=_coerce_datetime(mapping["next_retry_at"]),
+            processing_task_id=mapping["processing_task_id"],
+        )
+
+    # --------------------------------------------------------
     # UPDATE STATUS
     # --------------------------------------------------------
 
     def complete(self, message_id: str) -> MessageQueue | None:
-        """Mark message as completed."""
-        with Session(self.engine) as session:
-            message = session.get(MessageQueue, message_id)
-            if message is None:
-                return None
+        """Atomically mark message as completed.
 
-            message.status = MessageStatus.COMPLETED.value
-            message.completed_at = datetime.now(timezone.utc)
-            
-            session.commit()
-            session.refresh(message)
-            
-            return message
+        Uses a guarded UPDATE (``status = 'processing'``) so a concurrent
+        worker that already completed/failed/retrying the message cannot
+        have its terminal status clobbered. Returns ``None`` if the row
+        does not exist OR its current status is not ``processing``.
+        """
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET status = :status_completed,
+                        completed_at = :completed_at
+                    WHERE message_id = :message_id
+                      AND status = :status_processing
+                    RETURNING *
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_completed": MessageStatus.COMPLETED.value,
+                    "status_processing": MessageStatus.PROCESSING.value,
+                    "completed_at": now,
+                },
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_message(row)
 
     def fail(self, message_id: str, error_message: str) -> MessageQueue | None:
-        """Mark message as failed with error message."""
-        with Session(self.engine) as session:
-            message = session.get(MessageQueue, message_id)
-            if message is None:
+        """Atomically mark message as failed with error message.
+
+        Uses a guarded UPDATE (``status = 'processing'``) so a concurrent
+        worker that already completed/failed/retrying the message cannot
+        have its terminal status clobbered. Returns ``None`` if the row
+        does not exist OR its current status is not ``processing``.
+        """
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET status = :status_failed,
+                        error_message = :error_message,
+                        completed_at = :completed_at
+                    WHERE message_id = :message_id
+                      AND status = :status_processing
+                    RETURNING *
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_failed": MessageStatus.FAILED.value,
+                    "status_processing": MessageStatus.PROCESSING.value,
+                    "error_message": error_message,
+                    "completed_at": now,
+                },
+            ).fetchone()
+            if row is None:
                 return None
-
-            message.status = MessageStatus.FAILED.value
-            message.error_message = error_message
-            message.completed_at = datetime.now(timezone.utc)
-            
-            session.commit()
-            session.refresh(message)
-
-            return message
+            return self._row_to_message(row)
 
     def retry(self, message_id: str, error_message: str | None = None) -> MessageQueue | None:
-        """Increment retry count and set next_retry_at.
-        
-        Args:
-            message_id: The message ID to retry.
-            error_message: Optional error message from previous attempt.
-        
+        """Atomically transition a failed message to READY for retry.
+
+        Two guarded UPDATEs may be issued (in order):
+
+        1. ``WHERE status='failed' AND retry_count >= max_retries`` —
+           marks the message permanently FAILED with a "Max retries (N)
+           exceeded" error (mirrors the prior Python-side branch).
+        2. ``WHERE status='failed' AND retry_count < max_retries`` —
+           increments ``retry_count`` atomically (``retry_count + 1``)
+           and schedules the next retry using exponential backoff.
+
+        A follow-up ``SELECT`` reads the current ``retry_count`` and
+        ``max_retries`` to compute the backoff delay (and the
+        "Max retries (N)" message). If the row was concurrently
+        advanced to ``max_retries`` between the SELECT and the UPDATE,
+        the WHERE guard rejects our write and the method returns
+        ``None`` — the caller can re-invoke ``retry`` and pick up
+        branch (1) on the next attempt.
+
         Returns:
-            The updated message, or None if not found or max retries exceeded.
+            The updated message, or ``None`` if the message does not
+            exist or is not in ``failed`` status.
         """
-        with Session(self.engine) as session:
-            message = session.get(MessageQueue, message_id)
-            if message is None:
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            # Branch 1: max retries already exceeded — mark as FAILED.
+            # We compute the error message in SQL so the
+            # max_retries value from the row is included verbatim
+            # (preserves the prior Python-side format).
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET status = :status_failed,
+                        error_message = 'Max retries (' || max_retries || ') exceeded',
+                        completed_at = :completed_at
+                    WHERE message_id = :message_id
+                      AND status = :status_failed_guard
+                      AND retry_count >= max_retries
+                    RETURNING *
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_failed": MessageStatus.FAILED.value,
+                    "status_failed_guard": MessageStatus.FAILED.value,
+                    "completed_at": now,
+                },
+            ).fetchone()
+            if row is not None:
+                return self._row_to_message(row)
+
+            # Branch 2: read current retry_count to compute backoff delay.
+            # If the row was concurrently removed from FAILED status, the
+            # UPDATE below will match zero rows and we return None.
+            current = conn.execute(
+                text(
+                    """
+                    SELECT retry_count, max_retries
+                    FROM message_queue
+                    WHERE message_id = :message_id
+                      AND status = :status_failed_guard
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_failed_guard": MessageStatus.FAILED.value,
+                },
+            ).fetchone()
+            if current is None:
                 return None
 
-            # Check if we can retry
-            if message.retry_count >= message.max_retries:
-                message.status = MessageStatus.FAILED.value
-                message.error_message = f"Max retries ({message.max_retries}) exceeded"
-                message.completed_at = datetime.now(timezone.utc)
-            else:
-                # Increment retry count and set next retry time
-                message.retry_count += 1
-                # Set error message if provided
-                if error_message:
-                    message.error_message = error_message
-                # Exponential backoff: 1min, 2min, 4min, 8min, etc.
-                delay = min(60 * (2 ** (message.retry_count - 1)), 3600)  # Max 1 hour
-                message.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
-                message.status = MessageStatus.READY.value
-                message.processing_started_at = None
-            
-            session.commit()
-            session.refresh(message)
+            current_retry_count = int(current[0])
+            # Exponential backoff: 1min, 2min, 4min, 8min, … capped at 1h.
+            # Uses the OLD retry_count (before increment) — matches the
+            # prior Python implementation's semantics exactly.
+            delay = min(60 * (2 ** current_retry_count), 3600)
+            next_retry_at = now + timedelta(seconds=delay)
 
-            return message
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET status = :status_ready,
+                        retry_count = retry_count + 1,
+                        error_message = :error_message,
+                        next_retry_at = :next_retry_at,
+                        processing_started_at = NULL
+                    WHERE message_id = :message_id
+                      AND status = :status_failed_guard
+                      AND retry_count < max_retries
+                    RETURNING *
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_ready": MessageStatus.READY.value,
+                    "status_failed_guard": MessageStatus.FAILED.value,
+                    "error_message": error_message,
+                    "next_retry_at": next_retry_at,
+                },
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_message(row)
 
     def update_activity(self, message_id: str) -> MessageQueue | None:
-        """Update last_activity_at timestamp for a processing message.
-        
-        This is called during message processing to indicate the session
-        is still active (not stuck), even if processing takes a long time.
-        
-        Args:
-            message_id: The message ID to update.
-            
-        Returns:
-            The updated message or None if not found.
+        """Atomically refresh last_activity_at for a processing message.
+
+        Uses a guarded UPDATE (``status = 'processing'``) so a message
+        that has been completed/failed/retrying concurrently will not
+        have its activity timestamp refreshed. Returns ``None`` if the
+        row does not exist OR its current status is not ``processing``.
         """
-        with Session(self.engine) as session:
-            message = session.get(MessageQueue, message_id)
-            if message is None:
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET last_activity_at = :last_activity_at
+                    WHERE message_id = :message_id
+                      AND status = :status_processing
+                    RETURNING *
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_processing": MessageStatus.PROCESSING.value,
+                    "last_activity_at": now,
+                },
+            ).fetchone()
+            if row is None:
                 return None
-            
-            message.last_activity_at = datetime.now(timezone.utc)
-            
-            session.commit()
-            session.refresh(message)
-            
-            return message
+            return self._row_to_message(row)
     
     def get_status(self, message_id: str) -> str | None:
         """Get the current status of a message.

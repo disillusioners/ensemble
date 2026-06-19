@@ -618,25 +618,63 @@ class MessageJobHandler:
         ``_poll_interval`` of additional latency on every
         cross-dispatcher back-off, because the job simply sits in
         PENDING until the next scheduled poll.
+
+        M13: the per-queue lock is ALWAYS released, even if
+        ``atomic_transition`` returns ``None`` (already transitioned
+        by another process — our local acquisition was the cause of
+        the contention, the lock row is still ours) or raises. A
+        conditional skip on ``result is None`` leaks the lock
+        permanently: the lock row has our ``job_id`` but no caller
+        will ever clean it up. The lock release itself is wrapped in
+        a try/except so an internal error in ``release_queue_lock``
+        does not skip the dispatch bus notify or, worse, mask the
+        original ``atomic_transition`` exception.
         """
         logger.info(
             f"[TRACE] MessageJobHandler.handle: SKIP job {job.job_id[:8]}... — "
             f"instance {job.instance_id[:8]}... re-queuing ({reason})"
         )
-        result = await asyncio.to_thread(
-            self._job_repo.atomic_transition, job.job_id,
-            from_status="processing", to_status="pending",
-        )
+        try:
+            result = await asyncio.to_thread(
+                self._job_repo.atomic_transition, job.job_id,
+                from_status="processing", to_status="pending",
+            )
+        except Exception as trans_err:  # noqa: BLE001
+            logger.warning(
+                f"MessageJobHandler: atomic_transition failed during "
+                f"re-queue for job {job.job_id[:8]}...: "
+                f"{type(trans_err).__name__}: {trans_err} — "
+                "lock release will still be attempted"
+            )
+            result = None
         if result is None:
-            # Job was already transitioned by another process — nothing to do
+            # Job was already transitioned by another process, OR
+            # the transition itself failed. Either way, the lock we
+            # acquired at the start of this dispatch attempt is still
+            # ours and must be released — see M13 in
+            # docs/audits/postgresql-concurrency-audit-2026-06-18.
             logger.debug(
-                f"MessageJobHandler: job {job.job_id[:8]}... already transitioned, skipping"
+                f"MessageJobHandler: job {job.job_id[:8]}... already "
+                "transitioned or transition failed; releasing lock "
+                "unconditionally"
             )
-            return
+        # ALWAYS release the lock if we know which (project, queue)
+        # pair it belongs to. Wrapped in try/except so a release
+        # error doesn't suppress the dispatch-bus notify or the
+        # caller's exception context.
         if job.project_id and job.queue_id:
-            await self._job_service._lock_manager.release_queue_lock(
-                job.project_id, job.queue_id, job.job_id
-            )
+            try:
+                await self._job_service._lock_manager.release_queue_lock(
+                    job.project_id, job.queue_id, job.job_id
+                )
+            except Exception as release_err:  # noqa: BLE001
+                logger.warning(
+                    f"MessageJobHandler: failed to release queue lock "
+                    f"for job {job.job_id[:8]}...: "
+                    f"{type(release_err).__name__}: {release_err} — "
+                    "lock may be orphaned and will be recovered at "
+                    "next startup sweep"
+                )
         # Wake the JobProcessor dispatch bus so the freshly-requeued
         # PENDING job is picked up on the next poll cycle, not at the
         # end of the current ``_poll_interval`` (default 30 s). The

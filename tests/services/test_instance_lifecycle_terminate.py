@@ -63,6 +63,14 @@ def make_manager(
         manager._job_queue_mgmt_service._dispatch_bus = MagicMock()
         manager._job_queue_mgmt_service._dispatch_bus.notify_all = MagicMock()
 
+    # H10 fix: terminate_instance now writes through a real
+    # ``WriteGuardSession`` against ``manager.engine`` /
+    # ``manager.write_guard``. The mock-based tests stub the engine
+    # with a MagicMock (which still satisfies the WriteGuardSession
+    # gate — the session never actually executes against it).
+    manager.engine = MagicMock()
+    manager.write_guard = MagicMock()
+
     return manager
 
 
@@ -620,99 +628,101 @@ async def test_terminate_summary_log_has_all_fields(
 
 
 @pytest.mark.asyncio
-async def test_terminate_resets_waiting_for_to_zero_on_instance_repo():
-    """terminate_instance must reset ``waiting_for=0`` on the instance repo.
+async def test_terminate_resets_waiting_for_to_zero_on_instance_repo(
+    engine, write_guard,
+):
+    """terminate_instance must reset ``waiting_for=0`` on the instance.
 
-    Without this, a terminate→revive cycle leaves a non-zero ``waiting_for``
-    counter in the DB even though the instance is brand-new. The revived
-    instance would inherit a stale counter and ``is_complete()`` checks would
-    be wrong until manual cleanup.
+    H10 fix moves the write to a raw ``WriteGuardSession`` inside
+    ``_terminate_instance_db_sync``, so the test now verifies the
+    DB end-state (via real in-memory SQLite) instead of the mock
+    ``update()`` call surface.
+
+    Without this, a terminate→revive cycle leaves a non-zero
+    ``waiting_for`` counter in the DB even though the instance is
+    brand-new. The revived instance would inherit a stale counter
+    and ``is_complete()`` checks would be wrong until manual cleanup.
     """
+    from daemon.repositories.instance.models import InstanceStatus
+
     instance_id = "wf-reset-123"
+    seed_instance_in_engine(engine, instance_id, waiting_for=5)
 
     manager = make_manager(
         meta_for={instance_id: make_meta(instance_id)},
         graph_tasks={},
         with_dispatch_bus=True,
     )
-    svc = make_lifecycle_service(manager, make_job_queue_service())
+    # Plug in the real engine + guard so the helper actually writes
+    # against the seeded DB row.
+    manager.engine = engine
+    manager.write_guard = write_guard
+    # The mock-repo's get() should reflect the seeded row.
+    manager._instance_repository.get = lambda iid: (
+        _read_instance_via_session(engine, iid)
+    )
 
+    svc = make_lifecycle_service(manager, make_job_queue_service())
     await svc.terminate_instance(instance_id)
 
-    # update was called with waiting_for=0 for this instance.
-    update_calls = manager._instance_repository.update.call_args_list
-    wf_calls = [
-        c for c in update_calls if c.kwargs.get("waiting_for") == 0
-    ]
-    assert len(wf_calls) == 1, (
-        f"Expected exactly one update(waiting_for=0) call, got "
-        f"{update_calls}"
+    inst = _read_instance_via_session(engine, instance_id)
+    assert inst is not None
+    assert inst.waiting_for == 0, (
+        f"Expected waiting_for reset to 0, got {inst.waiting_for}"
     )
-    assert wf_calls[0].args[0] == instance_id
-
-
-# =============================================================================
-# Test 10b — terminate_instance writes status + waiting_for=0 in ONE atomic
-# update call (Fix 3 part B atomicity)
-# =============================================================================
+    assert inst.status == InstanceStatus.TERMINATED.value
 
 
 @pytest.mark.asyncio
-async def test_terminate_writes_status_and_waiting_for_in_single_atomic_update():
+async def test_terminate_writes_status_and_waiting_for_in_single_atomic_update(
+    engine, write_guard,
+):
     """terminate_instance MUST set ``status="terminated"`` and
-    ``waiting_for=0`` in the SAME ``update()`` call.
+    ``waiting_for=0`` in the SAME ``UPDATE`` — verified via real DB.
 
-    The fix collapses the two writes (``update_status("terminated")`` followed
-    by a separate ``update(waiting_for=0)``) into ONE repository call to
-    eliminate the crash window: if the daemon died between the two writes, the
-    DB would be left with ``status=terminated, waiting_for=N>0``, and on
-    restart ``rebuild_from_db()`` would over-count pending work and resurrect
-    zombie correlations.
+    H10 fix moves this to a single ``UPDATE instances SET status,
+    waiting_for`` in ``_terminate_instance_db_sync``. The atomicity
+    invariant is now verified by:
 
-    A regression that re-introduces TWO update calls (even if both succeed)
-    must be caught here. This test asserts:
+      1. Asserting the row's post-terminate state has both fields
+         updated together (verified above via raw SQL reads).
+      2. The crash-safety test
+         ``tests/services/test_instance_lifecycle_h10_l14.py::
+         test_h10_terminate_crash_safety_no_partial_state`` proves
+         that a mid-transaction failure rolls back BOTH fields
+         together — i.e. they can never be partially-applied.
 
-      1. Exactly ONE ``update(instance_id, ...)`` call is made for this
-         instance during terminate_instance.
-      2. That single call carries BOTH ``status="terminated"`` AND
-         ``waiting_for=0`` in its kwargs.
-
-    If a future refactor splits the writes, this test fails with a clear
-    message pointing at the regression.
+    A regression that re-introduces two separate writes (one for
+    status, one for waiting_for) would be caught by:
+      * This test (status + waiting_for must BOTH be set, not just one).
+      * The crash-safety test (rollback must restore BOTH, not just one).
     """
+    from daemon.repositories.instance.models import InstanceStatus
+
     instance_id = "atomic-123"
+    seed_instance_in_engine(engine, instance_id, waiting_for=3)
 
     manager = make_manager(
         meta_for={instance_id: make_meta(instance_id)},
         graph_tasks={},
         with_dispatch_bus=True,
     )
-    svc = make_lifecycle_service(manager, make_job_queue_service())
+    manager.engine = engine
+    manager.write_guard = write_guard
+    manager._instance_repository.get = lambda iid: (
+        _read_instance_via_session(engine, iid)
+    )
 
+    svc = make_lifecycle_service(manager, make_job_queue_service())
     await svc.terminate_instance(instance_id)
 
-    # All update() calls scoped to this instance.
-    update_calls = [
-        c for c in manager._instance_repository.update.call_args_list
-        if c.args and c.args[0] == instance_id
-    ]
-
-    # 1. Exactly one update call for this instance (atomicity invariant).
-    assert len(update_calls) == 1, (
-        f"Expected exactly ONE update() call for instance {instance_id}, "
-        f"got {len(update_calls)}: {update_calls}. "
-        f"Two calls would leave a crash window where status is set but "
-        f"waiting_for is not yet 0 (or vice versa)."
+    inst = _read_instance_via_session(engine, instance_id)
+    assert inst is not None
+    assert inst.status == InstanceStatus.TERMINATED.value, (
+        f"Status must be 'terminated'; got {inst.status!r}"
     )
-
-    # 2. That single call carries BOTH status and waiting_for=0.
-    only_call = update_calls[0]
-    kwargs = only_call.kwargs
-    assert kwargs.get("status") == "terminated", (
-        f"Single update must set status='terminated'; got kwargs={kwargs}"
-    )
-    assert kwargs.get("waiting_for") == 0, (
-        f"Single update must reset waiting_for=0; got kwargs={kwargs}"
+    assert inst.waiting_for == 0, (
+        f"waiting_for must be 0 in the SAME atomic write; got {inst.waiting_for}"
     )
 
 
@@ -882,3 +892,95 @@ def make_msg_repo_mock():
     repo = MagicMock(name="MsgRepo")
     repo.get_pending_for_instances = MagicMock(return_value=[])
     return repo
+
+
+# ─── Shared fixtures for H10 fix verification (real in-memory SQLite) ─────────
+#
+# The H10 fix moves DB writes to a raw ``WriteGuardSession`` inside
+# ``_terminate_instance_db_sync``, bypassing the ``_instance_repository``
+# mock layer. To verify the actual SQL effects (status / waiting_for /
+# job cancel / lock release / message_queue delete), the post-fix tests
+# use a real in-memory SQLite engine seeded via raw ``Session`` writes.
+
+from datetime import datetime, timezone
+
+import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session as SqlModelSession
+from sqlmodel import SQLModel
+
+from daemon.repositories.instance.models import Instance, InstanceStatus
+
+
+@pytest.fixture
+def engine() -> Engine:
+    """Real in-memory SQLite engine (StaticPool for cross-thread safety)."""
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(eng, "connect")
+    def _enable_fk(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def write_guard():
+    """Fresh ``WritePauseGuard`` — not paused."""
+    from daemon.write_pause_guard import WritePauseGuard
+    return WritePauseGuard()
+
+
+def seed_instance_in_engine(
+    engine: Engine,
+    instance_id: str,
+    *,
+    status: str = InstanceStatus.RUNNING.value,
+    waiting_for: int = 0,
+    parent_id: str | None = None,
+    agent_id: str = "test-agent",
+) -> None:
+    """Insert an Instance row into the real engine for H10 verification."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with SqlModelSession(engine) as s:
+        s.add(
+            Instance(
+                instance_id=instance_id,
+                agent_id=agent_id,
+                agent_dir=f"/tmp/agents/{agent_id}",
+                agent_name=agent_id,
+                parent_id=parent_id,
+                status=status,
+                waiting_for=waiting_for,
+                instance_metadata={},
+                children="[]",
+                version=1,
+                created_at=now_iso,
+                updated_at=now_iso,
+            )
+        )
+        s.commit()
+
+
+def _read_instance_via_session(engine: Engine, instance_id: str) -> Instance | None:
+    """Read a fresh Instance row (no session caching)."""
+    with SqlModelSession(engine) as s:
+        row = s.get(Instance, instance_id)
+        if row is not None:
+            # Detach so the caller sees a plain ORM object (mimics the
+            # behavior of the repository's ``get()`` which returns a
+            # detached ``_enrich_instance`` result).
+            s.expunge(row)
+        return row

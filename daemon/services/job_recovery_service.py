@@ -160,6 +160,16 @@ class JobRecoveryService:
     ) -> bool:
         """Mark an orphaned job as FAILED and release its lock.
 
+        Lock release ordering is critical: the status transition runs FIRST
+        and the lock is released SECOND (in a ``finally`` block). This
+        prevents a double-claim window where the job sits in PROCESSING
+        state with no lock to protect it.
+
+        If the transition raises, the job stays in PROCESSING and will be
+        picked up by the next recovery cycle. The ``finally`` block
+        guarantees the lock is released on ALL code paths (success,
+        ``InvalidTransitionError``, and unexpected exceptions).
+
         Args:
             job: The job to fail.
             error_message: Reason for failure.
@@ -167,16 +177,12 @@ class JobRecoveryService:
 
         Returns:
             True if job was successfully transitioned, False if transition was
-            skipped (e.g., already transitioned by another actor).
+            skipped (e.g., already transitioned by another actor) or failed.
         """
         try:
-            # Release lock first
-            if job.instance_id:
-                await asyncio.to_thread(
-                    self._lock_repository.release_by_instance, job.instance_id
-                )
-
-            # Transition to FAILED using atomic_transition
+            # 1. Transition status FIRST. If this raises, the job remains in
+            #    PROCESSING and the finally-block still releases the lock so
+            #    a later recovery cycle can retry.
             now = datetime.now(timezone.utc).isoformat()
             await asyncio.to_thread(
                 self._job_repository.atomic_transition,
@@ -187,14 +193,16 @@ class JobRecoveryService:
                 error_message=error_message,
             )
             stats["recovered"] += 1
-            
-            # Notify watchers after successful transition
+
+            # 2. Notify watchers after successful transition.
             if self._job_queue_service is not None:
-                await self._job_queue_service.notify_watchers(job.job_id, "failed", error_message)
-            
+                await self._job_queue_service.notify_watchers(
+                    job.job_id, "failed", error_message
+                )
+
             return True
         except InvalidTransitionError:
-            # Job was already transitioned by another actor — this is expected
+            # Job was already transitioned by another actor — this is expected.
             logger.info(
                 f"Job {job.job_id[:8]}... already transitioned during recovery, skipping"
             )
@@ -202,3 +210,19 @@ class JobRecoveryService:
         except Exception as e:
             logger.error(f"Failed to recover job {job.job_id[:8]}...: {e}")
             return False
+        finally:
+            # 3. Release lock AFTER the transition attempt. This runs on
+            #    success, InvalidTransitionError, and unexpected exception
+            #    paths, guaranteeing the lock is never leaked.
+            if job.instance_id:
+                try:
+                    await asyncio.to_thread(
+                        self._lock_repository.release_by_instance, job.instance_id
+                    )
+                except Exception as lock_err:
+                    # Do not mask the original exception; just log so an
+                    # operator can investigate stuck lock rows.
+                    logger.error(
+                        f"Failed to release lock for instance {job.instance_id} "
+                        f"during recovery of job {job.job_id[:8]}...: {lock_err}"
+                    )

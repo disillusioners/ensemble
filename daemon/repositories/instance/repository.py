@@ -9,9 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete as sql_delete, func, not_
+from sqlalchemy import delete as sql_delete, func, not_, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm.attributes import flag_modified
 from sqlmodel import Session as SQLModelSession, select, col
 
 from .models import Instance, InstanceHierarchy, InstanceStatus
@@ -552,14 +551,53 @@ class SQLModelInstanceRepository:
     # --------------------------------------------------------
 
     def update(self, instance_id: str, **updates) -> Instance | None:
-        """Update an instance's fields."""
+        """Update an instance's fields.
+
+        Defense-in-depth guard: callers must NOT pass ``status=`` here.
+        Status changes are routed through :meth:`transition_status_if`
+        so the SQL-level ``WHERE status IN (:allowed_from)`` predicate
+        prevents concurrent clobbering of terminal statuses. Bypassing
+        that path by writing ``status`` directly here would reintroduce
+        the very race the atomic-transition fix was designed to
+        eliminate.
+
+        ``instance_metadata`` is also rejected because writes to the
+        JSON column via plain ORM setattr are a read-modify-write at
+        the column level (the ORM replaces the whole JSON blob) and
+        clobber concurrent writers. Use :meth:`set_metadata` /
+        :meth:`delete_metadata` (dialect-aware JSONB / json_set
+        UPDATE) instead.
+
+        Args:
+            instance_id: Instance identifier.
+            **updates: Fields to update. ``status`` and
+                ``instance_metadata`` are rejected — use
+                :meth:`transition_status_if` for status changes and
+                :meth:`set_metadata` / :meth:`delete_metadata` for
+                metadata edits.
+
+        Returns:
+            Updated Instance if found, None otherwise.
+
+        Raises:
+            ValueError: If ``status`` or ``instance_metadata`` is
+                supplied via ``updates``.
+        """
+        if "status" in updates:
+            raise ValueError(
+                "Use transition_status_if for status changes "
+                "(see InstanceRepository.transition_status_if)"
+            )
+        if "instance_metadata" in updates:
+            raise ValueError(
+                "Use set_metadata / delete_metadata for metadata edits "
+                "(see InstanceRepository.set_metadata / delete_metadata)"
+            )
+
         with SQLModelSession(self.engine) as db_session:
             instance = db_session.get(Instance, instance_id)
             if instance is None:
                 return None
-
-            if 'status' in updates and not InstanceStatus.is_valid(updates['status']):
-                raise ValueError(f"Invalid status: {updates['status']}")
 
             for key, value in updates.items():
                 if hasattr(instance, key):
@@ -625,48 +663,152 @@ class SQLModelInstanceRepository:
         return self.update(instance_id, waiting_for=waiting_for)
 
     def update_title(self, instance_id: str, title: str) -> Instance | None:
-        """Update instance title in instance_metadata."""
-        with SQLModelSession(self.engine) as db_session:
-            instance = db_session.get(Instance, instance_id)
-            if instance is None:
-                return None
+        """Update instance title in instance_metadata.
 
-            instance.instance_metadata["title"] = title
-            flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            db_session.commit()
-            db_session.refresh(instance)
-
-            return self._enrich_instance(db_session, instance)
+        Delegates to :meth:`set_metadata` so the title write uses the same
+        dialect-aware atomic SQL path (single-statement UPDATE with
+        ``jsonb_set`` on PostgreSQL / ``json_set`` on SQLite). This avoids
+        the read-modify-write race where a concurrent ``set_metadata`` on
+        a different key would be silently overwritten.
+        """
+        return self.set_metadata(instance_id, "title", title)
 
     def set_metadata(self, instance_id: str, key: str, value: Any) -> Instance | None:
-        """Set an instance_metadata key-value pair."""
+        """Atomically set an instance_metadata key-value pair.
+
+        Uses a dialect-aware single-statement UPDATE so concurrent calls
+        targeting different keys compose correctly instead of silently
+        overwriting each other:
+
+        * PostgreSQL: ``jsonb_set(COALESCE(metadata, '{}'::jsonb), ...)``
+        * SQLite:     ``json_set(COALESCE(metadata, '{}'), ...)``
+
+        ``COALESCE`` keeps the call safe when the column is NULL.
+
+        Args:
+            instance_id: The instance ID whose metadata to update.
+            key: Top-level JSON key to set.
+            value: JSON-serialisable value to store.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+        """
         with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            json_value = json.dumps(value)
+            now = datetime.now(timezone.utc).isoformat()
+
+            if dialect == "postgresql":
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = jsonb_set(
+                        COALESCE(metadata, '{}'::jsonb),
+                        :path,
+                        CAST(:value AS jsonb),
+                        true
+                    ),
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                path_value = f"{{{key}}}"
+            else:
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = json_set(
+                        COALESCE(metadata, '{}'),
+                        :path,
+                        json(:value)
+                    ),
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                path_value = f"$.{key}"
+
+            db_session.execute(
+                update_sql,
+                {
+                    "path": path_value,
+                    "value": json_value,
+                    "now": now,
+                    "instance_id": instance_id,
+                },
+            )
+            db_session.commit()
+
             instance = db_session.get(Instance, instance_id)
             if instance is None:
                 return None
-
-            instance.instance_metadata[key] = value
-            flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            db_session.commit()
-            db_session.refresh(instance)
-
             return self._enrich_instance(db_session, instance)
 
     def delete_metadata(self, instance_id: str, key: str) -> Instance | None:
-        """Delete an instance_metadata key."""
+        """Atomically delete an instance_metadata key.
+
+        Uses a dialect-aware single-statement UPDATE so the deletion
+        cannot lose concurrent writes to other keys via a stale read:
+
+        * PostgreSQL: ``metadata - :key`` (jsonb delete-by-key)
+        * SQLite:     ``json_remove(metadata, :path)``
+
+        Args:
+            instance_id: The instance ID whose metadata to mutate.
+            key: Top-level JSON key to delete.
+
+        Returns:
+            The refreshed enriched ``Instance``, or ``None`` if the
+            instance does not exist.
+        """
         with SQLModelSession(self.engine) as db_session:
+            dialect = (
+                db_session.bind.dialect.name
+                if db_session.bind is not None
+                else "sqlite"
+            )
+            now = datetime.now(timezone.utc).isoformat()
+
+            if dialect == "postgresql":
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = metadata - :key,
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                params = {
+                    "key": key,
+                    "now": now,
+                    "instance_id": instance_id,
+                }
+            else:
+                update_sql = text(
+                    """
+                    UPDATE instances
+                    SET metadata = json_remove(metadata, :path),
+                    updated_at = :now
+                    WHERE instance_id = :instance_id
+                    """
+                )
+                params = {
+                    "path": f"$.{key}",
+                    "now": now,
+                    "instance_id": instance_id,
+                }
+
+            db_session.execute(update_sql, params)
+            db_session.commit()
+
             instance = db_session.get(Instance, instance_id)
             if instance is None:
                 return None
-
-            instance.instance_metadata.pop(key, None)
-            flag_modified(instance, "instance_metadata")
-            instance.updated_at = datetime.now(timezone.utc).isoformat()
-            db_session.commit()
-            db_session.refresh(instance)
-
             return self._enrich_instance(db_session, instance)
 
     # --------------------------------------------------------
@@ -746,6 +888,31 @@ class SQLModelInstanceRepository:
     def delete_by_project(self, project_id: str) -> int:
         """Delete all instances for a project.
 
+        M7 fix: the previous implementation read instance IDs, ran
+        per-instance cascades, then bulk-deleted the rows — all without
+        any row-level lock. Concurrent ``insert_instance`` /
+        ``update_instance`` calls for the same project could either:
+          (a) insert a new row after the ID snapshot but before the
+              DELETE, leaving an orphaned instance behind (because the
+              DELETE WHERE project_id = :p would actually pick that row
+              up — see below — so this is the LOWER risk), or
+          (b) much worse: an in-flight ``terminate_instance`` call
+              could cascade-update dependent rows (status, hierarchy)
+              concurrently with our cascade delete, producing a
+              partial delete (e.g. JobWatcher gone but Instance row
+              stuck because the terminate path locked the Instance row
+              in a different transaction).
+
+        We close that window by acquiring ``SELECT ... FOR UPDATE`` on
+        the affected rows BEFORE the cascade. PostgreSQL honours
+        ``FOR UPDATE`` and serializes us against any concurrent writer
+        touching the same rows. SQLite (the dev/test path) does not
+        support ``FOR UPDATE`` but its implicit per-session transaction
+        already serializes writes against this session, which is
+        sufficient because SQLite is single-writer at the database
+        level — concurrent writers wait for the holding transaction
+        to commit/rollback.
+
         Args:
             project_id: Project identifier.
 
@@ -753,8 +920,22 @@ class SQLModelInstanceRepository:
             Number of instances deleted.
         """
         with SQLModelSession(self.engine) as db_session:
-            # Get all instance IDs for this project first to run per-instance cascade
-            stmt = select(Instance.instance_id).where(Instance.project_id == project_id)
+            # Detect dialect once and pick the right lock mode.
+            is_pg = (
+                db_session.bind is not None
+                and db_session.bind.dialect.name == "postgresql"
+            )
+
+            # Get all instance IDs for this project, locking the rows
+            # for the duration of this transaction. On PostgreSQL this
+            # is ``SELECT ... FOR UPDATE``; on SQLite we fall back to a
+            # plain SELECT (the implicit per-session transaction is the
+            # lock).
+            stmt = select(Instance.instance_id).where(
+                Instance.project_id == project_id
+            )
+            if is_pg:
+                stmt = stmt.with_for_update()
             instance_ids = list(db_session.exec(stmt).all())
 
             # Cascade deps for each instance (handles JobWatcher, Task, Event,
@@ -762,7 +943,10 @@ class SQLModelInstanceRepository:
             for instance_id in instance_ids:
                 self._cascade_instance_deps(db_session, instance_id)
 
-            # Delete all instances for this project
+            # Delete all instances for this project. The PostgreSQL
+            # ``FOR UPDATE`` from the snapshot above is still held here,
+            # so any concurrent writer that tried to read these rows
+            # would have been blocked at the SELECT.
             stmt = sql_delete(Instance).where(Instance.project_id == project_id)
             result = db_session.exec(stmt)
             db_session.commit()

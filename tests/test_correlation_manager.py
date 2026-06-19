@@ -979,3 +979,410 @@ class TestClearForInstance:
         # (no state at all) or before it (just the late entry). In either
         # case the count is at most 1.
         assert cm.get_pending_count(parent) <= 1
+
+
+# =============================================================================
+# Group 7 — Callback Exception Restoration (Fix H7)
+# =============================================================================
+#
+# H7 fix: when the completion_callback raises, restore _pending[parent_id]
+# so external retry (or a subsequent register_message_send) can recover.
+# Without this, the parent job is permanently wedged in PROCESSING (orphan
+# job) because state was cleared under the lock before the callback fired.
+# All tests in this group use a deliberately-failing callback to exercise
+# the H7 restoration path.
+
+
+def _make_failing_callback(
+    exc: Exception | None = None,
+    *,
+    on_call: Any | None = None,
+) -> Any:
+    """Build a callback that raises ``exc`` (default: ``ValueError``).
+
+    If ``on_call`` is provided, it is awaited (or called) BEFORE the
+    exception is raised. Used to interleave work between lock release and
+    exception (the realistic race window for a concurrent register).
+    """
+    if exc is None:
+        exc = ValueError("simulated callback failure")
+
+    async def _cb(parent_id: str, terminal_status: str) -> None:
+        if on_call is not None:
+            result = on_call(parent_id, terminal_status)
+            if asyncio.iscoroutine(result):
+                await result
+        raise exc
+
+    return _cb
+
+
+class TestCallbackExceptionRestoration:
+    """H7 fix tests: completion_callback exception must not orphan the parent.
+
+    Coverage:
+      * State restoration on callback exception
+      * Logging on failure (exception + restoration message)
+      * Recovery via subsequent resolve (re-register → re-resolve → callback)
+      * Concurrent-register overwrite protection
+      * No-restore on callback success
+      * Same-object identity preservation across restoration
+      * No-callback path is unaffected
+    """
+
+    @pytest.mark.asyncio
+    async def test_callback_exception_restores_pending_state(self):
+        """Callback raises → ``_pending[parent_id]`` is restored so the
+        parent is no longer permanently untracked.
+        """
+        cm = make_cm(callback=_make_failing_callback())
+        parent, child, msg = "parent-h7-001", "child-1", "msg-1"
+
+        await cm.register_message_send(parent, child, msg)
+
+        # Resolve triggers the (failing) callback. The CM must catch the
+        # exception internally — resolve_response itself returns True.
+        result = await cm.resolve_response(parent, child, msg)
+        assert result is True, "resolve_response still returns True on last-resolve"
+
+        # CRITICAL: _pending[parent_id] must be re-populated by H7 fix.
+        assert parent in cm._pending, (
+            "H7 fix failed: _pending[parent_id] not restored after callback "
+            f"exception. _pending keys: {list(cm._pending)}"
+        )
+        # The restored entry has no pending entries (all were resolved) but
+        # is_complete() must still reflect reality — empty pending = complete.
+        assert cm.get_pending_count(parent) == 0
+        assert cm.is_complete(parent) is True
+
+    @pytest.mark.asyncio
+    async def test_callback_exception_logs_failure_and_restoration(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """Both the exception traceback AND the restoration message must be
+        logged at WARNING/ERROR level so operators see the failure.
+        """
+        caplog.set_level(logging.WARNING, logger="daemon.services.correlation_manager")
+        cm = make_cm(callback=_make_failing_callback(RuntimeError("boom")))
+        parent, child, msg = "parent-h7-002", "child-1", "msg-1"
+
+        await cm.register_message_send(parent, child, msg)
+        await cm.resolve_response(parent, child, msg)
+
+        # The exception log ("attempting to restore _pending for retry")
+        # fires via logger.exception → level ERROR + traceback attached.
+        exc_logs = [
+            r for r in caplog.records
+            if r.levelno >= logging.ERROR
+            and "completion_callback failed" in r.message
+        ]
+        assert len(exc_logs) >= 1, (
+            f"Expected ERROR log for callback failure, got: "
+            f"{[(r.levelname, r.message) for r in caplog.records]}"
+        )
+
+        # The restoration log fires via logger.warning.
+        restore_logs = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "restored _pending" in r.message
+        ]
+        assert len(restore_logs) == 1, (
+            f"Expected exactly 1 WARNING log for restoration, got: "
+            f"{[(r.levelname, r.message) for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_recovery_via_subsequent_resolve_cycle(self):
+        """After restoration, a new register+resolve cycle fires the callback
+        normally (recovery path). Proves the CM is fully usable after a
+        callback failure — the orphan-job scenario is resolved.
+        """
+        recorder: list[tuple[str, str, str]] = []
+        call_count = {"n": 0}
+
+        async def _flaky_cb(parent_id: str, terminal_status: str) -> None:
+            call_count["n"] += 1
+            recorder.append((parent_id, terminal_status, f"call-{call_count['n']}"))
+            if call_count["n"] == 1:
+                raise ValueError("first call fails; second must succeed")
+
+        cm = make_cm(callback=_flaky_cb)
+        parent, child = "parent-h7-003", "child-1"
+        msg_a, msg_b = "msg-a", "msg-b"
+
+        # First cycle: register one, resolve → callback fails → state restored.
+        await cm.register_message_send(parent, child, msg_a)
+        result_1 = await cm.resolve_response(parent, child, msg_a)
+        assert result_1 is True
+        assert call_count["n"] == 1
+        # H7: _pending is restored.
+        assert parent in cm._pending
+        assert cm.get_pending_count(parent) == 0
+
+        # Second cycle: register a NEW message + resolve → callback succeeds.
+        await cm.register_message_send(parent, child, msg_b)
+        assert cm.get_pending_count(parent) == 1
+        result_2 = await cm.resolve_response(parent, child, msg_b)
+        assert result_2 is True
+        assert call_count["n"] == 2, "Callback must fire again on next completion"
+
+        # After successful second callback, _pending is cleaned (success path).
+        assert parent not in cm._pending, (
+            "After successful callback, _pending should be cleaned (no restore)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_register_protects_overwrite(self):
+        """If ``_pending[parent_id]`` is populated between the callback
+        throwing and the restoration acquiring the lock, restoration must
+        NOT overwrite that concurrent state. Clobbering would lose newly-
+        registered correlations and leave the parent in a worse state
+        than the original orphan.
+
+        We simulate the race by having the failing callback populate
+        ``_pending[parent_id]`` BEFORE throwing — this models what would
+        happen if a concurrent ``register_message_send`` acquired the
+        per-parent lock between the callback yield and the restoration
+        lock acquisition. The callback runs OUTSIDE the original lock and
+        the restoration acquires a fresh lock, so this race is real.
+        """
+        cm = make_cm()
+        parent, child, msg = "parent-h7-004", "child-1", "msg-1"
+
+        # Pre-build the state that a concurrent register_message_send would
+        # have populated by the time our restoration runs.
+        concurrent_state = ParentCorrelation(parent_id=parent)
+        concurrent_state.pending["late-child:late-msg"] = PendingResponse(
+            parent_id=parent,
+            child_id="late-child",
+            message_id="late-msg",
+            created_at=0.0,
+            status=STATUS_PENDING,
+        )
+
+        async def _concurrent_then_fail_cb(
+            parent_id: str, terminal_status: str
+        ) -> None:
+            # Simulate a concurrent register that landed between original
+            # lock release and restoration lock acquisition. In production
+            # this would be a separate coroutine racing for the per-parent
+            # lock; here we just mutate the dict directly (no lock held by
+            # the callback) which has the same observable effect for the
+            # conditional restore check.
+            cm._pending[parent_id] = concurrent_state
+            raise ValueError("simulated failure after concurrent register")
+
+        cm._completion_callback = _concurrent_then_fail_cb
+
+        await cm.register_message_send(parent, child, msg)
+        await cm.resolve_response(parent, child, msg)
+
+        # The concurrent register's ParentCorrelation must NOT have been
+        # clobbered — restoration must have skipped because _pending was
+        # already populated.
+        assert parent in cm._pending
+        assert cm._pending[parent] is concurrent_state, (
+            "H7 conditional restore must NOT overwrite a concurrent "
+            "register_message_send's ParentCorrelation"
+        )
+        # The concurrent register's pending entry must still be there.
+        assert "late-child:late-msg" in cm._pending[parent].pending
+        assert cm.get_pending_count(parent) == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_register_protects_overwrite_async_race(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """Async variant of the concurrent-register test: uses asyncio.Event
+        to genuinely yield control between callback start and exception,
+        proving the race is handled even when the callback awaits.
+        """
+        caplog.set_level(logging.INFO, logger="daemon.services.correlation_manager")
+        gate = asyncio.Event()
+        parent, child, msg = "parent-h7-004b", "child-1", "msg-1"
+
+        async def _gated_failing_cb(parent_id: str, terminal_status: str) -> None:
+            await gate.wait()  # yield to event loop
+            raise ValueError("failure after yield")
+
+        cm = make_cm(callback=_gated_failing_cb)
+        await cm.register_message_send(parent, child, msg)
+
+        # Kick off the resolve — it will block inside the callback on gate.
+        resolve_task = asyncio.create_task(
+            cm.resolve_response(parent, child, msg)
+        )
+        # Give the task a chance to enter the callback and hit gate.wait().
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        # While the resolve is suspended, a concurrent register lands.
+        await cm.register_message_send(parent, "late-child", "late-msg")
+        # Sanity: the late register populated _pending[parent_id].
+        assert cm.get_pending_count(parent) == 1
+
+        # Now release the gate — callback resumes and throws.
+        gate.set()
+        result = await resolve_task
+        assert result is True
+
+        # The concurrent register's entry must survive restoration.
+        assert parent in cm._pending
+        assert cm.get_pending_count(parent) == 1
+        late_entry = cm._pending[parent].pending.get("late-child:late-msg")
+        assert late_entry is not None, (
+            "Async race: concurrent register entry must survive restoration"
+        )
+
+        # The "restore skipped" log should be present.
+        skip_logs = [
+            r for r in caplog.records if "restore skipped" in r.message
+        ]
+        assert len(skip_logs) == 1, (
+            f"Expected 'restore skipped' log when concurrent register "
+            f"populated _pending, got: {[(r.levelname, r.message) for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_restore_on_success(self):
+        """Callback succeeds → no restoration. After a successful callback
+        the in-memory state stays cleaned (current pre-H7 behaviour)."""
+        recorder, cb = make_callback()
+        cm = make_cm(callback=cb)
+        parent, child, msg = "parent-h7-005", "child-1", "msg-1"
+
+        await cm.register_message_send(parent, child, msg)
+        result = await cm.resolve_response(parent, child, msg)
+
+        assert result is True
+        assert recorder == [(parent, "completed")]
+        # On success, _pending must stay cleaned (no restore).
+        assert parent not in cm._pending
+        assert cm.get_pending_count(parent) == 0
+
+    @pytest.mark.asyncio
+    async def test_same_object_identity_preserved_on_restoration(self):
+        """The restored ``ParentCorrelation`` is the SAME Python object as
+        the one that was deleted (same id()). Preserves ``had_error``,
+        any other attributes, and avoids surprising downstream code that
+        relies on object identity.
+        """
+        cm = make_cm(callback=_make_failing_callback())
+        parent, child, msg = "parent-h7-006", "child-1", "msg-1"
+
+        await cm.register_message_send(parent, child, msg)
+
+        # Resolve with ERROR status so had_error is set on the ParentCorrelation.
+        await cm.resolve_response(parent, child, msg, status=STATUS_ERROR)
+
+        # _pending[parent_id] should be the SAME object as the original
+        # (had_error=True preserved).
+        assert parent in cm._pending
+        restored = cm._pending[parent]
+        assert restored.had_error is True, (
+            "had_error must be preserved across restoration (same object)"
+        )
+        # Empty pending dict (all entries resolved before callback fired).
+        assert restored.pending == {}
+        # The restored object is a ParentCorrelation — type preserved.
+        assert isinstance(restored, ParentCorrelation)
+
+    @pytest.mark.asyncio
+    async def test_had_error_preserved_across_restoration(self):
+        """When the LAST resolve has status=error and the callback then
+        throws, the restored ``ParentCorrelation`` must retain
+        ``had_error=True`` so a retry path can re-derive
+        ``terminal_status='error'`` from state.
+        """
+        cm = make_cm(callback=_make_failing_callback())
+        parent, child, msg = "parent-h7-007", "child-1", "msg-1"
+
+        await cm.register_message_send(parent, child, msg)
+        await cm.resolve_response(parent, child, msg, status=STATUS_ERROR)
+
+        assert parent in cm._pending
+        assert cm._pending[parent].had_error is True
+
+    @pytest.mark.asyncio
+    async def test_no_callback_registered_skips_restoration_logic(self):
+        """When ``_completion_callback`` is None, the exception-handling
+        block is unreachable (no callback is invoked). The behaviour must
+        match the pre-H7 implementation: state is cleared under the lock
+        and nothing else happens.
+        """
+        cm = make_cm(callback=None)
+        parent, child, msg = "parent-h7-008", "child-1", "msg-1"
+
+        await cm.register_message_send(parent, child, msg)
+        result = await cm.resolve_response(parent, child, msg)
+
+        assert result is True
+        assert parent not in cm._pending
+        assert cm.get_pending_count(parent) == 0
+
+    @pytest.mark.asyncio
+    async def test_multiple_correlations_partial_then_fail(self):
+        """Register 3, resolve 2 (no callback), resolve 3rd (callback fires,
+        fails). State must be restored exactly as if all 3 were resolved
+        in a clean run, with no leftover pending entries from the first 2.
+        """
+        recorder: list[str] = []
+        call_count = {"n": 0}
+
+        async def _cb(parent_id: str, terminal_status: str) -> None:
+            call_count["n"] += 1
+            recorder.append(f"{parent_id}:{terminal_status}")
+            raise ValueError("always fail")
+
+        cm = make_cm(callback=_cb)
+        parent = "parent-h7-009"
+        keys = [(f"child-{i}", f"msg-{i}") for i in range(3)]
+
+        for c, m in keys:
+            await cm.register_message_send(parent, c, m)
+
+        # Resolve first two — no callback, just decrements.
+        r1 = await cm.resolve_response(parent, *keys[0])
+        r2 = await cm.resolve_response(parent, *keys[1])
+        assert r1 is False
+        assert r2 is False
+        assert call_count["n"] == 0
+
+        # Resolve the third — callback fires (and fails).
+        r3 = await cm.resolve_response(parent, *keys[2])
+        assert r3 is True
+        assert call_count["n"] == 1
+
+        # _pending must be restored with no leftover entries.
+        assert parent in cm._pending
+        assert cm._pending[parent].pending == {}
+        assert cm._pending[parent].had_error is False  # all responded
+        assert cm.get_pending_count(parent) == 0
+
+    @pytest.mark.asyncio
+    async def test_restoration_uses_lock_no_deadlock(self):
+        """The restoration path acquires ``_get_lock(parent_id)`` after
+        the original lock was popped from ``_locks`` (S3 fix). The lock
+        must be lazily recreated and the whole flow must complete without
+        deadlock or asyncio cancellation. We bound the test with
+        ``asyncio.wait_for`` to detect hangs.
+        """
+        cm = make_cm(callback=_make_failing_callback())
+        parent, child, msg = "parent-h7-010", "child-1", "msg-1"
+
+        await cm.register_message_send(parent, child, msg)
+
+        # The original lock was popped; restoration must lazily recreate.
+        await asyncio.wait_for(
+            cm.resolve_response(parent, child, msg),
+            timeout=2.0,
+        )
+
+        # After completion, _locks[parent_id] should be lazily present
+        # again (from the restoration's _get_lock call).
+        assert parent in cm._locks, (
+            "Restoration should have lazily re-created the per-parent lock "
+            f"via _get_lock. _locks keys: {list(cm._locks)}"
+        )
+        # And _pending[parent_id] should be restored.
+        assert parent in cm._pending

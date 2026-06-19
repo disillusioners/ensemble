@@ -1081,7 +1081,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
 
 class TestNextJobTriggeredAfterCompletion:
     """Tests verifying next job is triggered after job completion."""
-    
+
     @pytest.mark.asyncio
     async def test_next_job_started_after_complete(self, job_queue_service, sample_job_data_service):
         """After completing a job, trigger_next_job starts the next queued job."""
@@ -1089,10 +1089,377 @@ class TestNextJobTriggeredAfterCompletion:
         started1 = await job_queue_service.start_job(job1.job_id)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
         assert job2.status == "pending"
-        
+
         await job_queue_service.complete_job(job1.job_id)
         next_job = await job_queue_service.trigger_next_job("test-project")
-        
+
         assert next_job is not None
         assert next_job.job_id == job2.job_id
         assert next_job.status == "processing"
+
+
+# =============================================================================
+# C11 Fix: try/finally lock release in _try_start_job / start_job
+# =============================================================================
+# These tests verify the lock is released on ALL failure paths (not just
+# ValueError) when ``start_job_atomic`` raises. Before the fix, an
+# OperationalError or CancelledError would leak the lock permanently because
+# the ``except ValueError`` clause did not match those exception types.
+
+
+class TestStartJobLockReleaseOnFailure:
+    """C11: lock MUST be released on any non-success path of start_job_atomic."""
+
+    @pytest.mark.asyncio
+    async def test_start_job_releases_lock_on_value_error(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """ValueError from start_job_atomic → lock released (existing behavior)."""
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+
+        # Force start_job_atomic to raise ValueError (e.g., job already started)
+        from unittest.mock import patch
+
+        with patch.object(
+            job_queue_service._repository,
+            "start_job_atomic",
+            side_effect=ValueError("already started"),
+        ):
+            result = await job_queue_service.start_job(job.job_id)
+
+        assert result is None
+        # Lock must be released even though the exception was caught
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_start_job_releases_lock_on_operational_error(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Non-ValueError exception (OperationalError) → lock MUST still be released.
+
+        This is the C11 regression test. Before the fix, OperationalError would
+        skip the except clause and leak the lock until process restart.
+        """
+        from unittest.mock import patch
+
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+
+        # Force a non-ValueError exception (simulates DB deadlock / driver error)
+        with patch.object(
+            job_queue_service._repository,
+            "start_job_atomic",
+            side_effect=RuntimeError("DB connection lost"),
+        ):
+            with pytest.raises(RuntimeError, match="DB connection lost"):
+                await job_queue_service.start_job(job.job_id)
+
+        # CRITICAL: lock MUST be released even when an unexpected exception fires
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_start_job_releases_lock_on_cancelled_error(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """CancelledError → lock MUST still be released.
+
+        CancelledError is a BaseException subclass in 3.8+ so it would never
+        match ``except ValueError`` and would leak the lock before the fix.
+        """
+        import asyncio
+        from unittest.mock import patch
+
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+
+        with patch.object(
+            job_queue_service._repository,
+            "start_job_atomic",
+            side_effect=asyncio.CancelledError(),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await job_queue_service.start_job(job.job_id)
+
+        # Lock MUST be released
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_start_job_keeps_lock_on_success(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Success path → lock is HELD (preserves original behavior).
+
+        Regression guard: the new try/finally with ``started_ok`` flag must
+        not release the lock when start_job_atomic succeeds.
+        """
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        started = await job_queue_service.start_job(job.job_id)
+
+        assert started is not None
+        assert started.status == JobStatus.PROCESSING.value
+        # Lock MUST still be held — JobProcessor uses it to serialize work
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is True
+
+
+class TestTryStartJobLockReleaseOnFailure:
+    """C11: _try_start_job must release the lock on any non-success path."""
+
+    @pytest.mark.asyncio
+    async def test_try_start_job_releases_lock_on_operational_error(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Non-ValueError from start_job_atomic → lock released in _try_start_job.
+
+        The C11 fix: while the original behavior only released the lock on
+        ValueError, the new hybrid pattern releases it on ANY failure path
+        (via the finally block). Non-ValueError exceptions propagate to the
+        caller, but the lock MUST still be released first.
+        """
+        from unittest.mock import patch
+
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+
+        with patch.object(
+            job_queue_service._repository,
+            "start_job_atomic",
+            side_effect=RuntimeError("DB gone"),
+        ):
+            with pytest.raises(RuntimeError, match="DB gone"):
+                await job_queue_service._try_start_job(job)
+
+        # Lock MUST be released (the whole point of the C11 fix)
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_try_start_job_releases_lock_on_cancelled_error(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """CancelledError → lock released in _try_start_job."""
+        import asyncio
+        from unittest.mock import patch
+
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+
+        with patch.object(
+            job_queue_service._repository,
+            "start_job_atomic",
+            side_effect=asyncio.CancelledError(),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await job_queue_service._try_start_job(job)
+
+        # Lock MUST be released
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_try_start_job_keeps_lock_on_success(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Success path: _try_start_job holds the lock (regression guard)."""
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        result = await job_queue_service._try_start_job(job)
+
+        assert result is True
+        # Lock MUST be held on success
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is True
+
+
+# =============================================================================
+# H9 Fix: status-first, lock-second ordering in _complete_job / _fail_job
+# =============================================================================
+# These tests verify the lock is released AFTER the status transition attempt
+# (in a finally block). Before the fix, a failed status transition would
+# release the lock first, leaving a job in PROCESSING with no lock — a
+# double-claim window for the next worker.
+
+
+class TestCompleteJobStatusFirstOrdering:
+    """H9: _complete_job must transition status BEFORE releasing the lock."""
+
+    @pytest.mark.asyncio
+    async def test_complete_job_releases_lock_on_transition_failure(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """If status transition raises, lock is still released (finally block)."""
+        from unittest.mock import patch
+
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        # Enqueue + start a job so the lock is held
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        started = await job_queue_service.start_job(job.job_id)
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is True
+
+        # Force complete_job (the repo method) to fail
+        with patch.object(
+            job_queue_service._repository,
+            "complete_job",
+            side_effect=RuntimeError("DB write failed"),
+        ):
+            with pytest.raises(RuntimeError, match="DB write failed"):
+                await job_queue_service._complete_job(started, "should-not-stick")
+
+        # Lock MUST be released via finally, even though transition failed
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_fail_job_releases_lock_on_success(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Success path: status → FAILED, then lock released."""
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        started = await job_queue_service.start_job(job.job_id)
+
+        await job_queue_service._fail_job(started, "boom")
+
+        # Job is FAILED
+        result = await job_queue_service.get_job(job.job_id)
+        assert result.status == JobStatus.FAILED.value
+        assert result.error_message == "boom"
+        # Lock is released
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_fail_job_releases_lock_on_success(
+        self, job_queue_service, sample_job_data_service, queue_repository
+    ):
+        """Success path: status → FAILED, then lock released."""
+        queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
+        assert queue is not None
+
+        job = await job_queue_service.enqueue(**sample_job_data_service)
+        started = await job_queue_service.start_job(job.job_id)
+
+        await job_queue_service._fail_job(started, "boom")
+
+        # Job is FAILED
+        result = await job_queue_service.get_job(job.job_id)
+        assert result.status == JobStatus.FAILED.value
+        assert result.error_message == "boom"
+        # Lock is released
+        assert await job_queue_service._lock_manager.is_queue_locked(
+            "test-project", queue.queue_id
+        ) is False
+
+
+# =============================================================================
+# Static structural verification: methods follow try/finally + status-first
+# =============================================================================
+
+
+class TestLockOrderingStructure:
+    """Source-level guards: catch regressions if someone re-introduces try/except."""
+
+    def test_try_start_job_uses_try_finally(self):
+        """_try_start_job queue/project lock branches must use try/finally."""
+        import inspect
+
+        from daemon.services.job_queue_service import JobQueueService
+
+        source = inspect.getsource(JobQueueService._try_start_job)
+        # Must have at least one try/finally block (for the queue/project lock paths)
+        assert "try:" in source
+        assert "finally:" in source
+        # Must use the started_ok flag pattern
+        assert "started_ok" in source
+        # The release_queue_lock / release calls must appear inside a finally
+        # block (search for release + finally proximity).
+        assert "release_queue_lock" in source
+        assert "release(" in source or "self._lock_manager.release" in source
+
+    def test_start_job_uses_try_finally(self):
+        """start_job must use try/finally (not try/except) for lock release."""
+        import inspect
+
+        from daemon.services.job_queue_service import JobQueueService
+
+        source = inspect.getsource(JobQueueService.start_job)
+        assert "try:" in source
+        assert "finally:" in source
+        assert "started_ok" in source
+        # Lock release MUST be inside the finally block
+        assert "release_queue_lock" in source
+
+    def test_complete_job_transitions_before_releases(self):
+        """_complete_job: status transition must come before lock release."""
+        import inspect
+
+        from daemon.services.job_queue_service import JobQueueService
+
+        source = inspect.getsource(JobQueueService._complete_job)
+        # The repo call is passed as a function reference to asyncio.to_thread,
+        # so it appears as ``self._repository.complete_job,`` (with trailing
+        # comma, no paren) in the source.
+        complete_idx = source.find("self._repository.complete_job")
+        release_idx = source.find("_release_job_lock(")
+        assert complete_idx != -1, "complete_job call must be present"
+        assert release_idx != -1, "lock release must be present"
+        assert complete_idx < release_idx, (
+            "H9 fix: status transition must happen BEFORE lock release"
+        )
+        # Lock release MUST be inside a finally block
+        assert "finally:" in source, (
+            "H9 fix: lock release must be in a finally block"
+        )
+
+    def test_fail_job_transitions_before_releases(self):
+        """_fail_job: status transition must come before lock release."""
+        import inspect
+
+        from daemon.services.job_queue_service import JobQueueService
+
+        source = inspect.getsource(JobQueueService._fail_job)
+        fail_idx = source.find("self._repository.fail_job")
+        release_idx = source.find("_release_job_lock(")
+        assert fail_idx != -1, "fail_job call must be present"
+        assert release_idx != -1, "lock release must be present"
+        assert fail_idx < release_idx, (
+            "H9 fix: status transition must happen BEFORE lock release"
+        )
+        # Lock release MUST be inside a finally block
+        assert "finally:" in source, (
+            "H9 fix: lock release must be in a finally block"
+        )

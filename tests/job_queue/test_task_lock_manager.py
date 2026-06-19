@@ -162,32 +162,55 @@ class TestLockManagerConcurrentAccess:
     """Tests for concurrent lock acquisition attempts."""
 
     @pytest.mark.asyncio
-    async def test_concurrent_acquire_same_project(self, lock_manager):
-        """Test concurrent attempts to acquire same project lock."""
-        acquired_count = 0
-        
+    async def test_concurrent_acquire_same_project(
+        self, concurrent_lock_manager
+    ):
+        """Test the NEW slot-claim contract under contention.
+
+        F10: rewrote from the old single-slot ``acquire()`` semantics
+        (3 callers → 1 wins, 2 lose) to the new
+        ``acquire_queue_lock`` contract with ``concurrency_limit=2``.
+
+        Five concurrent callers race for the same (project_id,
+        queue_id). The DB-level ``uq_job_locks_slot`` UNIQUE
+        constraint enforces that at most ``concurrency_limit`` rows
+        can exist per (project_id, queue_id). Exactly 2 acquire must
+        succeed; the remaining 3 must fail. The DB lock count must
+        equal 2 — proves the cap is held under fan-out, not just in
+        the happy path.
+
+        Uses ``concurrent_lock_manager`` (file-backed SQLite with
+        default QueuePool) instead of the regular ``lock_manager``
+        (in-memory + StaticPool) so each task gets its own SQLite
+        connection. StaticPool shares one connection across tasks,
+        which serialises cursor access and masks the race we want
+        to exercise.
+        """
+        manager = concurrent_lock_manager
+
         async def try_acquire(job_id: str):
-            nonlocal acquired_count
-            result = await lock_manager.acquire(
+            return await manager.acquire_queue_lock(
                 project_id="project-1",
+                queue_id="queue-1",
                 job_id=job_id,
-                instance_id=f"instance-{job_id}"
+                instance_id=f"instance-{job_id}",
+                concurrency_limit=2,
             )
-            if result:
-                acquired_count += 1
-            return result
-        
-        # Run multiple concurrent acquisitions
+
         results = await asyncio.gather(
             try_acquire("job-1"),
             try_acquire("job-2"),
             try_acquire("job-3"),
+            try_acquire("job-4"),
+            try_acquire("job-5"),
         )
-        
-        # Only one should succeed
-        assert acquired_count == 1
-        assert results.count(True) == 1
-        assert results.count(False) == 2
+
+        # Exactly 2 successes, 3 failures (concurrency_limit=2).
+        assert results.count(True) == 2
+        assert results.count(False) == 3
+        # DB-level invariant: at most 2 lock rows exist for the
+        # (project_id, queue_id) pair.
+        assert manager._lock_repo.get_lock_count("project-1", "queue-1") == 2
 
     @pytest.mark.asyncio
     async def test_concurrent_acquire_different_projects(self, lock_manager):
@@ -730,9 +753,10 @@ class TestLockManagerPerQueueLocking:
         assert await lock_manager.get_queue_lock_count("project-1", "queue-2") == 1
 
     @pytest.mark.asyncio
-    async def test_acquire_queue_lock_concurrent_safety(self, lock_manager):
+    async def test_acquire_queue_lock_concurrent_safety(self, concurrent_lock_manager):
         """Test that multiple concurrent acquires don't exceed the concurrency limit."""
         acquired_count = 0
+        lock_manager = concurrent_lock_manager
 
         async def try_acquire(job_id: str):
             nonlocal acquired_count
@@ -975,3 +999,274 @@ class TestLockManagerEdgeCases:
             assert acquired_by_waiter is True
         except asyncio.TimeoutError:
             pytest.fail("Waiter was not notified after lock release")
+
+
+# ============================================================================
+# C5 — cross-process-safe acquire_queue_lock
+# ============================================================================
+#
+# These tests verify the new atomic slot-claim loop:
+# 1. Happy path: first acquire claims slot 0 and returns True.
+# 2. Limit enforcement: after `limit` acquires, further acquires return False.
+# 3. After release, the freed slot is reclaimable.
+# 4. Slot column on the lock row reflects the claimed slot (0..limit-1).
+# 5. Different queues don't compete for slots.
+# 6. Same job_id can acquire multiple slots in different invocations
+#    (this is preserved pre-existing non-idempotency, not a regression).
+
+class TestAcquireQueueLockCrossProcessSafety:
+    """Tests that acquire_queue_lock respects concurrency_limit
+    even under contention."""
+
+    @pytest.mark.asyncio
+    async def test_first_acquire_claims_slot_zero(self, lock_manager):
+        """First acquire for an empty queue claims slot 0."""
+        ok = await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j1",
+            instance_id="i1", concurrency_limit=2,
+        )
+        assert ok is True
+        assert lock_manager._lock_repo.get_lock_count("p1", "q1") == 1
+        locks = lock_manager._lock_repo.get_all_locks()
+        assert locks[0].lock_slot == 0
+
+    @pytest.mark.asyncio
+    async def test_second_acquire_claims_slot_one(self, lock_manager):
+        """Second acquire fills slot 1."""
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j1",
+            instance_id="i1", concurrency_limit=2,
+        )
+        ok = await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j2",
+            instance_id="i2", concurrency_limit=2,
+        )
+        assert ok is True
+        assert lock_manager._lock_repo.get_lock_count("p1", "q1") == 2
+        slots = sorted(l.lock_slot for l in lock_manager._lock_repo.get_all_locks())
+        assert slots == [0, 1]
+
+    @pytest.mark.asyncio
+    async def test_third_acquire_at_limit_returns_false(self, lock_manager):
+        """Once limit=2 slots are filled, a third acquire returns False."""
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j1",
+            instance_id="i1", concurrency_limit=2,
+        )
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j2",
+            instance_id="i2", concurrency_limit=2,
+        )
+        ok = await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j3",
+            instance_id="i3", concurrency_limit=2,
+        )
+        assert ok is False
+        # Lock count remains exactly limit, not limit+1 (the bug).
+        assert lock_manager._lock_repo.get_lock_count("p1", "q1") == 2
+
+    @pytest.mark.asyncio
+    async def test_release_reopens_slot_for_new_acquire(self, lock_manager):
+        """After release, the freed slot is immediately reclaimable."""
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j1",
+            instance_id="i1", concurrency_limit=2,
+        )
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j2",
+            instance_id="i2", concurrency_limit=2,
+        )
+        # j3 is rejected.
+        ok_before = await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j3",
+            instance_id="i3", concurrency_limit=2,
+        )
+        assert ok_before is False
+
+        # Release j1's slot 0. j3 can now take slot 0.
+        released = await lock_manager.release_queue_lock("p1", "q1", "j1")
+        assert released is True
+
+        ok_after = await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j3",
+            instance_id="i3", concurrency_limit=2,
+        )
+        assert ok_after is True
+        assert lock_manager._lock_repo.get_lock_count("p1", "q1") == 2
+
+    @pytest.mark.asyncio
+    async def test_different_queues_have_independent_slots(self, lock_manager):
+        """Slot 0 in queue-A does not block slot 0 in queue-B."""
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="qA", job_id="j1",
+            instance_id="i1", concurrency_limit=1,
+        )
+        ok = await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="qB", job_id="j2",
+            instance_id="i2", concurrency_limit=1,
+        )
+        assert ok is True
+        assert lock_manager._lock_repo.get_lock_count("p1", "qA") == 1
+        assert lock_manager._lock_repo.get_lock_count("p1", "qB") == 1
+
+    @pytest.mark.asyncio
+    async def test_concurrent_acquires_never_exceed_limit(self, concurrent_lock_manager):
+        """Several concurrent acquires for a queue with limit=2 yield
+        exactly 2 successes.
+
+        This is the direct regression test for C5: pre-fix, the
+        in-process ``asyncio.Lock`` masked races within one process
+        but two processes could both pass the count check. The new
+        atomic slot-claim loop makes the cap a DB-enforced
+        invariant. Even within one process the bound is now
+        explicit (and visible in this test).
+
+        NOTE: SQLite's StaticPool serialises cursor access across
+        threads, so we keep concurrency low (3 acquires for limit=2)
+        to avoid the InterfaceError that surfaces with very high
+        fan-out against the in-memory test engine. The repo-level
+        ``TestTryAcquireSlot`` tests cover the high-concurrency
+        atomicity property directly.
+        """
+        lock_manager = concurrent_lock_manager
+
+        async def try_acquire(job_id: str):
+            return await lock_manager.acquire_queue_lock(
+                project_id="p1", queue_id="q1", job_id=job_id,
+                instance_id=f"inst-{job_id}", concurrency_limit=2,
+            )
+
+        results = await asyncio.gather(
+            try_acquire("j1"),
+            try_acquire("j2"),
+            try_acquire("j3"),
+        )
+        assert results.count(True) == 2
+        assert results.count(False) == 1
+        assert lock_manager._lock_repo.get_lock_count("p1", "q1") == 2
+
+    @pytest.mark.asyncio
+    async def test_same_job_can_acquire_different_slot_after_release(self, lock_manager):
+        """If a job holds slot 0 and releases it, it can acquire slot 0 again."""
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j1",
+            instance_id="i1", concurrency_limit=2,
+        )
+        await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j2",
+            instance_id="i2", concurrency_limit=2,
+        )
+        # j1 releases its slot 0.
+        await lock_manager.release_queue_lock("p1", "q1", "j1")
+        # j1 can claim slot 0 again.
+        ok = await lock_manager.acquire_queue_lock(
+            project_id="p1", queue_id="q1", job_id="j1",
+            instance_id="i1", concurrency_limit=2,
+        )
+        assert ok is True
+        assert lock_manager._lock_repo.get_lock_count("p1", "q1") == 2
+
+
+# ============================================================================
+# C12 — startup sweep / periodic cleanup at the manager level
+# ============================================================================
+
+
+class TestRecoverStaleJobLocks:
+    """Tests for ``JobLockManager.recover_stale_job_locks``.
+
+    Wraps ``LockRepository.clear_stale_job_locks``; verifies the
+    async wrapper behaves correctly (returns the row count, can be
+    called multiple times idempotently).
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_when_nothing_to_clear(self, lock_manager, repository):
+        """Empty lock table → 0."""
+        # No locks at all.
+        cleared = await lock_manager.recover_stale_job_locks()
+        assert cleared == 0
+
+    @pytest.mark.asyncio
+    async def test_returns_count_of_orphans_cleared(self, lock_manager):
+        """Counts locks whose job is no longer active and returns the count."""
+        # Two orphan locks (no backing job row at all). Distinct
+        # lock_slot values required (uq_job_locks_slot UNIQUE).
+        from daemon.repositories.job_queue.models import JobLock
+        for idx, jid in enumerate(("orphan-1", "orphan-2")):
+            lock = JobLock(
+                project_id="p1", queue_id="q1", job_id=jid,
+                instance_id=None, lock_slot=idx,
+            )
+            lock_manager._lock_repo.acquire(lock)
+
+        cleared = await lock_manager.recover_stale_job_locks()
+        assert cleared == 2
+        assert lock_manager._lock_repo.get_all_locks() == []
+
+    @pytest.mark.asyncio
+    async def test_active_lock_survives_recover(self, lock_manager, repository):
+        """A lock for a processing job is NOT cleared."""
+        job = repository.create(
+            agent_id="test-agent", agent_dir="./agents/test-agent",
+            message="m", source="api", project_id="p1", queue_id="q1",
+            priority=5, job_metadata=None,
+        )
+        from daemon.repositories.job_queue.models import JobLock
+        lock = JobLock(
+            project_id="p1", queue_id="q1", job_id=job.job_id,
+            instance_id=None,
+        )
+        lock_manager._lock_repo.acquire(lock)
+
+        cleared = await lock_manager.recover_stale_job_locks()
+        assert cleared == 0
+        assert len(lock_manager._lock_repo.get_all_locks()) == 1
+
+
+class TestCleanupTerminalJobLocks:
+    """Tests for ``JobLockManager.cleanup_terminal_job_locks`` (periodic variant)."""
+
+    @pytest.mark.asyncio
+    async def test_clears_terminal_status_locks(self, lock_manager, repository):
+        """A lock for a job in 'completed' status is cleared."""
+        job = repository.create(
+            agent_id="test-agent", agent_dir="./agents/test-agent",
+            message="m", source="api", project_id="p1", queue_id="q1",
+            priority=5, job_metadata=None,
+        )
+        from sqlalchemy import text
+        with repository.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE job_queue_items SET status='completed' WHERE job_id=:id"),
+                {"id": job.job_id},
+            )
+        from daemon.repositories.job_queue.models import JobLock
+        lock = JobLock(
+            project_id="p1", queue_id="q1", job_id=job.job_id,
+            instance_id=None,
+        )
+        lock_manager._lock_repo.acquire(lock)
+
+        cleared = await lock_manager.cleanup_terminal_job_locks()
+        assert cleared == 1
+        assert lock_manager._lock_repo.get_all_locks() == []
+
+    @pytest.mark.asyncio
+    async def test_returns_zero_when_no_terminal_locks(self, lock_manager, repository):
+        """Active jobs are not cleared by the periodic cleanup."""
+        job = repository.create(
+            agent_id="test-agent", agent_dir="./agents/test-agent",
+            message="m", source="api", project_id="p1", queue_id="q1",
+            priority=5, job_metadata=None,
+        )
+        from daemon.repositories.job_queue.models import JobLock
+        lock = JobLock(
+            project_id="p1", queue_id="q1", job_id=job.job_id,
+            instance_id=None,
+        )
+        lock_manager._lock_repo.acquire(lock)
+
+        cleared = await lock_manager.cleanup_terminal_job_locks()
+        assert cleared == 0
+        assert len(lock_manager._lock_repo.get_all_locks()) == 1

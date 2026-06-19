@@ -22,8 +22,76 @@ from unittest.mock import AsyncMock, MagicMock
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.repositories.instance.models import InstanceStatus
+from daemon.services.correlation_manager import set_correlation_manager
+from daemon.services.job_feedback_observer import (
+    JobFeedbackObserver,
+    _FinalizeJobResult,
+)
 from daemon.services.job_state_machine import InvalidTransitionError
+
+
+def make_fake_sync(
+    *,
+    skip: bool = False,
+    raise_exc: BaseException | None = None,
+    locks_released: int = 1,
+    instance_was_terminal: bool = False,
+):
+    """Build a fake `_finalize_job_db_sync` replacement for unit tests.
+
+    Mirrors the production sync helper's signature:
+      (job_id, instance_id, terminal_status, result_summary, error_message)
+      → _FinalizeJobResult
+    """
+    def fake_sync(
+        job_id,
+        instance_id,
+        terminal_status,
+        result_summary,
+        error_message,
+    ):
+        if raise_exc is not None:
+            raise raise_exc
+        if skip:
+            return _FinalizeJobResult(
+                skip=True,
+                terminal_status=None,
+                job_id=None,
+                instance_id=None,
+                parent_id=None,
+                agent_id=None,
+                result_summary=None,
+                error_message=None,
+                locks_released=0,
+                instance_was_terminal=False,
+            )
+        return _FinalizeJobResult(
+            skip=False,
+            terminal_status=terminal_status,
+            job_id=job_id,
+            instance_id=instance_id,
+            parent_id=None,
+            agent_id="coder",
+            result_summary=result_summary,
+            error_message=error_message,
+            locks_released=locks_released,
+            instance_was_terminal=instance_was_terminal,
+        )
+    return fake_sync
+
+
+def _install_sync_mock(observer, **kwargs):
+    """Install a fake `_finalize_job_db_sync` on the observer and return it.
+
+    H15 fix: the sync helper consolidates the 5-step terminal cascade into
+    a single WriteGuardSession transaction, which uses
+    ``Session(self._instance_manager.engine)`` — that breaks when
+    ``instance_manager`` is a MagicMock, so tests must mock the sync helper.
+    """
+    sync_mock = MagicMock(side_effect=make_fake_sync(**kwargs))
+    observer._finalize_job_db_sync = sync_mock
+    return sync_mock
 
 
 def create_mock_job(
@@ -52,19 +120,21 @@ class TestDoubleEventDelivery:
         """Same completion event delivered twice - second should be no-op.
 
         This tests the race condition where:
-        1. First event: atomic_transition succeeds, lock released
-        2. Second event: atomic_transition raises InvalidTransitionError,
+        1. First event: _finalize_job_db_sync succeeds
+        2. Second event: _finalize_job_db_sync raises InvalidTransitionError,
            handled gracefully, no lock release attempted
         """
+        # Ensure CM is None (a leftover CM would route via cm_pending branch).
+        set_correlation_manager(None)
+
         # Set up job queue service mock
         mock_job = create_mock_job(job_id="dup-job", status="processing", instance_id="dup-instance")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
         mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
 
-        # Set up job repo mock - first call succeeds
+        # Set up job repo mock - first call succeeds (sync mock by default).
         mock_job_repo = MagicMock(spec=JobRepository)
-        mock_job_repo.atomic_transition.return_value = mock_job  # Success on first call
 
         # Set up lock repo mock
         mock_lock_repo = MagicMock(spec=LockRepository)
@@ -72,6 +142,8 @@ class TestDoubleEventDelivery:
         # Set up instance manager mock
         mock_instance_manager = MagicMock()
         mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+        # Bypass the graceful-degradation waiting_for check.
+        mock_instance_manager._instance_repository.get.return_value.waiting_for = 0
 
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
@@ -81,6 +153,7 @@ class TestDoubleEventDelivery:
             project_repo=MagicMock(),
             instance_manager=mock_instance_manager,
         )
+        sync_mock = _install_sync_mock(observer)
 
         event = {
             "event_type": "instance_lifecycle",
@@ -95,37 +168,38 @@ class TestDoubleEventDelivery:
         await observer._process_event(event)
 
         # Verify first call succeeded
-        assert mock_job_repo.atomic_transition.call_count == 1
-        assert mock_lock_repo.release_by_instance.call_count == 1
+        assert sync_mock.call_count == 1
 
-        # Now simulate the job already being COMPLETED
-        # Second event arrives after job is already completed
-        mock_job_repo.atomic_transition.side_effect = InvalidTransitionError(
+        # Now simulate the second delivery raising InvalidTransitionError
+        # (the job is already terminal in the real DB).
+        sync_mock.side_effect = make_fake_sync(raise_exc=InvalidTransitionError(
             job_id="dup-job",
             from_status="processing",
             to_status="completed",
-        )
+        ))
 
         # Process second event - should be no-op (no exception)
         await observer._process_event(event)
 
         # Verify second call was attempted but handled gracefully
-        assert mock_job_repo.atomic_transition.call_count == 2
-        # Lock was NOT released again (already released)
-        assert mock_lock_repo.release_by_instance.call_count == 1
+        assert sync_mock.call_count == 2
 
     @pytest.mark.asyncio
     async def test_observer_handles_duplicate_error_event(self):
         """Same error event delivered twice - second should be no-op."""
+        set_correlation_manager(None)
+
         mock_job = create_mock_job(job_id="dup-err-job", status="processing", instance_id="dup-err-instance")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
         mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
 
         mock_job_repo = MagicMock(spec=JobRepository)
-        mock_job_repo.atomic_transition.return_value = mock_job
-
         mock_lock_repo = MagicMock(spec=LockRepository)
+
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+        mock_instance_manager._instance_repository.get.return_value.waiting_for = 0
 
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
@@ -133,8 +207,9 @@ class TestDoubleEventDelivery:
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
             project_repo=MagicMock(),
-            instance_manager=MagicMock(),
+            instance_manager=mock_instance_manager,
         )
+        sync_mock = _install_sync_mock(observer)
 
         event = {
             "event_type": "instance_lifecycle",
@@ -147,22 +222,24 @@ class TestDoubleEventDelivery:
 
         # First event succeeds
         await observer._process_event(event)
-        assert mock_job_repo.atomic_transition.call_count == 1
+        assert sync_mock.call_count == 1
 
-        # Second event fails with InvalidTransitionError (job already failed)
-        mock_job_repo.atomic_transition.side_effect = InvalidTransitionError(
+        # Second event raises InvalidTransitionError (job already failed)
+        sync_mock.side_effect = make_fake_sync(raise_exc=InvalidTransitionError(
             job_id="dup-err-job",
             from_status="processing",
             to_status="failed",
-        )
+        ))
 
         # Should not raise
         await observer._process_event(event)
-        assert mock_job_repo.atomic_transition.call_count == 2
+        assert sync_mock.call_count == 2
 
     @pytest.mark.asyncio
     async def test_observer_handles_duplicate_event_with_different_job_state(self):
         """Duplicate event when job has already moved to a terminal state."""
+        set_correlation_manager(None)
+
         mock_job = create_mock_job(job_id="terminal-job", status="processing", instance_id="terminal-instance")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
@@ -172,6 +249,7 @@ class TestDoubleEventDelivery:
 
         mock_instance_manager = MagicMock()
         mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+        mock_instance_manager._instance_repository.get.return_value.waiting_for = 0
 
         observer = JobFeedbackObserver(
             event_bus=MagicMock(),
@@ -182,6 +260,13 @@ class TestDoubleEventDelivery:
             instance_manager=mock_instance_manager,
         )
 
+        # Simulate job already being completed (race with terminate_instance)
+        sync_mock = _install_sync_mock(observer, raise_exc=InvalidTransitionError(
+            job_id="terminal-job",
+            from_status="completed",  # Job is already COMPLETED
+            to_status="completed",
+        ))
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -191,19 +276,12 @@ class TestDoubleEventDelivery:
             }
         }
 
-        # Simulate job already being completed (race with terminate_instance)
-        mock_job_repo.atomic_transition.side_effect = InvalidTransitionError(
-            job_id="terminal-job",
-            from_status="completed",  # Job is already COMPLETED
-            to_status="completed",
-        )
-
         # Should not raise - handled gracefully
         await observer._process_event(event)
 
-        # atomic_transition was called
-        mock_job_repo.atomic_transition.assert_called_once()
-        # Lock release was NOT attempted (transition failed)
+        # _finalize_job_db_sync was called (and raised)
+        sync_mock.assert_called_once()
+        # Lock release is inside the sync helper, which raised.
         mock_lock_repo.release_by_instance.assert_not_called()
 
 
@@ -468,9 +546,6 @@ class TestCancellationIntegration:
         result = await service.cancel_job("fail-race-job")
 
         assert result is True
-        # Verify transition from FAILED to CANCELLED
-        mock_repo.atomic_transition.assert_called_once_with(
-            job_id="fail-race-job",
-            from_status="failed",
-            to_status="cancelled",
-        )
+        # Verify atomic cancel_job was called (FAILED is in cancellable set;
+        # single UPDATE-WHERE-IN closes the TOCTOU window).
+        mock_repo.cancel_job.assert_called_once_with("fail-race-job")

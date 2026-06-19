@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.types import JSON
 from sqlmodel import SQLModel, Field
 from pydantic import BaseModel, field_validator
@@ -108,7 +108,14 @@ class HistoryEntryType(str, enum.Enum):
 
 
 class ProjectTagLink(SQLModel, table=True):
-    """Junction table for project-tag many-to-many relationship."""
+    """Junction table for project-tag many-to-many relationship.
+
+    Uniqueness on (project_id, tag) is enforced by the composite primary key
+    below; this is the column set that ``add_tag`` uses for
+    ``INSERT ... ON CONFLICT DO NOTHING``. SQLModel.metadata.create_all()
+    installs the constraint on PostgreSQL; existing SQLite DBs rely on the
+    composite PK being part of the table definition since v0.5.x.
+    """
     __tablename__ = "project_tags"
 
     project_id: str = Field(foreign_key="projects.project_id", primary_key=True)
@@ -116,7 +123,12 @@ class ProjectTagLink(SQLModel, table=True):
 
 
 class ProjectShortnameLink(SQLModel, table=True):
-    """Junction table for project-shortname many-to-many relationship."""
+    """Junction table for project-shortname many-to-many relationship.
+
+    Same uniqueness note as :class:`ProjectTagLink`: the composite primary
+    key on (project_id, shortname) is the column set used by
+    ``add_shortname`` for ``INSERT ... ON CONFLICT DO NOTHING``.
+    """
     __tablename__ = "project_shortnames"
 
     project_id: str = Field(foreign_key="projects.project_id", primary_key=True)
@@ -177,27 +189,34 @@ class Project(SQLModel, table=True):
     __tablename__ = "projects"
 
     project_id: str = Field(default_factory=lambda: str(uuid.uuid4()), primary_key=True)
-    name: str = Field(index=True, unique=True)
+    # F15: removed `unique=True` here. The UniqueConstraint in
+    # ``__table_args__`` below is the authoritative source for the
+    # UNIQUE(name) constraint. Keeping both would create two UNIQUE
+    # constraints on the column (one declared inline on Field, one
+    # declared via UniqueConstraint), which is wasteful and
+    # confusing — and on some dialects generates two separate
+    # index names, complicating IntegrityError inspection.
+    name: str = Field(index=True)
     project_type: str = Field(default="general")
     status: str = Field(default=ProjectStatus.ACTIVE.value)
-    
+
     main_directory: str | None = None
-    
+
     related_directories: list[str] = Field(
         default_factory=list,
         sa_column=Column(JSON)
     )
-    
+
     description: str | None = None
-    
+
     job_queue_paused: bool = Field(default=False, description="Whether job queue is paused for this project")
-    
+
     # Use 'project_metadata' to avoid conflict with SQLAlchemy's reserved 'metadata'
     project_metadata: dict[str, Any] = Field(
         default_factory=dict,
         sa_column=Column("metadata", JSON)
     )
-    
+
     relationships: dict[str, list[str]] = Field(
         default_factory=dict,
         sa_column=Column(JSON)
@@ -205,9 +224,25 @@ class Project(SQLModel, table=True):
 
     creator_instance_id: str | None = None
     creator_agent_id: str | None = None
-    
+
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+    __table_args__ = (
+        # Explicit UniqueConstraint on ``name`` for two reasons:
+        # 1. SQLModel.metadata.create_all() will emit the constraint for
+        #    PostgreSQL (the default v0.5.2+ dialect), closing the H14
+        #    check-then-insert race that previously lost concurrent
+        #    ``Project.create`` calls with the same name.
+        # 2. Existing SQLite DBs need a backfill via migration
+        #    20260619_000006_add_project_constraints.sql, since
+        #    SQLModel does not retroactively add the constraint.
+        UniqueConstraint("name", name="uq_projects_name"),
+        CheckConstraint(
+            "status IN ('active', 'paused', 'completed', 'archived')",
+            name="ck_projects_status_valid",
+        ),
+    )
     
     # Runtime-only attributes (not stored in DB)
     _tags: list[str] = []

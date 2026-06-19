@@ -82,6 +82,60 @@ def lock_manager(lock_repo):
         lock_repo.release(lock.lock_id)
 
 
+# ── File-backed SQLite fixtures for concurrent tests (F11) ─────────────────
+#
+# These fixtures back the engine with a file on disk rather than the
+# ``:memory:`` URL + StaticPool used by the regular fixtures above. They
+# are REQUIRED for tests that exercise the new atomic slot-claim contract
+# in ``LockRepository.try_acquire_slot`` (C5) under multi-thread fan-out:
+#
+#   * StaticPool shares a single connection across threads, so SQLite's
+#     per-connection locking serialises the cursor access and we never
+#     observe a real race. The race we want to test is the DB-level UNIQUE
+#     conflict on ``uq_job_locks_slot`` — which only fires when two
+#     connections race for the same slot.
+#   * File-backed SQLite (default QueuePool) hands each thread its own
+#     connection, exposing the real cross-connection UNIQUE conflict
+#     path that the production code uses.
+#
+# Both fixtures are file-scoped per-test (tmp_path is function-scoped by
+# pytest default), so concurrent tests do not pollute each other.
+
+@pytest.fixture
+def concurrent_lock_repo(tmp_path):
+    """LockRepository backed by a file on disk (default QueuePool).
+
+    Use this in tests that exercise concurrent ``try_acquire_slot``
+    against the same (project_id, queue_id, lock_slot) triple. The
+    file-backed engine hands each thread its own SQLite connection,
+    which is necessary to observe the cross-connection UNIQUE
+    conflict that makes the slot-claim invariant visible.
+    """
+    db_path = tmp_path / "job_locks_concurrent.db"
+    eng = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+    )
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield LockRepository(eng)
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def concurrent_lock_manager(concurrent_lock_repo):
+    """JobLockManager backed by a file-backed ``LockRepository`` (F11).
+
+    Pair this with ``concurrent_lock_repo`` (or use it directly) in
+    concurrent tests. Switches from ``:memory:`` + StaticPool to a
+    file-backed SQLite with the default QueuePool, so multi-thread
+    acquires each get their own connection and the DB-level UNIQUE
+    conflict path is actually exercised.
+    """
+    return JobLockManager(lock_repo=concurrent_lock_repo)
+
+
 @pytest.fixture
 def queue_repository(engine):
     """Create JobQueueRepository instance with fresh database."""

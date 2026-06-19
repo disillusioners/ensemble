@@ -16,6 +16,8 @@ All tests run against an in-memory SQLite database (via the
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlmodel import Session, SQLModel
 
 from daemon.repositories.infra import (
     InfraAsset,
@@ -1309,6 +1311,253 @@ class TestBootstrapDefaultTypes:
         result = infra_repository.bootstrap_default_types()
         assert result.new_count == 9
         assert result.updated_count == 0
+
+
+# =============================================================================
+# Group 4b: L3 Fix — Bootstrap upsert race
+# =============================================================================
+
+
+@pytest.fixture
+def file_engine(tmp_path):
+    """File-backed SQLite engine safe for cross-thread concurrent use.
+
+    The shared ``infra_repository`` fixture in conftest.py uses
+    ``StaticPool`` with ``:memory:`` SQLite — ``StaticPool``
+    shares ONE database connection across all threads. When two
+    threads concurrently call ``register_type`` on that single
+    connection, SQLite's single-connection access model is not
+    safe for concurrent statement execution, which surfaces as
+    intermittent ``ProgrammingError`` / ``InterfaceError`` (e.g.
+    "bad parameter or other API misuse" or "Cannot operate on a
+    closed database") when the suite runs alongside other tests
+    that share or recycle connection state.
+
+    The L3 race tests in :class:`TestBootstrapUpsertRace` therefore
+    bypass the shared fixture and use a per-test file-backed
+    engine with ``check_same_thread=False`` and the default
+    ``QueuePool``. Each thread checks out its OWN connection;
+    SQLite serializes writes via file-level locking, which is
+    exactly what makes the unique-index + ``ON CONFLICT DO
+    UPDATE`` upsert path atomic. Mirrors the pattern in
+    ``tests/unit/test_instance_mapping_upsert.py``.
+    """
+    from daemon.repositories.infra.models import (
+        InfraAsset,
+        InfraAssetHistory,
+        InfraAssetType,
+    )
+
+    db_path = tmp_path / "bootstrap_race_test.db"
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        connect_args={"check_same_thread": False},
+        # default QueuePool — each thread gets its own connection.
+    )
+
+    # Mirror the conftest's FK pragma so the
+    # InfraAsset / InfraAssetHistory FK to projects.project_id
+    # behaves correctly if any concurrent path ever touches
+    # those tables (the L3 race only writes to infra_asset_types,
+    # which has no FKs, so this is belt-and-suspenders).
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    # Ensure all three infra tables are registered on
+    # SQLModel.metadata. The Project table is already
+    # registered from the daemon import chain (see conftest
+    # engine fixture for the same comment).
+    _ = (InfraAsset, InfraAssetHistory, InfraAssetType)
+    SQLModel.metadata.create_all(engine)
+
+    try:
+        yield engine
+    finally:
+        engine.dispose()
+
+
+class TestBootstrapUpsertRace:
+    """Regression tests for the L3 bootstrap upsert race.
+
+    The pre-fix ``register_type`` implementation used a
+    check-then-insert pattern: ``session.get(InfraAssetType, name)``
+    followed by ``session.add(...)`` when the lookup returned
+    ``None``. Concurrent bootstrap calls (e.g. two daemons
+    starting in parallel, or two threads racing on the same
+    engine) could both pass the ``session.get`` check before
+    either committed, and the second ``session.add()`` then
+    raised :class:`sqlalchemy.exc.IntegrityError` on the
+    ``name`` primary key.
+
+    The fix replaces that pattern with a single
+    ``INSERT ... ON CONFLICT(name) DO UPDATE`` round trip via
+    the dialect-aware :meth:`_get_dialect_insert` helper. The
+    tests below verify that:
+
+    * concurrent ``register_type`` calls for the same ``name``
+      converge on a single row (no duplicates, no exceptions);
+    * concurrent ``bootstrap_default_types`` calls (which loop
+      over 9 names internally) all succeed without raising
+      ``IntegrityError``;
+    * the final row count matches the seed size (9).
+
+    NOTE: these tests use the :func:`file_engine` fixture rather
+    than the shared ``infra_repository`` fixture because that
+    fixture is bound to a ``StaticPool`` + ``:memory:`` engine
+    whose single shared connection is unsafe for concurrent
+    threaded access. Each worker constructs its own
+    :class:`SQLModelInfraRepository` against the file-backed
+    engine so each thread checks out its own connection from
+    the default ``QueuePool``.
+    """
+
+    def test_concurrent_register_type_same_name_no_duplicates(
+        self, file_engine
+    ):
+        """Two threads calling ``register_type`` with the same
+        name must not raise and must not produce duplicates.
+
+        This is the minimal repro of the L3 race: both threads
+        call ``session.get()`` which returns ``None``; both
+        then attempt ``session.add()`` and the second commit
+        would hit the ``name`` primary key constraint
+        pre-fix. With the upsert, both calls hit
+        ``on_conflict_do_update`` and converge on a single row.
+        """
+        import threading
+        import time
+
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+
+        def worker() -> None:
+            try:
+                # Synchronize both threads at the barrier so
+                # they hit ``register_type`` as close to
+                # simultaneously as possible. The check-then-
+                # insert window is small but real — without
+                # the upsert, this reliably raises
+                # ``IntegrityError`` on the slower thread.
+                # Each thread owns its own repository so
+                # SQLModelInfraRepository's per-method Session
+                # checks out a separate connection from the
+                # QueuePool — no two threads ever share a
+                # connection.
+                thread_repo = SQLModelInfraRepository(file_engine)
+                barrier.wait(timeout=5.0)
+                # Small sleep variance widens the race window
+                # for the pre-fix bug to manifest.
+                time.sleep(0.001)
+                thread_repo.register_type(
+                    name="racy_type",
+                    description="from a thread",
+                    schema_json={"type": "object"},
+                )
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+            assert not t.is_alive(), "thread hung — likely deadlock"
+
+        assert errors == [], (
+            f"Concurrent register_type raised: {errors!r} — "
+            f"the check-then-insert race is not fixed."
+        )
+
+        # Exactly one row per name; the upsert's
+        # ``on_conflict_do_update`` is the only thing that
+        # could have produced this state. Read via a fresh
+        # repository on the main thread.
+        main_repo = SQLModelInfraRepository(file_engine)
+        types = main_repo.list_types()
+        racy = [t for t in types if t.name == "racy_type"]
+        assert len(racy) == 1, (
+            f"Expected exactly 1 'racy_type' row, got {len(racy)} — "
+            f"the upsert is not enforcing the primary key."
+        )
+        assert racy[0].description == "from a thread"
+        assert racy[0].schema_doc == {"type": "object"}
+
+    def test_concurrent_bootstrap_default_types_no_integrity_error(
+        self, file_engine
+    ):
+        """Two threads calling ``bootstrap_default_types``
+        simultaneously must both succeed without raising
+        ``IntegrityError`` and must leave the registry with
+        exactly 9 rows (no duplicates, no missing types).
+        """
+        import threading
+
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
+        results: list = []
+
+        def worker() -> None:
+            try:
+                # Sync both threads so they enter
+                # ``bootstrap_default_types`` together. The
+                # inner loop calls ``register_type`` 9 times
+                # — that's 9 chances to race on the
+                # check-then-insert window. Each thread
+                # owns its own repository so per-method
+                # Sessions check out separate connections
+                # from the QueuePool.
+                thread_repo = SQLModelInfraRepository(file_engine)
+                barrier.wait(timeout=5.0)
+                results.append(thread_repo.bootstrap_default_types())
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=15.0)
+            assert not t.is_alive(), "thread hung — likely deadlock"
+
+        assert errors == [], (
+            f"Concurrent bootstrap_default_types raised: {errors!r} — "
+            f"the check-then-insert race in register_type is not fixed."
+        )
+
+        # Both calls returned a BootstrapResult.
+        assert len(results) == 2
+        for r in results:
+            assert len(r.registered) == 9
+
+        # Registry state: exactly 9 rows, one per built-in
+        # type. The pre-fix code would have produced 18 rows
+        # on a successful race or raised IntegrityError
+        # otherwise. Read via a fresh repository on the
+        # main thread.
+        main_repo = SQLModelInfraRepository(file_engine)
+        types = main_repo.list_types()
+        names = [t.name for t in types]
+        expected = {
+            "datacenter",
+            "server",
+            "rack",
+            "k8s_cluster",
+            "k8s_node",
+            "network",
+            "load_balancer",
+            "database",
+            "storage",
+        }
+        assert set(names) == expected, (
+            f"Registry has wrong set of types: {set(names)!r} != {expected!r}"
+        )
+        # No duplicates: each name must appear exactly once.
+        assert len(names) == len(set(names)), (
+            f"Duplicate rows in registry: {names!r}"
+        )
 
 
 # =============================================================================

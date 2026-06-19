@@ -29,7 +29,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 from .types import JSONBType
@@ -91,7 +91,17 @@ class InfraAssetType(SQLModel, table=True):
             on every import.
         created_at: ISO-8601 timestamp, immutable.
         updated_at: ISO-8601 timestamp; bumped on every
-            ``register_type`` upsert.
+            ``update_asset`` call (along with ``version``).
+        created_by / updated_by: Audit columns — instance_id of
+            the agent that wrote the row.
+        version: Optimistic-locking counter. Starts at ``1`` on
+            insert and is incremented by every ``update_asset``.
+            Callers that supply ``expected_version`` to
+            :meth:`SQLModelInfraRepository.update_asset` get a
+            check-and-increment; concurrent edits to the same
+            asset then raise ``ValueError`` instead of silently
+            clobbering each other. NOT NULL DEFAULT 1 — backfilled
+            by the M5 migration on existing SQLite rows.
     """
 
     __tablename__ = "infra_asset_types"
@@ -118,6 +128,21 @@ class InfraAssetType(SQLModel, table=True):
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+# Module-level Column kept as a reference for use in
+# InfraAsset.__mapper_args__. SQLAlchemy's mapper_coercions only
+# accepts a Column expression (or a string key) for version_id_col —
+# it rejects the Pydantic-FieldInfo-wrapped attribute that SQLModel
+# exposes as ``InfraAsset.version``. We can't reference
+# ``__table__.c.version`` at class definition time either, so we
+# define the Column once and reuse it as the ``sa_column=`` value
+# (which deduplicates it into the Table) and as the ``version_id_col``
+# target. ``default=1`` preserves the M5 design choice: every fresh
+# INSERT starts at version 1 so the first concurrent-modification
+# check sees a stable initial value regardless of which dialect
+# wrote the row.
+_infra_asset_version_col = Column("version", Integer, nullable=False, default=1)
 
 
 class InfraAsset(SQLModel, table=True):
@@ -230,6 +255,29 @@ class InfraAsset(SQLModel, table=True):
     )
     created_by: str | None = Field(default=None, max_length=64)
     updated_by: str | None = Field(default=None, max_length=64)
+    # M5: optimistic-locking counter. Bumped by every update_asset
+    # call — atomically (raw-SQL check-and-increment) when the
+    # caller supplies ``expected_version``, and via the ORM's
+    # version_id_col auto-increment when it doesn't. Starts at 1
+    # on insert so the first concurrent-modification check sees a
+    # stable initial value regardless of which dialect wrote the
+    # row. Defined as a Python default + sa_column default so that
+    # SQLModel.metadata.create_all() emits ``DEFAULT 1 NOT NULL``
+    # on PostgreSQL fresh-DB creation AND existing SQLite rows
+    # get backfilled to 1 by the 20260619_000005 migration.
+    version: int = Field(default=1, sa_column=_infra_asset_version_col)
+
+    # SQLAlchemy ORM configuration: declare the version column as
+    # the mapper's ``version_id_col`` so the unit-of-work machinery
+    # auto-emits ``AND version = :expected_version`` on UPDATE/DELETE
+    # and auto-increments the version on every flush. This brings
+    # InfraAsset to parity with Task / JobItem, which already
+    # configure ``version_id_col`` — the manual check-and-increment
+    # in ``update_asset``'s atomic raw-SQL path remains
+    # defense-in-depth, and the legacy ORM-flush path now inherits
+    # the auto-increment for free (the repository no longer bumps
+    # ``asset.version`` manually).
+    __mapper_args__ = {"version_id_col": _infra_asset_version_col}
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe view of the row."""

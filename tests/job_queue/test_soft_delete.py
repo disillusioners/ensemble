@@ -76,7 +76,8 @@ class TestRepositorySoftDelete:
         job_id = job.job_id
         
         # Transition to COMPLETED
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         
         # Soft delete
         result = repository.soft_delete(job_id)
@@ -92,7 +93,8 @@ class TestRepositorySoftDelete:
         job_id = job.job_id
         
         # Transition to FAILED
-        repository.update(job_id, status=JobStatus.FAILED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.fail_job(job_id, "test error")
         
         # Soft delete
         result = repository.soft_delete(job_id)
@@ -106,7 +108,7 @@ class TestRepositorySoftDelete:
         job_id = job.job_id
         
         # Transition to CANCELLED
-        repository.update(job_id, status=JobStatus.CANCELLED.value)
+        repository.cancel_job(job_id)
         
         # Soft delete
         result = repository.soft_delete(job_id)
@@ -120,7 +122,13 @@ class TestRepositorySoftDelete:
         job_id = job.job_id
         
         # Transition to DEAD_LETTER
-        repository.update(job_id, status=JobStatus.DEAD_LETTER.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.fail_job(job_id, "test error")
+        repository.atomic_transition(
+            job_id,
+            from_status=JobStatus.FAILED.value,
+            to_status=JobStatus.DEAD_LETTER.value,
+        )
         
         # Soft delete
         result = repository.soft_delete(job_id)
@@ -134,7 +142,8 @@ class TestRepositorySoftDelete:
         job_id = job.job_id
         
         # Transition to COMPLETED
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         
         # First soft delete
         result1 = repository.soft_delete(job_id)
@@ -208,7 +217,8 @@ class TestRepositoryListIncludeDeleted:
         job_id = job.job_id
         
         # Soft delete
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # List without include_deleted
@@ -223,7 +233,8 @@ class TestRepositoryListIncludeDeleted:
         job_id = job.job_id
         
         # Soft delete
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # List with include_deleted=True
@@ -241,7 +252,8 @@ class TestRepositoryListIncludeDeleted:
         
         # Create and delete another job
         job2 = repository.create(**sample_job_data)
-        repository.update(job2.job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job2.job_id, "test-instance")
+        repository.complete_job(job2.job_id)
         repository.soft_delete(job2.job_id)
         
         # List without deleted
@@ -324,7 +336,7 @@ class TestRepositorySchedulerSafety:
         job_id = job.job_id
         
         # Transition to PROCESSING
-        repository.update(job_id, status=JobStatus.PROCESSING.value, instance_id="test-instance")
+        repository.start_job_atomic(job_id, "test-instance")
         
         # Soft delete
         repository.soft_delete(job_id)
@@ -342,11 +354,9 @@ class TestRepositorySchedulerSafety:
         
         # Transition to FAILED with next_retry_at in the past
         past_time = datetime.utcnow().isoformat()
-        repository.update(
-            job_id,
-            status=JobStatus.FAILED.value,
-            next_retry_at=past_time,
-        )
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.fail_job(job_id, "test error")
+        repository.update(job_id, next_retry_at=past_time)
         
         # Soft delete
         repository.soft_delete(job_id)
@@ -364,7 +374,7 @@ class TestRepositorySchedulerSafety:
         instance_id = "test-instance-123"
         
         # Update with instance
-        repository.update(job_id, status=JobStatus.PROCESSING.value, instance_id=instance_id)
+        repository.start_job_atomic(job_id, instance_id)
         
         # Soft delete
         repository.soft_delete(job_id)
@@ -380,7 +390,8 @@ class TestRepositorySchedulerSafety:
         job_id = job.job_id
         
         # Soft delete
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # Find by idempotency key
@@ -402,7 +413,8 @@ class TestRepositoryGetBehavior:
         job_id = job.job_id
         
         # Soft delete
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # Get should still find the job
@@ -428,7 +440,8 @@ class TestDeleteJobEndpoint:
         job_id = response.json()["job_id"]
         
         # Complete the job directly via repository
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         
         # Delete via API
         response = api_client.delete(f"/jobs/{job_id}")
@@ -460,7 +473,7 @@ class TestDeleteJobEndpoint:
         job_id = response.json()["job_id"]
         
         # Set job to PROCESSING
-        repository.update(job_id, status=JobStatus.PROCESSING.value, instance_id="test-instance")
+        repository.start_job_atomic(job_id, "test-instance")
         
         # Delete via API
         response = api_client.delete(f"/jobs/{job_id}")
@@ -478,7 +491,8 @@ class TestDeleteJobEndpoint:
         job_id = response.json()["job_id"]
         
         # Complete and soft delete via repository
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # Try to delete again
@@ -532,7 +546,8 @@ class TestRestoreJobEndpoint:
         job_id = response.json()["job_id"]
         
         # Complete and soft-delete via repository
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # Verify via repository that job is deleted
@@ -574,7 +589,8 @@ class TestListJobsEndpoint:
         job_id = job.job_id
         
         # Complete and soft delete
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # List without deleted - should exclude
@@ -602,7 +618,8 @@ class TestListJobsEndpoint:
         job_id = job.job_id
         
         # Complete and soft delete
-        repository.update(job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job_id, "test-instance")
+        repository.complete_job(job_id)
         repository.soft_delete(job_id)
         
         # List with include_deleted=True - should include deleted jobs
@@ -741,7 +758,8 @@ class TestSchedulerSafetyIntegration:
         )
         
         # Delete only job2
-        repository.update(job2.job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job2.job_id, "test-instance")
+        repository.complete_job(job2.job_id)
         repository.soft_delete(job2.job_id)
         
         # Verify job1 is still returned

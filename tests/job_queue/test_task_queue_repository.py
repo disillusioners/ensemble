@@ -270,14 +270,63 @@ class TestRepositoryUpdate:
         result = repository.update("nonexistent-id", priority=10)
         assert result is None
 
-    def test_update_invalid_status(self, repository, sample_job_data):
-        """Test updating with invalid status raises ValueError."""
+    def test_update_with_status_kwarg_raises(self, repository, sample_job_data):
+        """Test that update() refuses status kwarg (use atomic_transition).
+
+        L1 guard: callers must NOT bypass atomic_transition by writing
+        ``status=`` directly via the generic ``update()``. Status changes
+        are routed through ``atomic_transition`` so the SQL-level
+        ``WHERE status = :from_status`` guard prevents concurrent
+        clobbering of terminal statuses. The generic update() now
+        raises ``ValueError`` for any ``status=`` kwarg regardless of
+        whether the value is a valid JobStatus enum member.
+        """
         job = repository.create(**sample_job_data)
-        
+
         with pytest.raises(ValueError) as exc_info:
-            repository.update(job.job_id, status="invalid-status")
-        
-        assert "Invalid status" in str(exc_info.value)
+            # Even a valid status value is rejected — the guard fires
+            # before any value validation.
+            repository.update(job.job_id, status=JobStatus.COMPLETED.value)
+
+        assert "atomic_transition" in str(exc_info.value)
+
+    def test_update_with_invalid_status_kwarg_raises(self, repository, sample_job_data):
+        """L1 guard fires BEFORE value validation — even an invalid
+        status string is rejected with the same ``Use atomic_transition``
+        message. The previous "Invalid status" branch was reachable
+        only via the unprotected path; now the guard is the only path.
+        """
+        job = repository.create(**sample_job_data)
+
+        with pytest.raises(ValueError) as exc_info:
+            repository.update(job.job_id, status="bogus-status-value")
+
+        # The new guard message references atomic_transition, not the
+        # old "Invalid status" text — the value-validation branch is
+        # no longer reachable for status= kwargs.
+        assert "atomic_transition" in str(exc_info.value)
+
+    def test_update_with_non_status_kwargs_still_works(self, repository, sample_job_data):
+        """L1 guard is targeted: only ``status=`` is rejected. Other
+        field updates (``priority``, ``message``, ``job_metadata``,
+        etc.) continue to work via ``update()`` — those are not part
+        of the state-machine contract and don't need the
+        ``WHERE status = :from_status`` guard.
+        """
+        job = repository.create(**sample_job_data)
+
+        # Update non-status fields — must succeed and persist.
+        updated = repository.update(
+            job.job_id,
+            priority=8,
+            message="new-message",
+        )
+
+        assert updated is not None
+        assert updated.priority == 8
+        assert updated.message == "new-message"
+        # Status must NOT have been touched by the update.
+        assert updated.status == JobStatus.PENDING.value
 
 
 class TestRepositoryJobLifecycle:

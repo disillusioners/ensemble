@@ -25,7 +25,7 @@ from datetime import datetime
 from daemon.repositories.job_queue import JobRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus, JobQueue, QueueType
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.services.job_queue_service import JobQueueService, DemandState
+from daemon.services.job_queue_service import JobQueueService, DemandState, TERMINAL_STATUSES
 from daemon.services.message_job_handler import MessageJobHandler
 from daemon.manager import MessageResult
 
@@ -837,7 +837,11 @@ class TestMessageJobInstanceReactivation:
         """Create mock instance manager with instance_repository and live_hub."""
         manager = MagicMock()
         manager._instance_repository = MagicMock()
-        manager._instance_repository.update_status = MagicMock(return_value=True)
+        # transition_status_if returns Instance | None — return a truthy mock so the
+        # "reactivation succeeded" branch fires in production code.
+        manager._instance_repository.transition_status_if = MagicMock(
+            return_value=MagicMock()
+        )
         manager._live_hub = MagicMock()
         manager._live_hub.stream_status_change = AsyncMock()
         return manager
@@ -941,9 +945,9 @@ class TestMessageJobInstanceReactivation:
 
         result = await jqs.start_job(job_id)
 
-        # 1. Instance status should be updated to RUNNING
-        mock_instance_manager._instance_repository.update_status.assert_called_once_with(
-            instance_id, InstanceStatus.RUNNING.value
+        # 1. Instance status should be transitioned to RUNNING via atomic guard
+        mock_instance_manager._instance_repository.transition_status_if.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value, tuple(TERMINAL_STATUSES)
         )
 
         # 2. stream_status_change should be called with RUNNING
@@ -989,9 +993,9 @@ class TestMessageJobInstanceReactivation:
 
         result = await jqs.start_job(job_id)
 
-        # 1. Instance status should be updated to RUNNING
-        mock_instance_manager._instance_repository.update_status.assert_called_once_with(
-            instance_id, InstanceStatus.RUNNING.value
+        # 1. Instance status should be transitioned to RUNNING via atomic guard
+        mock_instance_manager._instance_repository.transition_status_if.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value, tuple(TERMINAL_STATUSES)
         )
 
         # 2. stream_status_change should be called with RUNNING
@@ -1037,9 +1041,9 @@ class TestMessageJobInstanceReactivation:
 
         result = await jqs.start_job(job_id)
 
-        # 1. Instance status should be updated to RUNNING
-        mock_instance_manager._instance_repository.update_status.assert_called_once_with(
-            instance_id, InstanceStatus.RUNNING.value
+        # 1. Instance status should be transitioned to RUNNING via atomic guard
+        mock_instance_manager._instance_repository.transition_status_if.assert_called_once_with(
+            instance_id, InstanceStatus.RUNNING.value, tuple(TERMINAL_STATUSES)
         )
 
         # 2. stream_status_change should be called with RUNNING
@@ -1068,8 +1072,9 @@ class TestMessageJobInstanceReactivation:
         """Test MESSAGE job does NOT reactivate PAUSED instance.
 
         PAUSED instances have their own resume path (resume_instance),
-        so update_status(RUNNING) should NOT be called by start_job().
-        The job should be skipped (returns None).
+        so transition_status_if(RUNNING, TERMINAL_STATUSES) should NOT be called by
+        start_job() — PAUSED is not in TERMINAL_STATUSES. The job should be skipped
+        (returns None).
         """
         instance_id = "paused-instance-123"
         job_id = "message-job-paused"
@@ -1086,8 +1091,8 @@ class TestMessageJobInstanceReactivation:
         # Job should be skipped (PAUSED instances have their own resume path)
         assert result is None
 
-        # update_status should NOT be called (PAUSED has separate resume path)
-        mock_instance_manager._instance_repository.update_status.assert_not_called()
+        # transition_status_if should NOT be called (PAUSED has separate resume path)
+        mock_instance_manager._instance_repository.transition_status_if.assert_not_called()
 
         # stream_status_change should NOT be called
         mock_instance_manager._live_hub.stream_status_change.assert_not_called()

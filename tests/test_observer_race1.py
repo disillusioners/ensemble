@@ -49,11 +49,15 @@ import pytest
 
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
+from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.correlation_manager import (
     CorrelationManager,
     set_correlation_manager,
 )
-from daemon.services.job_feedback_observer import JobFeedbackObserver
+from daemon.services.job_feedback_observer import (
+    JobFeedbackObserver,
+    _FinalizeJobResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +76,56 @@ def make_msg_repo_mock() -> MagicMock:
     repo = MagicMock(name="MsgRepo")
     repo.get_pending_for_instances = MagicMock(return_value=[])
     return repo
+
+
+def make_fake_sync(
+    *,
+    skip: bool = False,
+    raise_exc: BaseException | None = None,
+    locks_released: int = 1,
+    instance_was_terminal: bool = False,
+):
+    """Build a fake `_finalize_job_db_sync` replacement for unit tests.
+
+    Mirrors the production sync helper's signature:
+      (job_id, instance_id, terminal_status, result_summary, error_message)
+      → _FinalizeJobResult
+    """
+    def fake_sync(
+        job_id,
+        instance_id,
+        terminal_status,
+        result_summary,
+        error_message,
+    ):
+        if raise_exc is not None:
+            raise raise_exc
+        if skip:
+            return _FinalizeJobResult(
+                skip=True,
+                terminal_status=None,
+                job_id=None,
+                instance_id=None,
+                parent_id=None,
+                agent_id=None,
+                result_summary=None,
+                error_message=None,
+                locks_released=0,
+                instance_was_terminal=False,
+            )
+        return _FinalizeJobResult(
+            skip=False,
+            terminal_status=terminal_status,
+            job_id=job_id,
+            instance_id=instance_id,
+            parent_id=None,
+            agent_id="coder",
+            result_summary=result_summary,
+            error_message=error_message,
+            locks_released=locks_released,
+            instance_was_terminal=instance_was_terminal,
+        )
+    return fake_sync
 
 
 def make_mock_job(
@@ -140,11 +194,18 @@ def make_observer_with_controlled_llm(
         instance_manager=mock_instance_manager,
     )
 
+    # H15 fix: install fake for the new sync helper so the test does not
+    # need a real SQLModel engine. The sync helper consolidates the 5-step
+    # terminal cascade into a single WriteGuardSession transaction.
+    sync_mock = MagicMock(side_effect=make_fake_sync())
+    observer._finalize_job_db_sync = sync_mock
+
     return observer, {
         "job_queue_service": mock_jqs,
         "job_repo": mock_job_repo,
         "lock_repo": mock_lock_repo,
         "instance_manager": mock_instance_manager,
+        "sync_mock": sync_mock,
     }
 
 
@@ -277,11 +338,12 @@ class TestRace1Regression:
             assert result is True  # last pending correlation
             assert cm.get_pending_count(parent_id) == 0
 
-            # ── T4: The callback ran and called atomic_transition ──
-            mocks["job_repo"].atomic_transition.assert_called_once()
-            kwargs = mocks["job_repo"].atomic_transition.call_args.kwargs
-            assert kwargs["from_status"] == JobStatus.PROCESSING.value
-            assert kwargs["to_status"] == JobStatus.COMPLETED.value
+            # ── T4: The callback ran and called _finalize_job_db_sync ──
+            mocks["sync_mock"].assert_called_once()
+            args = mocks["sync_mock"].call_args.args
+            assert args[0] == job.job_id
+            assert args[1] == job.instance_id
+            assert args[2] == InstanceStatus.COMPLETED.value
 
             # Watcher was notified with "completed" (from the callback).
             completed_calls = [

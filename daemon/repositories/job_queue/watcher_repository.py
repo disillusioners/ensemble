@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from sqlalchemy import delete as sql_delete, func
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
@@ -23,6 +24,28 @@ class JobWatcherRepository:
         """Initialize repository with a database engine."""
         self.engine = engine
 
+    @staticmethod
+    def _get_dialect_insert(session: SQLModelSession):
+        """Get dialect-appropriate insert callable for upsert.
+
+        Generic ``sqlalchemy.insert()`` lacks ``on_conflict_do_update()`` —
+        that is a dialect-specific method. Returns the SQLite or PostgreSQL
+        dialect insert that supports ``on_conflict_do_update`` for both
+        ``job_watchers`` UPSERTs.
+
+        Args:
+            session: SQLAlchemy/SQLModel Session whose bound engine
+                determines dialect.
+
+        Returns:
+            Dialect-specific insert callable (``sqlite_insert`` or
+            ``pg_insert``). Both support ``on_conflict_do_update``.
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            return pg_insert
+        return sqlite_insert
+
     def add_watch(
         self,
         job_id: str,
@@ -31,14 +54,28 @@ class JobWatcherRepository:
     ) -> JobWatcher:
         """Add a watch for a job by an instance.
 
-        If a watch already exists for (job_id, instance_id), updates the events.
-        Returns the created/updated watch.
+        Atomic upsert: if a watch already exists for (job_id, instance_id),
+        updates the events; otherwise inserts. Replaces the previous
+        check-then-insert pattern that could create duplicate rows under
+        concurrent calls (H13). Backed by the UNIQUE constraint on
+        (job_id, instance_id) plus dialect-aware INSERT ... ON CONFLICT
+        DO UPDATE, which is race-free across processes and threads.
+
+        Concurrency note (M12):
+            The ``watch_events`` JSON column is **always written as a full
+            replace** on both branches of the UPSERT — the INSERT side via
+            the ``VALUES`` clause and the UPDATE side via
+            ``excluded.watch_events``. There is no partial-list append path
+            here; callers are expected to compute the desired full event
+            list and pass it in. Because the whole row mutation is a single
+            ``INSERT ... ON CONFLICT DO UPDATE`` statement, the write is
+            atomic with no read-modify-write window — **safe by design**.
 
         Args:
             job_id: The job ID to watch.
             instance_id: The instance ID that wants notifications.
             watch_events: List of terminal states to watch for.
-                Defaults to all terminal states.
+                Defaults to all watchable events (terminal + in_progress).
 
         Returns:
             The created or updated JobWatcher.
@@ -47,29 +84,31 @@ class JobWatcherRepository:
         events = watch_events or default_events
 
         with SQLModelSession(self.engine) as db_session:
-            # Check if watch already exists
-            stmt = select(JobWatcher).where(
-                JobWatcher.job_id == job_id,
-                JobWatcher.instance_id == instance_id,
-            )
-            existing = db_session.exec(stmt).first()
-
-            if existing:
-                existing.watch_events = events
-                db_session.add(existing)
-                db_session.commit()
-                db_session.refresh(existing)
-                return existing
-
-            # Create new watch
-            watch = JobWatcher(
+            insert_fn = self._get_dialect_insert(db_session)
+            insert_stmt = insert_fn(JobWatcher).values(
                 job_id=job_id,
                 instance_id=instance_id,
-                watch_events=events,
+                watch_events=list(events),
             )
-            db_session.add(watch)
+            # ON CONFLICT DO UPDATE mirrors the legacy UPDATE branch:
+            # only `watch_events` is touched; created_at is preserved.
+            # Using ``insert_stmt.excluded.watch_events`` instead of
+            # re-binding the value avoids SQLite's "bad parameter or
+            # other API misuse" error when the same JSON column appears
+            # in both the INSERT VALUES and the UPDATE SET clauses.
+            stmt = insert_stmt.on_conflict_do_update(
+                index_elements=["job_id", "instance_id"],
+                set_={"watch_events": insert_stmt.excluded.watch_events},
+            )
+            db_session.execute(stmt)
             db_session.commit()
-            db_session.refresh(watch)
+
+            watch = db_session.exec(
+                select(JobWatcher).where(
+                    JobWatcher.job_id == job_id,
+                    JobWatcher.instance_id == instance_id,
+                )
+            ).first()
             return watch
 
     def remove_watch(self, job_id: str, instance_id: str) -> bool:

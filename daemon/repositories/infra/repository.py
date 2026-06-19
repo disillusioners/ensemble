@@ -45,8 +45,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import and_, cast as sa_cast
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, update as sa_update
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm.attributes import flag_modified
@@ -126,6 +127,35 @@ class SQLModelInfraRepository:
         ``json_extract(...)`` (SQLite).
         """
         return self.engine.dialect.name == "postgresql"
+
+    def _get_dialect_insert(self, session: Session):
+        """Get dialect-appropriate insert function for upsert operations.
+
+        Generic ``sqlalchemy.insert()`` does not support
+        ``on_conflict_do_update()`` — that method is dialect-specific. This
+        helper returns the dialect-specific insert callable so the caller can
+        chain ``on_conflict_do_update`` for both SQLite and PostgreSQL.
+
+        Used by :meth:`register_type` to atomically upsert the global
+        ``infra_asset_types`` registry on concurrent bootstrap calls.
+        Without the dialect-specific insert, a check-then-insert pattern
+        on the ``name`` primary key races under concurrent workers — two
+        ``session.get()`` lookups both return ``None`` and the second
+        ``session.add()`` raises ``IntegrityError``.
+
+        Args:
+            session: SQLAlchemy ``Session`` whose bound engine determines
+                the dialect. Both SQLite and PostgreSQL dialect inserts
+                returned by this helper support ``on_conflict_do_update``.
+
+        Returns:
+            Dialect-specific insert callable.
+        """
+        if session.bind is not None and session.bind.dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+            return pg_insert
+        return sqlite_insert
 
     def _json_path_text(self, column: Any, key: str) -> Any:
         """Build a dialect-aware expression that returns a JSON
@@ -651,6 +681,7 @@ class SQLModelInfraRepository:
         asset_id: str,
         project_id: str | None = None,
         updated_by: str | None = None,
+        expected_version: int | None = None,
         **updates: Any,
     ) -> InfraAsset | None:
         """Update fields on an existing asset.
@@ -673,22 +704,44 @@ class SQLModelInfraRepository:
             updated_by: Optional ``instance_id`` of the agent
                 making the change; recorded on the row and on
                 the history entry.
+            expected_version: Optional optimistic-locking version
+                (M5 fix). When supplied, the update is gated by
+                ``WHERE id = :id AND version = :expected_version``
+                and ``version`` is atomically set to
+                ``version + 1``; if the row's current version no
+                longer matches (because another caller mutated
+                the asset concurrently), the method raises
+                :class:`ValueError` and no changes are applied.
+                When ``None`` (default), the update falls back to
+                the previous read-modify-write behavior — the
+                ``version`` column is still incremented so a
+                caller that later opts into ``expected_version``
+                sees a meaningful counter. This parameter is
+                OPTIONAL for backward compatibility: existing
+                callers that don't track versions see no
+                behavior change. New callers that want
+                concurrency safety should
+                ``re-read → mutate → update_asset(expected_version=current.version)``.
             **updates: Column values to overwrite. Allowed
                 keys: ``name``, ``type``, ``parent_asset_id``,
                 ``attributes``, ``relationships``. Protected
                 keys (``id``, ``project_id``, ``created_at``,
-                ``created_by``, ``updated_at``, ``updated_by``)
-                are silently dropped with a warning. W1 fix:
-                ``updated_at`` / ``updated_by`` are owned by
-                the repository — ``updated_by`` is passed as
-                a named argument and the timestamp is set
-                internally to ``self._now_iso()``.
+                ``created_by``, ``updated_at``, ``updated_by``,
+                ``version``) are silently dropped with a warning.
+                W1 fix: ``updated_at`` / ``updated_by`` are
+                owned by the repository — ``updated_by`` is
+                passed as a named argument and the timestamp
+                is set internally to ``self._now_iso()``.
+                M5 fix: ``version`` is owned by the repository's
+                optimistic-lock mechanism — callers supply
+                ``expected_version`` (the value they read) as a
+                NAMED arg, not via ``**updates``.
 
         Returns:
             The updated :class:`InfraAsset` instance, or
             ``None`` if no asset with that ID exists, **or** if
-            ``project_id`` was supplied and the asset belongs
-            to a different project.
+            ``project_id`` was supplied and the asset belongs to
+            a different project.
 
         Raises:
             AttributeError: If any ``updates`` key is neither a
@@ -697,7 +750,10 @@ class SQLModelInfraRepository:
             ValueError: If the update would violate the
                 ``UNIQUE(project_id, type, name)`` constraint
                 (i.e. caller is renaming / retyping into a
-                name that's already taken).
+                name that's already taken), OR — M5 — if
+                ``expected_version`` was supplied and the row's
+                current version does not match (concurrent
+                modification detected).
         """
         protected = {
             "id",
@@ -714,10 +770,23 @@ class SQLModelInfraRepository:
             # audit identity on the row.
             "updated_at",
             "updated_by",
+            # M5 fix: ``version`` is owned by the repository's
+            # optimistic-lock mechanism. The caller passes the
+            # expected value as a NAMED arg (``expected_version``)
+            # so it can be applied atomically as part of the
+            # WHERE clause. Injecting ``version`` directly via
+            # ``**updates`` would either be silently dropped (the
+            # legacy ORM path) or fight with the Core UPDATE in
+            # the atomic path — neither is correct, so we drop
+            # it here and route callers through ``expected_version``.
+            "version",
         }
         # JSON column names that need ``flag_modified`` after
         # in-place mutation (no-op when the caller replaces the
-        # whole dict).
+        # whole dict). Only used by the legacy ORM path; the
+        # M5 atomic path sets JSON columns via Core
+        # ``.values()``, which goes through ``JSONBType``'s
+        # ``bind_processor`` automatically.
         json_columns = {"attributes", "relationships"}
 
         with Session(self.engine) as session:
@@ -739,6 +808,24 @@ class SQLModelInfraRepository:
                 )
                 return None
 
+            # Validate the caller's ``**updates`` keys BEFORE any
+            # mutation runs. The original code validated inside the
+            # mutation loop, which works for the legacy path but is
+            # wrong for the M5 atomic path (we want to fail fast on
+            # a typo'd column name rather than issue a Core UPDATE
+            # for half the keys and then raise on the rest).
+            for key in updates:
+                if key in protected:
+                    logger.warning(
+                        f"Ignoring protected field in update_asset: "
+                        f"id={asset_id}, field={key}"
+                    )
+                    continue
+                if not hasattr(asset, key):
+                    raise AttributeError(
+                        f"InfraAsset has no field {key!r}"
+                    )
+
             # Capture the PRE-update snapshot BEFORE the
             # mutation loop runs. The history row's
             # ``snapshot`` column must reflect the asset's
@@ -756,33 +843,106 @@ class SQLModelInfraRepository:
 
             for key, value in updates.items():
                 if key in protected:
-                    logger.warning(
-                        f"Ignoring protected field in update_asset: "
-                        f"id={asset_id}, field={key}"
-                    )
                     continue
-                if not hasattr(asset, key):
-                    raise AttributeError(
-                        f"InfraAsset has no field {key!r}"
-                    )
                 old = getattr(asset, key)
                 # Compare safely — dict / list equality.
                 if old != value:
                     old_values[key] = old
                     new_values[key] = value
                     changed_fields.append(key)
-                setattr(asset, key, value)
-                if key in json_columns:
-                    # Defensive: flag_modified is needed for in-place JSON
-                    # mutation; when replacing the whole dict SQLAlchemy
-                    # already detects the change via the attribute set, but
-                    # we flag anyway to guard against future in-place edits
-                    # (e.g. ``asset.attributes["k"] = v``) silently
-                    # bypassing the change tracker.
-                    flag_modified(asset, key)
 
-            asset.updated_at = self._now_iso()
-            asset.updated_by = updated_by
+            now = self._now_iso()
+
+            if expected_version is not None:
+                # M5 atomic path: raw-SQL check-and-increment.
+                # The Core UPDATE includes
+                # ``WHERE id = :id AND version = :expected_version``
+                # so a concurrent modification between the
+                # caller's read and write is detected at the DB
+                # layer instead of silently clobbering the
+                # concurrent write. ``rowcount == 0`` after the
+                # UPDATE means the WHERE clause did not match —
+                # either the row was deleted or the version moved
+                # (concurrent update). We surface this as
+                # ``ValueError`` so the caller knows to re-read.
+                set_values: dict[str, Any] = {
+                    "version": InfraAsset.version + 1,
+                    "updated_at": now,
+                    "updated_by": updated_by,
+                }
+                for key, value in updates.items():
+                    if key in protected:
+                        continue
+                    set_values[key] = value
+
+                stmt = (
+                    sa_update(InfraAsset)
+                    .where(InfraAsset.id == asset_id)
+                    .where(InfraAsset.version == expected_version)
+                    .values(**set_values)
+                )
+                result = session.execute(stmt)
+                if result.rowcount == 0:
+                    # Either the row was deleted between the
+                    # session.get() above and the UPDATE, or its
+                    # version moved. Roll back so the
+                    # ``session.commit()`` below doesn't try to
+                    # flush any half-applied state, and raise so
+                    # the caller can re-read and decide what to
+                    # do (retry, abort, merge, …).
+                    session.rollback()
+                    raise ValueError(
+                        f"Concurrent modification of asset "
+                        f"{asset_id}: expected_version="
+                        f"{expected_version} no longer matches "
+                        f"the row's current version "
+                        f"(caller has stale data; re-read and "
+                        f"retry)"
+                    )
+                # The Core UPDATE bypasses the ORM session's
+                # change tracker — the in-memory ``asset``
+                # object still holds the pre-update values.
+                # Expire it so any subsequent access (including
+                # the ``session.refresh`` below) re-reads from
+                # the DB. Without this, ``session.refresh``
+                # would still work, but we mark ``expire`` so
+                # the object is unambiguously "stale" in case
+                # another piece of code grabs it before the
+                # final ``refresh``.
+                session.expire(asset)
+            else:
+                # Legacy path: ORM-flush read-modify-write
+                # (backward-compatible with callers that don't
+                # track versions).
+                for key, value in updates.items():
+                    if key in protected:
+                        continue
+                    setattr(asset, key, value)
+                    if key in json_columns:
+                        # Defensive: flag_modified is needed for in-place JSON
+                        # mutation; when replacing the whole dict SQLAlchemy
+                        # already detects the change via the attribute set, but
+                        # we flag anyway to guard against future in-place edits
+                        # (e.g. ``asset.attributes["k"] = v``) silently
+                        # bypassing the change tracker.
+                        flag_modified(asset, key)
+
+                asset.updated_at = now
+                asset.updated_by = updated_by
+                # Version increment is handled by SQLAlchemy's
+                # ``version_id_col`` mapper config on the
+                # ``InfraAsset`` model — the ORM unit-of-work
+                # emits ``SET version = version + 1`` and the
+                # ``AND version = :expected_version`` predicate
+                # on flush, raising StaleDataError on a concurrent
+                # modification. No manual ``asset.version += 1``
+                # here: doing so would double-increment (version
+                # would land at loaded_value + 2) and/or confuse
+                # the mapper's tracked expected version, leading
+                # to a spurious StaleDataError on the commit
+                # itself. The raw-SQL atomic path above still
+                # increments manually because Core UPDATE bypasses
+                # ORM events entirely.
 
             if changed_fields:
                 history = InfraAssetHistory(
@@ -794,7 +954,7 @@ class SQLModelInfraRepository:
                     old_values=old_values,
                     new_values=new_values,
                     changed_by=updated_by,
-                    timestamp=asset.updated_at,
+                    timestamp=now,
                 )
                 session.add(history)
 
@@ -809,7 +969,8 @@ class SQLModelInfraRepository:
             session.refresh(asset)
             logger.info(
                 f"Updated infra asset: id={asset_id}, "
-                f"changed_fields={changed_fields}"
+                f"changed_fields={changed_fields}, "
+                f"version={asset.version}"
             )
             return asset
 
@@ -994,9 +1155,41 @@ class SQLModelInfraRepository:
         """Insert or update a type definition in the global registry.
 
         Atomic upsert: if a row with the same ``name`` already
-        exists, ``description`` and ``schema_json`` are
-        overwritten and ``updated_at`` is bumped; otherwise a
-        new row is created.
+        exists, ``description`` (when supplied as a non-``None``
+        value) and ``schema_json`` are overwritten and
+        ``updated_at`` is bumped; otherwise a new row is
+        created with ``created_at = updated_at = now``.
+
+        The upsert is implemented as a single
+        ``INSERT ... ON CONFLICT(name) DO UPDATE`` round trip via
+        the dialect-aware helper :meth:`_get_dialect_insert`.
+        This replaces a previous check-then-insert pattern
+        (``session.get(InfraAssetType, name)`` followed by
+        ``session.add()``) that raced under concurrent bootstrap
+        calls — two ``session.get()`` lookups could both return
+        ``None`` and the second ``session.add()`` then raised
+        ``IntegrityError`` because ``name`` is the primary key.
+        The atomic upsert is one round trip and is enforced by
+        the database, so concurrent callers (e.g. two daemons
+        starting in parallel, or two threads racing on the same
+        engine) all succeed and converge on a single row per
+        ``name``.
+
+        The ``description`` parameter is treated as
+        "preserve-on-update when ``None``, overwrite otherwise"
+        to match the legacy check-then-insert semantics: a
+        caller that omits the argument (or passes ``None``
+        explicitly) does not clobber the existing description,
+        and the upsert's ``set_`` dict conditionally excludes
+        ``description`` in that case. The INSERT leg always
+        stores ``description or ""`` so the not-null constraint
+        is satisfied regardless of caller input.
+
+        ``created_at`` is intentionally NOT in the ``set_`` dict
+        passed to ``on_conflict_do_update`` — the database
+        default / the value supplied at insert time is the
+        canonical creation timestamp and must not be bumped on
+        every update.
 
         Args:
             name: Type identifier — also the value used in
@@ -1004,7 +1197,12 @@ class SQLModelInfraRepository:
             schema_json: Optional JSON-Schema-shaped document.
                 Stored verbatim. Defaults to an empty dict.
             description: Optional human-readable description.
-                Defaults to empty string.
+                When ``None`` (default), the existing row's
+                description is preserved on update and ``""``
+                is used for fresh inserts. When a non-``None``
+                value is supplied, it overwrites the existing
+                row's description on update and is used
+                verbatim (or ``""`` if falsy) on insert.
 
         Returns:
             The :class:`InfraAssetType` instance reflecting the
@@ -1014,37 +1212,61 @@ class SQLModelInfraRepository:
         schema_json = dict(schema_json) if schema_json else {}
 
         with Session(self.engine) as session:
-            existing = session.get(InfraAssetType, name)
-            if existing is None:
-                row = InfraAssetType(
-                    name=name,
-                    description=description or "",
-                    schema_doc=schema_json,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(row)
-                session.commit()
-                session.refresh(row)
-                logger.info(f"Registered infra asset type: name={name}")
-                return row
+            insert_fn = self._get_dialect_insert(session)
 
-            # Update-in-place.
+            # Build the values for the INSERT leg. ``description``
+            # coerces ``None`` to ``""`` to satisfy the NOT NULL
+            # constraint and match the legacy ``description or ""``
+            # behavior on the insert path. NOTE: the ``schema_json``
+            # key uses the actual DB column name (not the Python
+            # attribute ``schema_doc``) because SQLAlchemy's
+            # ``Insert.values()`` resolves the dict by column
+            # name when the model is wired with ``sa_column=
+            # Column("schema_json", ...)`` — see
+            # :class:`InfraAssetType`.
+            insert_values: dict[str, Any] = {
+                "name": name,
+                "schema_json": schema_json,
+                "created_at": now,
+                "updated_at": now,
+                "description": description or "" if description is not None else "",
+            }
+
+            # Build the set_ dict for the UPDATE leg. Only
+            # include ``description`` when the caller supplied
+            # a non-``None`` value (preserves the legacy
+            # "don't overwrite on None" semantics). ``created_at``
+            # is intentionally absent — it is set once on
+            # insert and never bumped. ``schema_json`` is keyed
+            # by DB column name (see comment on ``insert_values``).
+            set_values: dict[str, Any] = {
+                "schema_json": schema_json,
+                "updated_at": now,
+            }
             if description is not None:
-                existing.description = description
-            existing.schema_doc = schema_json
-            existing.updated_at = now
-            # Defensive: flag_modified is needed for in-place JSON
-            # mutation; when replacing the whole dict SQLAlchemy already
-            # detects the change via the attribute set, but we flag
-            # anyway to guard against future in-place edits to
-            # ``existing.schema_doc`` silently bypassing the change
-            # tracker.
-            flag_modified(existing, "schema_doc")
+                set_values["description"] = description or ""
+
+            stmt = insert_fn(InfraAssetType.__table__).values(**insert_values)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["name"],
+                set_=set_values,
+            )
+            session.execute(stmt)
             session.commit()
-            session.refresh(existing)
-            logger.info(f"Updated infra asset type: name={name}")
-            return existing
+
+            # Re-read the canonical post-upsert state and
+            # return it. ``session.get`` returns the row the
+            # upsert touched, so callers see the freshly-updated
+            # ``updated_at`` / ``description`` / ``schema_doc``
+            # values.
+            row = session.get(InfraAssetType, name)
+            session.refresh(row)
+            logger.info(
+                f"Upserted infra asset type: name={name} "
+                f"(description={'updated' if description is not None else 'preserved'}, "
+                f"schema_doc=updated)"
+            )
+            return row
 
     def get_type(self, name: str) -> InfraAssetType | None:
         """Fetch a type definition by name.
