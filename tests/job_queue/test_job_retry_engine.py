@@ -9,6 +9,7 @@ This module tests the JobRetryEngine including:
 
 import pytest
 from datetime import datetime, timedelta
+import threading
 from unittest.mock import MagicMock, patch
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
@@ -501,8 +502,240 @@ class TestMaybeRetry:
     def test_maybe_retry_job_not_found(self, retry_engine):
         """Test maybe_retry returns None for non-existent job."""
         result = retry_engine.maybe_retry("non-existent-job")
-        
+
         assert result is None
+
+
+class TestMaybeRetryAtomicConcurrency:
+    """Concurrency tests for the H5 (P1) fix.
+
+    The pre-fix implementation read ``retry_count`` into Python,
+    computed ``retry_count + 1``, and committed — two concurrent
+    callers could both observe the same row and both write
+    ``N + 1``, losing one increment. These tests pin down the new
+    atomic UPDATE behaviour: the SQL-level guard
+    ``status = 'failed' AND retry_count < max_retries`` is the
+    race-safety boundary, and at most one concurrent caller can
+    transition the row.
+    """
+
+    def test_atomic_retry_concurrent_calls_only_one_succeeds(self, job_repo, engine):
+        """Two concurrent ``atomic_retry`` calls — only one increments.
+
+        Without the SQL-level guard, both threads would observe
+        ``retry_count=1``, both would write ``2``, and the assertion
+        would fail (the row would carry ``retry_count=2`` while two
+        callers thought they had advanced it). With the guard,
+        exactly one UPDATE matches the ``status='failed' AND
+        retry_count < max_retries`` predicate; the second writer
+        sees ``status='pending'`` (or the incremented
+        ``retry_count``) and matches zero rows.
+        """
+        create_job(
+            engine,
+            job_id="job-concurrent",
+            agent_id="coder",
+            agent_dir="/agents/coder",
+            message="Test",
+            source="api",
+            project_id="project-abc",
+            status="failed",
+            retry_count=1,
+            max_retries=10,
+            error_message="Initial failure",
+            failed_at=datetime.utcnow().isoformat(),
+        )
+
+        results: list = []
+        errors: list = []
+        barrier = threading.Barrier(2)
+
+        def attempt_retry() -> None:
+            try:
+                barrier.wait(timeout=5)
+                outcome = job_repo.atomic_retry(
+                    job_id="job-concurrent",
+                    max_retries=10,
+                    next_retry_at=(
+                        datetime.utcnow() + timedelta(minutes=5)
+                    ).isoformat(),
+                )
+                results.append(outcome)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=attempt_retry) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert errors == [], f"Unexpected errors: {errors}"
+        successful = [r for r in results if r is not None]
+        assert len(successful) == 1, (
+            f"Expected exactly one successful atomic_retry, got "
+            f"{len(successful)}: {results}"
+        )
+
+        # retry_count advances by exactly 1 (1 -> 2), never 1 -> 3.
+        final = job_repo.get("job-concurrent")
+        assert final is not None
+        assert final.retry_count == 2, (
+            f"Lost increment detected: expected retry_count=2, got "
+            f"{final.retry_count}"
+        )
+        assert final.status == "pending"
+        assert final.failed_at is None
+        assert final.error_message is None
+        assert final.next_retry_at is not None
+
+    def test_atomic_retry_skips_when_retry_count_at_max(self, job_repo, engine):
+        """``atomic_retry`` is a no-op when ``retry_count == max_retries``.
+
+        Belt-and-braces guard for the inline ``retry_count <
+        max_retries`` predicate: even if a caller passes the SQL
+        guard's ``status='failed'`` check, an exhausted job must
+        not be incremented again — it must move to DLQ instead.
+        """
+        create_job(
+            engine,
+            job_id="job-exhausted",
+            agent_id="coder",
+            agent_dir="/agents/coder",
+            message="Test",
+            source="api",
+            project_id="project-abc",
+            status="failed",
+            retry_count=3,
+            max_retries=3,  # already at the cap
+            error_message="Final failure",
+            failed_at=datetime.utcnow().isoformat(),
+        )
+
+        outcome = job_repo.atomic_retry(
+            job_id="job-exhausted",
+            max_retries=3,
+            next_retry_at=(
+                datetime.utcnow() + timedelta(minutes=5)
+            ).isoformat(),
+        )
+
+        assert outcome is None
+        # Row must be unchanged: still FAILED, retry_count not bumped.
+        final = job_repo.get("job-exhausted")
+        assert final is not None
+        assert final.status == "failed"
+        assert final.retry_count == 3
+
+    def test_atomic_retry_skips_when_status_not_failed(self, job_repo, engine):
+        """``atomic_retry`` is a no-op when status is not FAILED.
+
+        A concurrent CANCELLED or DEAD_LETTER transition must not
+        be silently overwritten by a retry — the SQL-level
+        ``status='failed'`` guard is the protection.
+        """
+        create_job(
+            engine,
+            job_id="job-cancelled-mid-flight",
+            agent_id="coder",
+            agent_dir="/agents/coder",
+            message="Test",
+            source="api",
+            project_id="project-abc",
+            status="cancelled",  # Not FAILED
+            retry_count=1,
+            max_retries=10,
+        )
+
+        outcome = job_repo.atomic_retry(
+            job_id="job-cancelled-mid-flight",
+            max_retries=10,
+            next_retry_at=(
+                datetime.utcnow() + timedelta(minutes=5)
+            ).isoformat(),
+        )
+
+        assert outcome is None
+        final = job_repo.get("job-cancelled-mid-flight")
+        assert final is not None
+        assert final.status == "cancelled"
+        assert final.retry_count == 1  # Unchanged
+
+    def test_maybe_retry_skips_concurrently_cancelled_job(self, retry_engine, job_repo, engine):
+        """End-to-end: concurrent cancellation prevents retry.
+
+        Simulates the realistic race: ``fail_job`` writes FAILED,
+        ``cancel_job`` flips to CANCELLED, and the retry sweep /
+        ``maybe_retry`` arrives just after. The retry must be a
+        no-op — the SQL guard rejects it because
+        ``status='cancelled'`` no longer matches ``status='failed'``.
+        """
+        create_job(
+            engine,
+            job_id="job-mid-cancel",
+            agent_id="coder",
+            agent_dir="/agents/coder",
+            message="Test",
+            source="api",
+            project_id="project-abc",
+            status="failed",
+            retry_count=1,
+            max_retries=10,
+            error_message="Connection timeout",
+            failed_at=datetime.utcnow().isoformat(),
+        )
+
+        # Concurrent cancellation — flip status to CANCELLED before
+        # maybe_retry runs.
+        with Session(engine) as session:
+            row = session.get(JobItem, "job-mid-cancel")
+            row.status = "cancelled"
+            row.cancelled_at = datetime.utcnow().isoformat()
+            session.commit()
+
+        result = retry_engine.maybe_retry("job-mid-cancel")
+
+        assert result is None
+        final = job_repo.get("job-mid-cancel")
+        assert final is not None
+        assert final.status == "cancelled"
+        assert final.retry_count == 1  # Not incremented
+        assert final.error_message == "Connection timeout"  # Not cleared
+
+    def test_maybe_retry_skips_concurrently_dead_lettered_job(self, retry_engine, job_repo, dlq_repo, engine):
+        """End-to-end: a job moved to DLQ between read and retry must
+        not be resurrected by ``maybe_retry``.
+        """
+        create_job(
+            engine,
+            job_id="job-already-dlq",
+            agent_id="coder",
+            agent_dir="/agents/coder",
+            message="Test",
+            source="api",
+            project_id="project-abc",
+            queue_id="queue-123",
+            status="failed",
+            retry_count=2,
+            max_retries=3,
+            error_message="Stalled",
+            failed_at=datetime.utcnow().isoformat(),
+        )
+
+        # Concurrent path moves the job to DLQ (status='dead_letter')
+        # before maybe_retry runs.
+        with Session(engine) as session:
+            row = session.get(JobItem, "job-already-dlq")
+            row.status = "dead_letter"
+            session.commit()
+
+        result = retry_engine.maybe_retry("job-already-dlq")
+
+        assert result is None
+        final = job_repo.get("job-already-dlq")
+        assert final is not None
+        assert final.status == "dead_letter"
+        assert final.retry_count == 2  # Not incremented
 
 
 class TestFindRetryableJobs:

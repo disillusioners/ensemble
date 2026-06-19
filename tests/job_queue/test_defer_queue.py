@@ -142,7 +142,7 @@ class TestCountActiveJobsByProject:
             source="api",
             project_id="test-project",
         )
-        repository.update(job.job_id, status=JobStatus.PROCESSING.value)
+        repository.start_job_atomic(job.job_id, "test-instance")
         assert repository.count_active_jobs_by_project("test-project") == 1
 
     def test_does_not_count_completed_jobs(self, repository):
@@ -154,7 +154,8 @@ class TestCountActiveJobsByProject:
             source="api",
             project_id="test-project",
         )
-        repository.update(job.job_id, status=JobStatus.COMPLETED.value)
+        repository.start_job_atomic(job.job_id, "test-instance")
+        repository.complete_job(job.job_id)
         assert repository.count_active_jobs_by_project("test-project") == 0
 
     def test_does_not_count_failed_jobs(self, repository):
@@ -166,7 +167,8 @@ class TestCountActiveJobsByProject:
             source="api",
             project_id="test-project",
         )
-        repository.update(job.job_id, status=JobStatus.FAILED.value)
+        repository.start_job_atomic(job.job_id, "test-instance")
+        repository.fail_job(job.job_id, "test error")
         assert repository.count_active_jobs_by_project("test-project") == 0
 
     def test_does_not_count_cancelled_jobs(self, repository):
@@ -178,7 +180,7 @@ class TestCountActiveJobsByProject:
             source="api",
             project_id="test-project",
         )
-        repository.update(job.job_id, status=JobStatus.CANCELLED.value)
+        repository.cancel_job(job.job_id)
         assert repository.count_active_jobs_by_project("test-project") == 0
 
     def test_counts_only_specific_project(self, repository):
@@ -217,7 +219,7 @@ class TestCountActiveJobsByProject:
             source="api",
             project_id="test-project",
         )
-        repository.update(job2.job_id, status=JobStatus.PROCESSING.value)
+        repository.start_job_atomic(job2.job_id, "test-instance")
         assert repository.count_active_jobs_by_project("test-project") == 2
 
     def test_counts_multiple_active_jobs(self, repository):
@@ -245,8 +247,8 @@ class TestCountActiveJobsByProject:
             project_id="test-project",
         )
         # Set 2 to PROCESSING
-        repository.update(job1.job_id, status=JobStatus.PROCESSING.value)
-        repository.update(job2.job_id, status=JobStatus.PROCESSING.value)
+        repository.start_job_atomic(job1.job_id, "test-instance")
+        repository.start_job_atomic(job2.job_id, "test-instance")
         # Leave job3 as PENDING
         assert repository.count_active_jobs_by_project("test-project") == 3
 
@@ -306,7 +308,7 @@ class TestCountActiveJobsByProject:
             project_id="test-project",
             queue_id="another-queue-id",  # Different queue
         )
-        repository.update(job2.job_id, status=JobStatus.PROCESSING.value)
+        repository.start_job_atomic(job2.job_id, "test-instance")
 
         # Should count both jobs
         assert repository.count_active_jobs_by_project("test-project") == 2

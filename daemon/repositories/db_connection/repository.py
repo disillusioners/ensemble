@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select, col
 
 from .models import DbConnectionConfig
@@ -179,6 +180,19 @@ class DbConnectionRepository:
         (``id``, ``connection_name``, ``created_at``) are silently
         filtered out and a warning is logged.
 
+        L4 defense-in-depth: this method also wraps ``session.commit()``
+        in a try/except :class:`IntegrityError`. ``connection_name`` is
+        currently a protected field (rename is intentionally not
+        supported in Phase 1 — see ``_PROTECTED_UPDATE_FIELDS``), so
+        ``update_connection`` cannot directly trigger the UNIQUE
+        constraint on ``connection_name``. The handler is here as
+        forward protection: any future column added to this table with
+        a UNIQUE constraint would otherwise leak an opaque SQLAlchemy
+        :class:`IntegrityError` (with dialect-specific message text) to
+        the caller. We translate it into a clean ``ValueError`` carrying
+        the duplicate value and the field name, matching the pattern
+        used by :class:`daemon.repositories.project.ProjectRepository.update`.
+
         Args:
             connection_name: The unique name of the connection to
                 update. The connection is looked up by this value;
@@ -192,6 +206,9 @@ class DbConnectionRepository:
         Raises:
             AttributeError: If any of the supplied field names does not
                 correspond to a column on ``DbConnectionConfig``.
+            ValueError: If the underlying commit violates a UNIQUE
+                constraint (e.g. a future ``host`` uniqueness check).
+                The message names the offending field and value.
         """
         with Session(self.engine) as session:
             config = session.exec(
@@ -222,7 +239,27 @@ class DbConnectionRepository:
 
             config.update_timestamp()
             session.add(config)
-            session.commit()
+            try:
+                session.commit()
+            except IntegrityError as exc:
+                session.rollback()
+                # Translate UNIQUE-constraint violations into a clean
+                # ValueError with the duplicate value and field name.
+                # The dialect-specific message text would otherwise
+                # leak DB internals (constraint name, table name) to
+                # the API caller. We match by constraint name first,
+                # then fall back to a generic duplicate-value message
+                # if we can identify the offending field from the
+                # fields the caller actually wrote.
+                offending_value = self._extract_unique_value(fields)
+                offending_field = self._identify_unique_field(str(exc).lower())
+                if offending_field is None:
+                    # Fall back to the first field the caller wrote —
+                    # best-effort when the dialect message is opaque.
+                    offending_field = next(iter(fields.keys()), "value")
+                raise ValueError(
+                    f"A db_connection with {offending_field}={offending_value!r} already exists"
+                ) from exc
             session.refresh(config)
 
             logger.info(
@@ -230,6 +267,67 @@ class DbConnectionRepository:
                 f"fields={applied_fields}"
             )
             return config
+
+    @staticmethod
+    def _extract_unique_value(fields: dict[str, Any]) -> Any:
+        """Pick the most-likely duplicate value from the fields dict.
+
+        Used by the IntegrityError handler to populate the error
+        message. We don't know which field triggered the violation
+        from the fields alone — the database raises it after the
+        commit — so we look at the SQLAlchemy error first via
+        :meth:`_identify_unique_field`, and only fall back to the
+        first supplied field when that fails.
+
+        Args:
+            fields: The kwargs the caller passed to
+                ``update_connection``.
+
+        Returns:
+            The value the caller supplied for the offending field, or
+            ``"<unknown>"`` if no fields were supplied.
+        """
+        if not fields:
+            return "<unknown>"
+        # First non-protected field is the best heuristic when the
+        # dialect-specific error message doesn't name the field.
+        for key, value in fields.items():
+            if key not in DbConnectionRepository._PROTECTED_UPDATE_FIELDS:
+                return value
+        return next(iter(fields.values()))
+
+    @staticmethod
+    def _identify_unique_field(err_lower: str) -> str | None:
+        """Identify the field name from a SQLAlchemy IntegrityError message.
+
+        Tries to match the common SQLite/PostgreSQL message patterns:
+
+        * SQLite: ``"UNIQUE constraint failed: db_connections.<field>"``
+        * PostgreSQL: ``"duplicate key value violates unique constraint
+          \"...\"`` — the constraint name encodes the field; we look for
+          well-known field names as a fallback.
+
+        Args:
+            err_lower: Lowercased ``str(exc)`` from the IntegrityError.
+
+        Returns:
+            The suspected field name, or ``None`` if no match.
+        """
+        # SQLite pattern: "unique constraint failed: db_connections.<field>"
+        marker = "unique constraint failed: db_connections."
+        idx = err_lower.find(marker)
+        if idx != -1:
+            tail = err_lower[idx + len(marker):]
+            # Take the first comma-separated token (SQLite lists all
+            # columns of a composite UNIQUE index).
+            return tail.split(",")[0].strip() or None
+        # PostgreSQL pattern: try the constraint-name conventions used
+        # in the migration files (e.g. "uq_db_connections_<field>").
+        # If the error mentions a field by name directly, prefer that.
+        for candidate in ("connection_name", "host", "port"):
+            if candidate in err_lower:
+                return candidate
+        return None
 
     def delete(self, connection_name: str) -> bool:
         """Delete a connection configuration by name.

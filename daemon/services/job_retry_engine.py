@@ -177,86 +177,163 @@ class JobRetryEngine:
         config: JobSystemConfig = None,
     ) -> JobItem | None:
         """Attempt to retry a failed job atomically.
-        
-        This method executes in a single SQLite session/transaction:
-        1. Read the job from the session
-        2. If job is None or not FAILED, return None
-        3. Call should_retry():
-           - If True: Calculate backoff, compute next_retry_at, transition FAILED->PENDING
-           - If False: Call dlq_service.move_to_dlq() with the same session
-        4. session.commit()
-        5. Return the updated job (or None if moved to DLQ)
-        
+
+        Audit H5 fix (P1): the prior implementation read the job into
+        a Python-side ORM session, performed ``retry_count += 1`` in
+        Python, and committed. Under concurrent retry decisions
+        (retry sweep + explicit retry from ``JobFeedbackObserver``)
+        two callers both observed ``retry_count = N``, both computed
+        ``N + 1``, and both wrote ``N + 1`` — the true ``N + 2``
+        increment was lost. Retry-exhaustion decisions were then
+        off-by-one and a job could be retried past ``max_retries``.
+
+        New flow (status guard + atomic retry_count++ in SQL):
+
+        1. Read the job for **decision only** (status check,
+           ``should_retry()``, ``calculate_backoff()``, and
+           ``get_max_retries()`` — which carries the fallback chain
+           ``job.max_retries → queue.default_max_retries →
+           config.default_max_retries → 3``). No mutation.
+        2. If ``should_retry`` is True:
+           * Compute ``next_retry_at`` from
+             ``calculate_backoff(current_retry_count)``.
+           * Compute effective ``max_retries`` for the SQL guard.
+           * Call ``JobRepository.atomic_retry``, which issues a
+             single guarded UPDATE
+             ``SET status='pending', retry_count=retry_count+1, ...
+              WHERE job_id=:job_id AND status='failed'
+                    AND retry_count < :max_retries``.
+             Two concurrent callers cannot both succeed — the SQL
+             predicates are re-evaluated after the row lock is
+             acquired (PostgreSQL EvalPlanQual) or the
+             single-statement UPDATE is atomic at the database
+             level (SQLite). Returns ``None`` if the row's status
+             flipped concurrently (CANCELLED / DEAD_LETTER) or
+             ``retry_count`` already hit ``max_retries``.
+           * If ``atomic_retry`` returns ``None``, the job was
+             concurrently mutated — return ``None`` (no DLQ retry
+             here, the caller that flipped the status owns the
+             transition).
+        3. If ``should_retry`` is False (retries exhausted):
+           * Call ``DeadLetterService.move_to_dlq`` (which already
+             holds a row lock + status check, see
+             ``daemon/services/dead_letter_service.py``). The
+             ``UPDATE job_queue_items SET status='dead_letter'``
+             inside that helper is therefore safe — no additional
+             guard is required at this layer.
+
         Args:
             job_id: The job ID to retry.
             queue: Optional queue for queue-level defaults.
             config: Optional config override. Uses self._config if not provided.
-            
+
         Returns:
             The updated JobItem if retry was triggered, None if job not found,
-            not FAILED, or moved to DLQ.
+            not FAILED, concurrently cancelled / dead_lettered, or moved to DLQ.
         """
         from daemon.services.job_state_machine import job_state_machine
-        
+
+        # 1. Read-only decision pass. We do NOT mutate anything in
+        # this session — the actual retry is a single guarded
+        # UPDATE issued by JobRepository.atomic_retry below.
         with SQLModelSession(self._job_repo.engine) as session:
             from daemon.repositories.job_queue.models import JobItem
-            
-            # Read the job from the session
+
             job = session.get(JobItem, job_id)
-            
+
             if job is None:
                 return None
-            
+
             if job.status != "failed":
                 return None
-            
-            # Check if we should retry or move to DLQ
-            if self.should_retry(job, queue, config):
-                # Calculate backoff and next_retry_at
-                delay_seconds = self.calculate_backoff(job.retry_count, config)
-                next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
-                next_retry_at = next_retry.isoformat()
-                
-                # Validate transition is allowed
-                job_state_machine.validate_transition("failed", "pending")
-                
-                # Update job status and fields
-                job.status = "pending"
-                job.retry_count += 1
-                job.next_retry_at = next_retry_at
-                job.failed_at = None  # clear for next attempt
-                job.error_message = None  # clear error for fresh retry
-                
-                session.commit()
-                session.refresh(job)
-                
-                logger.info(
-                    f"Job {job_id} scheduled for retry (attempt {job.retry_count}), "
-                    f"next_retry_at={next_retry_at}"
+
+        # 2. Decide retry vs DLQ. should_retry() and the backoff /
+        # max_retries helpers operate on the in-memory JobItem
+        # snapshot — that's fine, they're decision-only and the
+        # SQL-level guard in atomic_retry is the actual race-safety
+        # boundary.
+        if self.should_retry(job, queue, config):
+            # Backoff is computed from the CURRENT retry_count
+            # (before increment) — matches the prior Python
+            # implementation's semantics exactly.
+            delay_seconds = self.calculate_backoff(job.retry_count, config)
+            next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+            next_retry_at = next_retry.isoformat()
+
+            # Resolve effective max_retries via the fallback chain
+            # so the SQL guard matches the decision.
+            max_retries = self.get_max_retries(job, queue, config)
+
+            # Validate transition is allowed (cheap fail-fast before
+            # opening a session / issuing the UPDATE).
+            job_state_machine.validate_transition("failed", "pending")
+
+            # 3. Atomic UPDATE with status + retry_count guards.
+            updated_job = self._job_repo.atomic_retry(
+                job_id=job_id,
+                max_retries=max_retries,
+                next_retry_at=next_retry_at,
+            )
+
+            if updated_job is None:
+                # The row's status flipped (concurrent CANCELLED or
+                # DEAD_LETTER) between our read and the UPDATE, or
+                # retry_count already reached max_retries. In all
+                # three cases, no further action is taken here —
+                # the owning writer is responsible for the next
+                # transition.
+                logger.debug(
+                    "Job %s atomic retry no-op (concurrent transition "
+                    "or retry_count at cap)",
+                    job_id,
                 )
-                
-                return job
-            else:
-                # No more retries - move to DLQ
-                try:
-                    self._dlq_service.move_to_dlq(session, job_id, reason="MAX_RETRIES")
-                    session.commit()
-                    logger.info(f"Job {job_id} moved to DLQ after {job.retry_count} retries")
-                    
-                    # Notify watchers after successful DLQ commit
-                    if self._job_queue_service and self._loop and self._loop.is_running():
-                        asyncio.run_coroutine_threadsafe(
-                            self._job_queue_service.notify_watchers(job_id, "dead_letter", job.error_message),
-                            self._loop,
-                        )
-                except Exception as e:
-                    session.rollback()
-                    logger.error(
-                        f"Failed to move job {job_id} to DLQ, rolled back: {e}"
-                    )
-                    raise
-                
                 return None
+
+            logger.info(
+                f"Job {job_id} scheduled for retry (attempt {updated_job.retry_count}), "
+                f"next_retry_at={next_retry_at}"
+            )
+
+            return updated_job
+
+        # 4. Retries exhausted — move to DLQ.
+        # DeadLetterService.move_to_dlq holds a row lock
+        # (with_for_update) and re-checks status == 'failed' under
+        # the lock, so the FAILED → DEAD_LETTER transition is safe
+        # against concurrent retries / cancellations. The atomic
+        # UPDATE inside atomic_retry above (which also enforces
+        # status='failed' + retry_count < max_retries) and the lock
+        # + status check inside move_to_dlq together cover the full
+        # maybe_retry → DLQ path.
+        try:
+            with SQLModelSession(self._job_repo.engine) as session:
+                self._dlq_service.move_to_dlq(session, job_id, reason="MAX_RETRIES")
+                session.commit()
+
+            # Re-read after commit to capture the dead-letter state
+            # for notification context (error_message, retry_count).
+            with SQLModelSession(self._job_repo.engine) as session:
+                notified = session.get(JobItem, job_id)
+                error_msg = notified.error_message if notified else None
+
+            logger.info(
+                f"Job {job_id} moved to DLQ after "
+                f"{notified.retry_count if notified else '?'} retries"
+            )
+
+            # Notify watchers after successful DLQ commit
+            if self._job_queue_service and self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(
+                    self._job_queue_service.notify_watchers(job_id, "dead_letter", error_msg),
+                    self._loop,
+                )
+        except Exception as e:
+            logger.error(
+                f"Failed to move job {job_id} to DLQ, rolled back: {e}"
+            )
+            raise
+
+        return None
     
     def find_retryable_jobs(self, project_id: str | None = None) -> list[JobItem]:
         """Find FAILED jobs ready for retry (next_retry_at <= now).

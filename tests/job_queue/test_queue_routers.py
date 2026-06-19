@@ -633,12 +633,7 @@ class TestQueueDelete:
         )
         
         # Update status to PROCESSING
-        from daemon.repositories.job_queue.models import JobStatus
-        job_repository.update(
-            job.job_id,
-            status=JobStatus.PROCESSING.value,
-            started_at="2024-01-01T00:00:00",
-        )
+        job_repository.start_job_atomic(job.job_id, "test-instance")
         
         # Try to delete the queue
         response = client.delete(f"/projects/test-project/queues/{queue_id}")

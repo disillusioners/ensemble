@@ -544,27 +544,168 @@ class JobRepository:
 
             return job
 
+    def atomic_retry(
+        self,
+        job_id: str,
+        max_retries: int,
+        next_retry_at: str,
+    ) -> JobItem | None:
+        """Atomically retry a failed job.
+
+        Single guarded UPDATE::
+
+            UPDATE job_queue_items
+            SET status = 'pending',
+                retry_count = retry_count + 1,   -- atomic SQL increment
+                next_retry_at = :next_retry_at,
+                failed_at = NULL,
+                error_message = NULL
+            WHERE job_id = :job_id
+              AND status = 'failed'
+              AND retry_count < :max_retries
+            RETURNING *
+
+        The SQL-level ``status = 'failed' AND retry_count < :max_retries``
+        guard is the race-safety boundary. PostgreSQL EvalPlanQual
+        re-evaluates the predicate after acquiring the row lock (so a
+        concurrent writer that flipped the status between the
+        caller's read and this UPDATE cannot slip past us); SQLite's
+        single-statement UPDATE is atomic at the database level.
+        The ``retry_count = retry_count + 1`` expression lets the
+        database compute the increment atomically — no
+        read-modify-write race where two concurrent callers could
+        both observe ``retry_count = N`` and both write ``N + 1``.
+
+        Args:
+            job_id: The job to retry.
+            max_retries: Effective retry cap (resolved by the caller
+                via the fallback chain ``job.max_retries`` →
+                ``queue.default_max_retries`` →
+                ``config.default_max_retries``). Used as the SQL
+                guard: if the row's ``retry_count`` has already
+                reached this value the UPDATE is a no-op.
+            next_retry_at: ISO timestamp for the next retry attempt
+                (already backoff-computed by the caller).
+
+        Returns:
+            The updated ``JobItem`` after the UPDATE commits, or
+            ``None`` if no row matched — i.e. the job does not
+            exist, its status is no longer ``failed`` (concurrent
+            ``CANCELLED`` / ``DEAD_LETTER`` transition), or its
+            ``retry_count`` has already reached ``max_retries``.
+            Callers treat ``None`` uniformly as "skip retry".
+        """
+        with SQLModelSession(self.engine) as session:
+            # Atomic guarded UPDATE. ``retry_count = retry_count + 1``
+            # is a SQL expression (not a Python read-then-add), so the
+            # increment happens server-side and is not subject to a
+            # read-modify-write race. The ``status = 'failed'`` clause
+            # is what makes concurrent retries safe: after the first
+            # writer commits, the row's status is ``'pending'`` and the
+            # second writer's UPDATE matches zero rows.
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.status == JobStatus.FAILED.value)
+                .where(JobItem.retry_count < max_retries)
+                .values(
+                    status=JobStatus.PENDING.value,
+                    retry_count=JobItem.retry_count + 1,
+                    next_retry_at=next_retry_at,
+                    failed_at=None,
+                    error_message=None,
+                )
+            )
+            result = session.exec(stmt)
+            session.commit()
+
+            if result.rowcount == 0:
+                # UPDATE matched no rows. Three possibilities, all
+                # indistinguishable from the UPDATE alone — and all
+                # collapse to "no-op, do not retry":
+                #   (a) ``job_id`` doesn't exist at all,
+                #   (b) the job exists but its status is no longer
+                #       ``'failed'`` (concurrent ``CANCELLED`` /
+                #       ``DEAD_LETTER`` transition),
+                #   (c) the job exists but ``retry_count >= max_retries``
+                #       (already at the cap).
+                # The caller treats ``None`` uniformly as "skip retry",
+                # so no further disambiguation is required here.
+                logger.debug(
+                    "atomic_retry no-op for %s (missing, concurrent "
+                    "transition, or retry_count at cap)",
+                    job_id,
+                )
+                return None
+
+            # Re-read the row to return a fully-populated ``JobItem``
+            # (mirrors ``atomic_transition`` / ``start_job``).
+            job = session.get(JobItem, job_id)
+            if job is None:
+                # Vanishingly unlikely race: row was deleted between
+                # the UPDATE and the SELECT. Preserve the "return None
+                # for missing job" contract rather than raising.
+                return None
+
+            logger.info(
+                "Job retry scheduled: %s | retry_count=%s | next_retry_at=%s",
+                job_id,
+                job.retry_count,
+                next_retry_at,
+            )
+
+            return job
+
     # --------------------------------------------------------
     # UPDATE
     # --------------------------------------------------------
 
     def update(self, job_id: str, **updates) -> JobItem | None:
         """Update a job's fields.
-        
+
+        Defense-in-depth guard: callers must NOT pass ``status=`` here.
+        Status changes are routed through :meth:`atomic_transition`
+        (and its convenience wrappers ``start_job`` /
+        ``start_job_atomic`` / ``complete_job`` / ``fail_job`` /
+        ``cancel_job`` / ``terminate_job``) so the SQL-level
+        ``WHERE status = :from_status`` guard prevents concurrent
+        clobbering of terminal statuses. Bypassing that path by
+        writing ``status`` directly here would reintroduce the very
+        race the atomic-transition fix was designed to eliminate.
+
+        Any field other than ``status`` is updated as a plain ORM
+        setattr — these updates are not part of the state-machine
+        contract (e.g. ``priority``, ``message``, ``job_metadata``)
+        and are safe to write directly. The ``JobItem.version``
+        column provides additional cross-process optimistic locking
+        for those ORM-flushed writes via SQLAlchemy's
+        ``version_id_col`` machinery.
+
         Args:
             job_id: Job identifier.
-            **updates: Fields to update.
-            
+            **updates: Fields to update. ``status`` is rejected — use
+                :meth:`atomic_transition` (or one of its wrappers)
+                instead.
+
         Returns:
             Updated JobItem if found, None otherwise.
+
+        Raises:
+            ValueError: If ``status`` is supplied via ``updates`` (use
+                :meth:`atomic_transition` for status changes).
         """
+        if "status" in updates:
+            raise ValueError(
+                "Use atomic_transition for status changes "
+                "(see JobRepository.atomic_transition / "
+                "start_job_atomic / complete_job / fail_job / "
+                "cancel_job / terminate_job)"
+            )
+
         with SQLModelSession(self.engine) as db_session:
             job = db_session.get(JobItem, job_id)
             if job is None:
                 return None
-
-            if 'status' in updates and not JobStatus.is_valid(updates['status']):
-                raise ValueError(f"Invalid status: {updates['status']}")
 
             for key, value in updates.items():
                 if hasattr(job, key):

@@ -85,6 +85,11 @@ class DeadLetterService:
         Uses pessimistic locking (FOR UPDATE) to prevent TOCTOU race conditions
         when multiple processes try to move the same job to DLQ.
         
+        Defense-in-depth: the status UPDATE additionally carries a
+        ``WHERE status = 'failed'`` guard so that a concurrent writer
+        which somehow slipped past the row lock (or a future caller that
+        bypasses the Python check) cannot clobber a non-failed status.
+        
         Args:
             session: An existing SQLModel Session (shared transaction).
             job_id: The job to move.
@@ -97,6 +102,7 @@ class DeadLetterService:
             ValueError: If job not found or not in FAILED state.
         """
         from sqlalchemy.exc import IntegrityError
+        from sqlmodel import update as sqlmodel_update
         from daemon.repositories.job_queue.models import JobItem
         
         # Use FOR UPDATE to acquire pessimistic row lock, preventing TOCTOU race
@@ -134,8 +140,26 @@ class DeadLetterService:
             # Add DLQ item to session
             session.add(dlq_item)
             
-            # Update job status to dead_letter
-            job.status = "dead_letter"
+            # SQL-level status guard (defense-in-depth). The FOR UPDATE
+            # lock + Python check above are the primary guard; this
+            # WHERE status='failed' clause ensures that a concurrent
+            # writer which slipped past the lock cannot silently
+            # transition a non-failed job. Mirrors the gold-template
+            # pattern in JobRepository.atomic_transition.
+            update_result = session.exec(
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.status == "failed")
+                .values(status="dead_letter")
+            )
+            
+            if update_result.rowcount == 0:
+                # Concurrent process flipped this job out of 'failed'
+                # between our Python check and this UPDATE. Detach the
+                # pending DLQ item so the caller's commit does not
+                # insert a DLQ row for a job that is no longer failed.
+                session.expunge(dlq_item)
+                raise JobNotInFailedStateError(job_id, job.status)
             
             # Let the caller commit the session
             return dlq_item
@@ -171,7 +195,7 @@ class DeadLetterService:
             JobNotInFailedStateError: If job is not in FAILED state (including concurrent modification).
         """
         from sqlalchemy.exc import IntegrityError
-        from sqlmodel import Session as SQLModelSession
+        from sqlmodel import Session as SQLModelSession, update as sqlmodel_update
         from daemon.repositories.job_queue.models import JobItem
         
         with SQLModelSession(self._job_repo.engine) as session:
@@ -209,8 +233,27 @@ class DeadLetterService:
                 # Add DLQ item to session
                 session.add(dlq_item)
                 
-                # Update job status to dead_letter
-                job.status = "dead_letter"
+                # SQL-level status guard (defense-in-depth). The FOR UPDATE
+                # lock + Python check above are the primary guard; this
+                # WHERE status='failed' clause ensures a concurrent writer
+                # which slipped past the lock cannot silently transition a
+                # non-failed job. Mirrors the gold-template pattern in
+                # JobRepository.atomic_transition.
+                update_result = session.exec(
+                    sqlmodel_update(JobItem)
+                    .where(JobItem.job_id == job_id)
+                    .where(JobItem.status == "failed")
+                    .values(status="dead_letter")
+                )
+                
+                if update_result.rowcount == 0:
+                    # Concurrent process flipped this job out of 'failed'
+                    # between our Python check and this UPDATE. Detach the
+                    # pending DLQ item and roll back this standalone
+                    # transaction so no partial state is committed.
+                    session.expunge(dlq_item)
+                    session.rollback()
+                    raise JobNotInFailedStateError(job_id, job.status)
                 
                 # Commit both operations atomically
                 session.commit()
@@ -242,6 +285,14 @@ class DeadLetterService:
         Uses pessimistic locking (FOR UPDATE) on the DLQ item to prevent
         concurrent replays of the same DLQ item.
         
+        Defense-in-depth: the job status UPDATE additionally carries a
+        ``WHERE status = 'dead_letter'`` guard so that a concurrent
+        writer which somehow slipped past the row lock (or a future
+        caller that bypasses the Python check) cannot clobber a
+        non-dead_letter status. All retry/clear fields are reset in the
+        SAME guarded UPDATE — there is no ORM-level read-modify-write
+        window for a concurrent ``atomic_retry`` to slip into.
+        
         Args:
             dlq_id: The DLQ item to replay.
             
@@ -251,7 +302,7 @@ class DeadLetterService:
         Raises:
             DLQItemNotFoundError: If DLQ item not found.
         """
-        from sqlmodel import Session as SQLModelSession
+        from sqlmodel import Session as SQLModelSession, update as sqlmodel_update
         from daemon.repositories.job_queue.models import JobItem, DeadLetterItem
         
         with SQLModelSession(self._job_repo.engine) as session:
@@ -276,23 +327,52 @@ class DeadLetterService:
                     to_status="pending",
                 )
             
-            # Update job status to pending (reset retry fields)
-            job.status = "pending"
-            job.retry_count = 0
-            job.failed_at = None
-            job.error_message = None
-            job.started_at = None
-            job.completed_at = None
-            job.instance_id = None
+            # Atomic UPDATE with status guard (defense-in-depth). All
+            # retry/clear fields are reset in the SAME guarded UPDATE —
+            # no ORM-level read-modify-write window for a concurrent
+            # atomic_retry to slip into. Mirrors the gold-template
+            # pattern in JobRepository.atomic_transition.
+            update_result = session.exec(
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.status == "dead_letter")
+                .values(
+                    status="pending",
+                    retry_count=0,
+                    failed_at=None,
+                    error_message=None,
+                    started_at=None,
+                    completed_at=None,
+                    instance_id=None,
+                )
+            )
+            
+            if update_result.rowcount == 0:
+                # Concurrent process flipped this job out of 'dead_letter'
+                # between our Python check and this UPDATE.
+                from daemon.services.job_state_machine import InvalidTransitionError
+                raise InvalidTransitionError(
+                    job_id=job_id,
+                    from_status=job.status,
+                    to_status="pending",
+                )
             
             # Delete the DLQ item
             session.delete(dlq_item)
             
             # Commit both operations atomically
             session.commit()
-            session.refresh(job)
             
-            return job
+            # Re-read the updated job to return a fully-populated JobItem
+            # (mirrors the gold-template `transition_status_if` approach).
+            replayed_job = session.get(JobItem, job_id)
+            if replayed_job is None:
+                # Vanishingly unlikely race: row was deleted between the
+                # UPDATE and the SELECT. Preserve the "raise on missing
+                # job" contract.
+                raise DLQItemNotFoundError(dlq_id)
+            
+            return replayed_job
     
     def list_dlq(
         self,
