@@ -570,6 +570,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # gives us the post-update value for an honest log line — under
         # concurrent decrements a separate SELECT could read a value
         # already past the increment we're about to log.
+        from datetime import datetime, timezone as _tz
         from sqlalchemy import text as _sa_text
         from sqlmodel import Session
         from ..repositories.instance.models import Instance
@@ -577,6 +578,56 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
             target_instance = session.get(Instance, instance_id)
             if target_instance and target_instance.parent_id == current_instance_id:
+                # ─── Change 3: Revive prematurely-COMPLETED parent ───
+                # The job track (correlation_manager → job_feedback_observer)
+                # can mark the parent instance as COMPLETED even though the
+                # orchestrator will spawn more children in later rounds.
+                # When the orchestrator calls ``send_message`` for a new
+                # child, revive the instance back to RUNNING before
+                # incrementing ``waiting_for`` — the instance has more
+                # work to do and cannot be terminal. Only revive from
+                # COMPLETED (the premature-completion status); other
+                # terminal statuses (ERROR / FAILED / TERMINATED) represent
+                # genuine failures and must NOT be silently resurrected.
+                #
+                # The revival and the ``waiting_for`` increment share the
+                # same ``WriteGuardSession`` and ``session.commit()`` below,
+                # so they commit atomically. The ``AND status = :completed``
+                # guard makes the UPDATE a no-op if a concurrent actor
+                # already revived the instance (defense against TOCTOU).
+                parent_inst = session.get(Instance, current_instance_id)
+                if (
+                    parent_inst is not None
+                    and parent_inst.status == InstanceStatus.COMPLETED.value
+                ):
+                    _now_str = datetime.now(_tz.utc).isoformat()
+                    _revive_result = session.execute(
+                        _sa_text(
+                            "UPDATE instances "
+                            "SET status = :running, "
+                            "    updated_at = :now, "
+                            "    last_activity_at = :now, "
+                            "    version = COALESCE(version, 1) + 1 "
+                            "WHERE instance_id = :pid "
+                            "AND status = :completed "
+                            "RETURNING version"
+                        ),
+                        {
+                            "pid": current_instance_id,
+                            "running": InstanceStatus.RUNNING.value,
+                            "completed": InstanceStatus.COMPLETED.value,
+                            "now": _now_str,
+                        },
+                    )
+                    _revive_row = _revive_result.first()
+                    if _revive_row is not None:
+                        logger.warning(
+                            f"Revived prematurely-COMPLETED parent "
+                            f"{current_instance_id[:8]}... → RUNNING "
+                            f"(spawning new child {instance_id[:8]}..., "
+                            f"version={_revive_row[0]})"
+                        )
+
                 result = session.execute(
                     _sa_text(
                         "UPDATE instances "

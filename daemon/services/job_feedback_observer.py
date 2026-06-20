@@ -1159,15 +1159,64 @@ class JobFeedbackObserver:
                     instance_was_terminal=False,
                 )
 
-        now = datetime.now(timezone.utc).isoformat()
-        now_dt = datetime.now(timezone.utc)
-        released = 0
-
         # ─── Single WriteGuardSession for ALL three DB writes ───
         with WriteGuardSession(
             Session(self._instance_manager.engine),
             self._instance_manager.write_guard,
         ) as session:
+            # ─── In-session waiting_for gate (premature-completion fix) ───
+            # The CM tracks per-message-batch correlations. When its pending
+            # set reaches zero it fires the callback — but ``send_message``
+            # increments ``waiting_for`` BEFORE registering the CM
+            # correlation, creating a window where ``waiting_for > 0`` and
+            # ``cm_pending == 0`` simultaneously. Reading ``waiting_for``
+            # INSIDE the same WriteGuardSession (before Step 1's job UPDATE)
+            # catches that race atomically — the SQLAlchemy session identity
+            # map guarantees the same row is read here and mutated in Step 2,
+            # eliminating the prior TOCTOU window.
+            #
+            # If the orchestrator still has active children, defer
+            # finalization for BOTH the job and the instance — they stay
+            # coupled. The CM will fire the callback again when the new wave
+            # resolves (send_message registers a fresh correlation), at
+            # which point ``waiting_for`` will be 0 and the transition
+            # proceeds normally.
+            try:
+                _gate_instance = session.get(Instance, instance_id)
+                if _gate_instance is not None:
+                    _wf_gate = (
+                        getattr(_gate_instance, "waiting_for", None) or 0
+                    )
+                    if _wf_gate > 0:
+                        logger.info(
+                            f"Observer: aborting terminal transition for "
+                            f"{instance_id[:8]}... — waiting_for="
+                            f"{_wf_gate} > 0 (orchestrator has active "
+                            f"children, deferring finalization)"
+                        )
+                        return _FinalizeJobResult(
+                            skip=True,
+                            terminal_status=None,
+                            job_id=None,
+                            instance_id=None,
+                            parent_id=None,
+                            agent_id=None,
+                            result_summary=None,
+                            error_message=None,
+                            locks_released=0,
+                            instance_was_terminal=False,
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"Observer: failed to read instance for waiting_for "
+                    f"gate ({instance_id[:8]}...): {e}"
+                )
+                # Fall through — better to finalize than to silently wedge
+                # the job in PROCESSING forever.
+
+            now = datetime.now(timezone.utc).isoformat()
+            now_dt = datetime.now(timezone.utc)
+
             # ─── Step 1: Job atomic transition (in-session UPDATE) ───
             # Mirrors ``JobRepository.atomic_transition`` but inside our
             # WriteGuardSession so it commits with steps 2/3 below. The UPDATE
