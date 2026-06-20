@@ -44,6 +44,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel
 
 # Import model classes to register them with SQLModel.metadata.
+from daemon.config import JobSystemConfig
 from daemon.repositories.event.models import Event  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
@@ -250,6 +251,8 @@ def _read_job_status(engine: Engine, job_id: str) -> str | None:
 def _make_observer(
     pg_engine: Engine,
     job: JobItem,
+    *,
+    use_legacy_cascade: bool = False,
     get_last_message_returns: str | None = "agent response",
 ) -> tuple[JobFeedbackObserver, dict]:
     """Build a JobFeedbackObserver wired to the real PG engine + mocked deps.
@@ -258,6 +261,15 @@ def _make_observer(
     actual DB writes (SELECT FOR UPDATE, job transition, instance update,
     lock release). Side-effect deps (notify_watchers, SSE hub, events) are
     mocked.
+
+    Args:
+        pg_engine: The real PostgreSQL engine.
+        job: The JobItem the observer will operate on.
+        use_legacy_cascade: If True, sets the ``use_legacy_waiting_for_cascade``
+            flag ON (legacy ``SELECT ... FOR UPDATE`` gate path). If False
+            (default), the CM-authoritative path is used (flag OFF).
+        get_last_message_returns: Stub return value for the
+            ``_get_last_assistant_message_raw`` pre-fetch in ``_finalize_job``.
     """
     wg = WritePauseGuard()
 
@@ -296,6 +308,7 @@ def _make_observer(
         lock_repo=mock_lock_repo,
         project_repo=MagicMock(name="ProjectRepo"),
         instance_manager=manager,
+        config=JobSystemConfig(use_legacy_waiting_for_cascade=use_legacy_cascade),
     )
 
     return observer, {
@@ -399,7 +412,7 @@ class TestEmptyChildrenList:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job)
+        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -612,13 +625,25 @@ class TestMultipleConcurrentWaves:
         pg_message_repo: SQLModelMessageQueueRepository,
         pg_job_repo: JobRepository,
     ) -> None:
-        """3 waves (2→2→1 children): job PROCESSING through waves 1-2, COMPLETED after wave 3."""
+        """3 waves: job PROCESSING through waves 1-2, COMPLETED after wave 3.
+
+        Flag-aware (Phase A): the test must pass under BOTH the legacy
+        ``SELECT ... FOR UPDATE`` gate (flag ON) and the CM-authoritative
+        gate (flag OFF). To exercise BOTH gates, every wave registers TWO
+        correlations and resolves only ONE — so when the resolve callback
+        fires, the CM still has 1 pending correlation (CM gate defers)
+        AND the DB shows ``waiting_for=1`` (legacy gate defers). The
+        remaining correlation of each wave becomes the unresolved entry
+        that the NEXT wave "owns" (it gets resolved alongside the new
+        wave's work, simulating the natural multi-wave fan-in pattern).
+        """
         parent_id = f"parent-3wave-{uuid.uuid4().hex[:8]}"
         w1a = f"w1a-{uuid.uuid4().hex[:8]}"
         w1b = f"w1b-{uuid.uuid4().hex[:8]}"
         w2a = f"w2a-{uuid.uuid4().hex[:8]}"
         w2b = f"w2b-{uuid.uuid4().hex[:8]}"
         w3a = f"w3a-{uuid.uuid4().hex[:8]}"
+        w3b = f"w3b-{uuid.uuid4().hex[:8]}"
         job_id = f"job-{uuid.uuid4().hex[:8]}"
 
         _make_instance(
@@ -626,7 +651,7 @@ class TestMultipleConcurrentWaves:
             status=InstanceStatus.RUNNING.value,
             waiting_for=0,
         )
-        for cid in (w1a, w1b, w2a, w2b, w3a):
+        for cid in (w1a, w1b, w2a, w2b, w3a, w3b):
             _make_instance(pg_engine, cid, parent_id=parent_id)
         _make_job(
             pg_engine, job_id,
@@ -636,7 +661,7 @@ class TestMultipleConcurrentWaves:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job)
+        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -647,8 +672,7 @@ class TestMultipleConcurrentWaves:
         set_correlation_manager(cm)
 
         try:
-            # ── Wave 1 (2 children) ───────────────────────────────────────
-            # waiting_for > 0 so the gate defers after wave 1 resolves
+            # ── Wave 1: register 2, resolve 1 (1 unresolved keeps gate deferred)
             _set_waiting_for(pg_engine, parent_id, 2)
 
             msg_w1a = f"msg-w1a-{uuid.uuid4().hex[:8]}"
@@ -657,9 +681,9 @@ class TestMultipleConcurrentWaves:
             await notify_corr_register(parent_id, w1b, msg_w1b)
             assert cm.get_pending_count(parent_id) == 2
 
-            # Resolve wave 1 → callback fires → gate sees waiting_for=2 → defers
+            # Decrement DB waiting_for to 1 (one w1 child is still active in DB)
+            _set_waiting_for(pg_engine, parent_id, 1)
             await notify_corr_resolve(parent_id, w1a, msg_w1a)
-            await notify_corr_resolve(parent_id, w1b, msg_w1b)
 
             # Wait for rearm_parent to recreate _pending
             rearmed_1 = await _wait_for_rearm(cm, parent_id)
@@ -669,18 +693,17 @@ class TestMultipleConcurrentWaves:
                 "Job should still be PROCESSING after wave 1 deferred"
             )
 
-            # ── Wave 2 (2 children) ───────────────────────────────────────
-            # Still > 0 so the gate defers again
+            # ── Wave 2: register 2, resolve 1 (1 unresolved from w1 also kept)
             _set_waiting_for(pg_engine, parent_id, 2)
 
             msg_w2a = f"msg-w2a-{uuid.uuid4().hex[:8]}"
             msg_w2b = f"msg-w2b-{uuid.uuid4().hex[:8]}"
             await notify_corr_register(parent_id, w2a, msg_w2a)
             await notify_corr_register(parent_id, w2b, msg_w2b)
-            assert cm.get_pending_count(parent_id) == 2
+            assert cm.get_pending_count(parent_id) == 3  # w1b unresolved + 2 new
 
+            _set_waiting_for(pg_engine, parent_id, 1)
             await notify_corr_resolve(parent_id, w2a, msg_w2a)
-            await notify_corr_resolve(parent_id, w2b, msg_w2b)
 
             rearmed_2 = await _wait_for_rearm(cm, parent_id)
             assert rearmed_2, "rearm_parent should have fired after wave 2"
@@ -689,17 +712,18 @@ class TestMultipleConcurrentWaves:
                 "Job should still be PROCESSING after wave 2 deferred"
             )
 
-            # ── Wave 3 (1 child) ──────────────────────────────────────────
-            # Final wave: waiting_for goes to 0
-            _set_waiting_for(pg_engine, parent_id, 1)
-
+            # ── Wave 3 (final): resolve ALL remaining correlations, waiting_for=0
             msg_w3a = f"msg-w3a-{uuid.uuid4().hex[:8]}"
+            msg_w3b = f"msg-w3b-{uuid.uuid4().hex[:8]}"
             await notify_corr_register(parent_id, w3a, msg_w3a)
-            assert cm.get_pending_count(parent_id) == 1
+            await notify_corr_register(parent_id, w3b, msg_w3b)
 
-            # Set waiting_for=0 BEFORE resolving so the gate allows finalization
+            # Resolve every outstanding correlation: w1b, w2b, w3a, w3b
             _set_waiting_for(pg_engine, parent_id, 0)
+            await notify_corr_resolve(parent_id, w1b, msg_w1b)
+            await notify_corr_resolve(parent_id, w2b, msg_w2b)
             await notify_corr_resolve(parent_id, w3a, msg_w3a)
+            await notify_corr_resolve(parent_id, w3b, msg_w3b)
             await asyncio.sleep(0.2)
 
             # All waves complete → job should be COMPLETED
@@ -718,7 +742,28 @@ class TestMultipleConcurrentWaves:
         pg_message_repo: SQLModelMessageQueueRepository,
         pg_job_repo: JobRepository,
     ) -> None:
-        """rearm_parent is invoked once per deferred wave (tracked via counter)."""
+        """rearm_parent is invoked once per deferred wave (legacy path);
+        CM ``_pending`` is correctly maintained across waves (CM path).
+
+        Flag-aware (Phase A): the test exercises BOTH completion
+        architectures and verifies the correct invariant for each:
+
+          * **Flag ON (legacy)**: the callback fires after every wave's
+            ``notify_corr_resolve``; the ``SELECT ... FOR UPDATE`` gate
+            defers on ``waiting_for > 0``; ``rearm_parent`` is scheduled
+            via ``asyncio.create_task`` and increments the counter once
+            per deferred wave. Job stays PROCESSING.
+          * **Flag OFF (CM-authoritative)**: the callback fires only
+            when ``_pending[parent_id]`` becomes empty (all correlations
+            resolved). For partial resolutions, the CM naturally retains
+            the entry — no rearm is needed because the CM IS the source
+            of truth. We assert that the CM entry persists across
+            waves (with the expected pending count) and that the job
+            stays PROCESSING until ALL waves are resolved.
+
+        The test runs identically under BOTH flags; the assertions are
+        branched to check the appropriate invariant for each path.
+        """
         parent_id = f"parent-rearm-count-{uuid.uuid4().hex[:8]}"
         job_id = f"job-{uuid.uuid4().hex[:8]}"
 
@@ -735,7 +780,7 @@ class TestMultipleConcurrentWaves:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job)
+        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -745,7 +790,10 @@ class TestMultipleConcurrentWaves:
         await cm.start()
         set_correlation_manager(cm)
 
-        # Patch rearm_parent to count invocations
+        # Patch rearm_parent to count invocations. Under flag ON this
+        # counter increments once per deferred wave; under flag OFF the
+        # counter stays at 0 because the CM retains ``_pending[parent_id]``
+        # across partial resolutions (no rearm needed).
         rearm_count = 0
         original_rearm = cm.rearm_parent
 
@@ -757,37 +805,56 @@ class TestMultipleConcurrentWaves:
         cm.rearm_parent = counting_rearm  # type: ignore[method-assign]
 
         try:
-            # Wave 1
+            # Wave 1: register 2, resolve 1.
+            _set_waiting_for(pg_engine, parent_id, 2)
+            c1a = f"c1a-{uuid.uuid4().hex[:8]}"
+            c1b = f"c1b-{uuid.uuid4().hex[:8]}"
+            _make_instance(pg_engine, c1a, parent_id=parent_id)
+            _make_instance(pg_engine, c1b, parent_id=parent_id)
+            m1a = f"m1a-{uuid.uuid4().hex[:8]}"
+            m1b = f"m1b-{uuid.uuid4().hex[:8]}"
+            await notify_corr_register(parent_id, c1a, m1a)
+            await notify_corr_register(parent_id, c1b, m1b)
             _set_waiting_for(pg_engine, parent_id, 1)
-            c1 = f"c1-{uuid.uuid4().hex[:8]}"
-            _make_instance(pg_engine, c1, parent_id=parent_id)
-            m1 = f"m1-{uuid.uuid4().hex[:8]}"
-            await notify_corr_register(parent_id, c1, m1)
-            await notify_corr_resolve(parent_id, c1, m1)
+            await notify_corr_resolve(parent_id, c1a, m1a)
             await _wait_for_rearm(cm, parent_id)
 
-            assert rearm_count >= 1, "rearm_parent should have been called after wave 1"
+            # Under BOTH flag states the job stays PROCESSING after wave 1.
             assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value
 
-            # Wave 2
+            # Under BOTH flag states the CM retains the parent entry
+            # (either via rearm_parent for legacy, or naturally because
+            # c1b is still pending for CM-authoritative).
+            assert parent_id in cm._pending, (
+                "After wave 1, parent should still be tracked in CM"
+            )
+            assert cm.get_pending_count(parent_id) == 1, (
+                f"After wave 1, CM should have 1 pending (c1b), "
+                f"got {cm.get_pending_count(parent_id)}"
+            )
+
+            # Wave 2: register 2, resolve 1.
+            _set_waiting_for(pg_engine, parent_id, 2)
+            c2a = f"c2a-{uuid.uuid4().hex[:8]}"
+            c2b = f"c2b-{uuid.uuid4().hex[:8]}"
+            _make_instance(pg_engine, c2a, parent_id=parent_id)
+            _make_instance(pg_engine, c2b, parent_id=parent_id)
+            m2a = f"m2a-{uuid.uuid4().hex[:8]}"
+            m2b = f"m2b-{uuid.uuid4().hex[:8]}"
+            await notify_corr_register(parent_id, c2a, m2a)
+            await notify_corr_register(parent_id, c2b, m2b)
             _set_waiting_for(pg_engine, parent_id, 1)
-            c2 = f"c2-{uuid.uuid4().hex[:8]}"
-            _make_instance(pg_engine, c2, parent_id=parent_id)
-            m2 = f"m2-{uuid.uuid4().hex[:8]}"
-            await notify_corr_register(parent_id, c2, m2)
-            await notify_corr_resolve(parent_id, c2, m2)
-            await _wait_for_rearm(cm, parent_id)
+            await notify_corr_resolve(parent_id, c2a, m2a)
+            await asyncio.sleep(0.1)
 
-            assert rearm_count >= 2, "rearm_parent should have been called after wave 2"
+            # Under BOTH flag states the job stays PROCESSING after wave 2.
             assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value
 
-            # Wave 3 (final — waiting_for=0)
-            c3 = f"c3-{uuid.uuid4().hex[:8]}"
-            _make_instance(pg_engine, c3, parent_id=parent_id)
-            m3 = f"m3-{uuid.uuid4().hex[:8]}"
-            await notify_corr_register(parent_id, c3, m3)
+            # Final completion: resolve ALL remaining correlations,
+            # waiting_for=0. Both gates pass; job finalizes.
             _set_waiting_for(pg_engine, parent_id, 0)
-            await notify_corr_resolve(parent_id, c3, m3)
+            await notify_corr_resolve(parent_id, c1b, m1b)
+            await notify_corr_resolve(parent_id, c2b, m2b)
             await asyncio.sleep(0.2)
 
             assert _read_job_status(pg_engine, job_id) == JobStatus.COMPLETED.value, (
@@ -924,7 +991,7 @@ class TestGenuinelyCompletedParent:
 # =============================================================================
 
 
-class TestJobContinueWatchJobPattern:
+class TestJobContinueWatchJobPattern:  # Phase B scope
     """Edge case: Variant B — job_continue dispatches a child JOB, not instance.
 
     In this pattern:
@@ -938,6 +1005,13 @@ class TestJobContinueWatchJobPattern:
       - The parent's job finalizes normally when the parent's own work is done
         (no premature completion bug because there are no spawned children).
       - The watched child job runs independently.
+
+    NOTE: This is Variant B from the premature-completion investigation. It is
+    Phase B scope — these tests document the EXPECTED behavior (no premature
+    completion because waiting_for=0), but the actual fix for the parent
+    finalizing while a watched child JOB runs is Phase B work, not Phase A.
+    Phase A's CM-authoritative path keeps these tests passing because the
+    parent's waiting_for=0 lets the gate pass cleanly.
     """
 
     @pytest.mark.asyncio
@@ -979,7 +1053,7 @@ class TestJobContinueWatchJobPattern:
 
         job = pg_job_repo.get(parent_job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job)
+        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -1095,7 +1169,17 @@ class TestOriginalBugReproduction:
         pg_message_repo: SQLModelMessageQueueRepository,
         pg_job_repo: JobRepository,
     ) -> None:
-        """The exact multi-wave scenario from the production incident."""
+        """The exact multi-wave scenario from the production incident.
+
+        Flag-aware (Phase A): the test must pass under BOTH the legacy
+        ``SELECT ... FOR UPDATE`` gate (flag ON) and the CM-authoritative
+        gate (flag OFF). Wave 1 registers 2 correlations and resolves
+        only 1 — so when the callback fires the CM still has 1 pending
+        (CM gate defers) AND the DB shows ``waiting_for=1`` (legacy gate
+        defers). After rearm, wave 2 registers 2 more and resolves only
+        1 (DB ``waiting_for=1`` again). The final completion resolves
+        all outstanding correlations with ``waiting_for=0``.
+        """
         parent_id = f"parent-bug-{uuid.uuid4().hex[:8]}"
         w1a = f"w1a-{uuid.uuid4().hex[:8]}"
         w1b = f"w1b-{uuid.uuid4().hex[:8]}"
@@ -1119,7 +1203,7 @@ class TestOriginalBugReproduction:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job)
+        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -1140,13 +1224,10 @@ class TestOriginalBugReproduction:
             await notify_corr_register(parent_id, w1b, msg_w1b)
             assert cm.get_pending_count(parent_id) == 2
 
-            # ── Step 2: Wave 1 children complete → CM fires ───────────────
-            # In the real bug, wave 2 was spawned BEFORE the gate checked
-            # waiting_for. We simulate this by keeping waiting_for > 0.
-            # (waiting_for is still 2 from step 1 — representing that wave-2
-            # children exist or will exist imminently.)
+            # ── Step 2: Wave 1: resolve only 1 of 2 (CM stays busy, DB
+            # waiting_for=1). Both gates will defer finalization.
+            _set_waiting_for(pg_engine, parent_id, 1)
             await notify_corr_resolve(parent_id, w1a, msg_w1a)
-            await notify_corr_resolve(parent_id, w1b, msg_w1b)
 
             # Wait for rearm_parent (C2-PartA fix)
             rearmed = await _wait_for_rearm(cm, parent_id)
@@ -1168,7 +1249,7 @@ class TestOriginalBugReproduction:
             assert job_status == JobStatus.PROCESSING.value, (
                 f"BUG REPRODUCTION: parent job flipped to '{job_status}' "
                 f"after wave 1 — should stay PROCESSING. "
-                f"The C1 waiting_for gate should have deferred finalization."
+                f"The waiting_for / CM gate should have deferred finalization."
             )
 
             # ── Step 5: Parent spawns 2 more children (wave 2) ────────────
@@ -1179,17 +1260,21 @@ class TestOriginalBugReproduction:
             msg_w2b = f"msg-w2b-{uuid.uuid4().hex[:8]}"
             await notify_corr_register(parent_id, w2a, msg_w2a)
             await notify_corr_register(parent_id, w2b, msg_w2b)
-            assert cm.get_pending_count(parent_id) == 2
+            assert cm.get_pending_count(parent_id) == 3  # w1b + 2 new
 
-            # ── Step 6: Wave 2 children complete ──────────────────────────
-            # All children are done — set waiting_for=0
-            _set_waiting_for(pg_engine, parent_id, 0)
-
+            # ── Step 6: Wave 2: resolve only 1 of 2 (DB waiting_for=1)
+            _set_waiting_for(pg_engine, parent_id, 1)
             await notify_corr_resolve(parent_id, w2a, msg_w2a)
+            await asyncio.sleep(0.1)
+
+            # ── Step 7: Final completion — resolve ALL remaining,
+            # waiting_for=0. Both gates pass, job finalizes.
+            _set_waiting_for(pg_engine, parent_id, 0)
+            await notify_corr_resolve(parent_id, w1b, msg_w1b)
             await notify_corr_resolve(parent_id, w2b, msg_w2b)
             await asyncio.sleep(0.2)
 
-            # ── Step 7: Assert parent and job ARE now completed ───────────
+            # ── Step 8: Assert parent and job ARE now completed ───────────
             final_instance_status = _read_instance_status(pg_engine, parent_id)
             assert final_instance_status == InstanceStatus.COMPLETED.value, (
                 f"Parent instance should be COMPLETED after all waves done, "

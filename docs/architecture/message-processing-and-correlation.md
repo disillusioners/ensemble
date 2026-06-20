@@ -173,6 +173,8 @@ A concrete walkthrough from entry to finalization:
 
 **The `waiting_for` deprecation (ADR-011).** The `waiting_for` column on the `instance` table is **deprecated as control-flow**. It is retained as a rebuild-only cache (the source for `rebuild_from_db()`). The CM is authoritative for all runtime decisions. No code should read `waiting_for` to decide whether a parent is done; use `CM.get_pending_count()` or `CM.is_complete()` instead.
 
+**Completion authority — three mechanisms, one owner.** "Is this parent's correlation complete?" is answered by one of three mechanisms, configured by the `USE_LEGACY_WAITING_FOR_CASCADE` kill switch: (1) the **CorrelationManager** — authoritative when the flag is `OFF` (default); (2) the legacy **`waiting_for` SQL cascade** — active only when the kill switch is `ON` (backward-compat / rollback path); (3) a **`SELECT COUNT(*)` fallback** — graceful degradation reachable when the kill switch is `ON` **and** CM is uninitialized (hard error under `OFF` + CM-`None`). Full authority doc — call-site inventory, feature-flag interaction matrix, `rebuild_from_db()` contract, and the kill-switch rollback recipe — lives at [`docs/architecture/completion-authority.md`](completion-authority.md). The `waiting_for` column remains in the schema as a rebuild-only cache per **ADR-011** (see paragraph above and §8 of `completion-authority.md`).
+
 **Error handling (`had_error` flag).** When `resolve_response()` is called with `had_error=True`, the CM sets `had_error=True` on the parent's `ParentCorrelation`. When all children have resolved, the `completion_callback` receives the terminal status derived from this flag: `"error"` if any response had an error, `"completed"` otherwise. This enables conservative error propagation.
 
 ## 6. ExecutionGate in Depth
@@ -237,4 +239,5 @@ Every site that calls a SQLAlchemy/SQLModel repository method now goes through `
 - [`docs/job-queue.md`](../job-queue.md) — job queue operational guide
 - [`docs/bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md`](../bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md) — root cause of the cross-dispatcher bug that motivated ExecutionGate
 - [`docs/architecture/unified-dispatch-architecture.md`](unified-dispatch-architecture.md) — target dispatch architecture (proposed state); this doc covers the **current** implemented state
+- [`docs/architecture/completion-authority.md`](completion-authority.md) — authoritative source for "is this parent complete?": three mechanisms (CM, `waiting_for` legacy cascade, `SELECT COUNT(*)` fallback), `USE_LEGACY_WAITING_FOR_CASCADE` kill switch, and the rebuild-cache contract per ADR-011
 - [`docs/plans/unified-dispatcher.md`](../plans/unified-dispatcher.md) — migration plan for dispatcher unification
