@@ -41,7 +41,11 @@
 - `is_complete()` returns True only when BOTH are empty
 - 260 tests pass (223 SQLite + 37 PostgreSQL)
 
-**Phase C (Single Dispatcher) — PENDING**
+**Phase C (Single Dispatcher) — COMPLETE ✅**
+- C-M4: Deprecation log + path tests (C1-C4)
+- C-M5: Route JobQueue through observer (C4.5-C11) — `USE_LEGACY_JOBQUEUE_DISPATCH` flag
+- C-M6: Collapse gate to asyncio.Lock (C12a-C18) — 707→268 lines, net -914 lines
+- 160+ Phase C tests pass
 - Unify enqueue to WorkerPool-only
 - JobQueue is scheduling-only
 - Est. 2.5 weeks
