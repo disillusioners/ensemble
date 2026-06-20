@@ -1530,3 +1530,112 @@ class TestRoundTripFilenameLookup:
             "Expected read_context_file to fail when given the slug form, "
             "but it returned content. The slug form must not exist on disk."
         )
+
+
+# ─── TestEdgeCaseFilenames (round-trip + display) ────────────────────────────────
+
+
+class TestEdgeCaseFilenames:
+    """Edge-case round-trip tests for the pre-loaded header display.
+
+    Verifies the fix preserves correctness for unusual but valid filenames:
+    - Files without a timestamp suffix (bare ``slug.md``).
+    - Multiple files with the same slug but different timestamps.
+    - Unicode characters in slugs.
+    """
+
+    def test_filename_without_timestamp_displays_and_round_trips(self, tmp_path):
+        """A bare ``slug.md`` filename (no timestamp) round-trips correctly.
+
+        The fix relies on displaying ``matched.filename`` directly. When the
+        on-disk file lacks a timestamp suffix, the display MUST still match
+        the on-disk filename exactly so ``read_context_file`` can resolve it.
+        """
+        from daemon.services.context_tools import read_context_file
+
+        context_dir = tmp_path / "ensemble" / "context" / "no-ts"
+        context_dir.mkdir(parents=True)
+
+        filename = "bare-slug-no-timestamp.md"
+        body = "## Answer\nno-timestamp body\n"
+        (context_dir / filename).write_text(body)
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("no-ts", "bare slug no timestamp")
+
+        assert result is not None
+        # Display must be the EXACT on-disk filename (no extra .md suffix
+        # appended, no timestamp stripped — the file already has neither).
+        assert f"## {filename}" in result
+
+        # Round-trip via read_context_file using the displayed name.
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            contents = read_context_file("no-ts", filename)
+        assert contents is not None
+        assert "no-timestamp body" in contents
+
+    def test_duplicate_slug_different_timestamps_displays_correct_file(self, tmp_path):
+        """Two files with same slug but different timestamps: the pre-loaded
+        header must show the SPECIFIC on-disk filename that won the match
+        (not a generic ``slug.md`` or the wrong timestamp).
+        """
+        from daemon.services.context_tools import read_context_file
+
+        context_dir = tmp_path / "ensemble" / "context" / "dup-slug"
+        context_dir.mkdir(parents=True)
+
+        # Two files with identical slug but different timestamps.
+        old_filename = "shared-topic_20260601_100000.md"
+        new_filename = "shared-topic_20260602_100000.md"
+        (context_dir / old_filename).write_text("## Answer\nold version\n")
+        (context_dir / new_filename).write_text("## Answer\nnew version\n")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("dup-slug", "shared topic")
+
+        assert result is not None
+
+        # The header should display ONE of the timestamped filenames
+        # (the one picked as the top match) — never the bare slug form.
+        assert "## shared-topic.md" not in result
+        assert (f"## {old_filename}" in result) or (f"## {new_filename}" in result)
+
+        # And whichever file is shown must be retrievable via read_context_file.
+        displayed = old_filename if f"## {old_filename}" in result else new_filename
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            contents = read_context_file("dup-slug", displayed)
+        assert contents is not None
+        assert "version" in contents  # "old version" or "new version"
+
+    def test_unicode_slug_displays_and_round_trips(self, tmp_path):
+        """Unicode characters in slugs round-trip correctly.
+
+        Real users may write context about international topics. The display
+        must preserve the full unicode filename so ``read_context_file``
+        can resolve it via exact match.
+        """
+        from daemon.services.context_tools import read_context_file
+
+        context_dir = tmp_path / "ensemble" / "context" / "unicode"
+        context_dir.mkdir(parents=True)
+
+        # Use unicode slug with timestamp suffix. The slug contains a mix
+        # of accented latin chars and a CJK character.
+        filename = "café-認証-flow_20260620_150000.md"
+        body = "## Answer\nunicode body\n"
+        (context_dir / filename).write_text(body)
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("unicode", "café 認証 flow")
+
+        assert result is not None
+        # Display must show the FULL unicode filename with timestamp + .md.
+        assert f"## {filename}" in result
+        # The bare-slug-without-timestamp form must NOT appear (the bug).
+        assert "## café-認証-flow.md" not in result
+
+        # Round-trip via read_context_file using the displayed unicode name.
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            contents = read_context_file("unicode", filename)
+        assert contents is not None
+        assert "unicode body" in contents
