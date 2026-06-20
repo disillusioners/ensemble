@@ -603,10 +603,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 # genuinely-completed parent whose job has already
                 # terminalized. Resurrecting that parent back to RUNNING
                 # would un-stick a finalized cascade. Before the revive
-                # UPDATE, require an active PROCESSING job for the
-                # parent — i.e. the parent itself is still mid-execution
-                # and the COMPLETED status is indeed premature. Query
-                # the job table inside the same session so the
+                # UPDATE, require ANY non-terminal active job for the
+                # parent (PENDING or PROCESSING) — i.e. the parent still
+                # has scheduled work and the COMPLETED status is indeed
+                # premature. A PENDING job paired with a COMPLETED parent
+                # is itself a sign of premature completion: the queued
+                # job WILL run and the parent must be RUNNING when it
+                # dispatches. Refuse only when no active job exists.
+                # Query the job table inside the same session so the
                 # instance+job read is snapshot-consistent (no extra
                 # round-trip, no extra transaction).
                 parent_inst = session.get(Instance, current_instance_id)
@@ -631,14 +635,6 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                             f"terminal status={parent_inst.status} but no "
                             f"active job exists; refusing to revive "
                             f"(spurious send_message — instance is genuinely done)."
-                        )
-                    elif _active_job.status != JobStatus.PROCESSING.value:
-                        logger.warning(
-                            f"Instance {current_instance_id[:8]}... in "
-                            f"terminal status={parent_inst.status} but active "
-                            f"job {_active_job.job_id[:8]}... is "
-                            f"status={_active_job.status} (not processing); "
-                            f"refusing to revive."
                         )
                     else:
                         _can_revive = True

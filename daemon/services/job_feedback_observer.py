@@ -110,8 +110,8 @@ class _FinalizeJobResult(NamedTuple):
     WriteGuardSession commits.
 
     * ``skip`` — True means no-op (unknown terminal_status, CM re-check
-      aborted, job not found). Caller returns silently without firing any
-      side effects.
+      aborted, job not found, gate defer). Caller returns silently without
+      firing any side effects.
     * ``terminal_status`` — ``"completed"`` or ``"error"`` (for SSE /
       CompletionRegistry).
     * ``job_id`` / ``instance_id`` — IDs for side effects.
@@ -125,18 +125,25 @@ class _FinalizeJobResult(NamedTuple):
       / CompletionRegistry / lifecycle event): they were already fired by
       whoever set the instance terminal first, OR the instance row is
       missing and there is no consumer to notify.
+    * ``gate_deferred`` — True ONLY when the waiting_for gate returned
+      ``skip=True`` (either the ``waiting_for > 0`` row-lock re-check or
+      the ``SELECT ... FOR UPDATE`` exception fallback). The caller scopes
+      ``notify_corr_rearm`` to this flag so the other ``skip`` paths
+      (unknown terminal_status, CM re-check aborted) don't create spurious
+      empty ``_pending[parent_id]`` entries — C2-N1 fix.
     """
 
-    skip: bool
-    terminal_status: str | None
-    job_id: str | None
-    instance_id: str | None
-    parent_id: str | None
-    agent_id: str | None
-    result_summary: str | None
-    error_message: str | None
-    locks_released: int
-    instance_was_terminal: bool
+    skip: bool = False
+    terminal_status: str | None = None
+    job_id: str | None = None
+    instance_id: str | None = None
+    parent_id: str | None = None
+    agent_id: str | None = None
+    result_summary: str | None = None
+    error_message: str | None = None
+    locks_released: int = 0
+    instance_was_terminal: bool = False
+    gate_deferred: bool = False
 
 
 class JobFeedbackObserver:
@@ -662,8 +669,15 @@ class JobFeedbackObserver:
                 error_message,
             )
 
-            # ─── Handle skip (CM re-check aborted, job not found, gate deferred) ───
-            if db_result.skip:
+            # ─── Handle gate-deferred skip (waiting_for > 0 or gate SELECT failed) ───
+            # C2-N1 fix: ``notify_corr_rearm`` fires ONLY on gate-deferred
+            # paths, NOT on every ``skip=True``. The other skip paths
+            # (unknown terminal_status, CM re-check aborted) must NOT
+            # create spurious empty ``_pending[parent_id]`` entries. The
+            # gate itself (``SELECT ... FOR UPDATE`` row lock + waiting_for
+            # counter) is the authoritative signal that children may still
+            # be running — only there do we re-arm CM for wave 2.
+            if db_result.gate_deferred:
                 # C2-PartA fix: re-arm CM ``_pending[parent_id]`` so wave 2
                 # children whose :func:`notify_corr_resolve` calls arrive
                 # BEFORE their :func:`notify_corr_register` calls (e.g. wave
@@ -688,10 +702,14 @@ class JobFeedbackObserver:
                 # the re-arm is just deferred by one event-loop iteration.
                 asyncio.create_task(notify_corr_rearm(instance_id))
                 logger.debug(
-                    f"Observer: _finalize_job skipped for job "
+                    f"Observer: _finalize_job gate-deferred for job "
                     f"{job.job_id[:8]}... instance {instance_id[:8]}... — "
                     f"scheduled CM rearm_parent for wave 2"
                 )
+                return
+
+            # ─── Handle other skip paths (unknown terminal_status, CM re-check) ───
+            if db_result.skip:
                 return
 
             # ─── Post-commit outbox: fire side effects on the event loop ───
@@ -1199,8 +1217,8 @@ class JobFeedbackObserver:
             # correlation, creating a window where ``waiting_for > 0`` and
             # ``cm_pending == 0`` simultaneously.
             #
-            # C1 fix (TOCTOU hardening): ``SELECT ... FOR UPDATE`` takes a
-            # pessimistic row-level lock on PostgreSQL (READ COMMITTED
+            # C1 fix (TOCTOU hardening): on PostgreSQL, ``SELECT ... FOR
+            # UPDATE`` takes a pessimistic row-level lock (READ COMMITTED
             # isolation). WriteGuardSession is a Python-level write-pause
             # counter, NOT a database-level lock — on PostgreSQL another
             # thread could commit ``waiting_for=1`` between a non-locking
@@ -1209,10 +1227,15 @@ class JobFeedbackObserver:
             # concurrent writers on this row until our transaction commits
             # or rolls back, eliminating the race.
             #
-            # SQLite silently ignores ``FOR UPDATE`` — its global database
-            # write lock already serializes all writers, so the gate is
-            # already race-free there. The same code is therefore safe
-            # across both DBs.
+            # SQLite has NO ``FOR UPDATE`` syntax — the raw keyword
+            # triggers ``sqlite3.OperationalError: near "FOR": syntax
+            # error``. SQLite relies on its global database-level write
+            # lock for serialisation; row-level locking is meaningless
+            # there. We therefore branch on dialect and emit ``FOR
+            # UPDATE`` only on PostgreSQL (matching the pattern used in
+            # ``SQLModelInstanceRepository.delete_by_project``,
+            # ``ExecutionLeaseRepository.try_acquire``, and
+            # ``SQLModelProjectRepository.delete``).
             #
             # If the orchestrator still has active children, defer
             # finalization for BOTH the job and the instance — they stay
@@ -1225,11 +1248,21 @@ class JobFeedbackObserver:
             # arrive before their registers (e.g. via ``job_continue`` /
             # ``watch_job``) still find the parent — C2-PartA fix.
             try:
-                _gate_row = session.execute(
-                    _sa_text(
+                _is_pg = (
+                    session.bind is not None
+                    and session.bind.dialect.name == "postgresql"
+                )
+                _gate_sql = (
+                    "SELECT waiting_for FROM instances "
+                    "WHERE instance_id = :iid FOR UPDATE"
+                    if _is_pg
+                    else (
                         "SELECT waiting_for FROM instances "
-                        "WHERE instance_id = :iid FOR UPDATE"
-                    ),
+                        "WHERE instance_id = :iid"
+                    )
+                )
+                _gate_row = session.execute(
+                    _sa_text(_gate_sql),
                     {"iid": instance_id},
                 ).first()
                 if _gate_row is not None:
@@ -1252,14 +1285,34 @@ class JobFeedbackObserver:
                             error_message=None,
                             locks_released=0,
                             instance_was_terminal=False,
+                            gate_deferred=True,
                         )
             except Exception as e:
                 logger.warning(
                     f"Observer: failed to read instance for waiting_for "
                     f"gate ({instance_id[:8]}...): {e}"
                 )
-                # Fall through — better to finalize than to silently wedge
-                # the job in PROCESSING forever.
+                # C1-N1 fix: defer, don't finalize. A transient PostgreSQL
+                # error (connection drop, statement_timeout, lock_deadlock,
+                # admin_cancel) must NOT cause premature completion —
+                # children may still be running. The C2-PartA rearm path
+                # fires (gate_deferred=True), allowing the wave-2
+                # callback to re-attempt finalization. The orphan-job
+                # recovery sweep is the safety net. Better to wait in
+                # PROCESSING than to prematurely complete.
+                return _FinalizeJobResult(
+                    skip=True,
+                    terminal_status=None,
+                    job_id=None,
+                    instance_id=None,
+                    parent_id=None,
+                    agent_id=None,
+                    result_summary=None,
+                    error_message=None,
+                    locks_released=0,
+                    instance_was_terminal=False,
+                    gate_deferred=True,
+                )
 
             now = datetime.now(timezone.utc).isoformat()
             now_dt = datetime.now(timezone.utc)

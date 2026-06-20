@@ -38,11 +38,12 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, SQLModel
 
 # Import model classes to register them with SQLModel.metadata.
@@ -53,6 +54,7 @@ from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
 from daemon.services.correlation_manager import (
     CorrelationManager,
+    get_correlation_manager,
     notify_corr_register,
     notify_corr_resolve,
     set_correlation_manager,
@@ -681,9 +683,7 @@ class TestStuckJobRecovery:
 
             # Now job should be COMPLETED (waiting_for=0)
             job_status = _read_job_status(pg_engine, job_id)
-            assert job_status == JobStatus.COMPLETED.value, (
-                f"Job should be COMPLETED after wave 2 resolved, got {job_status}"
-            )
+            assert job_status == JobStatus.COMPLETED.value
         finally:
             await cm.stop()
             set_correlation_manager(None)
@@ -1049,3 +1049,278 @@ class TestEndToEndMultiWave:
         finally:
             await cm.stop()
             set_correlation_manager(None)
+
+
+# =============================================================================
+# Test 8: Production-path _finalize_job — direct end-to-end exercise
+# =============================================================================
+
+
+class TestProductionPathFinalizeJob:
+    """Exercise the REAL ``observer._finalize_job()`` async method end-to-end.
+
+    Unlike the CM-callback-driven tests above (which reach ``_finalize_job``
+    indirectly via ``notify_corr_resolve`` → CM → ``handle_correlation_complete``),
+    these tests call the production ``_finalize_job`` method DIRECTLY. This
+    isolates the waiting_for gate inside ``_finalize_job_db_sync`` and
+    verifies it against a real PostgreSQL engine with only side-effect deps
+    mocked (notify_watchers, SSE hub, lifecycle events).
+
+    The DB logic (SELECT ... FOR UPDATE row lock, job atomic transition,
+    instance update, lock release) runs against the real PG engine — no
+    DB mocking. The ``WriteGuardSession`` uses the engine + write_guard
+    supplied by the ``_make_observer`` factory.
+
+    CM is intentionally NOT set so the C1 TOCTOU re-check at the top of
+    ``_finalize_job_db_sync`` is skipped (returns immediately when
+    ``get_correlation_manager() is None``). This forces the flow to reach
+    the in-session ``SELECT ... FOR UPDATE`` waiting_for gate — the exact
+    code path these tests target.
+    """
+
+    @pytest.mark.asyncio
+    async def test_finalize_job_defers_when_waiting_for_gt_zero_production_path(
+        self,
+        pg_engine: Engine,
+        pg_job_repo: JobRepository,
+    ) -> None:
+        """Direct ``_finalize_job`` call with waiting_for > 0 → job stays PROCESSING.
+
+        Exercises the production ``_finalize_job`` async method end-to-end:
+        pre-fetch (``_get_last_assistant_message_raw``) →
+        ``asyncio.to_thread(_finalize_job_db_sync)`` → in-session
+        ``SELECT ... FOR UPDATE`` waiting_for gate → ``gate_deferred=True`` →
+        early return. The gate must see waiting_for=1 and defer.
+
+        No CM is set, so the C1 TOCTOU re-check at the top of
+        ``_finalize_job_db_sync`` is skipped, forcing the flow to reach
+        the in-session waiting_for gate.
+        """
+        parent_id = f"parent-prod-{uuid.uuid4().hex[:8]}"
+        job_id = f"job-prod-{uuid.uuid4().hex[:8]}"
+
+        # Parent RUNNING with waiting_for=1 (one child still active).
+        _make_instance(
+            pg_engine, parent_id,
+            status=InstanceStatus.RUNNING.value,
+            waiting_for=1,
+        )
+        _make_job(
+            pg_engine, job_id,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+        )
+
+        job = pg_job_repo.get(job_id)
+        assert job is not None
+        observer, mocks = _make_observer(pg_engine, job)
+
+        # Sanity: CM singleton is cleared by the _reset_cm_singleton fixture.
+        assert get_correlation_manager() is None
+
+        # Direct production-path call.
+        await observer._finalize_job(job, parent_id, "completed", error=None)
+
+        # Let any background task (notify_corr_rearm no-op) settle.
+        await asyncio.sleep(0.05)
+
+        # C1 fix: gate saw waiting_for=1 > 0 → deferred → job NOT completed.
+        assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+            "PRODUCTION PATH: job transitioned to COMPLETED despite "
+            "waiting_for=1 — the in-session waiting_for gate failed to defer"
+        )
+        # Instance must also stay RUNNING (job+instance are coupled).
+        assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.RUNNING.value, (
+            "PRODUCTION PATH: instance transitioned despite gate deferral"
+        )
+        # waiting_for unchanged — gate must not mutate it.
+        assert _read_waiting_for(pg_engine, parent_id) == 1
+
+        # Side-effect deps must NOT have fired (gate deferred before outbox).
+        mocks["job_queue_service"].notify_watchers.assert_not_called()
+        mocks["live_hub"].stream_status_change.assert_not_called()
+        mocks["events_service"]._publish_instance_lifecycle_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_finalize_job_completes_when_waiting_for_zero_production_path(
+        self,
+        pg_engine: Engine,
+        pg_job_repo: JobRepository,
+    ) -> None:
+        """Direct ``_finalize_job`` call with waiting_for=0 → job COMPLETED.
+
+        Positive control for the gate: when no children are pending, the
+        production ``_finalize_job`` must complete the job, update the
+        instance, and fire the post-commit outbox side effects
+        (``notify_watchers``). Exercises the same code path with the gate
+        open (waiting_for=0), confirming the gate is the only reason
+        the deferral test above held the job in PROCESSING.
+        """
+        parent_id = f"parent-prod-ok-{uuid.uuid4().hex[:8]}"
+        job_id = f"job-prod-ok-{uuid.uuid4().hex[:8]}"
+
+        _make_instance(
+            pg_engine, parent_id,
+            status=InstanceStatus.RUNNING.value,
+            waiting_for=0,
+        )
+        _make_job(
+            pg_engine, job_id,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+        )
+
+        job = pg_job_repo.get(job_id)
+        assert job is not None
+        observer, mocks = _make_observer(pg_engine, job)
+
+        await observer._finalize_job(job, parent_id, "completed", error=None)
+        await asyncio.sleep(0.05)
+
+        # Gate passed (waiting_for=0) → terminal transition proceeded.
+        assert _read_job_status(pg_engine, job_id) == JobStatus.COMPLETED.value
+        assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.COMPLETED.value
+        # notify_watchers (post-commit outbox) must have fired.
+        mocks["job_queue_service"].notify_watchers.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_finalize_job_schedules_notify_corr_rearm_on_gate_defer(
+        self,
+        pg_engine: Engine,
+        pg_job_repo: JobRepository,
+    ) -> None:
+        """Gate deferral schedules ``notify_corr_rearm`` (C2-PartA fix).
+
+        When the waiting_for gate defers, ``_finalize_job`` must schedule
+        ``notify_corr_rearm`` via ``asyncio.create_task`` so the CM
+        ``_pending[parent_id]`` slot is recreated for wave 2. Without
+        this re-arm, wave-2 children's ``resolve_response`` calls would
+        silently no-op on a missing CM entry, wedging the job in
+        PROCESSING forever.
+
+        We spy on ``notify_corr_rearm`` by patching the module-level
+        binding in ``daemon.services.job_feedback_observer`` (the
+        exact reference used by the production code's
+        ``asyncio.create_task(notify_corr_rearm(instance_id))`` call).
+        """
+        parent_id = f"parent-rearm-prod-{uuid.uuid4().hex[:8]}"
+        job_id = f"job-rearm-prod-{uuid.uuid4().hex[:8]}"
+
+        _make_instance(
+            pg_engine, parent_id,
+            status=InstanceStatus.RUNNING.value,
+            waiting_for=1,
+        )
+        _make_job(
+            pg_engine, job_id,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+        )
+
+        job = pg_job_repo.get(job_id)
+        assert job is not None
+        observer, _ = _make_observer(pg_engine, job)
+
+        # Patch notify_corr_rearm at the module binding used by
+        # _finalize_job (``asyncio.create_task(notify_corr_rearm(...))``).
+        with patch(
+            "daemon.services.job_feedback_observer.notify_corr_rearm",
+            new=AsyncMock(name="notify_corr_rearm_spy"),
+        ) as rearm_spy:
+            await observer._finalize_job(job, parent_id, "completed", error=None)
+            # Let the create_task scheduled by _finalize_job run.
+            await asyncio.sleep(0.05)
+
+            # Gate deferred → job stays PROCESSING.
+            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+                "Gate should have deferred the finalization (waiting_for=1)"
+            )
+
+            # C2-PartA: notify_corr_rearm was scheduled with the parent id.
+            rearm_spy.assert_awaited_once_with(parent_id)
+
+    @pytest.mark.asyncio
+    async def test_finalize_job_defers_on_gate_exception_production_path(
+        self,
+        pg_engine: Engine,
+        pg_job_repo: JobRepository,
+    ) -> None:
+        """C1-N1 fix: gate SELECT raises → _finalize_job defers + schedules rearm.
+
+        When the in-session ``SELECT ... FOR UPDATE`` waiting_for gate
+        raises a transient PG error (connection drop, statement_timeout,
+        lock_deadlock, admin_cancel), the C1-N1 ``except Exception`` block
+        in ``_finalize_job_db_sync`` must return ``gate_deferred=True``
+        rather than letting the exception propagate. If it propagated, the
+        async caller would invoke the W3 fail-safe transition to FAILED —
+        a premature completion while children may still be running.
+
+        Verifies the production ``_finalize_job`` path end-to-end:
+
+          * waiting_for=0 (gate would normally PROCEED, not defer).
+          * ``Session.execute`` patched to raise ``OperationalError`` — the
+            gate SELECT is the FIRST execute call inside
+            ``WriteGuardSession`` so this hits the C1-N1 except block.
+          * Job stays PROCESSING (NOT transitioned to COMPLETED/FAILED).
+          * Side effects NOT fired (notify_watchers, SSE hub, lifecycle).
+          * ``notify_corr_rearm`` IS scheduled (gate_deferred=True path
+            fires ``asyncio.create_task`` re-arm per C2-PartA).
+        """
+        parent_id = f"parent-exc-{uuid.uuid4().hex[:8]}"
+        job_id = f"job-exc-{uuid.uuid4().hex[:8]}"
+
+        # Parent RUNNING with waiting_for=0 — gate would normally PROCEED.
+        _make_instance(
+            pg_engine, parent_id,
+            status=InstanceStatus.RUNNING.value,
+            waiting_for=0,
+        )
+        _make_job(
+            pg_engine, job_id,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+        )
+
+        job = pg_job_repo.get(job_id)
+        assert job is not None
+        observer, mocks = _make_observer(pg_engine, job)
+
+        # Patch the gate SELECT to raise a transient PG error AND spy on
+        # notify_corr_rearm simultaneously. The gate SELECT is the FIRST
+        # ``session.execute`` call inside ``WriteGuardSession``; any raise
+        # there hits the C1-N1 except block.
+        with patch.object(
+            Session,
+            "execute",
+            side_effect=OperationalError(
+                "SELECT waiting_for FROM instances "
+                "WHERE instance_id = :iid FOR UPDATE",
+                {"iid": parent_id},
+                Exception("simulated PG gate SELECT error"),
+            ),
+        ), patch(
+            "daemon.services.job_feedback_observer.notify_corr_rearm",
+            new=AsyncMock(name="notify_corr_rearm_spy"),
+        ) as rearm_spy:
+            # Direct production-path call. The pre-fetch uses the mocked
+            # ``_get_last_assistant_message_raw`` (no Session.execute).
+            await observer._finalize_job(job, parent_id, "completed", error=None)
+            # Let the create_task scheduled by _finalize_job run.
+            await asyncio.sleep(0.05)
+
+            # C1-N1 fix: gate raised → deferred (NOT W3 fail-safed to FAILED).
+            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+                "PRODUCTION PATH: job transitioned despite gate SELECT raising — "
+                "C1-N1 except block failed to defer"
+            )
+            assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.RUNNING.value, (
+                "PRODUCTION PATH: instance transitioned despite gate SELECT raising"
+            )
+
+            # Side-effect deps must NOT have fired (gate deferred before outbox).
+            mocks["job_queue_service"].notify_watchers.assert_not_called()
+            mocks["live_hub"].stream_status_change.assert_not_called()
+            mocks["events_service"]._publish_instance_lifecycle_event.assert_not_called()
+
+            # C2-PartA: notify_corr_rearm WAS scheduled with parent_id.
+            rearm_spy.assert_awaited_once_with(parent_id)
