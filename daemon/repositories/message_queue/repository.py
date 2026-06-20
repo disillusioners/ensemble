@@ -199,7 +199,65 @@ class SQLModelMessageQueueRepository:
             if row is None:
                 return None
             return self._row_to_message(row)
-    
+
+    def claim_specific(self, message_id: str) -> MessageQueue | None:
+        """Atomically transition a specific message READY -> PROCESSING.
+
+        Used by the message-processing pipeline: both WorkerPool and JobQueue
+        dispatchers know which message_id they are about to process, so a
+        "claim the next ready message" query (``dequeue``) is the wrong
+        shape — the candidate message has already been dequeued into a Task
+        row (WorkerPool) or the message_id is embedded in the JobQueue job
+        (JobQueue). This method transitions a *known* message_id from
+        READY (or RETRYING-due) to PROCESSING so the downstream
+        ``complete()`` and ``fail()`` guards can fire.
+
+        The status guard makes the transition a no-op if a concurrent
+        actor already advanced the message to PROCESSING / COMPLETED /
+        FAILED, which mirrors the EvalPlanQual defence used by
+        ``dequeue()``. Returns ``None`` when the row does not exist or its
+        current status is not ``ready`` / due ``retrying``.
+
+        This was previously missing: messages stayed in READY forever
+        because nothing transitioned them, so ``complete()`` (which
+        requires ``status='processing'``) silently no-op'd, leaving
+        ``pending_count`` permanently non-zero and breaking the
+        ``send_message`` in-progress guard in ``daemon/tools/instance.py``.
+        """
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE message_queue
+                    SET status = :status_processing,
+                        processing_started_at = :processing_started_at,
+                        last_activity_at = :last_activity_at
+                    WHERE message_id = :message_id
+                      AND (
+                        status = :status_ready
+                        OR (
+                            status = :status_retrying
+                            AND (next_retry_at IS NULL OR next_retry_at <= :now)
+                        )
+                      )
+                    RETURNING *
+                    """
+                ),
+                {
+                    "message_id": message_id,
+                    "status_processing": MessageStatus.PROCESSING.value,
+                    "status_ready": MessageStatus.READY.value,
+                    "status_retrying": MessageStatus.RETRYING.value,
+                    "processing_started_at": now,
+                    "last_activity_at": now,
+                    "now": now,
+                },
+            ).fetchone()
+            if row is None:
+                return None
+            return self._row_to_message(row)
+
     def find_stuck_messages(self) -> list[MessageQueue]:
         """Find all stuck processing messages.
 

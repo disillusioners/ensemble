@@ -407,6 +407,20 @@ class MessageProcessingPipeline:
                 silent=context.silent,
             )
 
+        # ---- Stage 1.5: claim the message (READY -> PROCESSING) ----
+        # The downstream ``complete()`` and ``fail()`` guards require the
+        # message to be in ``processing`` status — without this transition
+        # the message stays in READY forever and ``complete()`` silently
+        # no-ops, leaving ``pending_count`` permanently non-zero. That in
+        # turn breaks the ``send_message`` in-progress guard in
+        # ``daemon/tools/instance.py`` which checks ``get_queue_stats()``.
+        # We claim before acquiring the lease so a "stale retry" check
+        # doesn't race a still-READY message past the lease boundary.
+        # The claim is best-effort: if it fails (message already
+        # PROCESSING/COMPLETED/FAILED — e.g. concurrent actor) we still
+        # proceed, since the downstream transitions remain safe.
+        await self._claim_message(context.message_id)
+
         # ---- Stage 2: acquire lease + run work_fn ----
         # Two exit paths from the gate:
         #   - returns LeaseContention: another holder has the lease.
@@ -493,6 +507,51 @@ class MessageProcessingPipeline:
     # ------------------------------------------------------------------
     # Internal helpers (the shared post-processing stages)
     # ------------------------------------------------------------------
+
+    async def _claim_message(self, message_id: str | None) -> None:
+        """Stage 1.5: transition message READY (or RETRYING-due) -> PROCESSING.
+
+        The downstream ``complete()`` and ``fail()`` guards require
+        ``status='processing'`` so the row is mutable; without this step
+        the message stays in READY forever (neither WorkerPool nor JobQueue
+        dispatchers transitioned it on their own) and ``complete()``
+        silently no-ops. That in turn left ``pending_count`` permanently
+        non-zero, which broke the ``send_message`` in-progress guard in
+        ``daemon/tools/instance.py``.
+
+        Best-effort by design: a failed claim (already PROCESSING /
+        COMPLETED / FAILED — e.g. concurrent actor) does NOT block
+        processing; the existing downstream guards still handle those
+        statuses correctly. When ``queue_repository`` is ``None`` (e.g.
+        tests) we skip with a debug log — matches the WorkerPool behaviour
+        in tests that omit the repo.
+        """
+        if not message_id:
+            return
+        if self._queue_repository is None:
+            logger.debug(
+                "MessageProcessingPipeline: queue_repository not wired; "
+                "skipping message claim"
+            )
+            return
+        try:
+            claimed = await asyncio.to_thread(
+                self._queue_repository.claim_specific, message_id
+            )
+            if claimed is None:
+                # Either already PROCESSING/COMPLETED/FAILED (concurrent
+                # actor) or not in the queue at all (legacy test paths).
+                # Both are safe to ignore — downstream stages still work.
+                logger.debug(
+                    f"MessageProcessingPipeline: claim_specific returned "
+                    f"None for message {message_id} (already advanced or "
+                    f"missing); continuing"
+                )
+        except Exception as e:
+            logger.warning(
+                f"MessageProcessingPipeline: failed to claim message "
+                f"{message_id} as processing: {e}"
+            )
 
     async def _mark_message_completed(self, message_id: str | None) -> None:
         """Stage 4: mark the queue message COMPLETED.

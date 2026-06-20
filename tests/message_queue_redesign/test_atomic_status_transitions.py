@@ -203,6 +203,83 @@ class TestCompleteAtomic:
 
 
 # ============================================================================
+# claim_specific()
+# ============================================================================
+
+
+class TestClaimSpecificAtomic:
+    """``claim_specific`` transitions ready (or due-retrying) -> processing.
+
+    Regression for the bug where messages stayed READY forever because
+    neither WorkerPool nor JobQueue dispatchers transitioned them, so
+    ``complete()`` silently no-op'd and ``pending_count`` was permanently
+    non-zero (which broke the ``send_message`` in-progress guard in
+    ``daemon/tools/instance.py``).
+    """
+
+    def test_claim_succeeds_from_ready(self, message_repo, engine):
+        msg = _insert_processing_message(
+            engine, status=MessageStatus.READY.value
+        )
+        result = message_repo.claim_specific(msg.message_id)
+
+        assert result is not None
+        assert result.status == MessageStatus.PROCESSING.value
+        assert result.processing_started_at is not None
+
+    def test_claim_returns_none_from_processing(self, message_repo, engine):
+        # Already PROCESSING — guard rejects a second claim.
+        msg = _insert_processing_message(
+            engine, status=MessageStatus.PROCESSING.value
+        )
+        result = message_repo.claim_specific(msg.message_id)
+        assert result is None
+
+    def test_claim_returns_none_from_completed(self, message_repo, engine):
+        msg = _insert_processing_message(
+            engine, status=MessageStatus.COMPLETED.value
+        )
+        result = message_repo.claim_specific(msg.message_id)
+        assert result is None
+
+    def test_claim_returns_none_for_nonexistent_message(self, message_repo):
+        assert message_repo.claim_specific(str(uuid.uuid4())) is None
+
+    def test_claim_succeeds_from_due_retrying(self, message_repo, engine):
+        # RETRYING with next_retry_at <= now must be claimable; backoff
+        # has elapsed.
+        past = datetime.now(timezone.utc) - timedelta(seconds=10)
+        msg = _insert_processing_message(
+            engine,
+            status=MessageStatus.RETRYING.value,
+        )
+        with Session(engine) as session:
+            row = session.get(MessageQueue, msg.message_id)
+            row.next_retry_at = past
+            session.commit()
+
+        result = message_repo.claim_specific(msg.message_id)
+        assert result is not None
+        assert result.status == MessageStatus.PROCESSING.value
+
+    def test_claim_returns_none_from_future_retrying(self, message_repo, engine):
+        # RETRYING with next_retry_at > now must NOT be claimable; backoff
+        # has not elapsed yet.
+        future = datetime.now(timezone.utc) + timedelta(seconds=60)
+        msg = _insert_processing_message(
+            engine,
+            status=MessageStatus.RETRYING.value,
+        )
+        with Session(engine) as session:
+            row = session.get(MessageQueue, msg.message_id)
+            row.next_retry_at = future
+            session.commit()
+
+        result = message_repo.claim_specific(msg.message_id)
+        assert result is None
+
+
+# ============================================================================
 # fail()
 # ============================================================================
 
