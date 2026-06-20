@@ -580,115 +580,28 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
             target_instance = session.get(Instance, instance_id)
             if target_instance and target_instance.parent_id == current_instance_id:
-                # ─── Change 3: Revive prematurely-COMPLETED parent ───
-                # The job track (correlation_manager → job_feedback_observer)
-                # can mark the parent instance as COMPLETED even though the
-                # orchestrator will spawn more children in later rounds.
-                # When the orchestrator calls ``send_message`` for a new
-                # child, revive the instance back to RUNNING before
-                # incrementing ``waiting_for`` — the instance has more
-                # work to do and cannot be terminal. Only revive from
-                # COMPLETED (the premature-completion status); other
-                # terminal statuses (ERROR / FAILED / TERMINATED) represent
-                # genuine failures and must NOT be silently resurrected.
-                #
-                # The revival and the ``waiting_for`` increment share the
-                # same ``WriteGuardSession`` and ``session.commit()`` below,
-                # so they commit atomically. The ``AND status = :completed``
-                # guard makes the UPDATE a no-op if a concurrent actor
-                # already revived the instance (defense against TOCTOU).
-                #
-                # W1 defense-in-depth (revival safety net): a buggy
-                # orchestrator could send spurious messages for a
-                # genuinely-completed parent whose job has already
-                # terminalized. Resurrecting that parent back to RUNNING
-                # would un-stick a finalized cascade. Before the revive
-                # UPDATE, require ANY non-terminal active job for the
-                # parent (PENDING or PROCESSING) — i.e. the parent still
-                # has scheduled work and the COMPLETED status is indeed
-                # premature. A PENDING job paired with a COMPLETED parent
-                # is itself a sign of premature completion: the queued
-                # job WILL run and the parent must be RUNNING when it
-                # dispatches. Refuse only when no active job exists.
-                # Query the job table inside the same session so the
-                # instance+job read is snapshot-consistent (no extra
-                # round-trip, no extra transaction).
-                parent_inst = session.get(Instance, current_instance_id)
-                _can_revive = False
-                if (
-                    parent_inst is not None
-                    and parent_inst.status == InstanceStatus.COMPLETED.value
-                ):
-                    _active_job = session.exec(
-                        select(JobItem)
-                        .where(JobItem.instance_id == current_instance_id)
-                        .where(JobItem.deleted_at.is_(None))
-                        .where(JobItem.status.in_([
-                            JobStatus.PENDING.value,
-                            JobStatus.PROCESSING.value,
-                        ]))
-                        .order_by(JobItem.created_at.desc(), JobItem.job_id)
-                    ).first()
-                    if _active_job is None:
-                        logger.warning(
-                            f"Instance {current_instance_id[:8]}... in "
-                            f"terminal status={parent_inst.status} but no "
-                            f"active job exists; refusing to revive "
-                            f"(spurious send_message — instance is genuinely done)."
-                        )
-                    else:
-                        _can_revive = True
-
-                if _can_revive:
-                    _now_str = datetime.now(_tz.utc).isoformat()
-                    _revive_result = session.execute(
-                        _sa_text(
-                            "UPDATE instances "
-                            "SET status = :running, "
-                            "    updated_at = :now, "
-                            "    last_activity_at = :now, "
-                            "    version = COALESCE(version, 1) + 1 "
-                            "WHERE instance_id = :pid "
-                            "AND status = :completed "
-                            "RETURNING version"
-                        ),
-                        {
-                            "pid": current_instance_id,
-                            "running": InstanceStatus.RUNNING.value,
-                            "completed": InstanceStatus.COMPLETED.value,
-                            "now": _now_str,
-                        },
-                    )
-                    _revive_row = _revive_result.first()
-                    if _revive_row is not None:
-                        logger.warning(
-                            f"Revived prematurely-COMPLETED parent "
-                            f"{current_instance_id[:8]}... → RUNNING "
-                            f"(spawning new child {instance_id[:8]}..., "
-                            f"version={_revive_row[0]}, "
-                            f"active_job={_active_job.job_id[:8]}...)"
-                        )
-
-                result = session.execute(
-                    _sa_text(
-                        "UPDATE instances "
-                        "SET waiting_for = COALESCE(waiting_for, 0) + 1 "
-                        "WHERE instance_id = :pid "
-                        "RETURNING waiting_for"
-                    ),
-                    {"pid": current_instance_id},
+                # ─── Phase A: CM (CorrelationManager) is the authoritative ───
+                # The CM hook is ALWAYS invoked (it is the new completion
+                # authority under USE_LEGACY_WAITING_FOR_CASCADE=OFF). The
+                # legacy `waiting_for` SQL cascade below is GATED behind the
+                # kill switch so that, with the flag OFF (default), we skip
+                # both the M0 parent-revive UPDATE and the `waiting_for`++
+                # while still letting the CM track the new correlation.
+                # When the flag is ON, the legacy path runs in full (the
+                # kill-switch semantics documented in
+                # docs/configuration/completion-flags.md).
+                use_legacy_cascade = bool(
+                    manager.config.job_system.use_legacy_waiting_for_cascade
                 )
-                new_row = result.first()
-                new_val = int(new_row[0]) if new_row is not None else 0
 
-                # C3 fix — register the CM correlation BEFORE committing the
-                # ``waiting_for`` increment. If the CM registration fails,
-                # roll the session back so the waiting_for increment is not
-                # orphaned: without a CM callback the gate would defer forever
-                # and the parent would never complete. Calling context: this
-                # is the main async event loop (the per-parent CM lock is
-                # bound to it — N3 constraint), so a direct await is safe;
-                # no MainLoopBridge marshaling required.
+                # C3 fix — register the CM correlation BEFORE any SQL writes
+                # (only relevant when the kill switch is ON). The CM call is
+                # in-memory and surfaces exceptions so the caller can roll
+                # back a would-be-orphaned `waiting_for` increment. Under
+                # the default (flag OFF), there is no SQL write to roll back
+                # — the rollback is a no-op — but the failure still
+                # surfaces as an ERROR string to the agent, which is the
+                # desired contract.
                 #
                 # We invoke the underlying ``register_message_send`` (which
                 # surfaces exceptions) rather than ``notify_corr_register``
@@ -696,7 +609,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 # here to trigger the rollback. If the CM is not wired up
                 # (``get_correlation_manager() is None``), skip the call —
                 # the legacy ``waiting_for`` cascade is the graceful-
-                # degradation fallback.
+                # degradation fallback (and that path is itself gated by
+                # ``use_legacy_cascade`` below).
                 cm = get_correlation_manager()
                 if cm is not None:
                     try:
@@ -707,22 +621,142 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                         )
                     except Exception as hook_err:
                         logger.warning(
-                            f"CM hook: register failed before commit — "
-                            f"rolling back waiting_for increment "
+                            f"CM hook: register failed "
                             f"(parent={current_instance_id[:8]}, "
                             f"child={instance_id[:8]}): {hook_err}"
                         )
-                        session.rollback()
+                        if use_legacy_cascade:
+                            # Rollback is only meaningful when the legacy
+                            # path ran an SQL increment that would be left
+                            # orphaned. Under flag=OFF, no SQL write was
+                            # issued, so the session has nothing to roll
+                            # back and we can skip the call.
+                            session.rollback()
                         return (
                             f"ERROR: Failed to register message correlation: "
                             f"{hook_err}"
                         )
 
-                session.commit()
-                logger.info(
-                    f"waiting_for incremented -> {new_val} "
-                    f"(parent={current_instance_id[:8]}..., child={instance_id[:8]}...)"
-                )
+                # ─── Legacy path: only when USE_LEGACY_WAITING_FOR_CASCADE is ON ───
+                # The kill switch. With the flag OFF (default), skip both the
+                # M0 parent-revive UPDATE and the `waiting_for` SQL increment
+                # entirely — the CM owns completion and the SQL counter is
+                # vestigial. The legacy path is preserved bit-for-bit so the
+                # A14 kill-switch test pack can re-enable it without code
+                # changes.
+                if use_legacy_cascade:
+                    # ─── Change 3: Revive prematurely-COMPLETED parent ───
+                    # The job track (correlation_manager → job_feedback_observer)
+                    # can mark the parent instance as COMPLETED even though the
+                    # orchestrator will spawn more children in later rounds.
+                    # When the orchestrator calls ``send_message`` for a new
+                    # child, revive the instance back to RUNNING before
+                    # incrementing ``waiting_for`` — the instance has more
+                    # work to do and cannot be terminal. Only revive from
+                    # COMPLETED (the premature-completion status); other
+                    # terminal statuses (ERROR / FAILED / TERMINATED) represent
+                    # genuine failures and must NOT be silently resurrected.
+                    #
+                    # The revival and the ``waiting_for`` increment share the
+                    # same ``WriteGuardSession`` and ``session.commit()`` below,
+                    # so they commit atomically. The ``AND status = :completed``
+                    # guard makes the UPDATE a no-op if a concurrent actor
+                    # already revived the instance (defense against TOCTOU).
+                    #
+                    # W1 defense-in-depth (revival safety net): a buggy
+                    # orchestrator could send spurious messages for a
+                    # genuinely-completed parent whose job has already
+                    # terminalized. Resurrecting that parent back to RUNNING
+                    # would un-stick a finalized cascade. Before the revive
+                    # UPDATE, require ANY non-terminal active job for the
+                    # parent (PENDING or PROCESSING) — i.e. the parent still
+                    # has scheduled work and the COMPLETED status is indeed
+                    # premature. A PENDING job paired with a COMPLETED parent
+                    # is itself a sign of premature completion: the queued
+                    # job WILL run and the parent must be RUNNING when it
+                    # dispatches. Refuse only when no active job exists.
+                    # Query the job table inside the same session so the
+                    # instance+job read is snapshot-consistent (no extra
+                    # round-trip, no extra transaction).
+                    parent_inst = session.get(Instance, current_instance_id)
+                    _can_revive = False
+                    if (
+                        parent_inst is not None
+                        and parent_inst.status == InstanceStatus.COMPLETED.value
+                    ):
+                        _active_job = session.exec(
+                            select(JobItem)
+                            .where(JobItem.instance_id == current_instance_id)
+                            .where(JobItem.deleted_at.is_(None))
+                            .where(JobItem.status.in_([
+                                JobStatus.PENDING.value,
+                                JobStatus.PROCESSING.value,
+                            ]))
+                            .order_by(JobItem.created_at.desc(), JobItem.job_id)
+                        ).first()
+                        if _active_job is None:
+                            logger.warning(
+                                f"Instance {current_instance_id[:8]}... in "
+                                f"terminal status={parent_inst.status} but no "
+                                f"active job exists; refusing to revive "
+                                f"(spurious send_message — instance is genuinely done)."
+                            )
+                        else:
+                            _can_revive = True
+
+                    if _can_revive:
+                        _now_str = datetime.now(_tz.utc).isoformat()
+                        _revive_result = session.execute(
+                            _sa_text(
+                                "UPDATE instances "
+                                "SET status = :running, "
+                                "    updated_at = :now, "
+                                "    last_activity_at = :now, "
+                                "    version = COALESCE(version, 1) + 1 "
+                                "WHERE instance_id = :pid "
+                                "AND status = :completed "
+                                "RETURNING version"
+                            ),
+                            {
+                                "pid": current_instance_id,
+                                "running": InstanceStatus.RUNNING.value,
+                                "completed": InstanceStatus.COMPLETED.value,
+                                "now": _now_str,
+                            },
+                        )
+                        _revive_row = _revive_result.first()
+                        if _revive_row is not None:
+                            logger.warning(
+                                f"Revived prematurely-COMPLETED parent "
+                                f"{current_instance_id[:8]}... → RUNNING "
+                                f"(spawning new child {instance_id[:8]}..., "
+                                f"version={_revive_row[0]}, "
+                                f"active_job={_active_job.job_id[:8]}...)"
+                            )
+
+                    # Fix C: atomic SQL UPDATE eliminates the read-modify-write
+                    # race against concurrent decrements from sibling child
+                    # completions. RETURNING gives us the post-update value for
+                    # an honest log line — under concurrent decrements a
+                    # separate SELECT could read a value already past the
+                    # increment we're about to log.
+                    result = session.execute(
+                        _sa_text(
+                            "UPDATE instances "
+                            "SET waiting_for = COALESCE(waiting_for, 0) + 1 "
+                            "WHERE instance_id = :pid "
+                            "RETURNING waiting_for"
+                        ),
+                        {"pid": current_instance_id},
+                    )
+                    new_row = result.first()
+                    new_val = int(new_row[0]) if new_row is not None else 0
+
+                    session.commit()
+                    logger.info(
+                        f"waiting_for incremented -> {new_val} "
+                        f"(parent={current_instance_id[:8]}..., child={instance_id[:8]}...)"
+                    )
         
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     

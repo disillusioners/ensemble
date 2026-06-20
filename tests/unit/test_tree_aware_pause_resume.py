@@ -51,14 +51,27 @@ def _build_pause_db_sync_mock(captured: dict) -> MagicMock:
     """Build a mock ``_pause_cascade_db_sync`` that captures batch args.
 
     The real helper takes ``(engine, write_guard, *, tree_ids,
-    paused_at_iso, paused_instances_data)`` and runs a batched SQL
-    UPDATE. This mock captures the args and synthesizes the result the
-    real helper would return (updated_ids from paused_instances_data,
-    skipped_ids = tree_ids − updated_ids, plus per-node agent_id /
-    waiting_for maps).
+    paused_at_iso, paused_instances_data, use_legacy_cascade)`` and runs
+    a batched SQL UPDATE. This mock captures the args and synthesizes
+    the result the real helper would return (updated_ids from
+    paused_instances_data, skipped_ids = tree_ids − updated_ids, plus
+    per-node agent_id / waiting_for maps).
+
+    A6: ``use_legacy_cascade`` is captured but does not change the
+    synthesized ``waiting_for`` map — the test asserts on the
+    ``paused_instances_data`` tuple the cascade loop produced, which
+    is the same data the real helper sees.
     """
 
-    def _mock(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+    def _mock(
+        engine,
+        write_guard,
+        *,
+        tree_ids,
+        paused_at_iso,
+        paused_instances_data,
+        use_legacy_cascade: bool = False,
+    ):
         updated_ids = [iid for iid, _agent, _wf in paused_instances_data]
         updated_set = set(updated_ids)
         result = _CascadeUpdateResult(
@@ -73,7 +86,8 @@ def _build_pause_db_sync_mock(captured: dict) -> MagicMock:
         )
         captured["pause_calls"].append(
             {"tree_ids": list(tree_ids), "paused_at_iso": paused_at_iso,
-             "paused_instances_data": list(paused_instances_data), "result": result}
+             "paused_instances_data": list(paused_instances_data),
+             "use_legacy_cascade": use_legacy_cascade, "result": result}
         )
         return result
 
@@ -84,18 +98,34 @@ def _build_resume_db_sync_mock(captured: dict) -> MagicMock:
     """Build a mock ``_resume_cascade_db_sync`` that captures batch args.
 
     The real helper takes ``(engine, write_guard, *, tree_ids,
-    ancestor_ids, is_root_resume)`` and runs a batched SQL UPDATE
-    (status=paused→running, waiting_for=0 for everyone, then a follow-up
-    UPDATE bumping ``waiting_for=1`` for ancestors on non-root resume).
+    ancestor_ids, is_root_resume, use_legacy_cascade)`` and runs a
+    batched SQL UPDATE (status=paused→running, waiting_for=0 for
+    everyone when the A6 kill switch is ON, then a follow-up UPDATE
+    bumping ``waiting_for=1`` for ancestors on non-root resume).
     This mock captures the args and synthesizes the result with the
     correct ``waiting_for_by_instance`` map so SSE / logger side
     effects receive the right values.
+
+    A6: when ``use_legacy_cascade`` is False (default, CM-authoritative
+    path), the synthesized ``waiting_for_by_instance`` map is all
+    zeros — the real helper would not have touched ``waiting_for`` in
+    the SQL, so the log line gets a neutral placeholder. When the
+    kill switch is ON, the synthesized map matches the legacy
+    behavior (1 for ancestors on non-root resume, 0 otherwise).
     """
 
-    def _mock(engine, write_guard, *, tree_ids, ancestor_ids, is_root_resume):
+    def _mock(
+        engine,
+        write_guard,
+        *,
+        tree_ids,
+        ancestor_ids,
+        is_root_resume,
+        use_legacy_cascade: bool = False,
+    ):
         waiting_for_by_instance: dict[str, int] = {}
         for iid in tree_ids:
-            if not is_root_resume and iid in ancestor_ids:
+            if use_legacy_cascade and not is_root_resume and iid in ancestor_ids:
                 waiting_for_by_instance[iid] = 1
             else:
                 waiting_for_by_instance[iid] = 0
@@ -107,7 +137,8 @@ def _build_resume_db_sync_mock(captured: dict) -> MagicMock:
         )
         captured["resume_calls"].append(
             {"tree_ids": list(tree_ids), "ancestor_ids": set(ancestor_ids),
-             "is_root_resume": is_root_resume, "result": result}
+             "is_root_resume": is_root_resume,
+             "use_legacy_cascade": use_legacy_cascade, "result": result}
         )
         return result
 

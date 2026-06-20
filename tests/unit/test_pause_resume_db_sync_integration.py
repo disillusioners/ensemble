@@ -256,7 +256,13 @@ class TestPauseCascadeDbSync:
         assert result.skipped_ids == []
 
     def test_pause_clears_waiting_for_regardless_of_previous_value(self, engine, write_guard, service):
-        """SQL hardcodes waiting_for=0 for all paused rows, clearing any prior value."""
+        """SQL hardcodes waiting_for=0 for all paused rows, clearing any prior value.
+
+        A6: this is the legacy kill-switch path. The CM-authoritative
+        path (flag default OFF) preserves the existing ``waiting_for``
+        value instead — see ``test_pause_preserves_waiting_for_by_default``
+        in test_pause_resume_db_sync_flag_integration.py.
+        """
         root = seed_instance(engine, status=InstanceStatus.RUNNING.value, waiting_for=99)
         child = seed_instance(
             engine, status=InstanceStatus.RUNNING.value, parent_id=root, waiting_for=5
@@ -266,8 +272,9 @@ class TestPauseCascadeDbSync:
         now_iso = datetime.now(timezone.utc).isoformat()
         # Note: paused_instances_data carries the pre-classified waiting_for values
         # (cascade loop sets them to 0 when pending children exist). The SQL
-        # itself hardcodes 0 regardless, so passing non-zero here is a valid
-        # edge-case test — it proves the SQL, not the wrapper, is the authority.
+        # itself hardcodes 0 regardless when the kill switch is ON, so passing
+        # non-zero here is a valid edge-case test — it proves the SQL, not the
+        # wrapper, is the authority.
         paused_data = [(root, "coder", 99), (child, "coder", 5)]
 
         result = service._pause_cascade_db_sync(
@@ -276,6 +283,7 @@ class TestPauseCascadeDbSync:
             tree_ids=[root, child],
             paused_at_iso=now_iso,
             paused_instances_data=paused_data,
+            use_legacy_cascade=True,
         )
 
         # All rows must have waiting_for=0 in the DB even though we passed 99/5
@@ -345,6 +353,7 @@ class TestResumeCascadeDbSync:
             tree_ids=[root, c1, c2],
             ancestor_ids=set(),  # empty = root resume
             is_root_resume=True,
+            use_legacy_cascade=True,
         )
 
         assert set(result.updated_ids) == {root, c1, c2}
@@ -384,6 +393,7 @@ class TestResumeCascadeDbSync:
             tree_ids=[root, child_resumed, sibling],
             ancestor_ids={root},  # only root is an ancestor of child_resumed
             is_root_resume=False,
+            use_legacy_cascade=True,
         )
 
         assert set(result.updated_ids) == {root, child_resumed, sibling}
@@ -421,6 +431,7 @@ class TestResumeCascadeDbSync:
             tree_ids=tree_ids,
             ancestor_ids=ancestor_ids,
             is_root_resume=False,
+            use_legacy_cascade=True,
         )
 
         assert set(result.updated_ids) == set(tree_ids)
@@ -511,6 +522,7 @@ class TestResumeCascadeDbSync:
             tree_ids=[root, child],
             ancestor_ids={root},
             is_root_resume=False,
+            use_legacy_cascade=True,
         )
 
         assert isinstance(result, _CascadeUpdateResult)

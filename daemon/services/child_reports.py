@@ -483,55 +483,81 @@ Provide a concise summary:"""
         if not parent:
             return False, None, None
 
-        # Decrement parent's waiting_for counter atomically.
-        # Fix C: a non-atomic read-modify-write here races with concurrent
-        # child completions (two decrements can both read the same starting
-        # value, both write N-1, leaving the counter stuck at N-1 instead of
-        # N-2). The SQL UPDATE is atomic in both SQLite and Postgres; COALESCE
-        # guards against NULL and the CASE clamps at 0.
-        #
-        # Dialect note: SQLite's scalar MAX(a, b) is multi-arg, but PostgreSQL
-        # only exposes MAX as an aggregate, so it errors with
-        # ``function max(integer, integer) does not exist``. GREATEST looks
-        # like the obvious fix but is a SQLite *extension* function, not a
-        # core builtin, so the stdlib ``sqlite3`` driver raises
-        # ``no such function: GREATEST``. CASE is the portable form — same
-        # shape in both dialects, no dialect branch needed.
-        #
-        # RETURNING gives us the post-UPDATE value as observed by THIS
-        # statement, so the log line is honest about what THIS decrement
-        # actually saw. We do NOT log a from-value: under concurrent
-        # decrements, the pre-value would be a stale session-cache
-        # read, and the inferred "from" via ``new + 1`` is wrong when
-        # the clamp kept it at 0 (0-1 stays at 0, so +1 misleads). Log
-        # just the new value; chains of decrements reconstruct the
-        # sequence from successive log lines.
-        result = session.execute(
-            text(
-                "UPDATE instances "
-                "SET waiting_for = CASE "
-                "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
-                "        THEN COALESCE(waiting_for, 0) - 1 "
-                "    ELSE 0 "
-                "END "
-                "WHERE instance_id = :pid "
-                "RETURNING waiting_for"
-            ),
-            {"pid": parent.instance_id},
+        # ─── Phase A: USE_LEGACY_WAITING_FOR_CASCADE kill switch ──────────
+        # When the flag is OFF (default), the CorrelationManager is the SOLE
+        # completion authority and ``waiting_for`` is no longer decremented
+        # (the CM tracks the in-memory pending set). When the flag is ON, we
+        # run the legacy M0 path unchanged — the SQL decrement + cascade
+        # decision + ``WAITING_CHILDREN`` write. The flag exists for the
+        # rollback path documented in ``docs/configuration/completion-flags.md``
+        # and tested by the A14 kill-switch pack; it is NOT a safe revert.
+        # See ADR-011 and the execution plan (decouple-execution-plan.md §A4).
+        use_legacy_cascade = bool(
+            self._config.job_system.use_legacy_waiting_for_cascade
         )
-        new_waiting_row = result.first()
-        new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
 
-        # Force the session to re-read for the cascade check below.
-        # SQLAlchemy would otherwise return the stale cached value on
-        # subsequent attribute access.
-        session.expire(parent)
-        parent = session.get(Instance, instance.parent_id)
-        logger.info(
-            f"waiting_for decremented -> {new_waiting} "
-            f"(parent={parent.instance_id[:8] if parent else '?'}..., "
-            f"child={instance.instance_id[:8]}...)"
-        )
+        if use_legacy_cascade:
+            # Decrement parent's waiting_for counter atomically.
+            # Fix C: a non-atomic read-modify-write here races with concurrent
+            # child completions (two decrements can both read the same starting
+            # value, both write N-1, leaving the counter stuck at N-1 instead of
+            # N-2). The SQL UPDATE is atomic in both SQLite and Postgres; COALESCE
+            # guards against NULL and the CASE clamps at 0.
+            #
+            # Dialect note: SQLite's scalar MAX(a, b) is multi-arg, but PostgreSQL
+            # only exposes MAX as an aggregate, so it errors with
+            # ``function max(integer, integer) does not exist``. GREATEST looks
+            # like the obvious fix but is a SQLite *extension* function, not a
+            # core builtin, so the stdlib ``sqlite3`` driver raises
+            # ``no such function: GREATEST``. CASE is the portable form — same
+            # shape in both dialects, no dialect branch needed.
+            #
+            # RETURNING gives us the post-UPDATE value as observed by THIS
+            # statement, so the log line is honest about what THIS decrement
+            # actually saw. We do NOT log a from-value: under concurrent
+            # decrements, the pre-value would be a stale session-cache
+            # read, and the inferred "from" via ``new + 1`` is wrong when
+            # the clamp kept it at 0 (0-1 stays at 0, so +1 misleads). Log
+            # just the new value; chains of decrements reconstruct the
+            # sequence from successive log lines.
+            result = session.execute(
+                text(
+                    "UPDATE instances "
+                    "SET waiting_for = CASE "
+                    "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                    "        THEN COALESCE(waiting_for, 0) - 1 "
+                    "    ELSE 0 "
+                    "END "
+                    "WHERE instance_id = :pid "
+                    "RETURNING waiting_for"
+                ),
+                {"pid": parent.instance_id},
+            )
+            new_waiting_row = result.first()
+            new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
+
+            # Force the session to re-read for the cascade check below.
+            # SQLAlchemy would otherwise return the stale cached value on
+            # subsequent attribute access.
+            session.expire(parent)
+            parent = session.get(Instance, instance.parent_id)
+            logger.info(
+                f"waiting_for decremented -> {new_waiting} "
+                f"(parent={parent.instance_id[:8] if parent else '?'}..., "
+                f"child={instance.instance_id[:8]}...)"
+            )
+        else:
+            # Flag OFF: do NOT decrement the DB ``waiting_for`` column.
+            # CorrelationManager tracks the in-memory pending set; the
+            # ``waiting_for`` column is the rebuild cache (ADR-011) and
+            # must stay in sync with the CM. Decrementing it here would
+            # create divergence between the two authorities — which is
+            # exactly the bug class the flag is designed to prevent.
+            logger.debug(
+                f"USE_LEGACY_WAITING_FOR_CASCADE=OFF: skipping waiting_for SQL "
+                f"decrement for parent={parent.instance_id[:8] if parent else '?'}..., "
+                f"child={instance.instance_id[:8]}... (CM is authoritative)"
+            )
 
         # AUTHORITATIVE RESOLUTION HOOK (CorrelationManager Phase 3):
         # the CM is the single source of truth for parent completion. This
@@ -616,14 +642,33 @@ Provide a concise summary:"""
         # Phase 4: the ``parent.waiting_for == 0`` control-flow READ is
         # replaced by ``cm.is_complete(parent_id)`` when the CM is wired up.
         # ``waiting_for`` is retained as the rebuild cache (ADR-011) and the
-        # graceful-degradation fallback. The WRITE SQL above (lines 425-437)
-        # must continue — it is the decrement that keeps the cache consistent.
+        # graceful-degradation fallback. The WRITE SQL above is gated by
+        # ``USE_LEGACY_WAITING_FOR_CASCADE`` (Phase A) — when OFF, the
+        # decrement is skipped and the CM is the only completion authority.
         from .correlation_manager import get_correlation_manager
         cm = get_correlation_manager()
         if cm is not None:
+            # CM is wired up — it is the SOLE completion authority. The
+            # pending count is read from CM's in-memory set (no DB query,
+            # no TOCTOU window — Race #1 / #3 eliminated).
             is_parent_complete = cm.is_complete(parent.instance_id)
-        else:
+        elif use_legacy_cascade:
+            # Legacy M0 fallback (kill switch ON): use the ``waiting_for``
+            # column directly. Race-prone (Phase 4 docstring) but the
+            # behaviour Phase A is rolling back FROM.
             is_parent_complete = (getattr(parent, "waiting_for", None) or 0) == 0
+        else:
+            # CM is None AND flag OFF: the SELECT COUNT(*) fallback at
+            # line 657 is a hard error per A8. Until A8 lands we
+            # conservatively report ``not complete`` to avoid the
+            # premature-cascade bug class the flag is designed to
+            # prevent. A8 will replace this with an explicit raise.
+            logger.warning(
+                f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager "
+                f"is not initialized for parent={parent.instance_id[:8]}...; "
+                f"deferring cascade. A8 will turn this into a hard error."
+            )
+            is_parent_complete = False
         if (
             is_parent_complete
             and parent.status != InstanceStatus.COMPLETED.value
@@ -1250,36 +1295,63 @@ Provide a concise summary:"""
             session.add(report_task)
             
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
-            # Decrement parent's waiting_for counter atomically.
-            result_update = session.execute(
-                text(
-                    "UPDATE instances "
-                    "SET waiting_for = CASE "
-                    "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
-                    "        THEN COALESCE(waiting_for, 0) - 1 "
-                    "    ELSE 0 "
-                    "END "
-                    "WHERE instance_id = :pid "
-                    "RETURNING waiting_for"
-                ),
-                {"pid": instance.parent_id},
+            # ─── Phase A: USE_LEGACY_WAITING_FOR_CASCADE kill switch ─────
+            # When the flag is OFF (default), skip the legacy
+            # ``waiting_for`` SQL decrement — the CorrelationManager is
+            # the SOLE completion authority and tracks the in-memory
+            # pending set. The ``waiting_for`` column is the rebuild
+            # cache (ADR-011) and stays in sync via the CM. When the
+            # flag is ON (kill switch), run the legacy M0 path
+            # unchanged. See ``docs/configuration/completion-flags.md``
+            # and the execution plan (decouple-execution-plan.md §A4).
+            use_legacy_cascade = bool(
+                self._config.job_system.use_legacy_waiting_for_cascade
             )
-            new_waiting_row = result_update.first()
-            new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
 
-            # Force the session to re-read for the cascade check below.
-            parent = session.get(Instance, instance.parent_id)
-            session.expire(parent)
-            parent = session.get(Instance, instance.parent_id)
-            logger.info(
-                f"waiting_for decremented -> {new_waiting} "
-                f"(parent={parent.instance_id[:8] if parent else '?'}..., "
-                f"child={instance.instance_id[:8]}...)"
-            )
+            if use_legacy_cascade:
+                # Decrement parent's waiting_for counter atomically.
+                result_update = session.execute(
+                    text(
+                        "UPDATE instances "
+                        "SET waiting_for = CASE "
+                        "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
+                        "        THEN COALESCE(waiting_for, 0) - 1 "
+                        "    ELSE 0 "
+                        "END "
+                        "WHERE instance_id = :pid "
+                        "RETURNING waiting_for"
+                    ),
+                    {"pid": instance.parent_id},
+                )
+                new_waiting_row = result_update.first()
+                new_waiting = int(new_waiting_row[0]) if new_waiting_row is not None else 0
+
+                # Force the session to re-read for the cascade check below.
+                parent = session.get(Instance, instance.parent_id)
+                session.expire(parent)
+                parent = session.get(Instance, instance.parent_id)
+                logger.info(
+                    f"waiting_for decremented -> {new_waiting} "
+                    f"(parent={parent.instance_id[:8] if parent else '?'}..., "
+                    f"child={instance.instance_id[:8]}...)"
+                )
+            else:
+                # Flag OFF: do NOT decrement the DB ``waiting_for``
+                # column. CM is the authority; decrementing here would
+                # cause divergence between CM and the rebuild cache.
+                # Just look up the parent for the cascade check below
+                # (CM.is_complete reads from its in-memory set, not the
+                # DB column).
+                parent = session.get(Instance, instance.parent_id)
+                logger.debug(
+                    f"USE_LEGACY_WAITING_FOR_CASCADE=OFF: skipping waiting_for SQL "
+                    f"decrement for parent={instance.parent_id[:8] if instance.parent_id else '?'}..., "
+                    f"child={instance.instance_id[:8]}... (CM is authoritative)"
+                )
 
             parent.last_activity_at = datetime.now(timezone.utc)
             parent.version = (parent.version or 1) + 1
-            
+
             # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
             # The ``instance_hierarchy`` junction table is the canonical
             # source of parent-child relationships — _enrich_instance() in
@@ -1293,14 +1365,28 @@ Provide a concise summary:"""
                 text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
                 {"child_id": instance.instance_id}
             )
-            
-            # Cascade check
+
+            # Cascade check — gated by USE_LEGACY_WAITING_FOR_CASCADE
+            # (Phase A). CM is the SOLE completion authority when the
+            # flag is OFF; the legacy ``waiting_for == 0`` READ is
+            # only consulted when the kill switch is ON.
             from .correlation_manager import get_correlation_manager as get_cm_for_cascade
             cm = get_cm_for_cascade()
             if cm is not None:
                 is_parent_complete = cm.is_complete(parent.instance_id)
-            else:
+            elif use_legacy_cascade:
                 is_parent_complete = (getattr(parent, "waiting_for", None) or 0) == 0
+            else:
+                # CM is None AND flag OFF: A8 turns the SELECT COUNT(*)
+                # fallback into a hard error. Until A8 lands, defer
+                # the cascade to avoid the premature-completion bug
+                # class the flag is designed to prevent.
+                logger.warning(
+                    f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager "
+                    f"is not initialized for parent={instance.parent_id[:8] if instance.parent_id else '?'}...; "
+                    f"deferring cascade. A8 will turn this into a hard error."
+                )
+                is_parent_complete = False
             
             completed_parent_id: str | None = None
             completed_parent_parent_id: str | None = None

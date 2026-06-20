@@ -1595,3 +1595,333 @@ class TestRebuildFromDbCrashSafety:
         assert cm._pending[parent_id].pending.get(f"{new_child}:{new_msg}") is not None, (
             "Concurrent register's entry must NOT be clobbered by rebuild"
         )
+
+
+# =============================================================================
+# Group 6 — DEBUG_COMPLETION_INVARIANT (Phase A observability)
+# =============================================================================
+
+
+class TestDebugCompletionInvariant:
+    """Tests for the ``_check_invariant`` Phase A observability check.
+
+    The check is gated on the ``DEBUG_COMPLETION_INVARIANT`` config flag
+    and is non-blocking/observability-only. When ON, it reads
+    ``waiting_for`` from the DB for ``parent_id`` and compares with the
+    CM's in-memory pending count, logging a structured WARNING with
+    ``event=CM_WAITING_FOR_DIVERGENCE`` on disagreement.
+
+    Test contract:
+      * Override ``_debug_invariant_enabled`` directly on the CM instance
+        (the supported test override path documented in
+        ``_is_debug_invariant_enabled``).
+      * Verify the WARNING is emitted with the expected structured fields.
+      * Verify the check is a no-op when the flag is OFF.
+      * Verify the check swallows DB read failures and never raises.
+    """
+
+    @pytest.mark.asyncio
+    async def test_invariant_off_is_noop(self, caplog: pytest.LogCaptureFixture):
+        """When the flag is OFF, _check_invariant performs no DB read and
+        emits no WARNING. The check is a no-op."""
+        parent_id = "parent-1"
+        # Use a repo that would explode if its .get() were called.
+        instance_repo = MagicMock(name="InstanceRepo_should_not_be_called")
+        instance_repo.get = MagicMock(
+            side_effect=AssertionError(
+                "instance_repo.get must NOT be called when invariant is OFF"
+            )
+        )
+        cm = make_cm(instance_repo=instance_repo)
+        # Flag OFF (the test default via make_cm — we explicitly set
+        # to False in case prior tests mutated it on the singleton).
+        cm._debug_invariant_enabled = False
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        await cm._check_invariant(parent_id)
+
+        # No divergence log, no DB read
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert divergence_logs == []
+        instance_repo.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_invariant_match_no_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """When the flag is ON and counts match, no divergence WARNING."""
+        parent_id = "parent-1"
+        child_id = "child-1"
+        msg_id = str(uuid.uuid4())
+
+        # DB says waiting_for=1; CM will also have 1 after register.
+        instance_repo = make_instance_repo(
+            instance_by_id={parent_id: make_instance(parent_id, waiting_for=1)}
+        )
+        cm = make_cm(instance_repo=instance_repo)
+        cm._debug_invariant_enabled = True
+
+        await cm.register_message_send(parent_id, child_id, msg_id)
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        await cm._check_invariant(parent_id)
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert divergence_logs == [], (
+            f"Match should NOT log divergence, got: "
+            f"{[r.message for r in divergence_logs]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_invariant_divergence_logs_warning(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """When the flag is ON and counts disagree, a structured WARNING
+        is logged with ``event=CM_WAITING_FOR_DIVERGENCE`` and the
+        ``cm_pending_count`` / ``db_waiting_for`` fields.
+        """
+        parent_id = "parent-1"
+        child_id = "child-1"
+        msg_id = str(uuid.uuid4())
+
+        # CM has 1 pending; DB says waiting_for=5 → divergence.
+        instance_repo = make_instance_repo(
+            instance_by_id={parent_id: make_instance(parent_id, waiting_for=5)}
+        )
+        cm = make_cm(instance_repo=instance_repo)
+        cm._debug_invariant_enabled = True
+
+        await cm.register_message_send(parent_id, child_id, msg_id)
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        await cm._check_invariant(parent_id)
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert len(divergence_logs) == 1, (
+            f"Expected exactly 1 divergence log, got {len(divergence_logs)}: "
+            f"{[(r.levelname, r.message) for r in divergence_logs]}"
+        )
+        msg = divergence_logs[0].message
+        assert "event=CM_WAITING_FOR_DIVERGENCE" in msg
+        assert "cm_pending_count=1" in msg
+        assert "db_waiting_for=5" in msg
+        assert divergence_logs[0].levelname == "WARNING"
+
+    @pytest.mark.asyncio
+    async def test_invariant_no_instance_in_db(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """When the parent is not in DB, _check_invariant returns silently
+        and emits no WARNING (DB lookup is None — divergence cannot be
+        computed)."""
+        # No instance_by_id — get() always returns None.
+        cm = make_cm(instance_repo=make_instance_repo(instance_by_id={}))
+        cm._debug_invariant_enabled = True
+
+        # Register a correlation so the CM has a non-zero pending count
+        # (otherwise we'd just get 0 == 0 trivially).
+        parent_id = "ghost-parent"
+        await cm.register_message_send(parent_id, "child-1", "msg-1")
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        await cm._check_invariant(parent_id)
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert divergence_logs == [], (
+            f"Parent not in DB should not log divergence, got: "
+            f"{[r.message for r in divergence_logs]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_invariant_db_read_error_swallowed(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """When the DB read raises, _check_invariant swallows the error
+        (logs at DEBUG) and emits no WARNING. The check must never raise."""
+        parent_id = "parent-1"
+        instance_repo = MagicMock(name="InstanceRepo_explodes")
+        instance_repo.get = MagicMock(
+            side_effect=RuntimeError("simulated DB failure")
+        )
+        cm = make_cm(instance_repo=instance_repo)
+        cm._debug_invariant_enabled = True
+
+        # Set DEBUG level BEFORE the call so the swallowed error is
+        # captured by caplog. Setting it after the call won't capture
+        # the log records emitted during the call.
+        caplog.set_level(logging.DEBUG)
+
+        # Should not raise.
+        await cm._check_invariant(parent_id)
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert divergence_logs == []
+
+        # A DEBUG-level diagnostic should be present.
+        debug_logs = [
+            r
+            for r in caplog.records
+            if "DB read failed" in r.message
+        ]
+        assert len(debug_logs) >= 1, (
+            f"Expected a DEBUG log on DB read failure, got: "
+            f"{[(r.levelname, r.message) for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_invariant_instance_missing_waiting_for(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """When the instance has no ``waiting_for`` attribute, the check
+        returns silently and emits no WARNING. Defensive against mock
+        objects that don't expose the field."""
+        parent_id = "parent-1"
+        child_id = "child-1"
+        msg_id = str(uuid.uuid4())
+
+        # Build an instance mock without ``waiting_for`` attribute.
+        inst = MagicMock(spec=["instance_id"])  # only instance_id exposed
+        inst.instance_id = parent_id
+        instance_repo = make_instance_repo(instance_by_id={parent_id: inst})
+        cm = make_cm(instance_repo=instance_repo)
+        cm._debug_invariant_enabled = True
+
+        await cm.register_message_send(parent_id, child_id, msg_id)
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        await cm._check_invariant(parent_id)
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert divergence_logs == []
+
+    @pytest.mark.asyncio
+    async def test_register_message_send_runs_invariant(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """``register_message_send`` must call ``_check_invariant`` at the
+        end (after lock release). The flag must be honored — when ON and
+        a divergence exists, the WARNING is emitted automatically."""
+        parent_id = "parent-1"
+        child_id = "child-1"
+        msg_id = str(uuid.uuid4())
+
+        instance_repo = make_instance_repo(
+            instance_by_id={parent_id: make_instance(parent_id, waiting_for=99)}
+        )
+        cm = make_cm(instance_repo=instance_repo)
+        cm._debug_invariant_enabled = True
+
+        caplog.set_level(logging.WARNING)
+        await cm.register_message_send(parent_id, child_id, msg_id)
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert len(divergence_logs) == 1, (
+            f"register_message_send should auto-run the invariant check, "
+            f"got {len(divergence_logs)} divergence logs"
+        )
+        assert "cm_pending_count=1" in divergence_logs[0].message
+        assert "db_waiting_for=99" in divergence_logs[0].message
+
+    @pytest.mark.asyncio
+    async def test_resolve_response_runs_invariant(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """``resolve_response`` must call ``_check_invariant`` at the end
+        (after lock release). Covers both the partial-resolve and
+        completion paths."""
+        parent_id = "parent-1"
+        child_id = "child-1"
+        msg_id = str(uuid.uuid4())
+
+        # DB says waiting_for=42 (deliberately diverged from CM's truth).
+        # resolve_response should bring CM to 0; invariant should detect
+        # the divergence because DB is still 42.
+        instance_repo = make_instance_repo(
+            instance_by_id={parent_id: make_instance(parent_id, waiting_for=42)}
+        )
+        recorder, cb = make_callback()
+        cm = make_cm(instance_repo=instance_repo, callback=cb)
+        cm._debug_invariant_enabled = True
+
+        await cm.register_message_send(parent_id, child_id, msg_id)
+
+        caplog.set_level(logging.WARNING)
+        caplog.clear()
+        # Resolve the only correlation — should fire callback AND
+        # detect divergence (DB 42 vs CM 0).
+        result = await cm.resolve_response(parent_id, child_id, msg_id)
+
+        assert result is True
+        assert recorder == [(parent_id, "completed")]
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert len(divergence_logs) == 1, (
+            f"resolve_response should auto-run the invariant check on the "
+            f"completion path, got {len(divergence_logs)} divergence logs"
+        )
+        assert "cm_pending_count=0" in divergence_logs[0].message
+        assert "db_waiting_for=42" in divergence_logs[0].message
+
+    @pytest.mark.asyncio
+    async def test_invariant_off_register_does_not_warn(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """``register_message_send`` with the flag OFF must NOT call the
+        DB or emit any divergence warning. The integration is gated on
+        the flag — even an intentional divergence must be silent."""
+        parent_id = "parent-1"
+        child_id = "child-1"
+        msg_id = str(uuid.uuid4())
+
+        instance_repo = make_instance_repo(
+            instance_by_id={parent_id: make_instance(parent_id, waiting_for=99)}
+        )
+        cm = make_cm(instance_repo=instance_repo)
+        cm._debug_invariant_enabled = False
+
+        caplog.set_level(logging.WARNING)
+        await cm.register_message_send(parent_id, child_id, msg_id)
+
+        divergence_logs = [
+            r
+            for r in caplog.records
+            if "CM_WAITING_FOR_DIVERGENCE" in r.message
+        ]
+        assert divergence_logs == []

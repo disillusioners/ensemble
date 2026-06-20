@@ -894,6 +894,21 @@ class InstanceLifecycleService:
         # → reset cache to 0).
         cm = get_correlation_manager()
 
+        # A6 gate: read the legacy ``waiting_for`` cascade flag (kill
+        # switch). When ON, the pause cascade resets ``waiting_for=0``
+        # for paused nodes (legacy behavior — fixes deadlocks where
+        # a paused parent would never resume because
+        # ``waiting_for > 0`` blocked the resume SQL's status guard).
+        # When OFF (default), the CM is the SOLE completion authority
+        # and the cascade preserves the existing ``waiting_for``
+        # value. The CM re-registers correlations via
+        # ``rebuild_from_db()`` after a restart and via the standard
+        # ``register_message_send`` / ``resolve_response`` hooks on
+        # resume — see ``docs/configuration/completion-flags.md``.
+        use_legacy_cascade = bool(
+            self._config.job_system.use_legacy_waiting_for_cascade
+        )
+
         for node_id in tree_ids:
             try:
                 meta = repo.get(node_id)
@@ -924,22 +939,32 @@ class InstanceLifecycleService:
                     logger.info(f"Cancelled graph task for instance {node_id[:8]}...")
 
                 # 3. Resolve waiting_for reset decision.
-                # Phase 4 carve-out: when the CorrelationManager has
-                # pending children for this parent, reset ``waiting_for``
-                # to 0 (the CM is authoritative; the cache is rebuild-
-                # only). When CM is None, fall back to the legacy
-                # ``waiting_for`` column read.
-                if cm is not None:
-                    has_pending_children = cm.get_pending_count(node_id) > 0
+                # Phase 4 carve-out (legacy only): when the
+                # CorrelationManager has pending children for this
+                # parent, reset ``waiting_for`` to 0 (the CM is
+                # authoritative; the cache is rebuild-only). When the
+                # A6 flag is OFF, the cascade preserves the existing
+                # value — CM owns the count and the DB column is
+                # rebuild-only (ADR-011).
+                if use_legacy_cascade:
+                    if cm is not None:
+                        has_pending_children = cm.get_pending_count(node_id) > 0
+                    else:
+                        has_pending_children = bool(
+                            getattr(meta, "waiting_for", None) and meta.waiting_for > 0
+                        )
+                    waiting_for_value = 0 if has_pending_children else (meta.waiting_for or 0)
                 else:
-                    has_pending_children = bool(
-                        getattr(meta, "waiting_for", None) and meta.waiting_for > 0
-                    )
+                    # CM-authoritative path: preserve the existing
+                    # counter. The sync helper will omit the
+                    # ``waiting_for=0`` clause from the UPDATE so the
+                    # DB value is untouched.
+                    waiting_for_value = meta.waiting_for or 0
 
                 # L14: capture data for the batched UPDATE; the actual
                 # write happens once in the sync helper below.
                 paused_instances_data.append(
-                    (node_id, meta.agent_id, 0 if has_pending_children else meta.waiting_for or 0)
+                    (node_id, meta.agent_id, waiting_for_value)
                 )
 
                 logger.info(f"Pausing instance {node_id[:8]}...")
@@ -949,6 +974,8 @@ class InstanceLifecycleService:
                 skipped_ids.append(node_id)
 
         # Single batched UPDATE — L14 transaction-boundary fix.
+        # A6: pass ``use_legacy_cascade`` so the helper can decide
+        # whether to include ``waiting_for=0`` in the SQL SET clause.
         db_result = await asyncio.to_thread(
             self._pause_cascade_db_sync,
             self._manager.engine,
@@ -956,6 +983,7 @@ class InstanceLifecycleService:
             tree_ids=tree_ids,
             paused_at_iso=paused_at_iso,
             paused_instances_data=paused_instances_data,
+            use_legacy_cascade=use_legacy_cascade,
         )
 
         # Post-commit side effects: SSE status_change per paused node.
@@ -1030,6 +1058,21 @@ class InstanceLifecycleService:
         skipped_ids: list[str] = []
         agent_ids_by_instance: dict[str, str | None] = {}
 
+        # A6 gate: read the legacy ``waiting_for`` cascade flag (kill
+        # switch). When ON, the resume cascade resets ``waiting_for=0``
+        # for resumed nodes and bumps ``waiting_for=1`` for ancestor
+        # nodes (legacy behavior — keeps the SQL status guard +
+        # waiting_for invariant consistent). When OFF (default), the
+        # CM is the SOLE completion authority and the cascade
+        # preserves the existing ``waiting_for`` value. The CM
+        # re-registers correlations via ``rebuild_from_db()`` after a
+        # restart and via the standard ``register_message_send`` /
+        # ``resolve_response`` hooks on resume — see
+        # ``docs/configuration/completion-flags.md``.
+        use_legacy_cascade = bool(
+            self._config.job_system.use_legacy_waiting_for_cascade
+        )
+
         for node_id in tree_ids:
             try:
                 meta = repo.get(node_id)
@@ -1058,6 +1101,9 @@ class InstanceLifecycleService:
         # (b) one follow-up UPDATE for the ancestor ``waiting_for=1``
         # carve-out when resuming from a non-root node. Both UPDATEs
         # commit atomically.
+        #
+        # A6: pass ``use_legacy_cascade`` so the helper can gate the
+        # ``waiting_for`` reset clauses behind the kill switch.
         if resumable_ids:
             db_result = await asyncio.to_thread(
                 self._resume_cascade_db_sync,
@@ -1066,6 +1112,7 @@ class InstanceLifecycleService:
                 tree_ids=resumable_ids,
                 ancestor_ids=ancestor_ids,
                 is_root_resume=is_root_resume,
+                use_legacy_cascade=use_legacy_cascade,
             )
             waiting_for_by_instance = db_result.waiting_for_by_instance
             resumed_ids = db_result.updated_ids
@@ -1672,6 +1719,7 @@ class InstanceLifecycleService:
         tree_ids: list[str],
         paused_at_iso: str,
         paused_instances_data: list[tuple[str, str | None, int]],
+        use_legacy_cascade: bool = False,
     ) -> _CascadeUpdateResult:
         """Sync DB half of ``pause_instance_cascade`` (L14 fix).
 
@@ -1685,6 +1733,19 @@ class InstanceLifecycleService:
         L14 collapses the N updates into a single ``UPDATE`` so a crash
         either pauses the entire tree or none of it.
 
+        A6 gate: ``use_legacy_cascade`` controls whether the
+        ``waiting_for = 0`` clause is included in the SQL SET clause.
+
+          * ``True`` (kill switch): the legacy behavior is preserved —
+            every paused node has its ``waiting_for`` reset to 0 so
+            the status guard on resume (``status = 'paused'``) does
+            not deadlock against a parent with in-flight children.
+          * ``False`` (default, CM-authoritative): the
+            ``waiting_for = 0`` clause is omitted and the existing
+            DB value is preserved. The CorrelationManager is the SOLE
+            completion authority; the ``waiting_for`` column is
+            rebuild-only cache (ADR-011).
+
         Args:
             engine: The shared SQLAlchemy engine.
             write_guard: The shared WritePauseGuard.
@@ -1696,6 +1757,11 @@ class InstanceLifecycleService:
                 The caller pre-filters out already-paused nodes (skip
                 behavior) and pre-classifies the waiting_for reset
                 (parent carve-out vs. simple pause).
+            use_legacy_cascade: A6 kill switch. When True, the
+                ``waiting_for = 0`` SET clause is included in the
+                batched UPDATE (legacy path). When False (default),
+                the clause is omitted and the existing ``waiting_for``
+                value is preserved (CM-authoritative path).
 
         Returns:
             ``_CascadeUpdateResult`` with the list of updated IDs and
@@ -1729,15 +1795,29 @@ class InstanceLifecycleService:
             # the status is a no-op on that row (rowcount drops). Only
             # non-terminal, non-paused states are eligible for pause
             # — pausing a terminal row would lose the terminal write.
+            #
+            # A6: build the SET clause dynamically so the
+            # ``waiting_for = 0`` reset is gated behind the
+            # ``use_legacy_cascade`` flag. When OFF (default), the
+            # clause is omitted and the existing value is preserved.
+            set_clauses = [
+                "status = :paused_status",
+                "paused_at = :paused_at",
+                "updated_at = :paused_at",
+            ]
+            if use_legacy_cascade:
+                # Legacy path: reset waiting_for to 0. The position
+                # in the SET clause list (after status, before
+                # paused_at) is preserved for code-review readability
+                # of the diff.
+                set_clauses.insert(1, "waiting_for = 0")
+            set_clause_sql = ",\n                    ".join(set_clauses)
             session.execute(
                 text(
-                    "UPDATE instances "
-                    "SET status = :paused_status, "
-                    "    waiting_for = 0, "
-                    "    paused_at = :paused_at, "
-                    "    updated_at = :paused_at "
-                    "WHERE instance_id IN :tree_ids "
-                    "  AND status IN (:running_status, :idle_status, :waiting_children_status)"
+                    f"UPDATE instances "
+                    f"SET {set_clause_sql} "
+                    f"WHERE instance_id IN :tree_ids "
+                    f"  AND status IN (:running_status, :idle_status, :waiting_children_status)"
                 ).bindparams(
                     bindparam("tree_ids", expanding=True),
                 ),
@@ -1772,6 +1852,7 @@ class InstanceLifecycleService:
         tree_ids: list[str],
         ancestor_ids: set[str],
         is_root_resume: bool,
+        use_legacy_cascade: bool = False,
     ) -> _CascadeUpdateResult:
         """Sync DB half of ``resume_instance_cascade`` (L14 fix).
 
@@ -1783,16 +1864,29 @@ class InstanceLifecycleService:
 
           * ``status='running'``
           * ``paused_at=NULL`` (clears the paused timestamp)
-          * ``waiting_for=0`` for all nodes
+          * ``waiting_for=0`` for all nodes (legacy only — gated by A6)
           * then a follow-up UPDATE bumps ``waiting_for`` to 1 for the
-            ancestor nodes when resuming from a child (matches the
-            pre-fix carve-out).
+            ancestor nodes when resuming from a child (legacy only —
+            gated by A6).
 
         Splitting the WRITE into two UPDATEs (instead of one with a
         CASE-WHEN on an IN list) keeps the SQL portable across SQLite
         and PostgreSQL — CASE-WHEN with IN-list semantics is dialect-
         sensitive, while a plain ``WHERE instance_id IN :ancestor_ids``
         with expanding bind params works the same on both.
+
+        A6 gate: ``use_legacy_cascade`` controls whether the
+        ``waiting_for`` reset clauses are included.
+
+          * ``True`` (kill switch): the legacy behavior is preserved —
+            every resumed node has its ``waiting_for`` reset to 0
+            and ancestor nodes get ``waiting_for=1`` (for the
+            "resumed from a child, parent is waiting on me" state).
+          * ``False`` (default, CM-authoritative): both
+            ``waiting_for`` clauses are omitted and the existing DB
+            value is preserved. The CorrelationManager is the SOLE
+            completion authority; the ``waiting_for`` column is
+            rebuild-only cache (ADR-011).
 
         Returns ``_CascadeUpdateResult`` with the updated IDs and their
         waiting_for values so the async caller can fire
@@ -1811,20 +1905,33 @@ class InstanceLifecycleService:
 
         now_iso = datetime.now(timezone.utc).isoformat()
         with WriteGuardSession(Session(engine), write_guard) as session:
-            # Single batched UPDATE: status + paused_at + waiting_for=0
-            # for all nodes that are currently paused. The
-            # ``status = 'paused'`` predicate is the guard so a
+            # Single batched UPDATE: status + paused_at + (legacy)
+            # waiting_for=0 for all nodes that are currently paused.
+            # The ``status = 'paused'`` predicate is the guard so a
             # concurrent pause/resume that already flipped the status
             # is a no-op on that row (rowcount drops).
+            #
+            # A6: build the SET clause dynamically so the
+            # ``waiting_for = 0`` reset is gated behind the
+            # ``use_legacy_cascade`` flag. When OFF (default), the
+            # clause is omitted and the existing value is preserved.
+            set_clauses = [
+                "status = :running_status",
+                "paused_at = NULL",
+                "updated_at = :now",
+            ]
+            if use_legacy_cascade:
+                # Legacy path: reset waiting_for to 0. Inserted
+                # between status and paused_at to keep the diff
+                # readable.
+                set_clauses.insert(1, "waiting_for = 0")
+            set_clause_sql = ",\n                    ".join(set_clauses)
             session.execute(
                 text(
-                    "UPDATE instances "
-                    "SET status = :running_status, "
-                    "    waiting_for = 0, "
-                    "    paused_at = NULL, "
-                    "    updated_at = :now "
-                    "WHERE instance_id IN :tree_ids "
-                    "  AND status = :paused_status"
+                    f"UPDATE instances "
+                    f"SET {set_clause_sql} "
+                    f"WHERE instance_id IN :tree_ids "
+                    f"  AND status = :paused_status"
                 ).bindparams(
                     bindparam("tree_ids", expanding=True),
                 ),
@@ -1841,8 +1948,12 @@ class InstanceLifecycleService:
             # ``is_root_resume`` is False (root resume keeps
             # ``waiting_for=0`` for everyone, matching the pre-fix
             # behavior at line 887-888 of the original code).
+            #
+            # A6: gate the ancestor bump behind ``use_legacy_cascade``
+            # as well — the CM-authoritative path preserves the
+            # existing ``waiting_for`` value on the ancestor nodes.
             ancestor_bump_ids: list[str] = []
-            if not is_root_resume and ancestor_ids:
+            if use_legacy_cascade and not is_root_resume and ancestor_ids:
                 ancestor_bump_ids = [iid for iid in ancestor_ids if iid in set(tree_ids)]
                 if ancestor_bump_ids:
                     session.execute(
@@ -1861,12 +1972,22 @@ class InstanceLifecycleService:
                     )
             session.commit()
 
-        # Capture per-node waiting_for for the SSE emit on the event loop.
+        # Capture per-node waiting_for for the SSE emit on the event
+        # loop. When the A6 legacy flag is OFF, every node keeps its
+        # existing ``waiting_for`` value (we don't know it here — the
+        # caller logs the value it captured BEFORE the helper ran).
+        # We fall back to the previously-captured value in the
+        # ``waiting_for_by_instance`` dict so the log line stays
+        # meaningful.
         waiting_for_by_instance: dict[str, int] = {}
         for iid in tree_ids:
-            if not is_root_resume and iid in ancestor_ids:
+            if use_legacy_cascade and not is_root_resume and iid in ancestor_ids:
                 waiting_for_by_instance[iid] = 1
             else:
+                # A6: when the legacy flag is OFF, the helper did
+                # not touch ``waiting_for``; the log line shows 0 as
+                # a neutral placeholder (the actual value is in the
+                # DB and visible to CM via ``get_pending_count``).
                 waiting_for_by_instance[iid] = 0
 
         return _CascadeUpdateResult(

@@ -141,6 +141,13 @@ class CorrelationManager:
         self._mismatch_window_start: float = 0.0
         self._match_window_start: float = 0.0
 
+        # Cache for the DEBUG_COMPLETION_INVARIANT flag. None = not yet
+        # read. The flag is a runtime operator toggle (config-level) and
+        # is not expected to change without a daemon restart, so we read
+        # it once on first use and cache the value. Tests that need to
+        # flip the flag dynamically set this attribute directly.
+        self._debug_invariant_enabled: bool | None = None
+
     # -------------------------------------------------------------------------
     # Internal Helpers
     # -------------------------------------------------------------------------
@@ -212,6 +219,12 @@ class CorrelationManager:
                 f"CM register: parent={parent_id[:8]}, child={child_id[:8]}, "
                 f"msg={message_id[:8]}, pending={parent_state.pending_count}"
             )
+
+        # Lock released. Run the DEBUG_COMPLETION_INVARIANT check OUTSIDE
+        # the per-parent lock so the DB read does not serialize register
+        # operations for the same parent. The check is observability only
+        # and must not affect the caller's control flow.
+        await self._check_invariant(parent_id)
 
     async def resolve_response(
         self,
@@ -358,6 +371,13 @@ class CorrelationManager:
                                 f"concurrent register_message_send already "
                                 f"populated _pending, leaving as-is"
                             )
+            # Observability: run the DEBUG_COMPLETION_INVARIANT check
+            # on the completion path too. CM is now 0 for this parent
+            # (entry cleared under the lock above); a divergence means
+            # the DB is still tracking a non-zero waiting_for, which is
+            # exactly the symptom we're watching for. See
+            # _check_invariant docstring for the triage decision tree.
+            await self._check_invariant(parent_id)
             return True
 
         # Lock released: do shadow validation outside the per-parent lock
@@ -366,7 +386,18 @@ class CorrelationManager:
         # the lock — the validation is a best-effort, point-in-time check.
         if should_validate:
             await self._validate_shadow_mode(parent_id)
+            # Observability: also run the DEBUG_COMPLETION_INVARIANT check
+            # (no-op when the flag is OFF). See _check_invariant docstring
+            # for the divergence triage decision tree.
+            await self._check_invariant(parent_id)
             return False
+
+        # Defensive fallback: neither should_complete nor should_validate
+        # was set. This should not be reachable (the lock-protected block
+        # above sets one of them when the pending set is non-empty), but
+        # if it ever happens, run the invariant check anyway and fall
+        # through to the implicit return None.
+        await self._check_invariant(parent_id)
 
     def get_pending_count(self, parent_id: str) -> int:
         """Get the pending correlation count for a parent.
@@ -489,6 +520,144 @@ class CorrelationManager:
     # -------------------------------------------------------------------------
     # Shadow Validation (Phase 1)
     # -------------------------------------------------------------------------
+
+    def _is_debug_invariant_enabled(self) -> bool:
+        """Check if the ``DEBUG_COMPLETION_INVARIANT`` config flag is ON.
+
+        Reads the flag from ``daemon.config.load_config()`` on first call
+        and caches the result on the instance. The flag is a runtime
+        operator toggle (config-level) and is not expected to change
+        without a daemon restart, so reading it once is safe and avoids
+        the cost of re-parsing ``config.yaml`` on every register/resolve.
+
+        Tests that need to flip the flag dynamically should set
+        ``self._debug_invariant_enabled`` directly on the CM instance —
+        this is the supported override path (see
+        ``tests/test_correlation_manager.py`` for examples).
+
+        Returns:
+            ``True`` if the flag is ON, ``False`` otherwise (including
+            when config loading fails — fail closed to avoid spurious
+            DB reads in environments where config is unavailable).
+        """
+        if self._debug_invariant_enabled is not None:
+            return self._debug_invariant_enabled
+        try:
+            from ..config import load_config
+
+            config = load_config()
+            self._debug_invariant_enabled = bool(
+                config.job_system.debug_completion_invariant
+            )
+        except Exception as e:
+            # Config load failure — fail closed. The check is
+            # observability only and a config issue should not
+            # cause every register/resolve to error.
+            logger.debug(
+                f"CM invariant: failed to load config for "
+                f"debug_completion_invariant check: {e}"
+            )
+            self._debug_invariant_enabled = False
+        return self._debug_invariant_enabled
+
+    async def _check_invariant(self, parent_id: str) -> None:
+        """Check CM pending count vs DB ``waiting_for`` and log divergence.
+
+        Phase A observability check, gated on the ``DEBUG_COMPLETION_INVARIANT``
+        config flag (``daemon.config.JobSystemConfig.debug_completion_invariant``).
+        When the flag is OFF, this method is a no-op. When ON, it reads the
+        current ``waiting_for`` from the DB and compares with the CM's
+        in-memory pending count. Disagreement is logged at WARNING with the
+        structured prefix ``event=CM_WAITING_FOR_DIVERGENCE`` so log
+        aggregators can alert on the key directly.
+
+        Triage decision tree (operational runbook)
+        ------------------------------------------
+
+        * **<10 divergences/hour** → investigate in next sprint.
+          Background noise from timing of the register/resolve pair
+          relative to the DB write — accept this as long-running
+          operational reality.
+        * **10–100 divergences/hour** → page on-call, check for new
+          ``waiting_for`` mutation sites. The CM is the SOLE completion
+          authority in Phase A; any site that mutates ``waiting_for``
+          outside the CM hook chain is a bug.
+        * **>100 divergences/hour** → flip the kill switch
+          (``USE_LEGACY_WAITING_FOR_CASCADE=ON``) IMMEDIATELY and
+          investigate. Indicates a serious drift between CM and DB —
+          better to fall back to the legacy cascade than risk
+          premature completions.
+
+        **Acceptable divergence rate**: <10/hour (background noise).
+        **Zero is the goal** — investigate any divergence eventually;
+        <10/hour is the operational threshold, not a target.
+
+        Implementation contract
+        -----------------------
+
+        * **Non-blocking**: the DB read is wrapped in
+          ``asyncio.to_thread`` to avoid blocking the main event loop.
+        * **Never raises**: any exception (config load failure, DB read
+          failure, instance missing ``waiting_for``) is swallowed and
+          logged at DEBUG. The check is observability only and MUST NOT
+          affect the caller's control flow.
+        * **No decisions made on the comparison**: the divergence is
+          logged, nothing else. The check is a tripwire, not a guard.
+
+        Must be called from the main event loop (N3 constraint).
+
+        Args:
+            parent_id: The parent instance ID to validate.
+        """
+        if not self._is_debug_invariant_enabled():
+            return
+
+        try:
+            # Read DB waiting_for (sync, wrap in to_thread) — same
+            # pattern as _validate_shadow_mode. Single-row PK lookup,
+            # cheap.
+            instance = await asyncio.to_thread(
+                self._instance_repo.get, parent_id
+            )
+        except Exception as e:
+            # DB read failure — log at DEBUG and continue. The check
+            # is observability only and must not affect the calling
+            # control flow.
+            logger.debug(
+                f"CM invariant: DB read failed for parent={parent_id[:8]}: {e}"
+            )
+            return
+
+        if instance is None:
+            # Parent not in DB — can't compare. Could be a transient
+            # state during instance creation/termination. Log at DEBUG.
+            logger.debug(
+                f"CM invariant: parent={parent_id[:8]} not in DB, "
+                f"skipping divergence check"
+            )
+            return
+
+        db_waiting = getattr(instance, "waiting_for", None)
+        if db_waiting is None:
+            # Defensive: instance object doesn't expose waiting_for.
+            # This should never happen with a real Instance model, but
+            # the mock-friendly signature is robust to it.
+            logger.debug(
+                f"CM invariant: parent={parent_id[:8]} instance has no "
+                f"waiting_for attribute, skipping divergence check"
+            )
+            return
+
+        cm_count = self.get_pending_count(parent_id)
+
+        if cm_count != db_waiting:
+            # Structured WARNING — operators alert on the event= key.
+            # Field order in the message matches the structured fields
+            # so log aggregators can extract them consistently.
+            logger.warning(
+                f"event=CM_WAITING_FOR_DIVERGENCE parent={parent_id[:8]} "
+                f"cm_pending_count={cm_count} db_waiting_for={db_waiting}"
+            )
 
     async def rebuild_from_db(self) -> None:
         """Reconstruct pending state from database after daemon restart.

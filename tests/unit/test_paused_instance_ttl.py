@@ -683,10 +683,19 @@ class TestPausedAtField:
 
         from daemon.services.instance_lifecycle import _CascadeUpdateResult
 
-        def _mock_pause_db_sync(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+        def _mock_pause_db_sync(
+            engine,
+            write_guard,
+            *,
+            tree_ids,
+            paused_at_iso,
+            paused_instances_data,
+            use_legacy_cascade: bool = False,
+        ):
             captured["pause_calls"].append(
                 {"tree_ids": list(tree_ids), "paused_at_iso": paused_at_iso,
-                 "paused_instances_data": list(paused_instances_data)}
+                 "paused_instances_data": list(paused_instances_data),
+                 "use_legacy_cascade": use_legacy_cascade}
             )
             return _CascadeUpdateResult(
                 updated_ids=[iid for iid, _a, _w in paused_instances_data],

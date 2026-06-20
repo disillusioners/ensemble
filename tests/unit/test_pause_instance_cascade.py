@@ -91,13 +91,26 @@ class TestPauseInstanceCascade:
         pause_calls: list[tuple[str, dict]] = []
         resume_calls: list[tuple[str, dict]] = []
 
-        def fake_pause_cascade_db_sync(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+        def fake_pause_cascade_db_sync(
+            engine,
+            write_guard,
+            *,
+            tree_ids,
+            paused_at_iso,
+            paused_instances_data,
+            use_legacy_cascade: bool = False,
+        ):
             for node_id, agent_id, wf in paused_instances_data:
-                pause_calls.append((node_id, {"status": _IS.PAUSED.value, "waiting_for": 0, "paused_at": paused_at_iso}))
+                # A6: when the kill switch is OFF (default), preserve
+                # the existing ``waiting_for`` value (CM-authoritative
+                # path). When ON, fall back to the legacy behavior of
+                # resetting to 0.
+                effective_wf = 0 if use_legacy_cascade else wf
+                pause_calls.append((node_id, {"status": _IS.PAUSED.value, "waiting_for": effective_wf, "paused_at": paused_at_iso}))
                 mock_repo.update(
                     node_id,
                     status=_IS.PAUSED.value,
-                    waiting_for=0,
+                    waiting_for=effective_wf,
                     paused_at=paused_at_iso,
                 )
             from daemon.services.instance_lifecycle import _CascadeUpdateResult
@@ -108,9 +121,26 @@ class TestPauseInstanceCascade:
                 waiting_for_by_instance={iid: wf for iid, _, wf in paused_instances_data},
             )
 
-        def fake_resume_cascade_db_sync(engine, write_guard, *, tree_ids, ancestor_ids, is_root_resume):
+        def fake_resume_cascade_db_sync(
+            engine,
+            write_guard,
+            *,
+            tree_ids,
+            ancestor_ids,
+            is_root_resume,
+            use_legacy_cascade: bool = False,
+        ):
             for node_id in tree_ids:
-                wf = 1 if (not is_root_resume and node_id in ancestor_ids) else 0
+                # A6: when the kill switch is OFF (default), do not
+                # touch ``waiting_for`` — preserve the existing value
+                # in the DB. The fake still calls ``update()`` with
+                # the legacy value so test assertions can read the
+                # call kwargs, but the production helper no longer
+                # emits the reset clause in SQL.
+                if use_legacy_cascade:
+                    wf = 1 if (not is_root_resume and node_id in ancestor_ids) else 0
+                else:
+                    wf = 0
                 resume_calls.append((node_id, {"status": _IS.RUNNING.value, "waiting_for": wf, "paused_at": None}))
                 mock_repo.update(
                     node_id,
@@ -123,7 +153,7 @@ class TestPauseInstanceCascade:
                 updated_ids=list(tree_ids),
                 skipped_ids=[],
                 agent_ids_by_instance={},
-                waiting_for_by_instance={n: (1 if (not is_root_resume and n in ancestor_ids) else 0) for n in tree_ids},
+                waiting_for_by_instance={n: (1 if (use_legacy_cascade and not is_root_resume and n in ancestor_ids) else 0) for n in tree_ids},
             )
 
         service._pause_cascade_db_sync = fake_pause_cascade_db_sync
@@ -593,13 +623,26 @@ class TestResumeInstanceCascade:
         resume_calls: list[tuple[str, dict]] = []
         pause_calls: list[tuple[str, dict]] = []
 
-        def fake_pause_cascade_db_sync(engine, write_guard, *, tree_ids, paused_at_iso, paused_instances_data):
+        def fake_pause_cascade_db_sync(
+            engine,
+            write_guard,
+            *,
+            tree_ids,
+            paused_at_iso,
+            paused_instances_data,
+            use_legacy_cascade: bool = False,
+        ):
             for node_id, agent_id, wf in paused_instances_data:
-                pause_calls.append((node_id, {"status": _IS.PAUSED.value, "waiting_for": 0, "paused_at": paused_at_iso}))
+                # A6: when the kill switch is OFF (default), preserve
+                # the existing ``waiting_for`` value (CM-authoritative
+                # path). When ON, fall back to the legacy behavior of
+                # resetting to 0.
+                effective_wf = 0 if use_legacy_cascade else wf
+                pause_calls.append((node_id, {"status": _IS.PAUSED.value, "waiting_for": effective_wf, "paused_at": paused_at_iso}))
                 mock_repo.update(
                     node_id,
                     status=_IS.PAUSED.value,
-                    waiting_for=0,
+                    waiting_for=effective_wf,
                     paused_at=paused_at_iso,
                 )
             from daemon.services.instance_lifecycle import _CascadeUpdateResult
@@ -610,9 +653,26 @@ class TestResumeInstanceCascade:
                 waiting_for_by_instance={iid: wf for iid, _, wf in paused_instances_data},
             )
 
-        def fake_resume_cascade_db_sync(engine, write_guard, *, tree_ids, ancestor_ids, is_root_resume):
+        def fake_resume_cascade_db_sync(
+            engine,
+            write_guard,
+            *,
+            tree_ids,
+            ancestor_ids,
+            is_root_resume,
+            use_legacy_cascade: bool = False,
+        ):
             for node_id in tree_ids:
-                wf = 1 if (not is_root_resume and node_id in ancestor_ids) else 0
+                # A6: when the kill switch is OFF (default), do not
+                # touch ``waiting_for`` — preserve the existing value
+                # in the DB. The fake still calls ``update()`` with
+                # the legacy value so test assertions can read the
+                # call kwargs, but the production helper no longer
+                # emits the reset clause in SQL.
+                if use_legacy_cascade:
+                    wf = 1 if (not is_root_resume and node_id in ancestor_ids) else 0
+                else:
+                    wf = 0
                 resume_calls.append((node_id, {"status": _IS.RUNNING.value, "waiting_for": wf, "paused_at": None}))
                 mock_repo.update(
                     node_id,
@@ -625,7 +685,7 @@ class TestResumeInstanceCascade:
                 updated_ids=list(tree_ids),
                 skipped_ids=[],
                 agent_ids_by_instance={},
-                waiting_for_by_instance={n: (1 if (not is_root_resume and n in ancestor_ids) else 0) for n in tree_ids},
+                waiting_for_by_instance={n: (1 if (use_legacy_cascade and not is_root_resume and n in ancestor_ids) else 0) for n in tree_ids},
             )
 
         service._pause_cascade_db_sync = fake_pause_cascade_db_sync
