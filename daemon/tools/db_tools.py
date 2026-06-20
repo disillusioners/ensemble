@@ -272,6 +272,15 @@ def create_db_tools(
                 # encrypted string and never sees the plaintext.
                 credentials = credential_manager.encrypt({"password": password})
 
+            # Normalize db_type to the canonical "postgres" value accepted
+            # by the pool manager. Handles common aliases.
+            _DB_TYPE_ALIASES: dict[str, str] = {
+                "postgresql": "postgres",
+                "postgre": "postgres",
+                "pg": "postgres",
+            }
+            db_type = _DB_TYPE_ALIASES.get(db_type, db_type)
+
             config = repository.create(
                 connection_name=connection_name,
                 db_type=db_type,
