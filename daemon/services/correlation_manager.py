@@ -127,6 +127,17 @@ class CorrelationManager:
         self._event_task: asyncio.Task[None] | None = None
         self._running = False
 
+        # Re-entrancy guard for rebuild_from_db(). The rebuild body is not
+        # safe to call concurrently with itself: the top-level
+        # ``self._pending = {}`` clear and the per-parent merge loop assume
+        # a single executor. This flag is a defensive guard against
+        # accidental re-entry (e.g. an admin-resync handler triggering a
+        # rebuild while one is already running). It is NOT a lock — it
+        # only protects against re-entry from the same coroutine/call site.
+        # start() is the only production caller and invokes rebuild exactly
+        # once before any EventBus traffic.
+        self._rebuilding: bool = False
+
         # EventBus subscription
         self._subscriber_id: str | None = None
         self._event_queue: asyncio.Queue | None = None
@@ -749,7 +760,12 @@ class CorrelationManager:
             :meth:`register_message_send` or :meth:`resolve_response`
             callback. ``start()`` is the only production caller and is
             invoked exactly once during daemon startup, before any
-            EventBus traffic.
+            EventBus traffic. A runtime ``_rebuilding`` flag guards
+            against accidental re-entry: if a second rebuild is
+            attempted while one is in progress, a ``RuntimeError`` is
+            raised. The flag is reset in a ``finally`` block so an
+            exception during rebuild does not permanently lock out
+            future rebuilds.
 
         **Logging**:
 
@@ -763,110 +779,133 @@ class CorrelationManager:
 
         Must be called from the main event loop (N3 constraint).
         """
-        logger.info("CM rebuild_from_db: starting...")
-
-        # W2 fix: Clear _pending before rebuilding. Previously this method
-        # merged new entries into the existing dict, which could re-add
-        # stale or duplicate entries if a register_message_send landed
-        # between start() and rebuild_from_db(). start() is the only
-        # caller in production and is called before any EventBus traffic,
-        # so replacing the dict is safe; subsequent register/resolve
-        # calls must go through the per-parent lock and will see the
-        # rebuilt state.
-        #
-        # The clear is intentionally NOT held under any lock — it is an
-        # idempotent dict reassignment, and the per-parent locks below
-        # protect per-parent writes. See the crash-recovery contract in
-        # the docstring above for the full concurrency model.
-        self._pending = {}
-
-        # Step 1: Single query for all parents with waiting_for > 0.
-        parents = await asyncio.to_thread(self._instance_repo.get_all_with_waiting_for)
-
-        rebuild_mismatch_warnings = 0
-
-        for parent in parents:
-            parent_id = parent.instance_id
-            db_waiting = parent.waiting_for
-
-            # Step 2: Get children of this parent (one query per parent).
-            children = await asyncio.to_thread(
-                self._instance_repo.get_children, parent_id
+        # Re-entrancy guard: rebuild_from_db() is NOT safe to call
+        # concurrently with itself. The top-level ``self._pending = {}``
+        # clear and the per-parent merge loop assume a single executor,
+        # so an accidental second invocation (e.g. from a future
+        # admin-resync handler) would corrupt state mid-rebuild. This
+        # flag is a defensive guard — NOT a lock. Per the docstring
+        # contract, ``start()`` is the only production caller and
+        # invokes rebuild exactly once during daemon startup. If a
+        # caller violates that contract, we fail loudly rather than
+        # silently corrupting ``_pending``.
+        if self._rebuilding:
+            raise RuntimeError(
+                "CorrelationManager.rebuild_from_db() is already in progress. "
+                "Rebuild is NOT re-entrant — concurrent rebuilds will corrupt "
+                "the _pending dict. start() is the only production caller."
             )
-            child_ids = [c.instance_id for c in children]
+        self._rebuilding = True
+        try:
+            logger.info("CM rebuild_from_db: starting...")
 
-            # Step 3: Single batched query for pending messages across all
-            # children. Returns list[(child_instance_id, message_id)].
-            pending_pairs: list[tuple[str, str]] = []
-            if child_ids:
-                pending_pairs = await asyncio.to_thread(
-                    self._msg_repo.get_pending_for_instances,
-                    child_ids,
-                )
-
-            # Step 4: Build correlation entries from (child_id, message_id) tuples.
+            # W2 fix: Clear _pending before rebuilding. Previously this method
+            # merged new entries into the existing dict, which could re-add
+            # stale or duplicate entries if a register_message_send landed
+            # between start() and rebuild_from_db(). start() is the only
+            # caller in production and is called before any EventBus traffic,
+            # so replacing the dict is safe; subsequent register/resolve
+            # calls must go through the per-parent lock and will see the
+            # rebuilt state.
             #
-            # Crash-recovery contract: MERGE into the existing slot if a
-            # concurrent register_message_send populated it after the
-            # top-level clear above. This is the additive complement to
-            # the W2 OVERWRITE-at-the-top: stale pre-clear entries are
-            # wiped by the clear, but a register that landed after the
-            # clear is preserved. If the slot is empty, create fresh.
-            if pending_pairs:
-                async with self._get_lock(parent_id):
-                    # MERGE semantics: respect any ParentCorrelation that
-                    # a concurrent register_message_send already created.
-                    if parent_id not in self._pending:
-                        self._pending[parent_id] = ParentCorrelation(
-                            parent_id=parent_id
-                        )
-                    parent_state = self._pending[parent_id]
-                    for child_id, message_id in pending_pairs:
-                        correlation_key = f"{child_id}:{message_id}"
-                        # Only add the DB-backed entry if no entry for
-                        # this (child, msg) pair exists yet. A concurrent
-                        # register may have added the same pair (or a
-                        # pair whose DB write hasn't been read back yet);
-                        # in either case we must not clobber the
-                        # existing PendingResponse, which represents a
-                        # live correlation that the caller expects to
-                        # resolve later.
-                        if correlation_key not in parent_state.pending:
-                            parent_state.pending[correlation_key] = PendingResponse(
-                                parent_id=parent_id,
-                                child_id=child_id,
-                                message_id=message_id,
-                                created_at=time.monotonic(),
-                                status=STATUS_PENDING,
+            # The clear is intentionally NOT held under any lock — it is an
+            # idempotent dict reassignment, and the per-parent locks below
+            # protect per-parent writes. See the crash-recovery contract in
+            # the docstring above for the full concurrency model.
+            self._pending = {}
+
+            # Step 1: Single query for all parents with waiting_for > 0.
+            parents = await asyncio.to_thread(self._instance_repo.get_all_with_waiting_for)
+
+            rebuild_mismatch_warnings = 0
+
+            for parent in parents:
+                parent_id = parent.instance_id
+                db_waiting = parent.waiting_for
+
+                # Step 2: Get children of this parent (one query per parent).
+                children = await asyncio.to_thread(
+                    self._instance_repo.get_children, parent_id
+                )
+                child_ids = [c.instance_id for c in children]
+
+                # Step 3: Single batched query for pending messages across all
+                # children. Returns list[(child_instance_id, message_id)].
+                pending_pairs: list[tuple[str, str]] = []
+                if child_ids:
+                    pending_pairs = await asyncio.to_thread(
+                        self._msg_repo.get_pending_for_instances,
+                        child_ids,
+                    )
+
+                # Step 4: Build correlation entries from (child_id, message_id) tuples.
+                #
+                # Crash-recovery contract: MERGE into the existing slot if a
+                # concurrent register_message_send populated it after the
+                # top-level clear above. This is the additive complement to
+                # the W2 OVERWRITE-at-the-top: stale pre-clear entries are
+                # wiped by the clear, but a register that landed after the
+                # clear is preserved. If the slot is empty, create fresh.
+                if pending_pairs:
+                    async with self._get_lock(parent_id):
+                        # MERGE semantics: respect any ParentCorrelation that
+                        # a concurrent register_message_send already created.
+                        if parent_id not in self._pending:
+                            self._pending[parent_id] = ParentCorrelation(
+                                parent_id=parent_id
                             )
-                    # No `self._pending[parent_id] = parent_state` here:
-                    # we either created a fresh object (assigned above)
-                    # or we mutated the existing object in place. The
-                    # reference in self._pending[parent_id] is already
-                    # correct.
+                        parent_state = self._pending[parent_id]
+                        for child_id, message_id in pending_pairs:
+                            correlation_key = f"{child_id}:{message_id}"
+                            # Only add the DB-backed entry if no entry for
+                            # this (child, msg) pair exists yet. A concurrent
+                            # register may have added the same pair (or a
+                            # pair whose DB write hasn't been read back yet);
+                            # in either case we must not clobber the
+                            # existing PendingResponse, which represents a
+                            # live correlation that the caller expects to
+                            # resolve later.
+                            if correlation_key not in parent_state.pending:
+                                parent_state.pending[correlation_key] = PendingResponse(
+                                    parent_id=parent_id,
+                                    child_id=child_id,
+                                    message_id=message_id,
+                                    created_at=time.monotonic(),
+                                    status=STATUS_PENDING,
+                                )
+                        # No `self._pending[parent_id] = parent_state` here:
+                        # we either created a fresh object (assigned above)
+                        # or we mutated the existing object in place. The
+                        # reference in self._pending[parent_id] is already
+                        # correct.
 
-            # W2 fix: Compare found count with DB waiting_for UNDER the
-            # per-parent lock. Reading self._pending outside the lock was a
-            # TOCTOU hazard (concurrent register_message_send could mutate
-            # pending between rebuild and the count check).
-            async with self._get_lock(parent_id):
-                cm_count = self.get_pending_count(parent_id)
-            if cm_count != db_waiting:
-                logger.warning(
-                    f"CM rebuild mismatch: parent={parent_id[:8]}, "
-                    f"DB waiting_for={db_waiting}, CM found={cm_count}"
-                )
-                rebuild_mismatch_warnings += 1
-            else:
-                logger.debug(
-                    f"CM rebuild match: parent={parent_id[:8]}, count={cm_count}"
-                )
+                # W2 fix: Compare found count with DB waiting_for UNDER the
+                # per-parent lock. Reading self._pending outside the lock was a
+                # TOCTOU hazard (concurrent register_message_send could mutate
+                # pending between rebuild and the count check).
+                async with self._get_lock(parent_id):
+                    cm_count = self.get_pending_count(parent_id)
+                if cm_count != db_waiting:
+                    logger.warning(
+                        f"CM rebuild mismatch: parent={parent_id[:8]}, "
+                        f"DB waiting_for={db_waiting}, CM found={cm_count}"
+                    )
+                    rebuild_mismatch_warnings += 1
+                else:
+                    logger.debug(
+                        f"CM rebuild match: parent={parent_id[:8]}, count={cm_count}"
+                    )
 
-        logger.info(
-            f"CM rebuild_from_db complete: "
-            f"tracked_parents={len(self._pending)}, "
-            f"mismatch_warnings={rebuild_mismatch_warnings}"
-        )
+            logger.info(
+                f"CM rebuild_from_db complete: "
+                f"tracked_parents={len(self._pending)}, "
+                f"mismatch_warnings={rebuild_mismatch_warnings}"
+            )
+        finally:
+            # Always clear the flag, even if rebuild raised. A failed
+            # rebuild must not permanently lock out future legitimate
+            # rebuilds (e.g. on the next daemon restart).
+            self._rebuilding = False
 
     async def _validate_shadow_mode(self, parent_id: str) -> None:
         """Compare CM pending count with DB waiting_for and log the result.

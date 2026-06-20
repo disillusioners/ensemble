@@ -676,15 +676,49 @@ class JobFeedbackObserver:
             return
 
         # ─── Call the unified sync helper — single WriteGuardSession transaction ───
+        # C1 fix (cross-thread race hardening, 2026-06-20): wrap the
+        # ``asyncio.to_thread`` call in the CorrelationManager's per-parent
+        # ``asyncio.Lock`` when CM is active. The lock is held on the EVENT
+        # LOOP for the entire duration of the worker-thread sync helper,
+        # blocking ``register_message_send`` (which also acquires
+        # ``cm._get_lock(parent_id)``) from running on the loop and
+        # registering a new pending child between the pre-check at line ~509
+        # and the commit inside ``_finalize_job_db_sync``.
+        #
+        # Why this works (no deadlock risk):
+        #   * ``asyncio.Lock`` is event-loop-bound — the worker thread that
+        #     ``asyncio.to_thread`` runs in NEVER acquires it; it only runs
+        #     the sync SQLAlchemy code while the GIL is released during I/O.
+        #   * The lock serializes coroutines on the loop, not threads.
+        #   * When CM is None (legacy path / not initialized), no lock is
+        #     needed — the legacy ``SELECT ... FOR UPDATE`` row-lock gate in
+        #     ``_finalize_job_db_sync`` provides the same protection.
         try:
-            db_result = await asyncio.to_thread(
-                self._finalize_job_db_sync,
-                job.job_id,
-                instance_id,
-                terminal_status,
-                result_summary,
-                error_message,
-            )
+            cm = get_correlation_manager()
+            if cm is not None:
+                # CM is active — hold the per-parent lock across the to_thread
+                # call so concurrent ``register_message_send`` coroutines must
+                # wait until finalization has committed.
+                async with cm._get_lock(instance_id):
+                    db_result = await asyncio.to_thread(
+                        self._finalize_job_db_sync,
+                        job.job_id,
+                        instance_id,
+                        terminal_status,
+                        result_summary,
+                        error_message,
+                    )
+            else:
+                # Legacy path / CM not wired — no lock needed; the FOR UPDATE
+                # gate inside ``_finalize_job_db_sync`` is the only defence.
+                db_result = await asyncio.to_thread(
+                    self._finalize_job_db_sync,
+                    job.job_id,
+                    instance_id,
+                    terminal_status,
+                    result_summary,
+                    error_message,
+                )
 
             # ─── Handle gate-deferred skip (waiting_for > 0 or gate SELECT failed) ───
             # C2-N1 fix: ``notify_corr_rearm`` fires ONLY on gate-deferred
@@ -787,6 +821,18 @@ class JobFeedbackObserver:
                 f"(current: {e.from_status} -> {e.to_status}), skipping"
             )
             return
+        except RuntimeError:
+            # W2 fix (2026-06-20): A8 hard errors (e.g., CM is None under
+            # ``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` — see the raise at
+            # ``_finalize_job_db_sync`` ~line 1307) propagate as configuration
+            # errors, NOT as per-job FAILED transitions. Without this clause
+            # the W3 ``except Exception`` handler would swallow the
+            # RuntimeError and silently mark the job FAILED, hiding the
+            # misconfiguration from operators and turning a global config bug
+            # into a per-job recovery burden. Re-raise so the caller
+            # (``_process_event`` / ``handle_correlation_complete``) sees the
+            # hard error and can decide whether to surface it further.
+            raise
         except Exception as e:
             logger.error(
                 f"Failed to finalize job {job.job_id[:8]}... "

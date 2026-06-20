@@ -1118,10 +1118,10 @@ class TestProductionPathFinalizeJob:
     re-check at the top of ``_finalize_job_db_sync`` is skipped, forcing
     the flow to reach the in-session waiting_for gate. Under flag OFF, CM
     is also not set — which is a HARD ERROR per ADR-011 (the
-    ``_finalize_job`` wrapper invokes the W3 fail-safe and transitions the
-    job to FAILED so the queue can advance — the RuntimeError does NOT
-    propagate out of ``_finalize_job`` because the W3 fail-safe is the
-    only signal external callers receive).
+    ``_finalize_job`` wrapper propagates the A8 RuntimeError as a hard
+    configuration error — W2 fix, 2026-06-20. The W3 fail-safe does NOT
+    catch it; the W3 fail-safe is reserved for transient / operational
+    errors, not global config bugs).
     """
 
     @pytest.mark.parametrize("use_legacy_cascade", [True, False])
@@ -1150,10 +1150,13 @@ class TestProductionPathFinalizeJob:
             Job stays PROCESSING; no side effects fire.
           * **Flag OFF (CM)**: CM is ``None`` per the autouse
             ``_reset_cm_singleton`` fixture — a HARD ERROR per ADR-011.
-            ``_finalize_job`` catches the RuntimeError via the W3
-            fail-safe and transitions the job to FAILED so the queue
-            can advance (the RuntimeError does NOT propagate out of
-            ``_finalize_job`` — W3 is the only external signal).
+            ``_finalize_job`` propagates the RuntimeError as a
+            configuration error (W2 fix, 2026-06-20) rather than
+            silently swallowing it via the W3 fail-safe. The W3
+            fail-safe is reserved for transient / operational errors
+            (DB connectivity, etc.) — a global misconfiguration must
+            be surfaced to operators, not converted to per-job
+            FAILED transitions.
         """
         parent_id = f"parent-prod-{uuid.uuid4().hex[:8]}"
         job_id = f"job-prod-{uuid.uuid4().hex[:8]}"
@@ -1202,17 +1205,29 @@ class TestProductionPathFinalizeJob:
             mocks["events_service"]._publish_instance_lifecycle_event.assert_not_called()
         else:
             # ─── Flag OFF (CM): CM is None → HARD ERROR per ADR-011 ─────
-            # The W3 fail-safe in ``_finalize_job`` catches the
-            # RuntimeError and transitions the job to FAILED so the
-            # queue can advance. The RuntimeError does NOT propagate
-            # out of ``_finalize_job`` — W3 is the only signal.
-            await observer._finalize_job(job, parent_id, "completed", error=None)
+            # W2 fix (2026-06-20): the RuntimeError propagates out of
+            # ``_finalize_job`` as a hard configuration error. The W3
+            # fail-safe does NOT catch it — that handler is reserved for
+            # transient / operational errors, not global config bugs.
+            with pytest.raises(
+                RuntimeError, match="USE_LEGACY_WAITING_FOR_CASCADE=OFF"
+            ):
+                await observer._finalize_job(job, parent_id, "completed", error=None)
             await asyncio.sleep(0.05)
 
-            # W3 fail-safe: job → FAILED (no premature completion).
-            assert _read_job_status(pg_engine, job_id) == JobStatus.FAILED.value, (
-                f"PRODUCTION PATH (CM): expected W3 fail-safe to transition "
-                f"job to FAILED, got {_read_job_status(pg_engine, job_id)}"
+            # W2 contract: the W3 fail-safe does NOT fire on a propagated
+            # RuntimeError. The job must remain in PROCESSING (not
+            # FAILED) so the configuration error is visible to operators
+            # and not masked by spurious per-job FAILED transitions.
+            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+                f"PRODUCTION PATH (CM, W2): expected job to remain in "
+                f"PROCESSING (RuntimeError propagates), got "
+                f"{_read_job_status(pg_engine, job_id)}"
+            )
+            # Instance must also stay RUNNING (job+instance are coupled).
+            assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.RUNNING.value, (
+                "PRODUCTION PATH (CM, W2): instance transitioned despite "
+                "RuntimeError propagating out of _finalize_job"
             )
             # No side effects fired (gate rejected before outbox).
             mocks["job_queue_service"].notify_watchers.assert_not_called()
@@ -1241,8 +1256,10 @@ class TestProductionPathFinalizeJob:
             sees waiting_for=0 and proceeds. Job → COMPLETED, instance
             → COMPLETED, ``notify_watchers`` fires.
           * **Flag OFF (CM)**: CM is ``None`` per the autouse
-            ``_reset_cm_singleton`` fixture — HARD ERROR. W3 fail-safe
-            transitions the job to FAILED.
+            ``_reset_cm_singleton`` fixture — HARD ERROR. W2 fix
+            (2026-06-20): the RuntimeError propagates out of
+            ``_finalize_job`` as a hard configuration error. The W3
+            fail-safe does NOT fire (it would mask the config bug).
         """
         parent_id = f"parent-prod-ok-{uuid.uuid4().hex[:8]}"
         job_id = f"job-prod-ok-{uuid.uuid4().hex[:8]}"
@@ -1264,20 +1281,37 @@ class TestProductionPathFinalizeJob:
             pg_engine, job, use_legacy_cascade=use_legacy_cascade
         )
 
-        await observer._finalize_job(job, parent_id, "completed", error=None)
-        await asyncio.sleep(0.05)
-
         if use_legacy_cascade:
-            # Gate passed (waiting_for=0) → terminal transition proceeded.
+            # Gate passed (waiting_for=0) → terminal transition proceeds.
+            await observer._finalize_job(job, parent_id, "completed", error=None)
+            await asyncio.sleep(0.05)
+
             assert _read_job_status(pg_engine, job_id) == JobStatus.COMPLETED.value
             assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.COMPLETED.value
             # notify_watchers (post-commit outbox) must have fired.
             mocks["job_queue_service"].notify_watchers.assert_awaited()
         else:
-            # Flag OFF: CM is None → HARD ERROR → W3 fail-safe → job → FAILED.
-            assert _read_job_status(pg_engine, job_id) == JobStatus.FAILED.value, (
-                f"PRODUCTION PATH (CM): expected W3 fail-safe to transition "
-                f"job to FAILED, got {_read_job_status(pg_engine, job_id)}"
+            # Flag OFF: CM is None → HARD ERROR per ADR-011. W2 fix
+            # (2026-06-20): the RuntimeError propagates out of
+            # ``_finalize_job``; the W3 fail-safe does NOT fire (it would
+            # mask the global config bug as per-job FAILED transitions).
+            with pytest.raises(
+                RuntimeError, match="USE_LEGACY_WAITING_FOR_CASCADE=OFF"
+            ):
+                await observer._finalize_job(job, parent_id, "completed", error=None)
+            await asyncio.sleep(0.05)
+
+            # W2 contract: the W3 fail-safe does NOT catch a propagated
+            # RuntimeError. Job must remain in PROCESSING (not FAILED) so
+            # the misconfiguration is visible to operators.
+            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+                f"PRODUCTION PATH (CM, W2): expected job to remain in "
+                f"PROCESSING (RuntimeError propagates), got "
+                f"{_read_job_status(pg_engine, job_id)}"
+            )
+            assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.RUNNING.value, (
+                "PRODUCTION PATH (CM, W2): instance transitioned despite "
+                "RuntimeError propagating out of _finalize_job"
             )
             mocks["job_queue_service"].notify_watchers.assert_not_called()
 
@@ -1306,9 +1340,10 @@ class TestProductionPathFinalizeJob:
         Flag-aware (A8/A7 parity):
           * **Flag ON (legacy)**: gate defers on waiting_for=1 →
             ``notify_corr_rearm`` scheduled with parent_id.
-          * **Flag OFF (CM)**: CM is None → RuntimeError → W3 fail-safe
-            → no rearm scheduled, no gate deferral (CM check is in-memory
-            and doesn't honour the legacy deferral → rearm path).
+          * **Flag OFF (CM)**: CM is ``None`` → RuntimeError. W2 fix
+            (2026-06-20): the RuntimeError propagates out of
+            ``_finalize_job`` as a hard config error; the W3 fail-safe
+            does NOT fire and ``notify_corr_rearm`` is NOT scheduled.
         """
         parent_id = f"parent-rearm-prod-{uuid.uuid4().hex[:8]}"
         job_id = f"job-rearm-prod-{uuid.uuid4().hex[:8]}"
@@ -1336,11 +1371,13 @@ class TestProductionPathFinalizeJob:
             "daemon.services.job_feedback_observer.notify_corr_rearm",
             new=AsyncMock(name="notify_corr_rearm_spy"),
         ) as rearm_spy:
-            await observer._finalize_job(job, parent_id, "completed", error=None)
-            # Let the create_task scheduled by _finalize_job run.
-            await asyncio.sleep(0.05)
-
             if use_legacy_cascade:
+                # Gate defers on waiting_for=1; ``notify_corr_rearm`` is
+                # scheduled via ``asyncio.create_task`` — no exception
+                # raised. Yield to let the create_task run.
+                await observer._finalize_job(job, parent_id, "completed", error=None)
+                await asyncio.sleep(0.05)
+
                 # Gate deferred → job stays PROCESSING.
                 assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
                     "Gate should have deferred the finalization (waiting_for=1)"
@@ -1349,13 +1386,25 @@ class TestProductionPathFinalizeJob:
                 # C2-PartA: notify_corr_rearm was scheduled with the parent id.
                 rearm_spy.assert_awaited_once_with(parent_id)
             else:
-                # Flag OFF: CM None → RuntimeError → W3 fail-safe. The
-                # legacy deferral → rearm path does NOT fire (the CM
-                # check raised before reaching the legacy gate).
-                # W3 fail-safe transitions the job to FAILED.
-                assert _read_job_status(pg_engine, job_id) == JobStatus.FAILED.value, (
-                    f"PRODUCTION PATH (CM): expected W3 fail-safe to "
-                    f"transition job to FAILED, got "
+                # Flag OFF: CM None → ADR-011 RuntimeError. W2 fix
+                # (2026-06-20): the RuntimeError propagates out of
+                # ``_finalize_job``; the W3 fail-safe does NOT fire and
+                # ``notify_corr_rearm`` is NOT scheduled. The legacy
+                # deferral → rearm path does not apply (the CM check
+                # raised before reaching the legacy gate).
+                with pytest.raises(
+                    RuntimeError, match="USE_LEGACY_WAITING_FOR_CASCADE=OFF"
+                ):
+                    await observer._finalize_job(job, parent_id, "completed", error=None)
+                await asyncio.sleep(0.05)
+
+                # W2 contract: the W3 fail-safe does NOT catch the
+                # propagated RuntimeError. Job must remain in
+                # PROCESSING (not FAILED) so the misconfiguration is
+                # visible to operators.
+                assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+                    f"PRODUCTION PATH (CM, W2): expected job to remain in "
+                    f"PROCESSING (RuntimeError propagates), got "
                     f"{_read_job_status(pg_engine, job_id)}"
                 )
                 rearm_spy.assert_not_called()
@@ -1386,10 +1435,9 @@ class TestProductionPathFinalizeJob:
           * **Flag OFF (CM)**: the CM ``is_complete()`` check is in-memory
             — it does NOT execute SQL, so patching ``Session.execute`` has
             NO effect. CM is ``None`` → the CM gate raises the
-            ADR-011 RuntimeError → W3 fail-safe transitions the job to
-            FAILED. (This branch is dominated by the CM=None error path,
-            not the gate exception path; we still exercise it for
-            completeness.)
+            ADR-011 RuntimeError. W2 fix (2026-06-20): the RuntimeError
+            propagates out of ``_finalize_job`` as a hard config error;
+            the W3 fail-safe does NOT fire.
         """
         parent_id = f"parent-exc-{uuid.uuid4().hex[:8]}"
         job_id = f"job-exc-{uuid.uuid4().hex[:8]}"
@@ -1431,16 +1479,20 @@ class TestProductionPathFinalizeJob:
             "daemon.services.job_feedback_observer.notify_corr_rearm",
             new=AsyncMock(name="notify_corr_rearm_spy"),
         ) as rearm_spy:
-            # Direct production-path call. The pre-fetch uses the mocked
-            # ``_get_last_assistant_message_raw`` (no Session.execute).
-            await observer._finalize_job(job, parent_id, "completed", error=None)
-            # Yield + poll for the create_task (notify_corr_rearm) to run.
-            for _ in range(20):
-                await asyncio.sleep(0.1)
-                if rearm_spy.await_count > 0:
-                    break
-
             if use_legacy_cascade:
+                # Direct production-path call. The pre-fetch uses the
+                # mocked ``_get_last_assistant_message_raw`` (no
+                # Session.execute). The C1-N1 except block in
+                # ``_finalize_job_db_sync`` catches the OperationalError
+                # and returns ``gate_deferred=True`` — no exception
+                # propagates.
+                await observer._finalize_job(job, parent_id, "completed", error=None)
+                # Yield + poll for the create_task (notify_corr_rearm) to run.
+                for _ in range(20):
+                    await asyncio.sleep(0.1)
+                    if rearm_spy.await_count > 0:
+                        break
+
                 # C1-N1 fix: gate raised → deferred (NOT W3 fail-safed to FAILED).
                 assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
                     "PRODUCTION PATH (legacy): job transitioned despite gate SELECT raising — "
@@ -1459,12 +1511,27 @@ class TestProductionPathFinalizeJob:
                 rearm_spy.assert_awaited_once_with(parent_id)
             else:
                 # Flag OFF: CM check is in-memory so the Session.execute
-                # patch is a no-op. CM is None → ADR-011 RuntimeError →
-                # W3 fail-safe transitions the job to FAILED.
-                assert _read_job_status(pg_engine, job_id) == JobStatus.FAILED.value, (
-                    f"PRODUCTION PATH (CM): expected W3 fail-safe to "
-                    f"transition job to FAILED, got "
+                # patch is a no-op. CM is None → ADR-011 RuntimeError.
+                # W2 fix (2026-06-20): the RuntimeError propagates out
+                # of ``_finalize_job``; the W3 fail-safe does NOT fire.
+                with pytest.raises(
+                    RuntimeError, match="USE_LEGACY_WAITING_FOR_CASCADE=OFF"
+                ):
+                    await observer._finalize_job(job, parent_id, "completed", error=None)
+                await asyncio.sleep(0.05)
+
+                # W2 contract: the W3 fail-safe does NOT catch the
+                # propagated RuntimeError. Job must remain in
+                # PROCESSING (not FAILED) so the misconfiguration is
+                # visible to operators.
+                assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+                    f"PRODUCTION PATH (CM, W2): expected job to remain in "
+                    f"PROCESSING (RuntimeError propagates), got "
                     f"{_read_job_status(pg_engine, job_id)}"
+                )
+                assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.RUNNING.value, (
+                    "PRODUCTION PATH (CM, W2): instance transitioned despite "
+                    "RuntimeError propagating out of _finalize_job"
                 )
                 mocks["job_queue_service"].notify_watchers.assert_not_called()
                 mocks["live_hub"].stream_status_change.assert_not_called()

@@ -996,12 +996,20 @@ class TestObserverLifecycleResilience:
 
     @pytest.mark.asyncio
     async def test_atomic_transition_generic_exception_caught(self):
-        """Generic exceptions from _finalize_job_db_sync are caught within _process_event.
+        """Generic (non-RuntimeError) exceptions from _finalize_job_db_sync are
+        caught within _process_event by the W3 fail-safe handler.
 
         W3 behavior: after the sync helper raises, the fail-safe handler
         attempts ``atomic_transition(FAILED)`` so the job doesn't sit in
         PROCESSING forever. If that also raises, the exception is swallowed
         silently — the test verifies the fail-safe was invoked.
+
+        Note (W2 fix, 2026-06-20): a bare ``RuntimeError`` is now treated
+        as a hard configuration error and propagates through
+        ``_process_event`` rather than being silently swallowed by the W3
+        fail-safe. This test uses ``OSError`` (a non-RuntimeError generic
+        exception) to exercise the W3 path. RuntimeError propagation is
+        covered by ``test_runtime_error_propagates_as_config_error``.
         """
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
@@ -1011,7 +1019,7 @@ class TestObserverLifecycleResilience:
         # W3 fail-safe atomic_transition also raises — this is fine; the
         # fail-safe swallows it. We only assert that atomic_transition WAS
         # called once (by the fail-safe).
-        mock_job_repo.atomic_transition.side_effect = RuntimeError("Unexpected DB error")
+        mock_job_repo.atomic_transition.side_effect = OSError("Unexpected DB error")
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_instance_manager = MagicMock()
         mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
@@ -1024,9 +1032,12 @@ class TestObserverLifecycleResilience:
             project_repo=MagicMock(),
             instance_manager=mock_instance_manager,
         )
-        # Install a sync mock that raises a generic RuntimeError.
+        # Install a sync mock that raises a generic non-RuntimeError exception.
+        # OSError is the canonical "DB connectivity" error class — it hits
+        # the W3 ``except Exception`` branch (W2 fix only special-cases
+        # ``RuntimeError`` as a config error).
         sync_mock = MagicMock(side_effect=make_fake_sync(
-            raise_exc=RuntimeError("Unexpected DB error")
+            raise_exc=OSError("Unexpected DB error")
         ))
         observer._finalize_job_db_sync = sync_mock
 
@@ -1042,8 +1053,8 @@ class TestObserverLifecycleResilience:
         # Should not raise - exceptions are caught within _process_event
         try:
             await observer._process_event(event)
-        except RuntimeError:
-            pytest.fail("_process_event should catch RuntimeError from _finalize_job_db_sync")
+        except OSError:
+            pytest.fail("_process_event should catch OSError from _finalize_job_db_sync")
 
         # The sync helper was called (and raised).
         sync_mock.assert_called_once()
@@ -1062,19 +1073,24 @@ class TestObserverLifecycleResilience:
 
     @pytest.mark.asyncio
     async def test_atomic_transition_exception_does_not_propagate(self):
-        """If _finalize_job_db_sync raises an unexpected error, _process_event should handle it.
+        """If _finalize_job_db_sync raises a non-RuntimeError exception, _process_event handles it.
 
         W3 behavior: the fail-safe handler attempts a single
         ``atomic_transition`` to FAILED so the job doesn't sit in
         PROCESSING forever. The fail-safe's exception (if any) is
         swallowed silently.
+
+        Note (W2 fix, 2026-06-20): a bare ``RuntimeError`` is now treated
+        as a hard configuration error and propagates through
+        ``_process_event``. This test uses ``OSError`` (a non-RuntimeError
+        generic exception) to exercise the W3 path.
         """
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
         mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
-        mock_job_repo.atomic_transition.side_effect = RuntimeError("Unexpected DB error")
+        mock_job_repo.atomic_transition.side_effect = OSError("Unexpected DB error")
         mock_lock_repo = MagicMock(spec=LockRepository)
         mock_instance_manager = MagicMock()
         mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
@@ -1087,9 +1103,9 @@ class TestObserverLifecycleResilience:
             project_repo=MagicMock(),
             instance_manager=mock_instance_manager,
         )
-        # Install a sync mock that raises a generic RuntimeError.
+        # Install a sync mock that raises a generic non-RuntimeError exception.
         sync_mock = MagicMock(side_effect=make_fake_sync(
-            raise_exc=RuntimeError("Unexpected DB error")
+            raise_exc=OSError("Unexpected DB error")
         ))
         observer._finalize_job_db_sync = sync_mock
 
@@ -1115,6 +1131,87 @@ class TestObserverLifecycleResilience:
         assert mock_job_repo.atomic_transition.call_count == 1
 
         # Lock should NOT be released because transition failed.
+        mock_lock_repo.release_by_instance.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_runtime_error_propagates_as_config_error(self):
+        """W2 fix: a ``RuntimeError`` from ``_finalize_job_db_sync`` propagates
+        through ``_process_event`` as a hard configuration error, NOT as a
+        per-job FAILED transition.
+
+        The A8 hard error (``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` but CM is
+        ``None``) is a global misconfiguration — the system is in an
+        undefined state. Silently converting it to per-job FAILED transitions
+        would hide the misconfiguration from operators and create a flood of
+        spurious job failures.
+
+        The fix: ``_finalize_job`` adds an explicit ``except RuntimeError:
+        raise`` clause BEFORE the W3 ``except Exception`` handler. The
+        exception propagates to ``_process_event`` (which doesn't catch
+        ``RuntimeError``) and surfaces to the caller. In production, the
+        outer event loop's generic exception handler logs it and continues
+        — the daemon does NOT crash on a single misconfigured job.
+
+        The test verifies:
+          1. ``_process_event`` re-raises the ``RuntimeError`` (it is NOT
+             swallowed by the W3 fail-safe).
+          2. The W3 fail-safe ``atomic_transition`` is NOT called (the
+             configuration error is surfaced, not masked by a per-job
+             FAILED transition).
+          3. ``_finalize_job_db_sync`` was called (the RuntimeError
+             originated from the sync helper, as in the A8 case).
+        """
+        mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
+        mock_job_repo = MagicMock(spec=JobRepository)
+        mock_lock_repo = MagicMock(spec=LockRepository)
+        mock_instance_manager = MagicMock()
+        mock_instance_manager._get_last_assistant_message_raw = AsyncMock(return_value="Test response")
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
+            job_queue_service=mock_job_queue_service,
+            job_repo=mock_job_repo,
+            lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=mock_instance_manager,
+        )
+        # Install a sync mock that raises the canonical A8 hard error.
+        a8_message = (
+            "USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager is "
+            "not initialised — cannot gate finalization for instance... "
+            "(CM is authoritative under flag OFF, see ADR-011)"
+        )
+        sync_mock = MagicMock(side_effect=make_fake_sync(
+            raise_exc=RuntimeError(a8_message)
+        ))
+        observer._finalize_job_db_sync = sync_mock
+
+        event = {
+            "event_type": "instance_lifecycle",
+            "data": {
+                "instance_id": "instance-456",
+                "status": "completed",
+                "error": None,
+            }
+        }
+
+        # RuntimeError MUST propagate — it is a configuration error, not a
+        # per-job failure.
+        with pytest.raises(RuntimeError, match="USE_LEGACY_WAITING_FOR_CASCADE=OFF"):
+            await observer._process_event(event)
+
+        # The sync helper was called (and raised).
+        sync_mock.assert_called_once()
+
+        # W2: atomic_transition was NOT called by the W3 fail-safe — the
+        # RuntimeError propagated instead of being converted to a per-job
+        # FAILED transition.
+        mock_job_repo.atomic_transition.assert_not_called()
+
+        # Lock should NOT be released — the W3 fail-safe path was bypassed.
         mock_lock_repo.release_by_instance.assert_not_called()
 
 
