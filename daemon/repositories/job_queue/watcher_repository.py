@@ -9,6 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
+from .models import JobItem, JobStatus
 from .watcher_models import JobWatcher, ALL_WATCHABLE_EVENTS
 
 logger = logging.getLogger(__name__)
@@ -212,3 +213,53 @@ class JobWatcherRepository:
         with SQLModelSession(self.engine) as db_session:
             stmt = select(JobWatcher)
             return list(db_session.exec(stmt).all())
+
+    def get_watched_processing_job_ids(self, watcher_instance_id: str) -> list[str]:
+        """Return job_ids that ``watcher_instance_id`` is watching AND still PROCESSING.
+
+        B1 (Phase B): Used by ``CorrelationManager.rebuild_from_db`` to
+        reconstruct the ``pending_jobs`` set on daemon restart. The CM
+        is the single source of truth for parent completion — a watched
+        job that is still in PROCESSING keeps the parent's ``is_complete``
+        returning ``False`` (mirroring an outstanding message correlation).
+        Without this rebuild hook, a daemon crash during a parent job that
+        has watched children would leave the parent's ``pending_jobs``
+        empty after restart; the first ``is_complete`` call would fire
+        ``handle_correlation_complete`` prematurely, and the late watched
+        job's terminal event would find no PROCESSING job to resolve.
+
+        Semantics: returns the ``job_id`` (string) of every job that
+
+        1. has a ``JobWatcher`` row with ``instance_id == watcher_instance_id``
+           (i.e. this instance is actively subscribed to the job's events),
+        2. is currently in ``PROCESSING`` status, and
+        3. is not soft-deleted (``deleted_at IS NULL``).
+
+        The ``JobWatcher`` and ``JobItem`` tables are joined via
+        ``JobWatcher.job_id == JobItem.job_id``. The result is a flat
+        list of job_id strings — duplicates (a watcher can have at most
+        one row per job, enforced by the UNIQUE constraint on
+        ``(job_id, instance_id)``, so this is defensive) are de-duplicated
+        via ``dict.fromkeys`` to keep the result idempotent.
+
+        Args:
+            watcher_instance_id: The instance ID of the watcher (parent).
+
+        Returns:
+            List of job_ids (strings) for matching jobs. Empty list if the
+            watcher has no in-flight watches or all watches are already
+            terminal.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(JobWatcher.job_id)
+                .join(JobItem, JobWatcher.job_id == JobItem.job_id)
+                .where(JobWatcher.instance_id == watcher_instance_id)
+                .where(JobItem.status == JobStatus.PROCESSING.value)
+                .where(JobItem.deleted_at.is_(None))
+            )
+            # dict.fromkeys preserves order while de-duplicating. The
+            # downstream consumer (CM.rebuild_from_db) feeds this into
+            # a set, so ordering is not semantically meaningful, but
+            # stable order helps test assertions.
+            return list(dict.fromkeys(db_session.exec(stmt).all()))

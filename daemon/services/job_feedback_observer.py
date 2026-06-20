@@ -59,6 +59,7 @@ from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.services.correlation_manager import (
     get_correlation_manager,
     notify_corr_rearm,
+    notify_corr_resolve_job,
 )
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
@@ -853,6 +854,43 @@ class JobFeedbackObserver:
                 return
 
             # ─── Post-commit outbox: fire side effects on the event loop ───
+            # B4 fix: Pre-fetch the list of watching instances BEFORE
+            # ``notify_watchers`` is called. ``JobQueueService.notify_watchers``
+            # removes all ``JobWatcher`` rows for this job in terminal states
+            # (see ``notify_watchers`` lines 271-277), so we capture the
+            # list now and use it to drive CM resolution below. Without this
+            # capture, the post-``notify_watchers`` ``get_watchers_for_job``
+            # call would return an empty list and the CM ``pending_jobs``
+            # set would NEVER be drained for watch-based parents — the
+            # completion callback would never fire and the parent would
+            # hang in ``PROCESSING`` forever.
+            terminal_watchers: list[Any] = []
+            try:
+                # ``JobQueueService`` holds the watcher repo (set via
+                # ``set_watcher_repo`` in ``daemon/api.py``). When the
+                # service is mocked in tests, this attribute is typically
+                # not set — ``getattr`` returns ``None`` and we skip the
+                # fetch cleanly. Defensive: a missing or non-callable
+                # ``get_watchers_for_job`` is also treated as "no repo".
+                watcher_repo = getattr(
+                    self._job_queue_service, "_watcher_repo", None
+                )
+                if watcher_repo is not None and hasattr(
+                    watcher_repo, "get_watchers_for_job"
+                ):
+                    terminal_watchers = await asyncio.to_thread(
+                        watcher_repo.get_watchers_for_job, job.job_id
+                    )
+            except Exception as e:
+                # Defensive: never let a watcher-repo failure abort the
+                # post-commit outbox. Log at WARNING and continue with
+                # an empty list (the watcher notifications already fired;
+                # we just won't drive CM resolution for them).
+                logger.warning(
+                    f"Observer: pre-fetch watchers failed for job "
+                    f"{job.job_id[:8]}...: {e}"
+                )
+
             # notify_watchers (terminal notification) — fires AFTER commit so
             # watchers see a consistent state.
             if db_result.terminal_status == InstanceStatus.COMPLETED.value:
@@ -875,6 +913,41 @@ class JobFeedbackObserver:
                         f"Observer: notify_watchers failed for job "
                         f"{job.job_id[:8]}...: {e}"
                     )
+
+            # B4: Resolve watched jobs in CM. For each instance that was
+            # watching this job, notify the CM that the job is terminal.
+            # The CM removes ``child_job_id`` from ``_pending[parent_id].pending_jobs``
+            # and checks ``is_complete()`` — if both ``pending`` and
+            # ``pending_jobs`` are empty, the completion callback fires.
+            # Status mapping: completed → "responded" (clean terminal);
+            # error → "error" (conservative rule, mirrors
+            # ``_determine_terminal_status`` for message responses).
+            try:
+                cm_status = (
+                    "responded"
+                    if db_result.terminal_status == InstanceStatus.COMPLETED.value
+                    else "error"
+                )
+                for watcher in terminal_watchers:
+                    # ``watcher.instance_id`` is the parent (the instance
+                    # that called ``watch_job``). This is the parent whose
+                    # CM ``pending_jobs`` set tracks this child_job_id.
+                    await notify_corr_resolve_job(
+                        parent_id=watcher.instance_id,
+                        child_job_id=job.job_id,
+                        status=cm_status,
+                    )
+            except Exception as e:
+                # A CM failure must NOT affect the post-commit outbox.
+                # The watcher notifications have already fired; the
+                # worst case is that the parent's ``pending_jobs`` is
+                # not drained for this round (recoverable via the next
+                # ``rebuild_from_db`` or via the wave-2 ``notify_corr_rearm``
+                # path on the next ``_finalize_job`` invocation).
+                logger.warning(
+                    f"Observer: notify_corr_resolve_job failed for job "
+                    f"{job.job_id[:8]}...: {e}"
+                )
 
             # ─── Instance-side post-commit (SSE / CompletionRegistry / lifecycle) ───
             # Only fire if the instance was NOT already terminal when we wrote it.

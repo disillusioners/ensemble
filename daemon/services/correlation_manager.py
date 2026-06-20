@@ -56,20 +56,37 @@ class PendingResponse:
 
 @dataclass
 class ParentCorrelation:
-    """All outstanding message-response correlations for one parent."""
+    """All outstanding correlations (messages + watched jobs) for one parent.
+
+    B1 (Phase B): Tracks watched jobs via :attr:`pending_jobs` alongside
+    message correlations in :attr:`pending`. :attr:`is_complete` is True only
+    when BOTH sets are empty — a watched job still in PROCESSING keeps the
+    parent alive just like an outstanding message correlation would.
+    """
 
     parent_id: str
     pending: dict[str, PendingResponse] = field(default_factory=dict)
     # correlation_key = f"{child_id}:{message_id}"
+    pending_jobs: set[str] = field(default_factory=set)
+    # B1: job_ids this parent is watching (via JobWatcher records) and that
+    # have not yet reached a terminal state. Stored as a set so duplicate
+    # watch_job calls for the same job are idempotent.
     had_error: bool = False  # Set True when any response resolves with error
 
     @property
     def is_complete(self) -> bool:
-        return len(self.pending) == 0
+        # B1: complete only when BOTH message correlations AND watched jobs
+        # are resolved. A pending watched job keeps the parent alive just
+        # like an outstanding message correlation.
+        return len(self.pending) == 0 and len(self.pending_jobs) == 0
 
     @property
     def pending_count(self) -> int:
-        return len(self.pending)
+        # B1: total pending = message correlations + watched jobs. The
+        # generation-counter re-check in JobFeedbackObserver._finalize_job
+        # uses get_pending_count, so it must account for jobs too — otherwise
+        # a late watch_job registration would slip through the re-arm gate.
+        return len(self.pending) + len(self.pending_jobs)
 
 
 class CorrelationManager:
@@ -96,6 +113,7 @@ class CorrelationManager:
         message_queue_repository,  # SQLModelMessageQueueRepository
         completion_callback: Callable[[str, str], Awaitable[None]] | None = None,
         event_bus: EventBus | None = None,
+        watcher_repository=None,  # B1: optional — only required for rebuild_from_db
     ) -> None:
         """Initialize the CorrelationManager.
 
@@ -109,11 +127,25 @@ class CorrelationManager:
                 (e.g. during Phase 2 cascade work) without deadlocking.
             event_bus: Optional EventBus instance for inbound lifecycle subscription.
                 If provided, Phase 1 uses it for shadow validation logging.
+            watcher_repository: Optional JobWatcherRepository (B1). When provided,
+                ``rebuild_from_db`` reconstructs ``pending_jobs`` from the DB
+                (watched jobs still in PROCESSING status). When ``None``, the
+                rebuild gracefully skips the pending_jobs step — the CM
+                continues to track message correlations only and the
+                ``pending_jobs`` set stays empty until ``register_job_send``
+                is called for the first time after startup.
         """
         self._instance_repo = instance_repository
         self._msg_repo = message_queue_repository
         self._completion_callback = completion_callback
         self._event_bus = event_bus
+        # B1: may be None — rebuild_from_db skips pending_jobs reconstruction
+        # in that case. register_job_send and resolve_job are unaffected —
+        # they only mutate in-memory state and don't need a repo.
+        self._watcher_repo = watcher_repository
+        # B1: may be None — rebuild_from_db skips pending_jobs reconstruction
+        # in that case (graceful degradation, not a hard error).
+        self._watcher_repo = watcher_repository
 
         # In-memory state: parent_id → ParentCorrelation
         self._pending: dict[str, ParentCorrelation] = {}
@@ -273,6 +305,63 @@ class CorrelationManager:
         # the per-parent lock so the DB read does not serialize register
         # operations for the same parent. The check is observability only
         # and must not affect the caller's control flow.
+        await self._check_invariant(parent_id)
+
+    async def register_job_send(
+        self,
+        parent_id: str,
+        child_job_id: str,
+    ) -> None:
+        """Register a watched job correlation (mirrors waiting_for++ for jobs).
+
+        B2: Called from the ``watch_job`` code path when an instance
+        subscribes to a job's terminal events via the JobWatcher
+        repository. Keeps the CM's ``pending_jobs`` set in sync with the
+        actual watch set — a watched job counts as an outstanding
+        correlation until it reaches a terminal state, at which point
+        :meth:`resolve_job` removes it.
+
+        Must be called from the main event loop (N3 constraint).
+
+        Concurrency contract (orphan-race fix, 2026-06-20):
+
+            The per-parent generation counter is bumped BEFORE acquiring
+            the per-parent lock — same pattern as
+            :meth:`register_message_send`. The bump is a plain dict
+            assignment (atomic in CPython, no extra lock needed) and is
+            visible to a reader that holds the lock. JobFeedbackObserver.
+            _finalize_job reads ``get_generation()`` before/after its
+            ``_finalize_job_db_sync`` commit; if the generation changed
+            during finalization, a register was in-flight and the job
+            must be re-armed (COMPLETED → PROCESSING) so the late
+            watched job's eventual resolve can find a PROCESSING job.
+
+        Args:
+            parent_id: The parent instance ID that is registering the watch.
+            child_job_id: The job ID being watched.
+        """
+        # Orphan-race fix: bump generation counter BEFORE the lock (same
+        # as register_message_send). The bump is intentionally outside
+        # the lock so it is observable by readers that hold the lock.
+        # The lock is only needed for the pending_jobs mutation below.
+        self._generation[parent_id] = self._generation.get(parent_id, 0) + 1
+        async with self._get_lock(parent_id):
+            if parent_id not in self._pending:
+                self._pending[parent_id] = ParentCorrelation(parent_id=parent_id)
+
+            parent_state = self._pending[parent_id]
+            # set.add is idempotent — duplicate watch_job for the same
+            # job_id is a no-op (mirrors add_watch's UPSERT semantics
+            # in JobWatcherRepository).
+            parent_state.pending_jobs.add(child_job_id)
+
+            logger.debug(
+                f"CM register_job: parent={parent_id[:8]}, job={child_job_id[:8]}, "
+                f"pending_jobs={len(parent_state.pending_jobs)}"
+            )
+
+        # Lock released. Run invariant check outside the lock (same
+        # pattern as register_message_send).
         await self._check_invariant(parent_id)
 
     async def resolve_response(
@@ -447,6 +536,169 @@ class CorrelationManager:
         # if it ever happens, run the invariant check anyway and fall
         # through to the implicit return None.
         await self._check_invariant(parent_id)
+
+    async def resolve_job(
+        self,
+        parent_id: str,
+        child_job_id: str,
+        status: str = STATUS_RESPONDED,
+    ) -> bool:
+        """Resolve a watched job correlation (mirrors waiting_for-- for jobs).
+
+        B2: Called from the JobWatcher event handler when a watched job
+        reaches a terminal state (COMPLETED / FAILED / CANCELLED).
+        Removes the ``child_job_id`` from the CM's per-parent
+        ``pending_jobs`` set. When the last watched job AND the last
+        message correlation both resolve, fires the
+        ``completion_callback`` — same single-source-of-truth terminal
+        transition as :meth:`resolve_response`.
+
+        Must be called from the main event loop (N3 constraint).
+
+        Mirrors the exact control-flow shape of :meth:`resolve_response`:
+        state captured under the lock, ``del`` of ``_pending[parent_id]``
+        when complete (H7 reference capture), lock release BEFORE
+        firing the callback (W1 fix to avoid deadlock on Phase 2
+        cascade re-entry), H7 exception-restore path, and
+        ``_check_invariant`` on every exit path.
+
+        Args:
+            parent_id: The parent instance ID that was watching the job.
+            child_job_id: The job ID that reached terminal status.
+            status: "responded" for normal terminal, "error" for failures.
+                Any other value is treated as "responded" for terminal
+                status determination (conservative: only ``had_error=True``
+                flips the parent terminal_status to "error").
+
+        Returns:
+            True if this resolved the last outstanding correlation for the
+            parent (i.e., triggered the ``completion_callback``), False
+            otherwise.
+        """
+        # Bump generation counter OUTSIDE the lock. The bump is not
+        # strictly required for the resolve path (a resolve cannot
+        # create new work units, only retire them), but it is kept
+        # symmetric with register_job_send so the counter monotonically
+        # reflects "outstanding work units seen". It also helps
+        # _finalize_job detect a concurrent register_job_send that
+        # lands during finalization: a bump during finalization
+        # means a new watch was registered, so the re-arm gate
+        # (COMPLETED → PROCESSING) must fire.
+        self._generation[parent_id] = self._generation.get(parent_id, 0) + 1
+
+        # Same control-flow structure as resolve_response — defer all
+        # post-lock work (callback, invariant check) via flags captured
+        # under the lock.
+        should_complete = False  # W1: defer completion_callback past lock release
+        terminal_status: str | None = None
+        # H7: capture the ParentCorrelation reference before deletion so
+        # the completion_callback path can restore _pending[parent_id]
+        # if the callback raises. Without this, a callback exception
+        # would leave the parent permanently wedged (orphan job in
+        # PROCESSING forever) because _pending[parent_id] is already
+        # gone by the time the callback fires.
+        parent_state_to_restore: ParentCorrelation | None = None
+
+        async with self._get_lock(parent_id):
+            if parent_id not in self._pending:
+                # Parent not tracked — nothing to resolve. This is the
+                # common case for a late watcher event that arrives
+                # after the parent has already terminated or cleared.
+                logger.debug(
+                    f"CM resolve_job: parent={parent_id[:8]} not tracked, "
+                    f"job={child_job_id[:8]}"
+                )
+                return False
+
+            parent_state = self._pending[parent_id]
+
+            # Discard the watched job from pending_jobs. set.discard is
+            # a no-op if the job_id isn't in the set (defensive — the
+            # caller may have already removed it via another path, e.g.
+            # clear_for_instance or a prior resolve_job).
+            if child_job_id in parent_state.pending_jobs:
+                parent_state.pending_jobs.discard(child_job_id)
+
+            # Fix N2 (mirror): set had_error BEFORE the potential
+            # completion check, so the error flag is captured in
+            # terminal_status determination even if the entry is
+            # processed in the same critical section.
+            if status in (STATUS_ERROR, "failed"):
+                parent_state.had_error = True
+
+            logger.debug(
+                f"CM resolve_job: parent={parent_id[:8]}, job={child_job_id[:8]}, "
+                f"status={status}, remaining_pending_jobs={len(parent_state.pending_jobs)}, "
+                f"remaining_pending={len(parent_state.pending)}, "
+                f"had_error={parent_state.had_error}"
+            )
+
+            if parent_state.is_complete:
+                # BOTH pending AND pending_jobs are empty — terminal.
+                # Mirror the resolve_response completion branch:
+                # 1) determine terminal_status from had_error
+                # 2) capture reference for H7 restore
+                # 3) del _pending[parent_id] under the lock
+                # 4) pop _locks[parent_id] (S3 fix — prevent unbounded growth)
+                # 5) defer completion_callback to AFTER the lock release (W1)
+                terminal_status = self._determine_terminal_status(parent_state)
+                logger.info(
+                    f"CM correlation complete (resolve_job): parent={parent_id[:8]}, "
+                    f"status={terminal_status}, had_error={parent_state.had_error}"
+                )
+                parent_state_to_restore = parent_state
+                del self._pending[parent_id]
+                self._locks.pop(parent_id, None)
+                should_complete = True
+
+        # Lock released. Fire completion_callback OUTSIDE the per-parent
+        # lock (W1 fix) so Phase 2 cascade work (e.g. status transitions
+        # that re-enter CM for the same parent_id) cannot deadlock on
+        # _get_lock(parent_id). State mutation (del _pending[parent_id])
+        # already happened above under the lock.
+        if should_complete:
+            if self._completion_callback is not None:
+                try:
+                    await self._completion_callback(parent_id, terminal_status)
+                except Exception:
+                    # H7 fix: state was cleared under the lock above, so
+                    # an exception here would normally leave the parent
+                    # permanently wedged. Restore _pending[parent_id]
+                    # so external retry or a subsequent register can
+                    # recover the completion. The original lock was
+                    # popped from _locks by the S3 fix above;
+                    # _get_lock() lazily recreates it, so the
+                    # restoration lock is a fresh per-parent asyncio.Lock
+                    # bound to the current event loop (N3 preserved).
+                    logger.exception(
+                        f"CM completion_callback failed (resolve_job) for "
+                        f"parent={parent_id[:8]}; attempting to restore _pending for retry"
+                    )
+                    async with self._get_lock(parent_id):
+                        if parent_id not in self._pending:
+                            self._pending[parent_id] = parent_state_to_restore
+                            logger.warning(
+                                f"CM restored _pending[parent={parent_id[:8]}] "
+                                f"(had_error={parent_state_to_restore.had_error}, "
+                                f"terminal_status={terminal_status}, "
+                                f"restored_pending_jobs={len(parent_state_to_restore.pending_jobs)}) "
+                                f"— callback failure, state preserved for retry"
+                            )
+                        else:
+                            logger.info(
+                                f"CM restore skipped for parent={parent_id[:8]} — "
+                                f"concurrent register already populated _pending"
+                            )
+            # Observability: run invariant check on the completion path.
+            # CM is now 0 for this parent; a divergence means the DB is
+            # still tracking a non-zero waiting_for.
+            await self._check_invariant(parent_id)
+            return True
+
+        # Not complete yet — still run invariant check (matches
+        # resolve_response's non-completion path).
+        await self._check_invariant(parent_id)
+        return False
 
     def get_pending_count(self, parent_id: str) -> int:
         """Get the pending correlation count for a parent.
@@ -957,6 +1209,51 @@ class CorrelationManager:
                         # reference in self._pending[parent_id] is already
                         # correct.
 
+                # B1: Step 5 — reconstruct pending_jobs (watched jobs still
+                # in PROCESSING). The watcher_repo is optional; if not wired
+                # up, this step is a no-op and the CM continues to track
+                # message correlations only. The query is a single indexed
+                # JOIN between job_watchers and job_queue_items — the
+                # existing per-parent lock above already serialized against
+                # concurrent register_message_send, and the same lock is
+                # re-acquired here to also serialize against a concurrent
+                # register_job_send (which writes to pending_jobs on the
+                # same parent).
+                if self._watcher_repo is not None:
+                    try:
+                        watched_job_ids = await asyncio.to_thread(
+                            self._watcher_repo.get_watched_processing_job_ids,
+                            parent_id,
+                        )
+                    except Exception as e:
+                        # Rebuild is observability-only — a watcher-repo
+                        # failure must not abort the rebuild. Log and
+                        # continue with empty pending_jobs (the CM will
+                        # catch up via the next register_job_send).
+                        logger.warning(
+                            f"CM rebuild: watcher_repo query failed for "
+                            f"parent={parent_id[:8]}: {e}"
+                        )
+                        watched_job_ids = []
+
+                    if watched_job_ids:
+                        async with self._get_lock(parent_id):
+                            if parent_id not in self._pending:
+                                # MERGE semantics: respect any
+                                # ParentCorrelation that a concurrent
+                                # register_message_send / register_job_send
+                                # already created after the top-level clear.
+                                self._pending[parent_id] = ParentCorrelation(
+                                    parent_id=parent_id
+                                )
+                            parent_state = self._pending[parent_id]
+                            # set.update is idempotent and additive — a
+                            # concurrent register_job_send that landed
+                            # between the top-level clear and this lock
+                            # acquisition is preserved; the DB-backed
+                            # entries we just read are merged on top.
+                            parent_state.pending_jobs.update(watched_job_ids)
+
                 # W2 fix: Compare found count with DB waiting_for UNDER the
                 # per-parent lock. Reading self._pending outside the lock was a
                 # TOCTOU hazard (concurrent register_message_send could mutate
@@ -1370,6 +1667,73 @@ async def notify_corr_rearm(parent_id: str) -> None:
         )
 
 
+async def notify_corr_register_job(
+    parent_id: str,
+    child_job_id: str,
+) -> None:
+    """Authoritative hook: register a watched job in the CM.
+
+    B2: Called from the ``watch_job`` code path after the JobWatcher
+    row is persisted (DB write first, then register — same contract as
+    :func:`notify_corr_register`). Mirrors :func:`notify_corr_register`
+    but for job correlations instead of message correlations.
+
+    A CM failure is logged at WARNING and swallowed so the ``watch_job``
+    path is never affected by CM issues — the legacy ``waiting_for``
+    cascade in the inline code is the graceful-degradation fallback.
+
+    Must be called from the main asyncio event loop (N3 constraint).
+
+    Args:
+        parent_id: The parent instance ID that is registering the watch.
+        child_job_id: The job ID being watched.
+    """
+    cm = get_correlation_manager()
+    if cm is None:
+        return
+    try:
+        await cm.register_job_send(parent_id, child_job_id)
+    except Exception as e:
+        logger.warning(
+            f"CM hook: register_job_send failed "
+            f"(parent={parent_id[:8]}, job={child_job_id[:8]}): {e}"
+        )
+
+
+async def notify_corr_resolve_job(
+    parent_id: str,
+    child_job_id: str,
+    status: str = STATUS_RESPONDED,
+) -> None:
+    """Authoritative hook: resolve a watched job in the CM.
+
+    B2: Called from the JobWatcher event handler when a watched job
+    reaches a terminal state (COMPLETED / FAILED / CANCELLED). Mirrors
+    :func:`notify_corr_resolve` but for job correlations. A CM failure
+    is logged at WARNING and swallowed so the watcher event handler
+    is never affected by CM issues.
+
+    Must be called from the main asyncio event loop (N3 constraint).
+
+    Args:
+        parent_id: The parent instance ID that was watching the job.
+        child_job_id: The job ID that reached terminal status.
+        status: ``"responded"`` for normal terminal, ``"error"`` for
+            failures. ``STATUS_ERROR`` and ``"failed"`` both flip the
+            parent terminal_status to ``"error"`` (conservative rule).
+    """
+    cm = get_correlation_manager()
+    if cm is None:
+        return
+    try:
+        await cm.resolve_job(parent_id, child_job_id, status=status)
+    except Exception as e:
+        logger.warning(
+            f"CM hook: resolve_job failed "
+            f"(parent={parent_id[:8]}, job={child_job_id[:8]}, status={status}): {e}"
+        )
+
+
 # -------------------------------------------------------------------------
 # FastAPI lifespan helpers
 # -------------------------------------------------------------------------
@@ -1421,11 +1785,19 @@ async def init_correlation_manager(
     cb = completion_callback if completion_callback is not None else _shadow_completion_callback
 
     try:
+        # B1: watcher_repository is optional. If the InstanceManager
+        # exposes one (via job_queue_service or similar), pass it here so
+        # rebuild_from_db can reconstruct pending_jobs. Until then, the
+        # CM gracefully degrades to message-only tracking (register_job_send
+        # and resolve_job still work for live correlations, but the
+        # post-crash reconstruction of pending_jobs is skipped).
+        watcher_repo = getattr(manager, "_watcher_repository", None)
         correlation_manager = CorrelationManager(
             instance_repository=manager._instance_repository,
             message_queue_repository=manager._queue_repository,
             completion_callback=cb,
             event_bus=manager._event_bus,
+            watcher_repository=watcher_repo,
         )
         set_correlation_manager(correlation_manager)
         await correlation_manager.start()

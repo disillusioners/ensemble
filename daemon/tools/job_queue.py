@@ -10,6 +10,7 @@ from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
+from daemon.services.correlation_manager import notify_corr_register_job
 from daemon.services.project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
@@ -639,6 +640,12 @@ def create_job_tools(
 
             # Register watch
             watcher_repo.add_watch(job_id, current_instance_id, events)
+            # B3: Register the watched job with the CorrelationManager so the
+            # parent instance won't complete until this job resolves.
+            await notify_corr_register_job(
+                parent_id=current_instance_id,
+                child_job_id=job_id,
+            )
             return f"Watch registered for job {job_id[:8]}... Will notify on terminal state changes."
         except Exception as e:
             return f"Error watching job: {str(e)}"
