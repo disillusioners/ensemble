@@ -1,5 +1,5 @@
-Current Plan: CorrelationManager Migration
-Tracking File: correlation-manager-migration-tracking.md
-Iteration: 002
+Current Plan: Decouple Job/Task/Message Correlation (Review + Execution Plan)
+Tracking File: decouple-job-task-msg-tracking.md
+Iteration: 001
 Status: APPROVED
-Last Updated: 2026-06-16 23:15
+Last Updated: 2026-06-20 11:42
