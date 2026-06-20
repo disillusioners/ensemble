@@ -25,6 +25,7 @@
 - `afbb35ec` — A7-A8: FOR UPDATE gate replacement + hard error
 - `eee8efd9` — A1, A9, A14: authority doc, audit, kill-switch tests
 - `5f9ee985` — A10, A11, A13, A15: invariant, regression, crash-recovery tests
+- `ef147bfa` — Reviewer fixes: C1 (cross-thread race), C2 (threading test), W1 (re-entrancy guard), W2 (RuntimeError propagation)
 
 **Phase B (Close the Bug Class) — READY**
 - Route `watch_job`/`job_continue` through CM
