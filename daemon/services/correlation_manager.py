@@ -123,6 +123,27 @@ class CorrelationManager:
         # locks MUST run on the main event loop (N3 constraint).
         self._locks: dict[str, asyncio.Lock] = {}
 
+        # Per-parent generation counter (orphan-race fix, 2026-06-20).
+        # Incremented by :meth:`register_message_send` BEFORE it tries to
+        # acquire the per-parent lock. The JobFeedbackObserver reads
+        # ``get_generation(parent_id)`` before and after the
+        # ``_finalize_job_db_sync`` commit; if the generation changed, a
+        # register was in-flight during finalization and the job must be
+        # re-armed (COMPLETED → PROCESSING) so the late child's eventual
+        # resolve can find a PROCESSING job.
+        #
+        # The bump is OUTSIDE the per-parent lock so it is visible to a
+        # reader that holds the lock (i.e. ``_finalize_job`` reading
+        # post-gen after the lock release sees the bump that
+        # ``register_message_send`` made while it was blocked). The bump
+        # itself is a plain ``dict[k] = v + 1`` — atomic in CPython, no
+        # additional lock needed.
+        #
+        # Cleared alongside ``_pending`` and ``_locks`` in
+        # :meth:`clear_for_instance` and :meth:`rebuild_from_db` to avoid
+        # unbounded growth across terminate/revive cycles.
+        self._generation: dict[str, int] = {}
+
         # Background task for processing EventBus events
         self._event_task: asyncio.Task[None] | None = None
         self._running = False
@@ -212,6 +233,23 @@ class CorrelationManager:
             message_id: The message ID.
         """
         correlation_key = f"{child_id}:{message_id}"
+        # Orphan-race fix (2026-06-20): bump the per-parent generation
+        # counter BEFORE acquiring the per-parent lock. The bump is a
+        # plain dict assignment — atomic in CPython, no extra lock
+        # needed — and is visible to any reader that holds the
+        # per-parent lock (i.e. ``_finalize_job`` reading post-gen after
+        # releasing the lock will see the bump that a concurrent
+        # ``register_message_send`` made while it was blocked on the
+        # lock). If the generation changed during finalization, the
+        # observer re-arms the job from COMPLETED back to PROCESSING so
+        # the late child's resolve can find a PROCESSING job instead of
+        # being orphaned against a COMPLETED job.
+        #
+        # The bump is intentionally outside the lock so it is observable
+        # by readers that hold the lock. The lock is only needed for the
+        # pending-dict mutation below — the generation counter is a
+        # monotonic signal, not a critical section.
+        self._generation[parent_id] = self._generation.get(parent_id, 0) + 1
         async with self._get_lock(parent_id):
             if parent_id not in self._pending:
                 self._pending[parent_id] = ParentCorrelation(parent_id=parent_id)
@@ -423,6 +461,33 @@ class CorrelationManager:
             return 0
         return self._pending[parent_id].pending_count
 
+    def get_generation(self, parent_id: str) -> int:
+        """Get the current generation counter for a parent.
+
+        Orphan-race fix (2026-06-20). Used by
+        :meth:`JobFeedbackObserver._finalize_job` to detect whether a
+        :meth:`register_message_send` was in-flight during finalization.
+        The counter is bumped in :meth:`register_message_send` BEFORE the
+        per-parent lock is acquired, so a reader that holds the lock can
+        observe the bump. If the post-finalization generation is greater
+        than the pre-finalization generation, a new child was registered
+        during finalization — the observer must re-arm the job (COMPLETED
+        → PROCESSING) so the late child's resolve can find a PROCESSING
+        job.
+
+        The counter is monotonic and never decremented within the lifetime
+        of a tracked parent; it is reset only when the parent is cleared
+        via :meth:`clear_for_instance` or :meth:`rebuild_from_db`.
+
+        Args:
+            parent_id: The parent instance ID.
+
+        Returns:
+            The current generation counter, or 0 if the parent has no
+            recorded generation (untracked or cleared).
+        """
+        return self._generation.get(parent_id, 0)
+
     def is_complete(self, parent_id: str) -> bool:
         """Check if all correlations are resolved for a parent.
 
@@ -462,6 +527,10 @@ class CorrelationManager:
         async with self._get_lock(parent_id):
             self._pending.pop(parent_id, None)
             self._locks.pop(parent_id, None)
+            # Orphan-race fix (2026-06-20): also clear the generation
+            # counter so a terminate→revive cycle starts at 0. Without
+            # this the counter would monotonically grow across cycles.
+            self._generation.pop(parent_id, None)
             logger.debug(f"CM clear_for_instance: parent={parent_id[:8]}")
 
     async def rearm_parent(self, parent_id: str) -> bool:
@@ -812,7 +881,16 @@ class CorrelationManager:
             # idempotent dict reassignment, and the per-parent locks below
             # protect per-parent writes. See the crash-recovery contract in
             # the docstring above for the full concurrency model.
+            #
+            # Orphan-race fix (2026-06-20): also clear _generation alongside
+            # _pending. The generation counter is a monotonic signal of
+            # "how many registers have we seen for this parent"; after a
+            # rebuild it should restart at 0 (the rebuilt entries are
+            # historical, not new). Per-parent rebuild merge below
+            # preserves any concurrent register's bumped generation via
+            # the same lock-protected merge as the _pending entries.
             self._pending = {}
+            self._generation = {}
 
             # Step 1: Single query for all parents with waiting_for > 0.
             parents = await asyncio.to_thread(self._instance_repo.get_all_with_waiting_for)

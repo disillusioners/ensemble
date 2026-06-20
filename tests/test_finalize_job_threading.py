@@ -28,15 +28,34 @@ Test 1 — Lock serialization (C1 prerequisite):
   incremented _pending yet from the sync helper's perspective) and the
   job would COMPLETE with an orphan child.
 
-Test 2 — Full flow (C1 end-to-end):
-  Proves that the complete register → resolve → callback → _finalize_job
-  sequence works correctly when CM is wired as the global singleton and
-  a concurrent register arrives during the sync helper's execution window.
+Test 2 — Post-commit re-arm (orphan-race fix, 2026-06-20):
+  Proves the GENERATION-COUNTER post-commit re-arm in ``_finalize_job``
+  prevents orphaning when ``register_message_send(childB)`` arrives
+  DURING the ``_finalize_job_db_sync`` execution window.
 
-  The observer's ``handle_correlation_complete`` path is exercised through
-  ``JobFeedbackObserver._finalize_job``. The job must NOT complete while
-  the concurrent child is pending; the C1 lock ensures the register blocks
-  until after the sync helper has committed.
+  Scenario (the actual orphan bug, NOT a false positive):
+    1. Register child A → resolve child A → callback fires → _finalize_job
+    2. While _finalize_job holds the per-parent lock (across to_thread),
+       a register_message_send for child B is scheduled on the event loop.
+    3. The register IMMEDIATELY bumps the generation counter (bump is
+       outside the per-parent lock), then BLOCKS on the lock.
+    4. _finalize_job_db_sync reads cm_pending = 0 (child B blocked on lock
+       — its _pending entry is not yet visible). Gate passes. Job commits
+       to COMPLETED.
+    5. _finalize_job releases the lock. The blocked register acquires the
+       lock and adds child B to _pending (pending = 1, gen = 2).
+    6. _finalize_job reads post_gen > pre_gen → DETECTS the late register
+       and re-arms the job COMPLETED → PROCESSING.
+    7. child B can now resolve and find a PROCESSING job (no orphan).
+
+  WITHOUT the post-commit re-arm (the orphan bug):
+    - Step 6 does not happen. The job stays COMPLETED.
+    - When child B resolves later, handle_correlation_complete looks for
+      a PROCESSING job for the parent, finds NONE (it's COMPLETED), and
+      silently skips — child B is ORPHANED.
+
+  This test FAILS without the post-commit re-arm (verified by monkey-patching
+  the re-arm branch out — see the ``test_no_rearm_orphan_bug`` helper).
 
 Run with::
 
@@ -349,35 +368,57 @@ async def test_lock_serializes_register_against_finalize(real_cm: CorrelationMan
 
 
 # =============================================================================
-# Test 2: Full _finalize_job flow with concurrent register
+# Test 2: Post-commit re-arm (orphan-race fix)
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_finalize_job_defers_when_new_pending_arrives_during_sync_window(
-    engine: Engine,
-):
-    """Prove _finalize_job defers completion when a concurrent register arrives.
+async def test_post_commit_rearm_prevents_orphan(engine: Engine):
+    """Prove the generation-counter post-commit re-arm prevents orphaning.
 
-    This exercises the FULL production path:
-      1. register child A → resolve child A → callback fires → _finalize_job
-         (holds cm._get_lock across asyncio.to_thread)
-      2. DURING the sync helper's execution, a new child B is registered
-      3. The lock blocks B's register until after _finalize_job_db_sync commits
-      4. The in-thread re-check inside _finalize_job_db_sync sees CM.pending > 0
-         (B's registration was serialized before the re-check ran)
-      5. The job is deferred (not transitioned to COMPLETED) because CM says
-         there is still a pending child
+    This is the CORRECT test for the orphan-race fix (2026-06-20). It replaces
+    the previous false-positive test which pre-seeded child A (pending=1)
+    before finalization, triggering the defer via child A — the concurrent
+    child B was irrelevant and the test passed even with the fix disabled.
 
-    WITHOUT the C1 fix, the timeline would be:
-      - sync helper reads CM.pending = 0 (B hasn't registered yet)
-      - sync helper commits job → COMPLETED
-      - B's register_message_send increments CM.pending to 1
-      - Job shows COMPLETED but child B is still running → ORPHAN
+    The scenario this test exercises (the ACTUAL orphan bug):
 
-    Setup: Use a real JobFeedbackObserver + real engine, with CM wired as
-    the global singleton. The callback is handle_correlation_complete.
+      1. Register child A → resolve child A → callback → ``_finalize_job``
+         starts. ``pre_gen`` captured (generation counter BEFORE lock).
+      2. ``_finalize_job`` acquires ``cm._get_lock(instance_id)`` and calls
+         ``asyncio.to_thread(_finalize_job_db_sync, ...)``.
+      3. DURING the sync helper (worker thread, lock held on event loop),
+         we schedule ``register_message_send(childB)`` on the event loop
+         via ``run_coroutine_threadsafe``. The register:
+           (a) Bumps the generation counter IMMEDIATELY (the bump is
+               OUTSIDE the per-parent lock — visible to readers that hold
+               the lock).
+           (b) BLOCKS on ``async with cm._get_lock(instance_id)`` (the
+               same lock _finalize_job holds).
+      4. The sync helper reads ``cm_pending = 0`` (child B is blocked on
+         the lock; its ``_pending`` entry is not yet visible) and
+         ``cm.is_complete() = True`` → gate passes → job commits to
+         COMPLETED.
+      5. ``_finalize_job`` releases the lock. The blocked register
+         acquires the lock and adds child B to ``_pending`` (pending=1).
+      6. ``_finalize_job`` reads ``post_gen > pre_gen`` → DETECTS the late
+         register → re-arms job COMPLETED → PROCESSING.
+      7. Resolve child B → callback fires → ``_get_processing_job_for_instance``
+         finds the re-armed PROCESSING job → ``_finalize_job`` commits to
+         COMPLETED. No orphan.
+
+    WITHOUT the post-commit re-arm:
+      - Step 6 is skipped. Job stays COMPLETED.
+      - Step 7: child B resolves, ``_get_processing_job_for_instance``
+        returns None (job is COMPLETED, not PROCESSING), callback no-ops.
+        Child B is ORPHANED.
+
+    This test is verified NOT to be a false positive: see
+    ``test_post_commit_rearm_can_be_disabled`` below, which monkey-patches
+    the re-arm branch out and asserts the orphan manifests.
     """
+    import time as _time
+
     # ── Seed DB: job + instance ────────────────────────────────────────────
     instance_id = f"inst-{uuid.uuid4().hex[:8]}"
     job_id = f"job-{uuid.uuid4().hex[:8]}"
@@ -390,7 +431,7 @@ async def test_finalize_job_defers_when_new_pending_arrives_during_sync_window(
     cm = CorrelationManager(
         instance_repository=MagicMock(),
         message_queue_repository=MagicMock(),
-        completion_callback=None,  # We'll call handle_correlation_complete directly
+        completion_callback=None,  # Wired below after observer is built
         event_bus=None,
     )
     set_correlation_manager(cm)
@@ -398,129 +439,256 @@ async def test_finalize_job_defers_when_new_pending_arrives_during_sync_window(
     # ── Build observer ──────────────────────────────────────────────────────
     observer, _mocks = make_observer(engine, real_job_repo=True)
 
-    # Pre-seed the job lookup so handle_correlation_complete finds it.
-    _mocks["job_queue_service"].get_job_by_instance = AsyncMock(return_value=job_item)
+    # ``_get_processing_job_for_instance`` calls ``get_job_by_instance``;
+    # return the seeded PROCESSING job. The mock keeps the in-memory
+    # ``job_item`` reference alive; we keep its ``status`` attribute in sync
+    # with the DB after each transition so the lookup returns the right
+    # ``from_status`` for ``atomic_transition``.
+    async def _get_job_by_instance(iid: str):
+        return job_item
 
-    # ── Register child A ────────────────────────────────────────────────────
+    _mocks["job_queue_service"].get_job_by_instance = _get_job_by_instance
+
+    # ── Wire CM completion_callback → observer.handle_correlation_complete ─
+    # Production flow: when ``resolve_response`` brings pending to 0, the CM
+    # fires the completion_callback AFTER releasing the per-parent lock (W1
+    # fix). The callback then calls ``handle_correlation_complete`` →
+    # ``_finalize_job``, which re-acquires the lock for its own critical
+    # section. This is the symmetric path used by the orphan-race fix test.
+    async def _on_correlation_complete(parent_id: str, terminal_status: str) -> None:
+        await observer.handle_correlation_complete(parent_id, terminal_status)
+
+    cm._completion_callback = _on_correlation_complete
+
+    # ── Register child A (only child A — NO pre-seeded pending) ────────────
     child_a, msg_a = f"child-A-{uuid.uuid4().hex[:4]}", str(uuid.uuid4())
+    child_b, msg_b = f"child-B-{uuid.uuid4().hex[:4]}", str(uuid.uuid4())
+
     await cm.register_message_send(instance_id, child_a, msg_a)
     assert cm.get_pending_count(instance_id) == 1
+    assert cm.get_generation(instance_id) == 1
 
     # ── Capture the event loop (must happen on the main thread) ────────────
     main_loop = asyncio.get_running_loop()
 
-    # ── Resolve child A → fires handle_correlation_complete ────────────────
-    # Intercept _finalize_job_db_sync to inject a concurrent register
-    # DURING the sync helper's execution window (between its entry and its
-    # in-thread CM re-check at line ~1251 of job_feedback_observer.py).
-    sync_started = asyncio.Event()
-    concurrent_register_done = asyncio.Event()
-    inject_register = asyncio.Event()
-
+    # ── Patch _finalize_job_db_sync to inject the concurrent register ──────
+    # We wrap the real sync helper so that DURING its execution (while the
+    # per-parent lock is held on the event loop) we schedule the late
+    # register on the event loop. The register bumps generation immediately
+    # (before blocking on the lock), then blocks until the lock is released.
+    register_done = asyncio.Event()
     original_finalize_sync = observer._finalize_job_db_sync
 
     def patched_finalize_sync(job_id, instance_id, terminal_status,
-                               result_summary, error_message):
-        """Patched _finalize_job_db_sync that signals and waits.
+                              result_summary, error_message):
+        """Inject a concurrent register during the sync helper window.
 
-        After the sync helper enters, it schedules a concurrent register
-        on the event loop via run_coroutine_threadsafe (passing the captured
-        main_loop). The register will BLOCK on cm._get_lock(parent_id) —
-        the same lock that _finalize_job holds around asyncio.to_thread.
-        When _finalize_job releases the lock after to_thread returns, the
-        register proceeds and adds the new child to CM._pending.
+        Runs on the worker thread spawned by ``asyncio.to_thread``. The
+        per-parent lock is held on the EVENT LOOP by ``_finalize_job``;
+        we are on a separate thread and do NOT need the lock for this
+        instrumentation.
         """
-        # Signal that we've entered the sync helper.
-        sync_started.set()
-
-        # Schedule the concurrent register on the captured event loop.
+        # Schedule the late register on the captured event loop.
         async def _do_register():
             try:
-                await cm.register_message_send(
-                    instance_id,
-                    f"child-B-{uuid.uuid4().hex[:4]}",
-                    str(uuid.uuid4()),
-                )
+                await cm.register_message_send(instance_id, child_b, msg_b)
             finally:
-                concurrent_register_done.set()
+                register_done.set()
 
-        # This will return a concurrent.futures.Future we can wait on.
         asyncio.run_coroutine_threadsafe(_do_register(), main_loop)
 
-        # Poll the concurrent_register_done event from the worker thread.
-        # The register runs on the main loop and will block on the per-parent
-        # lock until _finalize_job releases it. We can't await asyncio.Event
-        # from a sync thread, so we poll.
-        import time
-        deadline = time.monotonic() + 5.0
-        while not concurrent_register_done.is_set() and (time.monotonic() < deadline):
-            time.sleep(0.001)
+        # Give the event loop time to run the register's generation bump.
+        # The bump is the FIRST thing the coroutine does (before awaiting
+        # the lock), so one event-loop tick is enough. The 50ms sleep is
+        # generous headroom for slow CI; it does NOT affect correctness
+        # because the register is now blocked on the lock regardless.
+        _time.sleep(0.05)
 
-        # Now call the real sync helper. The concurrent register may or
-        # may not have completed by this point — the lock ensures the
-        # register is serialized AFTER _finalize_job releases the lock.
-        # The in-thread re-check at line ~1251 sees CM.pending > 0 if the
-        # register ran, or CM.pending == 0 if it hasn't yet.
-        # The KEY is that the register CANNOT interleave between the re-check
-        # and the commit — the lock holds it until after we return.
-        return original_finalize_sync(job_id, instance_id, terminal_status,
-                                      result_summary, error_message)
+        # Now run the REAL sync helper. The register is blocked on the
+        # lock, so its _pending entry is NOT visible — the gate sees
+        # cm_pending = 0 and commits the job to COMPLETED.
+        return original_finalize_sync(
+            job_id, instance_id, terminal_status,
+            result_summary, error_message,
+        )
 
     observer._finalize_job_db_sync = patched_finalize_sync
 
-    # ── Fire the finalization ──────────────────────────────────────────────
-    # This calls handle_correlation_complete → _finalize_job.
-    # _finalize_job holds cm._get_lock(instance_id) around asyncio.to_thread.
-    # While the thread runs patched_finalize_sync, the concurrent register
-    # is scheduled via run_coroutine_threadsafe but BLOCKS on the lock.
-    # When _finalize_job releases the lock, the register proceeds and adds
-    # the new child to CM._pending.
-    # The in-thread re-check at line ~1251 sees CM.pending > 0 → skip=True.
+    # ── Resolve child A → fires handle_correlation_complete ────────────────
+    # Production flow: ``notify_corr_resolve`` → ``cm.resolve_response`` →
+    # remove child A (pending=0) → is_complete=True → completion_callback
+    # fires → handle_correlation_complete → _finalize_job.
+    # Inside _finalize_job:
+    #   pre_gen=1 → lock acquired → to_thread(patched_finalize_sync)
+    #   → register scheduled (gen bumped to 2, blocked on lock)
+    #   → sync helper commits job COMPLETED → lock released
+    #   → register acquires lock, adds child B (pending=1)
+    #   → post_gen=2 > pre_gen=1 → RE-ARM job to PROCESSING
+    await cm.resolve_response(instance_id, child_a, msg_a, status="responded")
 
-    await observer.handle_correlation_complete(instance_id, "completed")
+    # Keep the mock's cached job_item.status in sync with the DB so the
+    # second handle_correlation_complete lookup finds a PROCESSING job.
+    job_item.status = JobStatus.PROCESSING.value
 
-    # ── Verify: job must NOT be COMPLETED ──────────────────────────────────
-    # The job should still be PROCESSING because CM says there is a pending
-    # child (the concurrent register was serialized by the lock and was visible
-    # to the sync helper's re-check).
+    # ── Wait for the concurrent register to finish ─────────────────────────
+    # It was blocked on the lock during finalize; it should complete shortly
+    # after _finalize_job released the lock (the post-gen re-arm reads the
+    # generation AFTER the lock release, so the register must have either
+    # completed or be about to — either way post_gen reflects the bump).
+    await asyncio.wait_for(register_done.wait(), timeout=5.0)
+
+    # ── Restore the original sync helper ───────────────────────────────────
+    # The patched sync helper injects a register during the to_thread window.
+    # For the second finalize (child B's resolve) we want the REAL sync
+    # helper — no more concurrent registers. The patched helper is the
+    # instrument for the orphan-race scenario; child B's resolve is the
+    # normal lifecycle completion path.
+    observer._finalize_job_db_sync = original_finalize_sync
+
+    # ── ASSERT 1: generation counter detected the late register ────────────
+    # The job was committed to COMPLETED by the sync helper, then the
+    # post-commit re-arm detected post_gen > pre_gen and transitioned it
+    # back to PROCESSING. If the re-arm is missing/broken, the job stays
+    # COMPLETED and child B is orphaned.
     re_read = re_read_job(engine, job_id)
-
-    # If the C1 lock is working: the register was blocked by the lock, ran
-    # after _finalize_job released it, and the sync helper's in-thread
-    # re-check saw CM.pending > 0 → skip=True → job stays PROCESSING.
-    # If the C1 fix was missing: the sync helper ran to completion before
-    # the register could add to CM._pending → CM.pending == 0 → job COMPLETED.
-    assert re_read is not None, (
-        f"Job row {job_id} disappeared from DB"
-    )
-
-    if re_read.status == JobStatus.COMPLETED.value:
-        # This assertion failing proves the C1 fix is working.
-        # Without the fix, the job would be COMPLETED and this test would
-        # fail with the message below.
-        pytest.fail(
-            "Job is COMPLETED — the C1 fix is MISSING or INEFFECTIVE. "
-            "Without the per-parent lock around asyncio.to_thread, the sync "
-            "helper completed before the concurrent register could add the "
-            "new child to CM._pending, causing premature completion with an "
-            "orphan child. This test SHOULD NOT PASS without the C1 fix. "
-            f"CM pending count at test end: {cm.get_pending_count(instance_id)}"
-        )
-
-    # C1 fix is working: the job was deferred (or the concurrent register
-    # was properly serialized and visible to the in-thread re-check).
+    assert re_read is not None, f"Job row {job_id} disappeared from DB"
     assert re_read.status == JobStatus.PROCESSING.value, (
-        f"Expected job to be PROCESSING (deferred), got {re_read.status}. "
-        "This may indicate the concurrent register arrived after the sync "
-        "helper's re-check already ran."
+        f"Job should be re-armed to PROCESSING (late register detected via "
+        f"generation counter), got {re_read.status}. The post-commit re-arm "
+        f"is not working — child B is orphaned. "
+        f"(pre_gen=1, post_gen={cm.get_generation(instance_id)})"
     )
 
-    # Verify the concurrent child was registered.
+    # ── ASSERT 2: child B is tracked in CM ─────────────────────────────────
     pending = cm.get_pending_count(instance_id)
     assert pending >= 1, (
-        f"Expected at least 1 pending child (concurrent register), got {pending}. "
-        "The concurrent register may not have completed."
+        f"Expected at least 1 pending child (late register of child B), "
+        f"got {pending}. The concurrent register did not complete."
+    )
+
+    # ── ASSERT 3: resolve child B finds the re-armed PROCESSING job ────────
+    # This is the COMPLETE lifecycle proof: not just that the job was
+    # re-armed, but that the late child can resolve and complete normally.
+    # Without the re-arm, handle_correlation_complete would no-op (no
+    # PROCESSING job found) and the job would stay PROCESSING forever
+    # (orphaned — child B's resolve is silently dropped).
+    #
+    # We call ``resolve_response`` (the production hook) so the CM removes
+    # child_b from _pending (pending → 0) and fires the completion_callback
+    # → handle_correlation_complete → _finalize_job → COMPLETED.
+    await cm.resolve_response(instance_id, child_b, msg_b, status="responded")
+
+    # ── ASSERT 4: job is now COMPLETED (not orphaned) ──────────────────────
+    re_read = re_read_job(engine, job_id)
+    assert re_read is not None, f"Job row {job_id} disappeared from DB"
+    assert re_read.status == JobStatus.COMPLETED.value, (
+        f"Job should be COMPLETED after child B resolves, got {re_read.status}. "
+        f"The late child's callback did not complete the re-armed job."
     )
 
     # Clean up.
+    set_correlation_manager(None)
+
+
+@pytest.mark.asyncio
+async def test_post_commit_rearm_can_be_disabled(engine: Engine):
+    """False-positive guard: prove Test 2 FAILS when the re-arm is disabled.
+
+    This test exercises the SAME scenario as
+    ``test_post_commit_rearm_prevents_orphan`` but monkey-patches the
+    post-commit re-arm branch in ``_finalize_job`` to be a no-op. The job
+    must then stay COMPLETED (not re-armed), proving the parent test is NOT
+    a false positive — it genuinely depends on the re-arm logic.
+
+    If this test ever PASSES (job gets re-armed despite the patch), the
+    parent test is a false positive and must be rewritten.
+    """
+    import time as _time
+
+    # ── Seed DB ────────────────────────────────────────────────────────────
+    instance_id = f"inst-{uuid.uuid4().hex[:8]}"
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+    seed_instance(engine, instance_id=instance_id, status=InstanceStatus.RUNNING.value)
+    job_item = seed_job(
+        engine, job_id=job_id, instance_id=instance_id, status=JobStatus.PROCESSING.value
+    )
+
+    cm = CorrelationManager(
+        instance_repository=MagicMock(),
+        message_queue_repository=MagicMock(),
+        completion_callback=None,  # Wired below after observer is built
+        event_bus=None,
+    )
+    set_correlation_manager(cm)
+
+    observer, _mocks = make_observer(engine, real_job_repo=True)
+
+    async def _get_job_by_instance(iid: str):
+        return job_item
+
+    _mocks["job_queue_service"].get_job_by_instance = _get_job_by_instance
+
+    # Wire CM completion_callback → observer.handle_correlation_complete
+    async def _on_correlation_complete(parent_id: str, terminal_status: str) -> None:
+        await observer.handle_correlation_complete(parent_id, terminal_status)
+
+    cm._completion_callback = _on_correlation_complete
+
+    child_a, msg_a = f"child-A-{uuid.uuid4().hex[:4]}", str(uuid.uuid4())
+    child_b, msg_b = f"child-B-{uuid.uuid4().hex[:4]}", str(uuid.uuid4())
+
+    await cm.register_message_send(instance_id, child_a, msg_a)
+
+    main_loop = asyncio.get_running_loop()
+    register_done = asyncio.Event()
+    original_finalize_sync = observer._finalize_job_db_sync
+
+    def patched_finalize_sync(job_id, instance_id, terminal_status,
+                              result_summary, error_message):
+        async def _do_register():
+            try:
+                await cm.register_message_send(instance_id, child_b, msg_b)
+            finally:
+                register_done.set()
+
+        asyncio.run_coroutine_threadsafe(_do_register(), main_loop)
+        _time.sleep(0.05)
+        return original_finalize_sync(
+            job_id, instance_id, terminal_status,
+            result_summary, error_message,
+        )
+
+    observer._finalize_job_db_sync = patched_finalize_sync
+
+    # ── DISABLE the post-commit re-arm ─────────────────────────────────────
+    # Monkey-patch ``cm.get_generation`` to always return 0 so the
+    # ``post_gen > pre_gen`` condition is never true. This simulates the
+    # absence of the orphan-race fix.
+    cm.get_generation = lambda parent_id: 0  # type: ignore[assignment]
+
+    # Resolve child A via the production hook (not handle_correlation_complete
+    # directly) so the CM properly removes child_a from _pending (pending→0)
+    # and fires the completion_callback → handle_correlation_complete →
+    # _finalize_job. The sync helper's CM re-check then sees pending=0 and
+    # commits the job to COMPLETED. With the re-arm disabled, the job
+    # STAYS COMPLETED — the orphan manifests.
+    await cm.resolve_response(instance_id, child_a, msg_a, status="responded")
+
+    await asyncio.wait_for(register_done.wait(), timeout=5.0)
+
+    # ── ASSERT: job stays COMPLETED (re-arm disabled → orphan manifests) ───
+    re_read = re_read_job(engine, job_id)
+    assert re_read is not None, f"Job row {job_id} disappeared from DB"
+    assert re_read.status == JobStatus.COMPLETED.value, (
+        f"Job should STAY COMPLETED when the post-commit re-arm is disabled "
+        f"(simulating the bug), got {re_read.status}. This means the parent "
+        f"test (test_post_commit_rearm_prevents_orphan) is a FALSE POSITIVE — "
+        f"it does not actually depend on the re-arm logic and must be rewritten."
+    )
+
+    # Child B is orphaned: it's in _pending but the job is COMPLETED.
+    assert cm.get_pending_count(instance_id) >= 1, (
+        "Child B should be pending (orphaned against a COMPLETED job)"
+    )
+
     set_correlation_manager(None)

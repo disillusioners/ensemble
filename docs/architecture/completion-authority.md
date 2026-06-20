@@ -34,6 +34,25 @@ The invariant is enforced by:
 - A11: a CI invariant test pack fails the build if a new control-flow read of `waiting_for` is added without a corresponding flag gate or a documented cache-only rationale.
 - A3: runtime divergence logs (`CM_WAITING_FOR_DIVERGENCE`) when CM's pending count disagrees with the DB `waiting_for` snapshot, gated by `DEBUG_COMPLETION_INVARIANT`.
 
+### Honest characterization of the A8 "hard error"
+
+The A8 RuntimeError is the **invariant enforcer** — the act of throwing
+is what makes the premature-completion bug class structurally
+impossible (because the only code path that would have produced it is
+short-circuited). The RuntimeError does NOT need to crash the process
+to enforce the invariant; it only needs to **not** fall through to the
+`SELECT COUNT(*)` TOCTOU fallback.
+
+In production the RuntimeError is caught by the W2/W3 fail-safe at
+`_finalize_job` (`daemon/services/job_feedback_observer.py:904-947`)
+or by broader `except Exception` handlers one frame up. The user-
+visible result under `OFF` + CM uninitialized is **per-job FAILED**
+(or, on the CM-callback path, **logged + restored for retry**), not a
+process crash. This is intentional fail-safe behavior — see
+[`docs/configuration/completion-flags.md`](../configuration/completion-flags.md)
+§"Honest characterization of the A8 hard error" for the full
+propagation table.
+
 ---
 
 ## 4. Feature Flag Interaction Matrix

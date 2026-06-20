@@ -46,6 +46,46 @@ All four combinations of the two flags are defined and supported. There is no un
 
 > The legacy `SELECT COUNT(*)` TOCTOU fallback path (Race #3 in the decouple plan) is the bug being fixed; under `OFF` it must not be reachable. A8 throws instead of falling back.
 
+#### Honest characterization of the A8 "hard error" (W2 honest-documentation, 2026-06-20)
+
+The RuntimeError raised by A8 propagates from the gated call sites
+(`daemon/services/child_reports.py:672` and `:1398`, plus the
+`_finalize_job_db_sync` site) through `asyncio.to_thread` and is
+re-raised by the W2 explicit `except RuntimeError: raise` in
+`_finalize_job` (`daemon/services/job_feedback_observer.py:904`).
+
+In production call paths the RuntimeError is typically caught one or
+two frames up by a broader `except Exception` handler:
+
+| Caller path | Catching handler | What happens to the job |
+|-------------|------------------|-------------------------|
+| CM callback (`handle_correlation_complete` → `_finalize_job`) | `CorrelationManager`'s H7 restoration `except Exception` at `correlation_manager.py:388` | Logs at EXCEPTION level, restores `_pending[parent_id]` so a subsequent retry can recover the completion. |
+| Event loop (`_process_event` → `_finalize_job`) | `_event_loop`'s `except Exception` at `job_feedback_observer.py:313` (and the stop-drain at `:258`) | Logs at ERROR level, continues processing the next event. |
+| W3 fallthrough (no broader catch on the direct path) | `_finalize_job`'s `except Exception` (W3 fail-safe, after the W2 re-raise) | Transitions the job to `FAILED` so the queue can advance. |
+
+**Net behavior under `OFF` + CM uninitialized:**
+
+- The **"hard error" is per-job FAILED, not a process crash.**
+- The daemon stays alive; only the affected job fails (and only when the
+  W3 path is the one that catches it).
+- The CM-callback path catches the RuntimeError at the H7 restoration
+  handler, logs it, and **restores** the parent state for retry rather
+  than marking the job FAILED.
+- The event-loop path catches it at the per-event `except Exception`
+  and logs it.
+
+This is **intentional fail-safe design** — a configuration bug
+degrades to per-job failure (or retryable per-event logging) rather
+than cascading into a full daemon outage. For true hard-error
+semantics (process abort), the CM must be initialized before any
+traffic — the production startup invariant enforced in
+`daemon/main.py` via `cm.start()` before the EventBus opens.
+
+If you see A8 RuntimeErrors in logs, the diagnosis is **CM
+initialization order**: CM was not started before the first traffic
+arrived. Fix by ensuring `cm.start()` runs at process boot, before
+the HTTP server begins accepting requests.
+
 ---
 
 ## Recommended Settings

@@ -29,6 +29,15 @@ TRANSITIONS: Dict[Tuple[str | None, str], str] = {
     (_STATUS_FAILED, _STATUS_DEAD_LETTER): "dead_letter",
     (_STATUS_FAILED, _STATUS_CANCELLED): "cancel_after_fail",
     (_STATUS_DEAD_LETTER, _STATUS_PENDING): "replay",
+    # Orphan-race re-arm (2026-06-20): after a job is committed to COMPLETED
+    # the post-commit re-check in JobFeedbackObserver._finalize_job may detect
+    # a concurrent ``register_message_send`` that bumped the CM generation
+    # counter during finalization. The job must be transitioned back to
+    # PROCESSING so the late child's eventual resolve can find a PROCESSING
+    # job (otherwise ``_get_processing_job_for_instance`` returns None and
+    # the child is silently orphaned). This transition is the only legal
+    # way to un-stick a finalized job whose CM had a late register.
+    (_STATUS_COMPLETED, _STATUS_PROCESSING): "rearm_after_complete",
 }
 
 

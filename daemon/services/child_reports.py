@@ -669,6 +669,14 @@ Provide a concise summary:"""
             # external precondition" and the decouple execution plan §A8.
             # Flag ON (kill switch) keeps the legacy ``SELECT COUNT(*)``
             # fallback above so the rollback path still works.
+            #
+            # Honest propagation note: this RuntimeError is caught by the
+            # W3 fail-safe (``except Exception``) in
+            # ``_finalize_job`` and results in a per-job FAILED transition.
+            # It is NOT a process-level crash — the daemon stays alive and
+            # only the affected job fails. For production, CM must be
+            # initialized before any traffic (the startup invariant
+            # enforced in ``daemon/main.py`` via ``cm.start()``).
             raise RuntimeError(
                 f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager "
                 f"is not initialized for parent={parent.instance_id[:8]}...; "
@@ -1395,6 +1403,12 @@ Provide a concise summary:"""
                 # thread via ``asyncio.to_thread`` and cannot ``await`` the
                 # async helper. Both call sites must enforce the same A8
                 # invariant.
+                #
+                # Honest propagation note: this RuntimeError is caught by
+                # the W3 fail-safe (``except Exception``) in
+                # ``_finalize_job`` and results in a per-job FAILED
+                # transition. It is NOT a process-level crash. For
+                # production, CM must be initialized before any traffic.
                 raise RuntimeError(
                     f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager "
                     f"is not initialized for parent={instance.parent_id[:8] if instance.parent_id else '?'}...; "

@@ -693,8 +693,23 @@ class JobFeedbackObserver:
         #   * When CM is None (legacy path / not initialized), no lock is
         #     needed — the legacy ``SELECT ... FOR UPDATE`` row-lock gate in
         #     ``_finalize_job_db_sync`` provides the same protection.
+        #
+        # Orphan-race fix (2026-06-20, post-commit re-check): capture the
+        # CM generation counter BEFORE acquiring the lock. ``register_message_send``
+        # bumps the counter OUTSIDE its per-parent lock acquisition, so the
+        # bump is visible to a reader that holds the lock. After the lock
+        # is released (and the job is committed to COMPLETED), we read the
+        # counter again. If it changed, a register was in-flight during
+        # finalization — we must re-arm the job (COMPLETED → PROCESSING)
+        # so the late child's eventual resolve can find a PROCESSING job.
+        # Without this, the late child is orphaned: its resolve callback
+        # finds a COMPLETED job and silently skips.
         try:
             cm = get_correlation_manager()
+            # Pre-commit generation snapshot — read BEFORE the lock so we
+            # can detect any bump that happens during the critical section
+            # (lock acquire → to_thread → commit → lock release).
+            pre_gen = cm.get_generation(instance_id) if cm is not None else 0
             if cm is not None:
                 # CM is active — hold the per-parent lock across the to_thread
                 # call so concurrent ``register_message_send`` coroutines must
@@ -719,6 +734,71 @@ class JobFeedbackObserver:
                     result_summary,
                     error_message,
                 )
+
+            # ─── Post-commit re-arm (orphan-race fix, 2026-06-20) ───
+            # After the lock is released, check if a register_message_send
+            # bumped the generation counter during finalization. If yes,
+            # the job was committed to COMPLETED but a new child is now
+            # pending in CM — re-arm the job to PROCESSING so the late
+            # child's resolve can find a PROCESSING job. Without this,
+            # the late child is orphaned: its callback sees COMPLETED
+            # and silently no-ops.
+            #
+            # We only re-arm when the job was ACTUALLY committed (not
+            # skip / gate_deferred). Skipped paths mean the job was not
+            # moved to COMPLETED by us, and gate-deferred paths already
+            # schedule a ``notify_corr_rearm`` for the wave 2 case.
+            if (
+                cm is not None
+                and not db_result.skip
+                and not db_result.gate_deferred
+            ):
+                post_gen = cm.get_generation(instance_id)
+                if post_gen > pre_gen:
+                    # A register_message_send bumped the generation during
+                    # finalization. The register is either blocked on the
+                    # lock (just released) or already enqueued on the
+                    # event loop and about to acquire the lock. Either
+                    # way, a new child is on its way into CM. Re-arm the
+                    # job so the late child's resolve can find it.
+                    logger.info(
+                        f"Observer: orphan-race post-commit re-check "
+                        f"detected generation change for instance="
+                        f"{instance_id[:8]} (pre_gen={pre_gen}, "
+                        f"post_gen={post_gen}). Re-arming job "
+                        f"{job.job_id[:8]} from COMPLETED to PROCESSING."
+                    )
+                    try:
+                        await asyncio.to_thread(
+                            self._job_repo.atomic_transition,
+                            job_id=job.job_id,
+                            from_status=JobStatus.COMPLETED.value,
+                            to_status=JobStatus.PROCESSING.value,
+                        )
+                    except InvalidTransitionError as ite:
+                        # The job was transitioned by another actor
+                        # (e.g. terminate_instance, a manual admin
+                        # operation) between our commit and this re-arm.
+                        # Log and continue — the post-commit outbox below
+                        # is still valid for whatever state the job is
+                        # actually in.
+                        logger.info(
+                            f"Observer: re-arm skipped — job "
+                            f"{job.job_id[:8]} no longer COMPLETED "
+                            f"(current: {ite.from_status} → "
+                            f"{ite.to_status})"
+                        )
+                    except Exception as rearm_exc:
+                        # Defensive: never let a re-arm failure crash the
+                        # observer. The job is already in COMPLETED — the
+                        # late child may be orphaned, which is strictly
+                        # better than a partially-finalized state.
+                        logger.warning(
+                            f"Observer: re-arm failed for job "
+                            f"{job.job_id[:8]} "
+                            f"(COMPLETED → PROCESSING): {rearm_exc}. "
+                            f"The late child may be orphaned."
+                        )
 
             # ─── Handle gate-deferred skip (waiting_for > 0 or gate SELECT failed) ───
             # C2-N1 fix: ``notify_corr_rearm`` fires ONLY on gate-deferred
@@ -822,16 +902,47 @@ class JobFeedbackObserver:
             )
             return
         except RuntimeError:
-            # W2 fix (2026-06-20): A8 hard errors (e.g., CM is None under
-            # ``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` — see the raise at
-            # ``_finalize_job_db_sync`` ~line 1307) propagate as configuration
-            # errors, NOT as per-job FAILED transitions. Without this clause
-            # the W3 ``except Exception`` handler would swallow the
-            # RuntimeError and silently mark the job FAILED, hiding the
-            # misconfiguration from operators and turning a global config bug
-            # into a per-job recovery burden. Re-raise so the caller
-            # (``_process_event`` / ``handle_correlation_complete``) sees the
-            # hard error and can decide whether to surface it further.
+            # W2 fix (2026-06-20): A8 hard errors (CM is None under
+            # ``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` — raised in
+            # ``_finalize_job_db_sync`` and at the two A8 call sites in
+            # ``child_reports.py``) propagate as configuration errors.
+            #
+            # Re-raise so the W3 ``except Exception`` below cannot silently
+            # convert the misconfiguration into a per-job FAILED transition.
+            # This preserves the A8 invariant at the direct (non-callback)
+            # call boundary: any code that invokes ``_finalize_job`` directly
+            # sees the hard error.
+            #
+            # Honest propagation note (W2 honest-documentation fix): the
+            # RuntimeError typically does NOT reach a process-level crash in
+            # production paths, because broader ``except Exception`` handlers
+            # catch it one or two frames up:
+            #
+            #   1. CM-callback path — when invoked from
+            #      :meth:`CorrelationManager.handle_correlation_complete` (the
+            #      completion_callback at correlation_manager.py:387), the
+            #      CM's own ``except Exception`` (H7 restoration handler at
+            #      correlation_manager.py:388) catches the RuntimeError, logs
+            #      it at EXCEPTION level, and restores ``_pending[parent_id]``
+            #      so a subsequent retry can recover the completion.
+            #
+            #   2. Event-loop path — when invoked from
+            #      :meth:`JobFeedbackObserver._process_event` via
+            #      :meth:`_event_loop`, the loop's ``except Exception`` at
+            #      line 313 (and the stop-drain ``except Exception`` at
+            #      line 258) catches the RuntimeError, logs it at ERROR
+            #      level, and continues processing the next event.
+            #
+            # Net effect: the "hard error" is per-job FAILED (via the W3
+            # path) or per-event ERROR log + retry-via-restoration, NOT a
+            # process crash. This is INTENTIONAL fail-safe behavior — the
+            # daemon stays alive and affected jobs fail individually rather
+            # than cascading a configuration bug into a full process outage.
+            #
+            # For true hard-error semantics (process abort) the CM must be
+            # initialized before any traffic — the production invariant
+            # enforced at startup (``cm.start()`` runs in
+            # ``daemon/main.py`` before the EventBus is open for business).
             raise
         except Exception as e:
             logger.error(

@@ -71,9 +71,16 @@ class TestStateMachineInvalidTransitions:
         assert sm.can_transition("completed", "pending") is False
 
     def test_cannot_transition_completed_to_processing(self):
-        """Test COMPLETED -> PROCESSING is invalid."""
+        """Test COMPLETED -> PROCESSING is VALID as the orphan-race re-arm
+        transition (added 2026-06-20). The JobFeedbackObserver
+        ``_finalize_job`` post-commit re-check transitions a just-committed
+        COMPLETED job back to PROCESSING when a concurrent
+        ``register_message_send`` was in-flight during finalization. Without
+        this transition the late child would be silently orphaned.
+        """
         sm = JobStateMachine()
-        assert sm.can_transition("completed", "processing") is False
+        assert sm.can_transition("completed", "processing") is True
+        assert sm.get_transition_name("completed", "processing") == "rearm_after_complete"
 
     def test_cannot_transition_pending_to_completed(self):
         """Test PENDING -> COMPLETED is invalid."""
@@ -213,10 +220,14 @@ class TestStateMachineGetValidTransitions:
         assert len(result) == 1
 
     def test_get_valid_transitions_from_completed(self):
-        """Test valid transitions from COMPLETED state (none)."""
+        """Test valid transitions from COMPLETED state.
+
+        As of 2026-06-20 the only valid transition is the orphan-race
+        re-arm (COMPLETED → PROCESSING via ``rearm_after_complete``).
+        """
         sm = JobStateMachine()
         result = sm.get_valid_transitions("completed")
-        assert result == []
+        assert result == [("processing", "rearm_after_complete")]
 
     def test_get_valid_transitions_from_cancelled(self):
         """Test valid transitions from CANCELLED state (none)."""
@@ -286,9 +297,13 @@ class TestInvalidTransitionError:
 class TestTransitionsConstant:
     """Tests for TRANSITIONS constant."""
 
-    def test_transitions_has_eleven_entries(self):
-        """Test TRANSITIONS dict has 11 entries (added requeue for MESSAGE jobs)."""
-        assert len(TRANSITIONS) == 11
+    def test_transitions_has_twelve_entries(self):
+        """Test TRANSITIONS dict has 12 entries (added rearm_after_complete for
+        the orphan-race fix in 2026-06-20: COMPLETED → PROCESSING is now a
+        legal transition for jobs that need to be re-armed when a late
+        ``register_message_send`` was in-flight during finalization).
+        """
+        assert len(TRANSITIONS) == 12
 
     def test_transitions_contains_create(self):
         """Test TRANSITIONS contains create transition."""
@@ -334,6 +349,28 @@ class TestTransitionsConstant:
         """Test TRANSITIONS contains replay transition."""
         assert ("dead_letter", "pending") in TRANSITIONS
         assert TRANSITIONS[("dead_letter", "pending")] == "replay"
+
+    def test_transitions_contains_rearm_after_complete(self):
+        """Test TRANSITIONS contains the orphan-race re-arm transition
+        (COMPLETED → PROCESSING). This is the legal transition that
+        ``JobFeedbackObserver._finalize_job`` uses to re-arm a job whose
+        CM had a late ``register_message_send`` during finalization —
+        without it, the late child is silently orphaned.
+        """
+        assert ("completed", "processing") in TRANSITIONS
+        assert TRANSITIONS[("completed", "processing")] == "rearm_after_complete"
+
+    def test_can_transition_rearm_after_complete(self):
+        """Test ``can_transition`` accepts the re-arm transition."""
+        sm = JobStateMachine()
+        assert sm.can_transition("completed", "processing") is True
+        assert sm.get_transition_name("completed", "processing") == "rearm_after_complete"
+
+    def test_validate_transition_rearm_after_complete(self):
+        """Test ``validate_transition`` does not raise for the re-arm."""
+        sm = JobStateMachine()
+        # Should not raise — the re-arm is a legal transition.
+        sm.validate_transition("completed", "processing")
 
 
 class TestJobStateMachineSingleton:
