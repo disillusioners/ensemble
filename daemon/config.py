@@ -309,10 +309,15 @@ class ServicesConfig(BaseSettings):
 
 
 class JobSystemConfig(BaseSettings):
-    """Configuration for the job system improvements."""
+    """Configuration for the job system improvements.
+
+    This section owns completion-architecture feature flags used by Phase A of the
+    decoupling plan (CorrelationManager migration). See
+    ``docs/configuration/completion-flags.md`` for the interaction matrix.
+    """
 
     model_config = SettingsConfigDict(env_prefix="ENSEMBLE_JOB_SYSTEM_")
-    
+
     default_max_retries: int = Field(default=3, description="Default max retry attempts for failed jobs")
     retry_backoff_base_seconds: int = Field(default=60, description="Base delay in seconds for exponential backoff")
     retry_backoff_max_seconds: int = Field(default=3600, description="Maximum delay in seconds for retry backoff")
@@ -322,6 +327,36 @@ class JobSystemConfig(BaseSettings):
     observer_health_check_interval_seconds: int = Field(default=300, description="Interval in seconds for observer health checks")
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
+
+    # ─── Phase A completion-architecture feature flags ──────────────────────
+    # These gates protect the migration from the legacy ``waiting_for`` cascade
+    # path to the CorrelationManager-authoritative path. See
+    # ``docs/configuration/completion-flags.md`` for the full interaction matrix
+    # and operational guidance (when to flip USE_LEGACY_WAITING_FOR_CASCADE ON).
+
+    use_legacy_waiting_for_cascade: bool = Field(
+        default=False,
+        description=(
+            "Phase A kill switch for the legacy `waiting_for` cascade path. "
+            "When OFF (default), the CorrelationManager is the SOLE completion "
+            "authority and the premature-completion bug class is structurally "
+            "impossible. When ON, the legacy `waiting_for` SQL decrement + "
+            "`waiting_for == 0` cascade runs in 18 gated call sites — this is "
+            "the rollback path, not a safe revert. See the [W6] note in "
+            "docs/configuration/completion-flags.md before flipping ON."
+        ),
+    )
+    debug_completion_invariant: bool = Field(
+        default=False,
+        description=(
+            "Phase A observability flag. When ON, the runtime emits a structured "
+            "warning with event=CM_WAITING_FOR_DIVERGENCE whenever CM's in-memory "
+            "pending count disagrees with the DB `waiting_for` counter. "
+            "Default OFF. Recommended ON in dev/CI; flip ON in production for "
+            "the first 2 weeks post-release, then OFF if no divergence logs "
+            "appeared. Set via env var ENSEMBLE_JOB_SYSTEM_DEBUG_COMPLETION_INVARIANT=true."
+        ),
+    )
 
 
 class McpPoolConfig(BaseSettings):
