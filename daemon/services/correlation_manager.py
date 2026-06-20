@@ -422,6 +422,70 @@ class CorrelationManager:
             self._locks.pop(parent_id, None)
             logger.debug(f"CM clear_for_instance: parent={parent_id[:8]}")
 
+    async def rearm_parent(self, parent_id: str) -> bool:
+        """Recreate a minimal ``_pending[parent_id]`` slot after deferred finalization.
+
+        C2-PartA fix (premature-completion bug). When
+        :meth:`CorrelationManager.resolve_response` brings the pending set to
+        zero, it deletes ``_pending[parent_id]`` BEFORE firing the
+        ``completion_callback`` (so the H7 exception-restore path can recover
+        it). The ``completion_callback`` in turn calls
+        :meth:`JobFeedbackObserver._finalize_job`, which runs the
+        :meth:`JobFeedbackObserver._finalize_job_db_sync` terminal transition.
+        If the ``waiting_for`` gate inside that helper defers (``skip=True`` —
+        wave 2 has been spawned), ``_pending[parent_id]`` has already been
+        cleared and the per-message-batch callback will NEVER fire again.
+
+        Without this method, multi-wave scenarios where wave 2 is spawned via
+        ``job_continue`` or ``watch_job`` (paths that register new CM
+        correlations but may not use the ``send_message`` register sequence)
+        can wedge the job in PROCESSING forever: wave 2 children complete,
+        :func:`notify_corr_resolve` calls land on a parent with no entry,
+        ``resolve_response`` returns ``False`` silently, and no callback fires
+        when the last wave 2 child resolves.
+
+        This method recreates an empty ``_pending[parent_id]`` slot so
+        subsequent :meth:`register_message_send` and
+        :meth:`resolve_response` calls find the parent and track the next
+        wave. When all wave 2 correlations resolve, the CM callback fires
+        again and ``_finalize_job`` runs the terminal transition (with
+        ``waiting_for == 0`` this time).
+
+        Safe to call when an entry already exists: returns ``False`` without
+        clobbering existing pending state (a concurrent
+        ``register_message_send`` may have populated it). The lock is acquired
+        to serialize against concurrent ``register_message_send`` for the same
+        parent — same pattern as :meth:`clear_for_instance`.
+
+        Must be called from the main event loop (N3 constraint). Callers
+        that run inside the ``completion_callback`` (i.e.
+        :meth:`JobFeedbackObserver.handle_correlation_complete` → ``_finalize_job``)
+        must schedule this via ``asyncio.create_task()`` to respect the N4
+        constraint (re-entering CM for the same ``parent_id`` from the
+        callback would deadlock).
+
+        Args:
+            parent_id: The parent instance ID whose CM state should be re-armed.
+
+        Returns:
+            ``True`` if a fresh empty entry was created, ``False`` if an
+            entry already existed (no-op).
+        """
+        async with self._get_lock(parent_id):
+            if parent_id in self._pending:
+                existing_count = self._pending[parent_id].pending_count
+                logger.debug(
+                    f"CM rearm_parent: parent={parent_id[:8]} already tracked "
+                    f"(pending_count={existing_count}), skipping re-arm"
+                )
+                return False
+            self._pending[parent_id] = ParentCorrelation(parent_id=parent_id)
+            logger.info(
+                f"CM rearm_parent: recreated empty _pending[parent="
+                f"{parent_id[:8]}] after deferred finalization (waiting_for>0)"
+            )
+            return True
+
     # -------------------------------------------------------------------------
     # Shadow Validation (Phase 1)
     # -------------------------------------------------------------------------
@@ -831,20 +895,19 @@ async def notify_corr_resolve(
     """Authoritative resolution hook: resolve a message response in the CM.
 
     Removes the (child_id, message_id) entry from the CM's per-parent
-    pending set. The CM is the single source of truth for parent
-    completion (Phase 3) — when the pending set reaches zero, the CM
-    synchronously fires ``handle_correlation_complete`` (registered as
-    ``completion_callback``), which transitions both the parent JOB
-    and the parent INSTANCE to terminal. The chosen ``terminal_status``
-    is "completed" if all resolved correlations had status="responded",
-    otherwise "error" (conservative rule).
+    pending set. The CM is the single source of truth for parent completion
+    (Phase 3) — when the pending set reaches zero, the CM synchronously fires
+    ``handle_correlation_complete`` (registered as ``completion_callback``),
+    which transitions both the parent JOB and the parent INSTANCE to
+    terminal. The chosen ``terminal_status`` is "completed" if all resolved
+    correlations had status="responded", otherwise "error" (conservative rule).
 
     Must be called from the main asyncio event loop (N3 constraint).
 
     Wraps in try/except so a CM failure NEVER affects the calling
-    control flow (the child_reports / error_reporting paths must
-    continue even if CM is broken — the legacy ``waiting_for`` cascade
-    is the graceful-degradation fallback).
+    control flow (the child_reports / error_reporting paths must continue
+    even if CM is broken — the legacy ``waiting_for`` cascade is the
+    graceful-degradation fallback).
 
     Args:
         parent_id: The parent instance ID (waiting for the response).
@@ -862,6 +925,46 @@ async def notify_corr_resolve(
             f"CM hook: resolve_response failed "
             f"(parent={parent_id[:8]}, child={child_id[:8]}, msg={message_id[:8]}, "
             f"status={status}): {e}"
+        )
+
+
+async def notify_corr_rearm(parent_id: str) -> None:
+    """Authoritative resolution hook: re-arm CM ``_pending[parent_id]``.
+
+    C2-PartA fix (premature-completion bug). After
+    :func:`_finalize_job_db_sync` defers finalization (``skip=True`` due to
+    ``waiting_for > 0``), the CM's ``_pending[parent_id]`` has been cleared
+    by the prior :func:`resolve_response` (which ``del``'s the entry inside
+    the per-parent lock before firing the completion_callback). Call this
+    hook to recreate an empty slot so wave 2 children's
+    :func:`notify_corr_resolve` calls find the parent and track the next
+    wave. Without this, jobs in multi-wave scenarios can wedge in PROCESSING
+    forever — particularly when wave 2 is spawned via ``job_continue`` or
+    ``watch_job`` (paths that register via CM independently of
+    ``send_message``).
+
+    Follows the same fire-and-forget pattern as :func:`notify_corr_register`
+    and :func:`notify_corr_resolve`: no-op if the CM is not initialized, and
+    any exception is logged at WARNING and swallowed so the calling control
+    flow is never affected.
+
+    Must be called from the main asyncio event loop (N3 constraint). The
+    intended call site (:meth:`JobFeedbackObserver._finalize_job` on
+    ``skip=True``) schedules this via ``asyncio.create_task()`` to respect
+    the N4 constraint — re-entering CM for the same ``parent_id`` from
+    inside the completion_callback would deadlock.
+
+    Args:
+        parent_id: The parent instance ID to re-arm.
+    """
+    cm = get_correlation_manager()
+    if cm is None:
+        return
+    try:
+        await cm.rearm_parent(parent_id)
+    except Exception as e:
+        logger.warning(
+            f"CM hook: rearm_parent failed (parent={parent_id[:8]}): {e}"
         )
 
 

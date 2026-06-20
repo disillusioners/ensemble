@@ -572,9 +572,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         # already past the increment we're about to log.
         from datetime import datetime, timezone as _tz
         from sqlalchemy import text as _sa_text
-        from sqlmodel import Session
+        from sqlmodel import Session, select
         from ..repositories.instance.models import Instance
+        from ..repositories.job_queue.models import JobItem, JobStatus
         from ..write_pause_guard import WriteGuardSession
+        from ..services.correlation_manager import get_correlation_manager
         with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
             target_instance = session.get(Instance, instance_id)
             if target_instance and target_instance.parent_id == current_instance_id:
@@ -595,11 +597,53 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 # so they commit atomically. The ``AND status = :completed``
                 # guard makes the UPDATE a no-op if a concurrent actor
                 # already revived the instance (defense against TOCTOU).
+                #
+                # W1 defense-in-depth (revival safety net): a buggy
+                # orchestrator could send spurious messages for a
+                # genuinely-completed parent whose job has already
+                # terminalized. Resurrecting that parent back to RUNNING
+                # would un-stick a finalized cascade. Before the revive
+                # UPDATE, require an active PROCESSING job for the
+                # parent — i.e. the parent itself is still mid-execution
+                # and the COMPLETED status is indeed premature. Query
+                # the job table inside the same session so the
+                # instance+job read is snapshot-consistent (no extra
+                # round-trip, no extra transaction).
                 parent_inst = session.get(Instance, current_instance_id)
+                _can_revive = False
                 if (
                     parent_inst is not None
                     and parent_inst.status == InstanceStatus.COMPLETED.value
                 ):
+                    _active_job = session.exec(
+                        select(JobItem)
+                        .where(JobItem.instance_id == current_instance_id)
+                        .where(JobItem.deleted_at.is_(None))
+                        .where(JobItem.status.in_([
+                            JobStatus.PENDING.value,
+                            JobStatus.PROCESSING.value,
+                        ]))
+                        .order_by(JobItem.created_at.desc(), JobItem.job_id)
+                    ).first()
+                    if _active_job is None:
+                        logger.warning(
+                            f"Instance {current_instance_id[:8]}... in "
+                            f"terminal status={parent_inst.status} but no "
+                            f"active job exists; refusing to revive "
+                            f"(spurious send_message — instance is genuinely done)."
+                        )
+                    elif _active_job.status != JobStatus.PROCESSING.value:
+                        logger.warning(
+                            f"Instance {current_instance_id[:8]}... in "
+                            f"terminal status={parent_inst.status} but active "
+                            f"job {_active_job.job_id[:8]}... is "
+                            f"status={_active_job.status} (not processing); "
+                            f"refusing to revive."
+                        )
+                    else:
+                        _can_revive = True
+
+                if _can_revive:
                     _now_str = datetime.now(_tz.utc).isoformat()
                     _revive_result = session.execute(
                         _sa_text(
@@ -625,7 +669,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                             f"Revived prematurely-COMPLETED parent "
                             f"{current_instance_id[:8]}... → RUNNING "
                             f"(spawning new child {instance_id[:8]}..., "
-                            f"version={_revive_row[0]})"
+                            f"version={_revive_row[0]}, "
+                            f"active_job={_active_job.job_id[:8]}...)"
                         )
 
                 result = session.execute(
@@ -639,44 +684,49 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 )
                 new_row = result.first()
                 new_val = int(new_row[0]) if new_row is not None else 0
+
+                # C3 fix — register the CM correlation BEFORE committing the
+                # ``waiting_for`` increment. If the CM registration fails,
+                # roll the session back so the waiting_for increment is not
+                # orphaned: without a CM callback the gate would defer forever
+                # and the parent would never complete. Calling context: this
+                # is the main async event loop (the per-parent CM lock is
+                # bound to it — N3 constraint), so a direct await is safe;
+                # no MainLoopBridge marshaling required.
+                #
+                # We invoke the underlying ``register_message_send`` (which
+                # surfaces exceptions) rather than ``notify_corr_register``
+                # (which swallows them) because we MUST observe the failure
+                # here to trigger the rollback. If the CM is not wired up
+                # (``get_correlation_manager() is None``), skip the call —
+                # the legacy ``waiting_for`` cascade is the graceful-
+                # degradation fallback.
+                cm = get_correlation_manager()
+                if cm is not None:
+                    try:
+                        await cm.register_message_send(
+                            parent_id=current_instance_id,
+                            child_id=instance_id,
+                            message_id=message_id,
+                        )
+                    except Exception as hook_err:
+                        logger.warning(
+                            f"CM hook: register failed before commit — "
+                            f"rolling back waiting_for increment "
+                            f"(parent={current_instance_id[:8]}, "
+                            f"child={instance_id[:8]}): {hook_err}"
+                        )
+                        session.rollback()
+                        return (
+                            f"ERROR: Failed to register message correlation: "
+                            f"{hook_err}"
+                        )
+
                 session.commit()
                 logger.info(
                     f"waiting_for incremented -> {new_val} "
                     f"(parent={current_instance_id[:8]}..., child={instance_id[:8]}...)"
                 )
-
-                # AUTHORITATIVE RESOLUTION HOOK (CorrelationManager
-                # Phase 3): register the send_message in the CM as a
-                # pending correlation. The CM is the single source of
-                # truth for parent completion — its per-parent pending
-                # set drives the terminal transition via
-                # ``handle_correlation_complete`` once all
-                # registered sends resolve (no ``SELECT COUNT(*)``
-                # fallback, no TOCTOU window). MUST NOT affect control
-                # flow — wrapped in try/except inside
-                # ``notify_corr_register``.
-                #
-                # Calling context: send_message is an async LangChain tool
-                # invoked from the agent's main async run, which executes on
-                # the main asyncio event loop. The CM's per-parent lock is
-                # bound to the main loop (N3 constraint), so a direct await
-                # is safe here — no MainLoopBridge marshaling needed.
-                try:
-                    from ..services.correlation_manager import notify_corr_register
-                    await notify_corr_register(
-                        parent_id=current_instance_id,
-                        child_id=instance_id,
-                        message_id=message_id,
-                    )
-                except Exception as hook_err:
-                    # Defensive belt-and-suspenders: the helper already
-                    # swallows CM errors, but keep this outer guard so a
-                    # failure in the import path or argument binding can
-                    # never break send_message.
-                    logger.warning(
-                        f"CM hook: register path failed "
-                        f"(parent={current_instance_id[:8]}, child={instance_id[:8]}): {hook_err}"
-                    )
         
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     

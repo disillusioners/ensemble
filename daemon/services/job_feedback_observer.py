@@ -49,13 +49,17 @@ import time
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlmodel import Session, select, update as sqlmodel_update
+from sqlalchemy import text as _sa_text
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import JobLock
 from daemon.repositories.project.repository import SQLModelProjectRepository
-from daemon.services.correlation_manager import get_correlation_manager
+from daemon.services.correlation_manager import (
+    get_correlation_manager,
+    notify_corr_rearm,
+)
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.write_pause_guard import WriteGuardSession
@@ -658,11 +662,35 @@ class JobFeedbackObserver:
                 error_message,
             )
 
-            # ─── Handle skip (CM re-check aborted, job not found, etc.) ───
+            # ─── Handle skip (CM re-check aborted, job not found, gate deferred) ───
             if db_result.skip:
+                # C2-PartA fix: re-arm CM ``_pending[parent_id]`` so wave 2
+                # children whose :func:`notify_corr_resolve` calls arrive
+                # BEFORE their :func:`notify_corr_register` calls (e.g. wave
+                # 2 spawned via ``job_continue`` / ``watch_job``) still find
+                # the parent in CM and don't silently no-op. Without this,
+                # multi-wave scenarios where the wave 2 register sequence is
+                # not via ``send_message`` can wedge the job in PROCESSING
+                # forever — ``resolve_response`` returns ``False`` for
+                # missing parents, so the CM callback never re-fires.
+                #
+                # N4 compliance: ``_finalize_job`` runs as the
+                # ``completion_callback`` when invoked from
+                # :meth:`handle_correlation_complete`, and the N4 constraint
+                # forbids re-entering CM for the same ``parent_id`` from
+                # inside the callback. We therefore schedule via
+                # ``asyncio.create_task`` rather than awaiting directly —
+                # the re-arm acquires the per-parent lock once it actually
+                # runs, well after ``_finalize_job`` has returned and the
+                # original callback context has unwound. When called from
+                # :meth:`_process_event` (the lifecycle-event fall-through,
+                # no N4 concern) the same ``create_task`` is harmless —
+                # the re-arm is just deferred by one event-loop iteration.
+                asyncio.create_task(notify_corr_rearm(instance_id))
                 logger.debug(
                     f"Observer: _finalize_job skipped for job "
-                    f"{job.job_id[:8]}... instance {instance_id[:8]}..."
+                    f"{job.job_id[:8]}... instance {instance_id[:8]}... — "
+                    f"scheduled CM rearm_parent for wave 2"
                 )
                 return
 
@@ -1169,24 +1197,43 @@ class JobFeedbackObserver:
             # set reaches zero it fires the callback — but ``send_message``
             # increments ``waiting_for`` BEFORE registering the CM
             # correlation, creating a window where ``waiting_for > 0`` and
-            # ``cm_pending == 0`` simultaneously. Reading ``waiting_for``
-            # INSIDE the same WriteGuardSession (before Step 1's job UPDATE)
-            # catches that race atomically — the SQLAlchemy session identity
-            # map guarantees the same row is read here and mutated in Step 2,
-            # eliminating the prior TOCTOU window.
+            # ``cm_pending == 0`` simultaneously.
+            #
+            # C1 fix (TOCTOU hardening): ``SELECT ... FOR UPDATE`` takes a
+            # pessimistic row-level lock on PostgreSQL (READ COMMITTED
+            # isolation). WriteGuardSession is a Python-level write-pause
+            # counter, NOT a database-level lock — on PostgreSQL another
+            # thread could commit ``waiting_for=1`` between a non-locking
+            # read and the subsequent UPDATE below, re-opening the TOCTOU
+            # window this gate exists to close. ``FOR UPDATE`` blocks
+            # concurrent writers on this row until our transaction commits
+            # or rolls back, eliminating the race.
+            #
+            # SQLite silently ignores ``FOR UPDATE`` — its global database
+            # write lock already serializes all writers, so the gate is
+            # already race-free there. The same code is therefore safe
+            # across both DBs.
             #
             # If the orchestrator still has active children, defer
             # finalization for BOTH the job and the instance — they stay
-            # coupled. The CM will fire the callback again when the new wave
-            # resolves (send_message registers a fresh correlation), at
-            # which point ``waiting_for`` will be 0 and the transition
-            # proceeds normally.
+            # coupled. The CM will fire the callback again when the new
+            # wave resolves (send_message registers a fresh correlation),
+            # at which point ``waiting_for`` will be 0 and the transition
+            # proceeds normally. The async caller
+            # (``_finalize_job``) re-arms the CM ``_pending[parent_id]``
+            # slot on ``skip=True`` so wave 2 children whose resolves
+            # arrive before their registers (e.g. via ``job_continue`` /
+            # ``watch_job``) still find the parent — C2-PartA fix.
             try:
-                _gate_instance = session.get(Instance, instance_id)
-                if _gate_instance is not None:
-                    _wf_gate = (
-                        getattr(_gate_instance, "waiting_for", None) or 0
-                    )
+                _gate_row = session.execute(
+                    _sa_text(
+                        "SELECT waiting_for FROM instances "
+                        "WHERE instance_id = :iid FOR UPDATE"
+                    ),
+                    {"iid": instance_id},
+                ).first()
+                if _gate_row is not None:
+                    _wf_gate = _gate_row[0] or 0
                     if _wf_gate > 0:
                         logger.info(
                             f"Observer: aborting terminal transition for "
