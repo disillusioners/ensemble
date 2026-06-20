@@ -52,13 +52,13 @@ from daemon.cancellation import (
     OperationCancelledError,
 )
 from daemon.manager import MessageResult
-from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.services.execution_gate import (
     ExecutionGateService,
     LeaseContention,
     LeaseContentionReason,
+    LeaseHolderKind,
     LeaseLostError,
 )
 from daemon.services.job_queue_service import DemandState

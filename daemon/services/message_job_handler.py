@@ -19,8 +19,11 @@ from daemon.cancellation import (
     OperationCancelledError,
 )
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.execution_lease.models import LeaseHolderKind
-from daemon.services.execution_gate import LeaseContention, LeaseLostError
+from daemon.services.execution_gate import (
+    LeaseContention,
+    LeaseHolderKind,
+    LeaseLostError,
+)
 from daemon.services.job_queue_service import DemandState
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,

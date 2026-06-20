@@ -8,7 +8,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from .execution_gate import LeaseContention, LeaseLostError
+from .execution_gate import LeaseContention, LeaseHolderKind, LeaseLostError
 from .main_loop_bridge import MainLoopBridge
 from .message_processing_pipeline import (
     MessageProcessingPipeline,
@@ -17,7 +17,6 @@ from .message_processing_pipeline import (
     ProcessingResult,
 )
 from daemon.cancellation import CancellationToken, OperationCancelledError
-from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )

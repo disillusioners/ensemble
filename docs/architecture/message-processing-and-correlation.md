@@ -1,4 +1,4 @@
-> **Last updated: 2026-06-18.** Reflects the state after the CorrelationManager migration (6 phases) + deadlock fix + resume gate fix.
+> **Last updated: 2026-06-21.** Reflects the state after the C12 collapse of the Execution Gate from DB-backed lease to per-instance `asyncio.Lock` (plus the correlation / resume / Phase 5 work referenced in earlier revisions).
 
 # Message Processing and Correlation
 
@@ -37,11 +37,11 @@ Both paths converge through shared infrastructure. The architecture is organized
 │  └─ Direct async callback → observer finalizes job        │
 │                                                           │
 ├───────────────────────────────────────────────────────────┤
-│  ExecutionGate (DB-backed lease per instance)              │
-│  ├─ Prevents dual-driver checkpoint corruption             │
-│  ├─ Lease acquired BEFORE graph.astream                    │
-│  ├─ Released on success, failure, or LeaseLostError        │
-│  └─ Both paths (WorkerPool + JobQueue) go through it       │
+│  ExecutionGate (per-instance asyncio.Lock)                │
+│  ├─ Prevents dual-driver checkpoint corruption            │
+│  ├─ Lock acquired BEFORE graph.astream                    │
+│  ├─ Released on success, failure, or cancellation         │
+│  └─ Both paths (WorkerPool + JobQueue) go through it      │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -51,7 +51,7 @@ Both paths converge through shared infrastructure. The architecture is organized
 
 Phase 5 of the CorrelationManager migration consolidated six shared stages that both dispatchers were duplicating. The pipeline takes a `ProcessingContext` (message metadata) and `PipelineCallbacks` (path-specific behaviour) and produces a `ProcessingResult`. The six stages are:
 
-1. **GATE ACQUIRE** — wraps the work function in `execution_gate.run()`, acquiring a per-instance lease before any `graph.astream` call.
+1. **GATE ACQUIRE** — wraps the work function in `execution_gate.run()`, acquiring the per-instance `asyncio.Lock` before any `graph.astream` call. The second caller for the same instance blocks on the event loop until the first releases.
 2. **PROCESS** — calls `manager._process_message_with_tracking()`, which runs the LangGraph streaming logic.
 3. **MARK COMPLETE** — calls `queue_repository.complete(message_id)` to set the message row to `COMPLETED`. Defensive (warn-log on failure; does not fail the message).
 4. **DISPATCH** — resolves the dispatch source (`internal_report` → `original_source` from instance metadata) and calls `source_dispatcher.dispatch_completed()` to route the response externally (SSE, etc.). Skipped when no valid external source is resolved.
@@ -80,13 +80,12 @@ Hook sites (`notify_corr_register` / `notify_corr_resolve`) are wired in `child_
 
 `daemon/services/execution_gate.py` — `ExecutionGateService`
 
-The `ExecutionGate` is the **single chokepoint** for `graph.astream`. It owns a DB-backed per-instance lease against the `instance_execution_leases` table. The contract:
+The `ExecutionGate` is the **single chokepoint** for `graph.astream`. It owns a per-instance `asyncio.Lock` keyed by `instance_id`. The contract:
 
-- Only one dispatcher holds the lease for a given instance at a time.
-- Acquisition is atomic (`INSERT ... ON CONFLICT DO NOTHING`).
-- The lease is held for the entire duration of `_process_message_with_tracking`. Release is conditional on `holder_id` matching — a stale loser cannot evict a fresh winner's lease.
-- A background heartbeat keeps the lease alive for long-running `graph.astream` calls.
-- On contention, the caller receives a `LeaseContention` signal and backs off. If the lease is revoked mid-flight (e.g., by `recover_stale_leases` on another node), `LeaseLostError` is raised and the caller re-queues.
+- Only one `gate.run` for a given instance is in flight at a time. The second caller blocks on the same event loop until the first releases the lock, then runs its `work_fn` (no `LeaseContention` return path — the lock IS the contention mechanism).
+- The lock is held for the entire duration of `_process_message_with_tracking`. Release is unconditional on exit (success, exception, or task cancellation) via the `async with` block.
+- Distinct instances have distinct locks, so unrelated work_fns run in parallel — the gate does NOT false-serialize the world.
+- Cross-process coordination is NOT supported — this gate is for single-process WorkerPool serialization. All gate callers (WorkerPool threads, JobQueue async handlers, the resume path) funnel their work onto the main event loop via `MainLoopBridge.run_async`, so a single `asyncio.Lock` per instance is sufficient to serialize concurrent `graph.astream` calls for that instance.
 
 Both `ProcessMessageProcessor` and `MessageJobHandler` wrap their `_process_message_with_tracking` call in `gate.run()`. The gate is also required on the resume path (Race #5 fix — previously `resume_processing_job` bypassed the gate; now wrapped in `gate.run()` with 3-attempt bounded retry + exponential backoff).
 
@@ -148,7 +147,7 @@ A concrete walkthrough from entry to finalization:
 
 1. **Entry** — An HTTP API call lands in `enqueue_message_via_jq()` (in `daemon/manager.py` or `daemon/services/instance_messaging.py`), or an internal agent tool triggers `enqueue_message()` (e.g., a child completion report from `_create_completion_report` in `child_reports.py`). **`enqueue_message_via_jq` is a legacy JobQueue dispatch path** — its structured log line (`dispatch_path=jobqueue_legacy`) marks it for monitoring. It is the JobQueue entry point used for cross-instance handoff; the unification of all dispatch paths onto a single observer-based dispatcher happens at **C-M5** in the [decouple execution plan](../plans/decouple-execution-plan.md) Phase C.
 2. **Queue** — Both paths write a `MessageQueue` row (the message to process) and a dispatch row (`JobItem` for JobQueue; `Task` for WorkerPool). The dispatcher picks it up from its respective poll loop. Post-C-M5, only the WorkerPool (`Task`) path will be the runtime dispatch path; `JobItem` rows are retained only as scheduling-only artifacts for cross-instance handoff.
-3. **Gate** — `MessageProcessingPipeline.execute()` calls `execution_gate.run()`, acquiring a per-instance lease. If contention occurs, the path-specific `on_contention` callback re-queues the work.
+3. **Gate** — `MessageProcessingPipeline.execute()` calls `execution_gate.run()`, acquiring the per-instance `asyncio.Lock`. If a second caller arrives while the lock is held, it blocks on the same event loop until the holder releases; there is no `LeaseContention` return path.
 4. **Process** — `_process_message_with_tracking` calls `graph.astream`, streaming results back to the caller.
 5. **Post-process** — The pipeline marks the message `COMPLETED`, resolves and dispatches the response (SSE, routing), and checks child completion via the CM.
 6. **Correlation resolution** — If the message is a child completion report, `notify_corr_resolve()` calls `CM.resolve_response()`, decrementing the parent's pending count. If the count reaches zero, the CM fires its `completion_callback`.
@@ -181,13 +180,17 @@ A concrete walkthrough from entry to finalization:
 
 **What it prevents: dual-driver checkpoint corruption.** Before the gate existed, both dispatchers could call `graph.astream` for the same instance concurrently. Each call would read the same LangGraph checkpoint version, append its own message via `add_messages`, and try to write a new version. The write-side lost-update race caused one of the appended messages to disappear from the final checkpoint. This was the root cause of the bug documented in `docs/bugs/child-completion-report-lost-cross-dispatcher-jobqueue-vs-workerpool.md`.
 
-**The DB-backed lease (`instance_execution_leases` table).** The lease row carries `instance_id`, `holder_id`, `holder_kind` (`"task"` or `"message_job"`), `acquired_at`, `heartbeat_at`, and a diagnostic `process_id` (the OS PID of the holder process — recorded for observability/debugging only; it is NOT used for correctness, and crash recovery relies on heartbeat staleness rather than PID). The heartbeat is written by a background task spawned inside `_execute_under_lease`; `recover_stale_leases` uses `COALESCE(heartbeat_at, acquired_at) < :cutoff` to detect crashed holders.
+**Per-instance `asyncio.Lock` (C12 collapse).** The gate is now a per-instance `asyncio.Lock` stored in `ExecutionGateService._locks[instance_id]`. The lock is acquired on the main event loop by every caller — WorkerPool threads (via `MainLoopBridge.run_async`), JobQueue async handlers, and the resume path all funnel their `gate.run` calls onto the same loop, so a single `asyncio.Lock` per instance is sufficient to serialize concurrent `graph.astream` calls for that instance.
 
-> **Note on the `LeaseHolderKind` enum:** it currently defines three members — `MESSAGE_JOB`, `TASK`, and `RESUME` — but only the first two are produced by any code path today. The `RESUME` member is reserved for the planned paused-instance resume path and exists so the DB CHECK constraint does not need a migration when that path lands.
+The previous DB-backed implementation (`instance_execution_leases` table, `ExecutionLeaseRepository`, `recover_stale_leases` startup sweep, in-flight `LeaseContention` / `LeaseLostError` escalation) has been collapsed. The migration file `20260614_000002_create_instance_execution_leases.sql` is retained as part of released history but the table is no longer written at runtime.
 
-**Lease lifecycle.** Acquire → hold for duration of `_process_message_with_tracking` → release on success. On contention (`LeaseContention`), the caller re-queues. On mid-flight revocation (`LeaseLostError`), the caller's work is cancelled and it re-queues with backoff.
+> **Why `asyncio.Lock` is the correct primitive.** Every `gate.run` body acquires the lock on the main loop, so the lock's `lock.locked()` / `lock.locked()` semantics (single-owner per instance, no re-entrance) line up exactly with the dispatch model. There is no need for cross-process coordination: both dispatchers run in the same Python process, and the WorkerPool's `ThreadPoolExecutor` calls are bridged to the main loop before they touch the gate. A coarse single-process lock (not per-instance) would false-serialize unrelated instances; a coarse `dict[instance_id, threading.Lock]` would require thread-safe dict access; an `asyncio.Lock` per instance keeps the lookup and the acquire on the same event loop with no extra synchronization.
 
-**Required on ALL paths, including resume (Race #5).** The `resume_processing_job` path previously bypassed the gate entirely. This created a window where a resumed instance could run `graph.astream` concurrently with a new message if the previous run had not yet released the lease. Race #5 is eliminated: `resume_processing_job` now calls `gate.run()` with 3-attempt bounded retry + exponential backoff, identical to the forward path.
+> **Note on the `LeaseHolderKind` enum:** it is preserved as a deprecated stub in `daemon/services/execution_gate.py` (along with `LeaseContention` and `LeaseLostError`) so the dispatchers' existing call sites continue to work. The asyncio.Lock gate ignores `holder_kind` entirely — the value is kept for documentation/diagnostics only (log lines, SSE payloads). Under the new gate, `LeaseContention` is never returned and `LeaseLostError` is never raised; the dispatcher branches that handle them are harmless dead code that will be removed in a future cleanup pass.
+
+**Lock lifecycle.** Acquire (via `async with` on the per-instance `asyncio.Lock`) → hold for duration of `_process_message_with_tracking` → release unconditionally on exit (success, exception, or task cancellation). On contention, the second caller blocks on the same event loop until the holder releases; the second caller's `work_fn` then runs *after* the first caller's. There is no `LeaseContention` return path and no mid-flight `LeaseLostError` escalation.
+
+**Required on ALL paths, including resume (Race #5).** The `resume_processing_job` path previously bypassed the gate entirely. This created a window where a resumed instance could run `graph.astream` concurrently with a new message if the previous run had not yet released the lease. Race #5 is eliminated: `resume_processing_job` now calls `gate.run()` with 3-attempt bounded retry + exponential backoff, identical to the forward path. The retry/return semantics inside the resume path are preserved unchanged; only the underlying lock primitive is different (asyncio.Lock vs DB-backed lease).
 
 ## 7. What's Shared vs Path-Specific
 
@@ -200,7 +203,7 @@ The following five differences are **intentional path-specific behaviour**, not 
 | 1 | **Retry-context derivation** | `retry_count > 0 OR resume_mode` | `resume_mode` only |
 | 2 | **Pre-flight sibling checks** | Relies on gate's `try_acquire` | Cross-dispatcher checks before acquiring gate |
 | 3 | **Pause/terminate discrimination** | Log "task paused" + re-raise | `PAUSED` instance → leave `PROCESSING`; others → `CANCELLED` |
-| 4 | **Lease contention handling** | Jittered backoff via `requeue_task_with_backoff` | Extracted `_requeue_for_contention` + dispatch bus wake-up |
+| 4 | **Lease contention handling** | N/A — `gate.run` blocks on the per-instance `asyncio.Lock`; second caller waits (no `LeaseContention` return path). Old `requeue_task_with_backoff` branch is dead code, preserved for backward compat. | N/A — same; old `_requeue_for_contention` + dispatch bus wake-up branch is dead code, preserved for backward compat. |
 | 5 | **CancellationToken ownership** | Passed as parameter from `TaskProcessor.run_task` | Stored in `_active_tokens[job_id]` (keyed by `job_id`) |
 
 ## 8. The Deadlock Fix
@@ -228,7 +231,7 @@ Every site that calls a SQLAlchemy/SQLModel repository method now goes through `
 | Race #1 — JobFeedbackObserver `waiting_for` snapshot vs child completion | Phase 2 | CM callback (`handle_correlation_complete`) is the sole terminal-transition path; no TOCTOU window between snapshot read and transition |
 | Race #3 — `SELECT COUNT(*)` TOCTOU in cascade decision logic | Phase 3 | CM uses pure in-memory `_pending` set operations; no DB query in the completion hot path |
 | Race #5 — ExecutionGate bypass on `resume_processing_job` | Phase 0 | `resume_processing_job` now wrapped in `gate.run()` with bounded retry + backoff; gate is authoritative |
-| Cross-dispatcher checkpoint corruption | ExecutionGate | Per-instance lease prevents concurrent `graph.astream` calls |
+| Cross-dispatcher checkpoint corruption | ExecutionGate | Per-instance `asyncio.Lock` prevents concurrent `graph.astream` calls (was DB-backed lease pre-C12) |
 | Sync/async deadlock | `asyncio.to_thread` wrapping | All sync DB calls offloaded to thread pool |
 
 ## 10. Related Docs

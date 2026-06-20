@@ -52,8 +52,7 @@ from .repositories.message_queue.models import MessageQueue, MessageStatus, Mess
 from .repositories.task.models import Task, TaskType, TaskStatus
 from .repositories.event.models import Event, EventKind
 from .repositories.db_connection.models import DbConnectionConfig
-from .repositories.execution_lease.models import LeaseHolderKind
-from .services.execution_gate import LeaseContention, LeaseLostError
+from .services.execution_gate import LeaseContention, LeaseHolderKind, LeaseLostError
 from sqlmodel import Session
 from sqlalchemy import text, select
 from .tools import create_instance_tools
@@ -543,7 +542,6 @@ class InstanceManager:
         # Import SchemaMigration to register it with SQLModel.metadata
         # This ensures the schema_migrations table is created
         from .migrations.models import SchemaMigration
-        from .repositories.execution_lease.models import InstanceExecutionLease
 
         SQLModel.metadata.create_all(self._engine)
 
@@ -699,29 +697,16 @@ class InstanceManager:
         self._stale_recovery: StaleTaskRecovery | None = None
 
         # Execution Gate: the single owner of graph.astream per
-        # thread_id. Initialised with a per-instance lease repository
-        # so the two physical dispatchers (MessageJobHandler and
-        # ProcessMessageProcessor) can never run astream concurrently
-        # for the same instance. See daemon/services/execution_gate.py
-        # and docs/bugs/child-completion-report-lost-*.
-        from .repositories.execution_lease.repository import ExecutionLeaseRepository
+        # thread_id. Now a per-process asyncio.Lock (see
+        # ``daemon/services/execution_gate.py``) — the two physical
+        # dispatchers (MessageJobHandler and ProcessMessageProcessor)
+        # can never run astream concurrently for the same instance
+        # because all callers funnel through MainLoopBridge onto the
+        # main event loop. Replaces the previous DB-backed lease
+        # (``instance_execution_leases`` table) which is no longer
+        # used at runtime.
         from .services.execution_gate import ExecutionGateService
-        self._execution_lease_repo = ExecutionLeaseRepository(engine=self._engine)
-        # Lease heartbeat interval: pulled from services config if
-        # present, otherwise the gate uses its own default. Using
-        # ``getattr`` keeps test mocks (which often pass a bare
-        # ``services`` object) from breaking on this lookup.
-        heartbeat_interval = getattr(
-            self.config.services,
-            "lease_heartbeat_interval_seconds",
-            None,
-        )
-        self._execution_gate = ExecutionGateService(
-            lease_repo=self._execution_lease_repo,
-            heartbeat_interval_seconds=heartbeat_interval
-            if heartbeat_interval is not None
-            else ExecutionGateService.DEFAULT_LEASE_HEARTBEAT_SECONDS,
-        )
+        self._execution_gate = ExecutionGateService()
 
         # Shutdown flag for graceful shutdown
         self._shutting_down = False

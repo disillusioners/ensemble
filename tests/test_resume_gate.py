@@ -46,11 +46,11 @@ import pytest
 from daemon.manager import InstanceManager
 from daemon.config import Config
 from daemon.cancellation import CancellationTokenSource
-from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.execution_gate import (
     LeaseContention,
     LeaseContentionReason,
+    LeaseHolderKind,
     LeaseLostError,
 )
 from daemon.services.job_queue_service import DemandState
@@ -537,144 +537,6 @@ class TestResumeGateWrapping:
         manager._instance_repository.update_instance.assert_called_once()
         ui_kwargs = manager._instance_repository.update_instance.call_args.kwargs
         assert ui_kwargs["status"] == InstanceStatus.ERROR.value
-
-
-class TestResumeGateIntegration:
-    """Integration-style tests using a real ``ExecutionGateService``
-    backed by an in-memory SQLite lease table, to verify the resume
-    path actually contends when another holder owns the lease.
-    """
-
-    @pytest.fixture
-    def real_gate(self):
-        """Build a real ``ExecutionGateService`` over an in-memory DB."""
-        from sqlalchemy import create_engine
-        from sqlalchemy.pool import StaticPool
-        from sqlmodel import SQLModel
-
-        from daemon.repositories.execution_lease.repository import (
-            ExecutionLeaseRepository,
-        )
-        from daemon.services.execution_gate import ExecutionGateService
-
-        engine = create_engine(
-            "sqlite:///:memory:",
-            connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
-        )
-        SQLModel.metadata.create_all(engine)
-        lease_repo = ExecutionLeaseRepository(engine)
-        yield ExecutionGateService(lease_repo=lease_repo)
-        engine.dispose()
-
-    @pytest.mark.asyncio
-    async def test_real_gate_blocks_resume_while_message_job_holds_lease(
-        self, real_gate
-    ):
-        """Use a real ``ExecutionGateService`` to verify the resume
-        path actually sees ``LeaseContention`` when another dispatcher
-        holds the lease.
-
-        Step 1: Acquire the lease as a MESSAGE job (simulating a
-                concurrent /api message dispatch).
-        Step 2: Call ``_resume_processing_background`` — it should see
-                ``LeaseContention`` (the MESSAGE job is the holder).
-        Step 3: Release the MESSAGE job's lease.
-        Step 4: The resume's retry should now succeed.
-
-        We patch ``asyncio.sleep`` so the backoff is instant.
-        """
-        manager = _make_manager(real_gate)
-        instance_id = "inst-real-contend"
-        message_id = str(uuid.uuid4())
-        old_job_id = "job-real-contend"
-
-        # 1. Another dispatcher holds the lease.
-        acquired = await asyncio.to_thread(
-            real_gate._lease_repo.try_acquire,
-            instance_id,
-            f"message_job:other-job-1",
-            LeaseHolderKind.MESSAGE_JOB.value,
-        )
-        assert acquired is True
-
-        # 2+3. Schedule the resume; after the resume's first
-        # LeaseContention (which sleeps), release the holding lease so
-        # the retry succeeds.
-        async def release_after_delay():
-            await asyncio.sleep(0.01)
-            await asyncio.to_thread(
-                real_gate._lease_repo.release,
-                instance_id,
-                "message_job:other-job-1",
-            )
-
-        release_task = asyncio.create_task(release_after_delay())
-        try:
-            with patch("daemon.manager.asyncio.sleep", new=AsyncMock()):
-                await manager._resume_processing_background(
-                    instance_id=instance_id,
-                    message="resume",
-                    message_id=message_id,
-                    old_job_id=old_job_id,
-                    silent=False,
-                    images=None,
-                )
-        finally:
-            await release_task
-
-        # 4. The resume completed (job COMPLETED), the lease was
-        # released cleanly.
-        manager._job_queue_service.complete_job.assert_awaited_once()
-        cj_args = manager._job_queue_service.complete_job.await_args.args
-        assert cj_args[1] == DemandState.COMPLETED
-
-        # Lease is free after the resume finishes.
-        holder = await asyncio.to_thread(
-            real_gate._lease_repo.get_holder, instance_id
-        )
-        assert holder is None
-
-    @pytest.mark.asyncio
-    async def test_real_gate_workerpool_task_blocks_resume(self, real_gate):
-        """Same as above but the holder is a TASK lease (WorkerPool path)."""
-        manager = _make_manager(real_gate)
-        instance_id = "inst-real-task"
-        message_id = str(uuid.uuid4())
-        old_job_id = "job-real-task"
-
-        # 1. WorkerPool task holds the lease.
-        acquired = await asyncio.to_thread(
-            real_gate._lease_repo.try_acquire,
-            instance_id,
-            f"task:99",
-            LeaseHolderKind.TASK.value,
-        )
-        assert acquired is True
-
-        async def release_after_delay():
-            await asyncio.sleep(0.01)
-            await asyncio.to_thread(
-                real_gate._lease_repo.release, instance_id, "task:99"
-            )
-
-        release_task = asyncio.create_task(release_after_delay())
-        try:
-            with patch("daemon.manager.asyncio.sleep", new=AsyncMock()):
-                await manager._resume_processing_background(
-                    instance_id=instance_id,
-                    message="resume",
-                    message_id=message_id,
-                    old_job_id=old_job_id,
-                    silent=False,
-                    images=None,
-                )
-        finally:
-            await release_task
-
-        manager._job_queue_service.complete_job.assert_awaited_once()
-        cj_args = manager._job_queue_service.complete_job.await_args.args
-        assert cj_args[1] == DemandState.COMPLETED
 
 
 class TestResumeGraphTaskTracking:

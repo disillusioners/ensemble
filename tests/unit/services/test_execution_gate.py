@@ -1,816 +1,447 @@
-"""Unit tests for the Execution Gate and its lease repository.
+"""Unit tests for the asyncio.Lock-based Execution Gate.
 
-Covers:
-- Acquire / release happy path
-- Concurrent acquire serialises correctly (one wins, the other gets
-  LeaseContention)
-- Re-entrant acquire by the same holder is a no-op (in-process fast
-  path)
-- Conditional release — a stale loser cannot delete a fresh winner's
-  row
-- Heartbeat refresh
-- Crash recovery: stale leases are deleted, fresh ones are not
-- ProcessMessageProcessor re-queue path on lease contention
-- MessageJobHandler cross-dispatcher check sees running tasks and
-  re-queues
+Covers the gate's core contract after the C12 collapse from
+DB-backed lease to per-instance ``asyncio.Lock``:
+
+- **Acquire / release happy path** — ``gate.run`` runs the work_fn
+  and returns its result; the lock is released on exit.
+- **Exception / cancellation release** — the lock is released even
+  when the work_fn raises or the awaited task is cancelled.
+- **Re-entrant call from the same holder deadlocks** — the new gate
+  is NOT re-entrant (asyncio.Lock is not re-entrant). A holder
+  re-entering ``gate.run`` from inside its own work_fn would
+  deadlock. This is pinned as a regression guard so a future
+  "fast path" addition does not silently reintroduce the bug.
+- **Concurrent callers serialize** — two ``gate.run`` calls for the
+  same instance never overlap their work_fns; the second blocks
+  until the first releases.
+- **Different instances run in parallel** — the gate does NOT
+  false-serialize unrelated instances.
+- **CancellationToken cooperation** — cancelling the awaiting task
+  interrupts the in-flight work_fn (the gate does not own
+  cancellation; the caller's CancellationToken does).
+
+DB-backed lease tests (acquire/release on the SQLModel table,
+heartbeat, recovery, in-process fast path) have been removed
+because the ``instance_execution_leases`` table is no longer
+written at runtime. The migration file
+``20260614_000002_create_instance_execution_leases.sql`` is
+retained as part of released history but the table is now unused.
 """
 
 from __future__ import annotations
 
 import asyncio
-import pytest
-from datetime import datetime, timedelta, timezone
-from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
-from sqlmodel import SQLModel
 
-from daemon.repositories.execution_lease.models import (
-    InstanceExecutionLease,
-    LeaseHolderKind,
-)
-from daemon.repositories.execution_lease.repository import (
-    ExecutionLeaseRepository,
-)
+import pytest
+
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
-from daemon.services.execution_gate import (
-    ExecutionGateService,
-    LeaseContention,
-    LeaseContentionReason,
-    LeaseLostError,
-)
+from daemon.services.execution_gate import ExecutionGateService
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def engine():
-    """In-memory SQLite engine with the lease + task tables registered.
+def gate():
+    """A fresh ExecutionGateService with no constructor args.
 
-    StaticPool so multiple threads share the same connection — required
-    for the worker's threading model, even though the gate's DB
-    operations are all single-statement and short-lived.
+    The new gate accepts (and ignores) the old ``lease_repo=`` kwarg
+    for backward compat with ``InstanceManager``'s old call site —
+    this fixture exercises the new no-arg path.
     """
-    engine = create_engine(
-        "sqlite:///:memory:",
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
+    return ExecutionGateService()
+
+
+@pytest.fixture
+def gate_backward_compat():
+    """An ExecutionGateService constructed with old-style kwargs.
+
+    Verifies the constructor still accepts (and ignores) the legacy
+    ``lease_repo=``, ``stale_lease_seconds=``,
+    ``heartbeat_interval_seconds=``,
+    ``heartbeat_max_consecutive_errors=`` arguments that the old
+    ``InstanceManager`` passed. This pins the backward-compat
+    contract.
+    """
+    return ExecutionGateService(
+        lease_repo=None,
+        stale_lease_seconds=300,
+        heartbeat_interval_seconds=30.0,
+        heartbeat_max_consecutive_errors=5,
     )
-    SQLModel.metadata.create_all(engine)
-    yield engine
-    engine.dispose()
 
 
-@pytest.fixture
-def lease_repo(engine):
-    return ExecutionLeaseRepository(engine)
+# ─── Constructor / backward compat ────────────────────────────────────────────
 
 
-@pytest.fixture
-def task_repo(engine):
-    return TaskRepository(engine, on_pending_task=lambda: None)
+class TestExecutionGateConstructor:
+    def test_no_args_constructs_cleanly(self):
+        """The new gate has no required constructor args."""
+        gate = ExecutionGateService()
+        assert gate is not None
 
-
-@pytest.fixture
-def gate(lease_repo):
-    return ExecutionGateService(lease_repo=lease_repo)
-
-
-# ─── Repository: acquire / release ─────────────────────────────────────────────
-
-
-class TestLeaseRepositoryAcquireRelease:
-    def test_try_acquire_succeeds_when_free(self, lease_repo):
-        ok = lease_repo.try_acquire(
-            "inst-1", "message_job:job-A", LeaseHolderKind.MESSAGE_JOB.value
-        )
-        assert ok is True
-
-    def test_try_acquire_returns_holder_after_first_acquire(
-        self, lease_repo
-    ):
-        lease_repo.try_acquire(
-            "inst-1", "message_job:job-A", LeaseHolderKind.MESSAGE_JOB.value
-        )
-        holder = lease_repo.get_holder("inst-1")
-        assert holder is not None
-        assert holder.holder_id == "message_job:job-A"
-        assert holder.holder_kind == LeaseHolderKind.MESSAGE_JOB.value
-
-    def test_try_acquire_fails_when_held_by_other(self, lease_repo):
-        lease_repo.try_acquire(
-            "inst-1", "message_job:job-A", LeaseHolderKind.MESSAGE_JOB.value
-        )
-        ok = lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        assert ok is False
-
-    def test_try_acquire_succeeds_for_same_holder_id_repeatedly(
-        self, lease_repo
-    ):
-        """The same holder can re-acquire (e.g. on retry); the
-        row already exists with the same PK so the INSERT is a no-op
-        and the call returns True (rowcount 0 means 'no insert
-        happened but the row matches'). This is by design — a
-        re-entrant acquire from the same caller is idempotent and
-        should not be reported as contention.
+    def test_accepts_legacy_kwargs_silently(self, gate_backward_compat):
+        """Old call sites pass ``lease_repo=`` etc. — the constructor
+        must accept (and ignore) them without raising.
         """
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        ok = lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        assert ok is True
-
-    def test_release_deletes_row(self, lease_repo):
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        deleted = lease_repo.release("inst-1", "task:42")
-        assert deleted is True
-        assert lease_repo.get_holder("inst-1") is None
-
-    def test_release_is_idempotent(self, lease_repo):
-        """Releasing an already-released lease returns False (no row
-        to delete), but does not raise. Dispatchers rely on this when
-        they hold a holder_id that no longer matches a row (e.g. the
-        recovery loop cleared the row out from under them).
-        """
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        assert lease_repo.release("inst-1", "task:42") is True
-        # Second release is a no-op
-        assert lease_repo.release("inst-1", "task:42") is False
-
-    def test_release_with_wrong_holder_id_does_nothing(self, lease_repo):
-        """A stale loser must not accidentally evict a fresh winner."""
-        lease_repo.try_acquire(
-            "inst-1", "message_job:job-A", LeaseHolderKind.MESSAGE_JOB.value
-        )
-        # Someone else tries to release — they should not be able to.
-        assert lease_repo.release("inst-1", "task:99") is False
-        # Original holder is still there.
-        assert lease_repo.get_holder("inst-1").holder_id == "message_job:job-A"
-
-    def test_is_held_by(self, lease_repo):
-        lease_repo.try_acquire(
-            "inst-1", "message_job:job-A", LeaseHolderKind.MESSAGE_JOB.value
-        )
-        assert lease_repo.is_held_by("inst-1", "message_job:job-A") is True
-        assert lease_repo.is_held_by("inst-1", "task:99") is False
-        assert lease_repo.is_held_by("inst-other", "message_job:job-A") is False
+        assert gate_backward_compat is not None
 
 
-# ─── Repository: heartbeat ─────────────────────────────────────────────────────
-
-
-class TestLeaseRepositoryHeartbeat:
-    def test_heartbeat_updates_holder_row(self, lease_repo):
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        before = lease_repo.get_holder("inst-1").heartbeat_at
-        # Sleep a smidge to make the timestamp differ.
-        import time
-        time.sleep(0.01)
-        ok = lease_repo.heartbeat("inst-1", "task:42")
-        assert ok is True
-        after = lease_repo.get_holder("inst-1").heartbeat_at
-        assert after > before
-
-    def test_heartbeat_returns_false_for_wrong_holder(self, lease_repo):
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        ok = lease_repo.heartbeat("inst-1", "task:99")
-        assert ok is False
-
-
-# ─── Repository: crash recovery ───────────────────────────────────────────────
-
-
-class TestLeaseRepositoryRecovery:
-    def test_find_stale_leases_uses_heartbeat(self, lease_repo):
-        # Create a lease, then manually backdate its heartbeat.
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        with SQLModelSession(lease_repo.engine) as session:
-            row = session.get(InstanceExecutionLease, "inst-1")
-            row.heartbeat_at = datetime.now(timezone.utc) - timedelta(
-                seconds=1000
-            )
-            session.add(row)
-            session.commit()
-        # Also a fresh lease that should NOT be cleared.
-        lease_repo.try_acquire(
-            "inst-2", "task:43", LeaseHolderKind.TASK.value
-        )
-        stale = lease_repo.find_stale_leases(max_age_seconds=300)
-        assert len(stale) == 1
-        assert stale[0].instance_id == "inst-1"
-
-    def test_clear_stale_removes_row(self, lease_repo):
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        ok = lease_repo.clear_stale("inst-1")
-        assert ok is True
-        assert lease_repo.get_holder("inst-1") is None
-
-    def test_clear_stale_does_not_require_holder_id(self, lease_repo):
-        """clear_stale is the recovery primitive — no holder_id check.
-
-        Contrast with release() which DOES require holder_id. A
-        well-behaved dispatcher must never call clear_stale().
-        """
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        # No holder_id provided — should still work.
-        assert lease_repo.clear_stale("inst-1") is True
-
-    def test_clear_stale_leases_bulk_deletes(self, lease_repo):
-        """clear_stale_leases is the bulk recovery primitive (one
-        round-trip, no N+1) used by ``recover_stale_leases`` on
-        startup.
-        """
-        lease_repo.try_acquire(
-            "inst-stale", "task:42", LeaseHolderKind.TASK.value
-        )
-        lease_repo.try_acquire(
-            "inst-fresh", "task:43", LeaseHolderKind.TASK.value
-        )
-        # Backdate the first one's heartbeat to past the threshold.
-        with SQLModelSession(lease_repo.engine) as session:
-            row = session.get(InstanceExecutionLease, "inst-stale")
-            row.heartbeat_at = datetime.now(timezone.utc) - timedelta(
-                seconds=1000
-            )
-            session.add(row)
-            session.commit()
-        cleared = lease_repo.clear_stale_leases(max_age_seconds=300)
-        assert cleared == 1
-        assert lease_repo.get_holder("inst-stale") is None
-        assert lease_repo.get_holder("inst-fresh") is not None
-
-    def test_find_stale_leases_uses_sql_filter(self, lease_repo):
-        """The stale-lease scan must filter in SQL (not load all
-        rows into Python) so it stays cheap as the table grows.
-        The default_factory on the column guarantees
-        ``heartbeat_at`` is never NULL on insert, so the
-        ``COALESCE(heartbeat_at, acquired_at)`` is a defensive
-        belt-and-braces against hand-edited or older-schema rows.
-        """
-        lease_repo.try_acquire(
-            "inst-stale-2", "task:42", LeaseHolderKind.TASK.value
-        )
-        # A row whose heartbeat is well past the threshold is stale.
-        with SQLModelSession(lease_repo.engine) as session:
-            row = session.get(InstanceExecutionLease, "inst-stale-2")
-            row.heartbeat_at = datetime.now(timezone.utc) - timedelta(
-                seconds=1000
-            )
-            session.add(row)
-            session.commit()
-        # A row whose heartbeat is fresh is NOT stale.
-        lease_repo.try_acquire(
-            "inst-fresh-2", "task:43", LeaseHolderKind.TASK.value
-        )
-        stale = lease_repo.find_stale_leases(max_age_seconds=300)
-        ids = {s.instance_id for s in stale}
-        assert "inst-stale-2" in ids
-        assert "inst-fresh-2" not in ids
-
-
-# ─── Service: happy path ──────────────────────────────────────────────────────
+# ─── Happy path ───────────────────────────────────────────────────────────────
 
 
 class TestExecutionGateHappyPath:
     @pytest.mark.asyncio
-    async def test_run_acquires_and_releases_lease(self, gate, lease_repo):
+    async def test_run_executes_work_fn_and_returns_result(self, gate):
+        """``gate.run`` runs the work_fn and returns its result."""
         called = {"count": 0}
 
         async def work():
             called["count"] += 1
             return "result-ok"
 
-        out = await gate.run(
-            "inst-1",
-            "message_job:job-A",
-            LeaseHolderKind.MESSAGE_JOB.value,
-            work,
-        )
+        out = await gate.run("inst-1", "holder-A", "task", work)
         assert out == "result-ok"
         assert called["count"] == 1
-        # Lease is released after the call.
-        assert lease_repo.get_holder("inst-1") is None
 
     @pytest.mark.asyncio
-    async def test_run_releases_lease_even_on_exception(
-        self, gate, lease_repo
-    ):
+    async def test_run_releases_lock_on_exception(self, gate):
+        """If the work_fn raises, the lock must be released so the
+        next call on the same instance can proceed.
+        """
+
         async def work():
             raise RuntimeError("boom")
 
         with pytest.raises(RuntimeError, match="boom"):
-            await gate.run(
-                "inst-1",
-                "task:42",
-                LeaseHolderKind.TASK.value,
-                work,
-            )
-        # Lease is still released.
-        assert lease_repo.get_holder("inst-1") is None
+            await gate.run("inst-1", "holder-A", "task", work)
+
+        # Lock is released → is_held returns False.
+        assert await gate.is_held("inst-1") is False
 
     @pytest.mark.asyncio
-    async def test_run_releases_lease_on_cancellation(
-        self, gate, lease_repo
-    ):
+    async def test_run_releases_lock_on_cancellation(self, gate):
+        """If the awaiting task is cancelled, the lock must still
+        be released so the next call can proceed.
+        """
+
         async def work():
             await asyncio.sleep(10)
 
         task = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "task:42",
-                LeaseHolderKind.TASK.value,
-                work,
-            )
+            gate.run("inst-1", "holder-A", "task", work)
         )
-        # Let it acquire the lease.
+        # Let the work_fn start and acquire the lock.
         await asyncio.sleep(0.05)
-        assert lease_repo.get_holder("inst-1") is not None
-        # Cancel the task.
+        assert await gate.is_held("inst-1") is True
+
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        # Lease was released by the finally clause.
-        assert lease_repo.get_holder("inst-1") is None
-
-
-# ─── Service: contention ──────────────────────────────────────────────────────
-
-
-class TestExecutionGateContention:
-    @pytest.mark.asyncio
-    async def test_second_caller_gets_lease_contention(self, gate, lease_repo):
-        started = asyncio.Event()
-        release_inner = asyncio.Event()
-
-        async def holder_work():
-            started.set()
-            await release_inner.wait()
-            return "holder-done"
-
-        async def loser_work():
-            return "should-not-run"
-
-        holder_task = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                holder_work,
-            )
-        )
-        await started.wait()
-        # Lease is now held. Second caller must see contention.
-        out = await gate.run(
-            "inst-1",
-            "task:42",
-            LeaseHolderKind.TASK.value,
-            loser_work,
-        )
-        assert isinstance(out, LeaseContention)
-        assert out.holder_id == "message_job:job-A"
-        assert out.holder_kind == LeaseHolderKind.MESSAGE_JOB.value
-        assert out.reason == LeaseContentionReason.HELD_BY_OTHER
-        # Release the holder; the holder's result is still "holder-done".
-        release_inner.set()
-        result = await holder_task
-        assert result == "holder-done"
+        # Lock is released by the ``async with`` unwind.
+        assert await gate.is_held("inst-1") is False
 
     @pytest.mark.asyncio
-    async def test_loser_does_not_run_work(self, gate):
-        ran = {"count": 0}
-
-        async def holder_work():
-            await asyncio.Event().wait()  # wait forever
-
-        async def loser_work():
-            ran["count"] += 1
-            return "should-not-see"
-
-        holder = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                holder_work,
-            )
-        )
-        await asyncio.sleep(0.05)  # let the holder acquire
-        out = await gate.run(
-            "inst-1",
-            "task:42",
-            LeaseHolderKind.TASK.value,
-            loser_work,
-        )
-        assert isinstance(out, LeaseContention)
-        assert ran["count"] == 0
-        holder.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await holder
-
-    @pytest.mark.asyncio
-    async def test_lease_becomes_available_after_holder_releases(
-        self, gate, lease_repo
-    ):
-        async def work():
-            return "first"
-
-        await gate.run(
-            "inst-1",
-            "message_job:job-A",
-            LeaseHolderKind.MESSAGE_JOB.value,
-            work,
-        )
-        # After release, a new acquire should succeed.
-        out = await gate.run(
-            "inst-1",
-            "task:42",
-            LeaseHolderKind.TASK.value,
-            work,
-        )
-        assert out == "first"
-
-    @pytest.mark.asyncio
-    async def test_reentrant_call_by_same_holder_is_allowed(
-        self, gate, lease_repo
-    ):
-        """A holder that already holds the lease (via a previous
-        gate.run in this process) can call gate.run again for the
-        same instance without contention. This is rare in current
-        code (dispatchers don't re-enter) but the fast path exists
-        to avoid an unnecessary DB roundtrip.
-
-        Concretely: after the first call, ``is_held_locally`` is
-        True, so the second call short-circuits to
-        ``_execute_under_lease`` without re-acquiring the lease.
-        The result: the second work_fn runs, no contention.
+    async def test_sequential_acquire_release_acquire_cycle(self, gate):
+        """After holder-A releases, holder-B can acquire the same
+        instance. The lock must release cleanly between calls.
         """
-        outer_started = asyncio.Event()
-        outer_release = asyncio.Event()
+
+        async def work_a():
+            return "A-done"
+
+        async def work_b():
+            return "B-done"
+
+        result_a = await gate.run("inst-1", "holder-A", "task", work_a)
+        assert await gate.is_held("inst-1") is False
+        result_b = await gate.run("inst-1", "holder-B", "task", work_b)
+        assert await gate.is_held("inst-1") is False
+        assert result_a == "A-done"
+        assert result_b == "B-done"
+
+
+# ─── Concurrency / serialization ──────────────────────────────────────────────
+
+
+class TestExecutionGateSerialization:
+    @pytest.mark.asyncio
+    async def test_concurrent_callers_serialize_same_instance(self, gate):
+        """Two concurrent ``gate.run`` calls for the SAME instance
+        must not execute their work_fns concurrently. The second
+        caller's work_fn must wait for the first to release.
+        """
+        instance_id = "inst-serialize-1"
+        active = 0
+        max_active = 0
+        counter_lock = asyncio.Lock()
+        events: list[tuple[str, str]] = []
+
+        async def worker_a():
+            nonlocal active, max_active
+            events.append(("start", "A"))
+            async with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            await asyncio.sleep(0.05)
+            async with counter_lock:
+                active -= 1
+            events.append(("end", "A"))
+            return "A-done"
+
+        async def worker_b():
+            nonlocal active, max_active
+            events.append(("start", "B"))
+            async with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            await asyncio.sleep(0.05)
+            async with counter_lock:
+                active -= 1
+            events.append(("end", "B"))
+            return "B-done"
+
+        results = await asyncio.gather(
+            gate.run(instance_id, "holder-A", "task", worker_a),
+            gate.run(instance_id, "holder-B", "task", worker_b),
+        )
+
+        # Headline contract: at most one work_fn in flight at a time.
+        assert max_active == 1, (
+            f"Gate failed to serialize: max concurrent work_fns = "
+            f"{max_active}. Events: {events}. Results: {results}"
+        )
+        # Both work_fns ran (the second blocked, not contended).
+        assert results == ["A-done", "B-done"]
+        # No work_fn events interleave.
+        for i, (phase, worker) in enumerate(events):
+            if phase == "start":
+                # The next event must be the SAME worker's "end"
+                # before any other worker can "start".
+                assert events[i + 1] == ("end", worker), (
+                    f"work_fn overlap detected: {events}"
+                )
+        # Lock is released.
+        assert await gate.is_held(instance_id) is False
+
+    @pytest.mark.asyncio
+    async def test_different_instances_run_in_parallel(self, gate):
+        """Two concurrent ``gate.run`` calls for DIFFERENT instances
+        must run their work_fns in parallel — the gate must NOT
+        false-serialize unrelated instances.
+        """
+        active = 0
+        max_active = 0
+        counter_lock = asyncio.Lock()
+
+        async def make_worker(instance_tag: str):
+            async def work():
+                nonlocal active, max_active
+                async with counter_lock:
+                    active += 1
+                    max_active = max(max_active, active)
+                await asyncio.sleep(0.08)
+                async with counter_lock:
+                    active -= 1
+                return f"{instance_tag}-done"
+
+            return work
+
+        work_a = await make_worker("A")
+        work_b = await make_worker("B")
+
+        results = await asyncio.gather(
+            gate.run("instance-A", "holder-A", "task", work_a),
+            gate.run("instance-B", "holder-B", "task", work_b),
+        )
+
+        # Distinct instances serialize independently — both work_fns
+        # overlap → max_active == 2.
+        assert max_active == 2, (
+            f"Gate falsely serialized unrelated instances: "
+            f"max concurrent = {max_active}, expected 2. Results: {results}"
+        )
+        assert results == ["A-done", "B-done"]
+        assert await gate.is_held("instance-A") is False
+        assert await gate.is_held("instance-B") is False
+
+
+# ─── Re-entrance ──────────────────────────────────────────────────────────────
+
+
+class TestExecutionGateReentrance:
+    @pytest.mark.asyncio
+    async def test_reentrant_call_from_same_holder_deadlocks(self, gate):
+        """The asyncio.Lock gate is NOT re-entrant. A holder that
+        calls ``gate.run`` from inside its own work_fn (same
+        instance) deadlocks. This is a known limitation — production
+        dispatchers do not re-enter, so the deadlock cannot be
+        triggered in practice. This test pins the limitation so a
+        future "fast path" addition does not silently introduce a
+        regression where the gate silently re-enters.
+
+        We assert the deadlock by racing the call against a timeout.
+        """
 
         async def outer():
-            outer_started.set()
-            await outer_release.wait()
-            # Re-entrant call from inside the lease.
+            # Re-entrant call: same instance, same holder.
             return await gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                inner,
+                "inst-1", "holder-A", "task", _never_called
             )
 
-        async def inner():
-            return "inner-result"
+        async def _never_called():
+            raise AssertionError("work_fn must not run on re-entrant call")
 
-        task = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                outer,
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                gate.run("inst-1", "holder-A", "task", outer),
+                timeout=0.5,
             )
-        )
-        await outer_started.wait()
-        outer_release.set()
-        result = await task
-        assert result == "inner-result"
-        # Lease was released.
-        assert lease_repo.get_holder("inst-1") is None
+        # Lock is held by the timed-out outer call.
+        # We don't assert on is_held here because the timeout left
+        # the task running — the lock may or may not be released
+        # depending on the interpreter's cleanup. The point is the
+        # gate deadlocked, not the cleanup state.
 
 
-# ─── Service: cancel_instance_execution ───────────────────────────────────────
+# ─── Diagnostic helpers ───────────────────────────────────────────────────────
 
 
-class TestExecutionGateCancel:
+class TestExecutionGateDiagnosticHelpers:
     @pytest.mark.asyncio
-    async def test_cancel_interrupts_running_work(self, gate):
+    async def test_is_held_false_initially(self, gate):
+        assert await gate.is_held("inst-1") is False
+
+    @pytest.mark.asyncio
+    async def test_is_held_true_during_run(self, gate):
         entered = asyncio.Event()
+        release = asyncio.Event()
 
         async def work():
             entered.set()
-            await asyncio.sleep(10)
-            return "should-not-see"
+            await release.wait()
 
         task = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                work,
-            )
+            gate.run("inst-1", "holder-A", "task", work)
         )
         await entered.wait()
-        ok = await gate.cancel_instance_execution("inst-1")
-        assert ok is True
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        assert await gate.is_held("inst-1") is True
+        release.set()
+        await task
+        assert await gate.is_held("inst-1") is False
 
     @pytest.mark.asyncio
-    async def test_cancel_returns_false_when_nothing_running(self, gate):
-        ok = await gate.cancel_instance_execution("inst-1")
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_cancel_drains_inner_work_task(
-        self, gate, lease_repo
-    ):
-        """Regression: after ``cancel_instance_execution`` returns,
-        the inner ``work_task`` (the actual ``graph.astream`` driver)
-        must be cancelled AND drained — not left running detached.
-
-        The bug was that the gate's ``finally`` only cancelled the
-        heartbeat task; the ``work_task`` was a bare
-        ``asyncio.create_task`` that the structured-concurrency
-        cleanup path didn't see. With the fix, the finally cancels
-        and awaits both child tasks.
-        """
-        work_cancelled = {"flag": False}
-        work_finished = asyncio.Event()
+    async def test_is_held_distinct_per_instance(self, gate):
+        entered = asyncio.Event()
+        release = asyncio.Event()
 
         async def work():
-            try:
-                await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                work_cancelled["flag"] = True
-                raise
-            finally:
-                work_finished.set()
+            entered.set()
+            await release.wait()
 
         task = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                work,
-            )
+            gate.run("inst-1", "holder-A", "task", work)
         )
-        # Let the work_fn start.
-        await asyncio.sleep(0.05)
-        ok = await gate.cancel_instance_execution("inst-1")
-        assert ok is True
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        # Both must have settled before the await returned.
-        assert work_cancelled["flag"] is True
-        assert work_finished.is_set()
-        # The lease must be released.
-        assert lease_repo.get_holder("inst-1") is None
-
-
-# ─── Service: crash recovery ──────────────────────────────────────────────────
-
-
-class TestExecutionGateRecovery:
-    @pytest.mark.asyncio
-    async def test_recover_stale_leases_clears_old_rows(self, gate, lease_repo):
-        # Insert a lease whose heartbeat is in the distant past.
-        lease_repo.try_acquire(
-            "inst-stale", "task:42", LeaseHolderKind.TASK.value
-        )
-        with SQLModelSession(lease_repo.engine) as session:
-            row = session.get(InstanceExecutionLease, "inst-stale")
-            row.heartbeat_at = datetime.now(timezone.utc) - timedelta(
-                seconds=1000
-            )
-            session.add(row)
-            session.commit()
-        # And a fresh one that should NOT be cleared.
-        lease_repo.try_acquire(
-            "inst-fresh", "task:43", LeaseHolderKind.TASK.value
-        )
-
-        cleared = await gate.recover_stale_leases(max_age_seconds=300)
-        assert cleared == 1
-        assert lease_repo.get_holder("inst-stale") is None
-        assert lease_repo.get_holder("inst-fresh") is not None
+        await entered.wait()
+        assert await gate.is_held("inst-1") is True
+        assert await gate.is_held("inst-2") is False
+        release.set()
+        await task
 
     @pytest.mark.asyncio
-    async def test_recover_stale_leases_returns_zero_when_nothing_stale(
-        self, gate, lease_repo
-    ):
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
-        cleared = await gate.recover_stale_leases(max_age_seconds=300)
-        assert cleared == 0
-        # Fresh lease is preserved.
-        assert lease_repo.get_holder("inst-1") is not None
-
-
-# ─── Service: in-flight heartbeat / lease-loss detection ──────────────────────
-
-
-class TestExecutionGateHeartbeat:
-    @pytest.mark.asyncio
-    async def test_lease_lost_raises_lease_lost_error(self, gate, lease_repo):
-        """If the lease row is deleted by another process (e.g.
-        ``recover_stale_leases`` on a different node) while
-        ``work_fn`` is in flight, ``gate.run`` must cancel the work
-        and raise ``LeaseLostError``.
+    async def test_is_held_by_ignores_holder_identity(self, gate):
+        """The asyncio.Lock gate does not track holder identity —
+        ``is_held_by`` accepts a ``holder_id`` and returns True iff
+        the lock is held, regardless of which caller holds it.
+        Backward-compat contract.
         """
-        heartbeat_seen = asyncio.Event()
-        work_started = asyncio.Event()
-        work_cancelled = {"flag": False}
+        entered = asyncio.Event()
+        release = asyncio.Event()
 
         async def work():
-            work_started.set()
-            try:
-                # Long enough for at least one heartbeat tick.
-                await asyncio.sleep(2.0)
-            except asyncio.CancelledError:
-                work_cancelled["flag"] = True
-                raise
+            entered.set()
+            await release.wait()
 
-        # Patch the heartbeat method so we can both (a) wait for
-        # the heartbeat task to be running and (b) simulate the
-        # lease being lost on the second tick.
-        call_count = {"n": 0}
-
-        async def fake_heartbeat(instance_id, holder_id):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                # First heartbeat: refresh succeeds.
-                return await gate.heartbeat.__wrapped__(
-                    gate, instance_id, holder_id
-                ) if hasattr(gate.heartbeat, "__wrapped__") else True
-            # Subsequent heartbeats: simulate lease loss.
-            heartbeat_seen.set()
-            return False
-
-        gate.heartbeat = fake_heartbeat  # type: ignore[assignment]
-        # Tighten the heartbeat interval so the test runs quickly.
-        gate._heartbeat_interval = 0.05
-
-        with pytest.raises(LeaseLostError):
-            await gate.run(
-                "inst-1",
-                "task:42",
-                LeaseHolderKind.TASK.value,
-                work,
-            )
-        assert work_cancelled["flag"] is True
-        # After the loss, the holder row is gone (work was cancelled
-        # before the gate ran the release; the release is still
-        # called in the finally but is a no-op for the lost lease).
-        # We don't assert on the row's existence — the heartbeat
-        # returned False because the row was already deleted, so
-        # the release is a no-op.
-
-    @pytest.mark.asyncio
-    async def test_in_flight_heartbeat_refreshes_heartbeat_at(
-        self, gate, lease_repo
-    ):
-        """The in-flight heartbeat (spawned by ``_execute_under_lease``)
-        must refresh ``heartbeat_at`` while ``work_fn`` is running,
-        so a long-running ``graph.astream`` is not eligible for
-        eviction by ``recover_stale_leases`` on another node.
-        """
-        async def work():
-            # Sleep longer than the heartbeat interval; the
-            # heartbeat task should have fired at least once.
-            await asyncio.sleep(gate._heartbeat_interval * 3 + 0.05)
-            return "done"
-        before = datetime.now(timezone.utc)
-        out = await gate.run(
-            "inst-1",
-            "task:42",
-            LeaseHolderKind.TASK.value,
-            work,
+        task = asyncio.create_task(
+            gate.run("inst-1", "holder-A", "task", work)
         )
-        assert out == "done"
-        after = datetime.now(timezone.utc)
-        # The lease row may have been released already; the
-        # important thing is that during the call, the heartbeat
-        # fired (we verified by side effect — no exception, the
-        # work completed). ``before``/``after`` is just to ensure
-        # the test exercised real time.
-        assert (after - before).total_seconds() >= gate._heartbeat_interval
+        await entered.wait()
+        assert await gate.is_held_by("inst-1", "holder-A") is True
+        assert await gate.is_held_by("inst-1", "holder-B") is True
+        release.set()
+        await task
 
     @pytest.mark.asyncio
-    async def test_heartbeat_escalates_to_lease_lost_after_consecutive_errors(
-        self, gate, lease_repo
-    ):
-        """After ``heartbeat_max_consecutive_errors`` consecutive DB
-        errors, the heartbeat loop must escalate to ``lease_lost``
-        so the in-flight work is cancelled deterministically rather
-        than left running against an un-refreshed lease that
-        ``recover_stale_leases`` on another node would eventually
-        evict anyway.
+    async def test_cancel_instance_execution_is_noop(self, gate):
+        """``cancel_instance_execution`` is preserved for backward
+        compat but is a no-op under the asyncio.Lock gate. The
+        caller's ``CancellationToken`` is the cancellation
+        mechanism.
         """
-        work_cancelled = {"flag": False}
-
-        async def work():
-            try:
-                # Long enough for several heartbeat ticks to fail.
-                await asyncio.sleep(2.0)
-            except asyncio.CancelledError:
-                work_cancelled["flag"] = True
-                raise
-
-        async def always_failing_heartbeat(instance_id, holder_id):
-            raise RuntimeError("simulated DB outage")
-
-        gate.heartbeat = always_failing_heartbeat  # type: ignore[assignment]
-        gate._heartbeat_interval = 0.05
-        # Tighten the threshold so the test doesn't have to wait long.
-        gate._heartbeat_max_consecutive_errors = 3
-
-        with pytest.raises(LeaseLostError):
-            await gate.run(
-                "inst-1",
-                "task:42",
-                LeaseHolderKind.TASK.value,
-                work,
-            )
-        assert work_cancelled["flag"] is True
+        assert gate.cancel_instance_execution("inst-1") is None
+        assert gate.cancel_instance_execution("anything") is None
 
     @pytest.mark.asyncio
-    async def test_lease_lost_during_contention_flag(
-        self, gate, lease_repo
-    ):
-        """If the lease row exists at ``try_acquire`` time but is
-        gone by the time we ask ``get_holder`` (vanishingly rare),
-        the returned ``LeaseContention`` has
-        ``holder_lost_during_contention=True`` and empty
-        ``holder_id``/``holder_kind``.
+    async def test_recover_stale_leases_is_noop(self, gate):
+        """``recover_stale_leases`` is preserved for backward compat
+        but is a no-op under the asyncio.Lock gate — there is no
+        lease row to recover.
         """
-        # Acquire a lease, then race the contender: delete the
-        # row between try_acquire and get_holder. The cleanest
-        # way is to monkey-patch ``get_holder`` to return None
-        # for one call.
-        lease_repo.try_acquire(
-            "inst-1", "task:42", LeaseHolderKind.TASK.value
-        )
+        assert await gate.recover_stale_leases() == 0
+        assert await gate.recover_stale_leases(max_age_seconds=300) == 0
 
-        original_get_holder = lease_repo.get_holder
-        call_count = {"n": 0}
+    @pytest.mark.asyncio
+    async def test_heartbeat_is_noop(self, gate):
+        """``heartbeat`` is preserved for backward compat but is a
+        no-op under the asyncio.Lock gate.
+        """
+        assert await gate.heartbeat("inst-1", "holder-A") is True
 
-        def flaky_get_holder(instance_id):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                return None  # Simulate the row being deleted
-            return original_get_holder(instance_id)
-
-        lease_repo.get_holder = flaky_get_holder  # type: ignore[assignment]
-        try:
-            out = await gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                lambda: _never_called(),
-            )
-        finally:
-            lease_repo.get_holder = original_get_holder  # type: ignore[assignment]
-
-        assert isinstance(out, LeaseContention)
-        assert out.holder_lost_during_contention is True
-        assert out.holder_id == ""
-        assert out.holder_kind == ""
-        assert out.reason == LeaseContentionReason.HELD_BY_LOST
+    def test_lease_repo_property_returns_none(self, gate):
+        """The ``_lease_repo`` property is preserved for backward
+        compat and returns None under the asyncio.Lock gate.
+        """
+        assert gate._lease_repo is None
 
 
-async def _never_called():
-    raise AssertionError("work_fn must NOT run when lease is contended")
-
-
-# ─── Integration: ProcessMessageProcessor re-queue ───────────────────────────
+# ─── TaskRepository requeue (gate contention path) ───────────────────────────
 
 
 class TestTaskProcessorRequeueOnContention:
+    """The gate's contention path triggers
+    ``TaskRepository.requeue_task_with_backoff`` on the WorkerPool
+    side. These tests exercise the requeue logic in isolation — the
+    gate itself no longer returns ``LeaseContention`` (it blocks
+    instead), but the requeue path is the same one the WorkerPool
+    would take if the gate ever needed to back off (e.g. a future
+    contention-aware variant).
+    """
+
+    @pytest.fixture
+    def task_repo(self):
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import StaticPool
+        from sqlmodel import SQLModel
+
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(engine)
+        yield TaskRepository(engine, on_pending_task=lambda: None)
+        engine.dispose()
+
     @pytest.mark.asyncio
     async def test_requeue_task_moves_running_to_pending(self, task_repo):
-        """No-backoff requeue_task was removed in favour of
-        requeue_task_with_backoff (the only production caller). This
-        test now exercises the with-backoff variant for parity.
-        """
         task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="inst-1",
             message_id="msg-1",
         )
-        # Simulate the worker having claimed it.
         task_repo.claim_pending_task(worker_id="worker-1")
-        # Now re-queue (as the gate-contention path would).
         requeued = task_repo.requeue_task_with_backoff(
             task.id, min_delay_seconds=0.0, max_delay_seconds=0.0
         )
@@ -821,9 +452,7 @@ class TestTaskProcessorRequeueOnContention:
         assert requeued.last_heartbeat_at is None
 
     @pytest.mark.asyncio
-    async def test_requeue_task_is_noop_for_completed_tasks(
-        self, task_repo
-    ):
+    async def test_requeue_task_is_noop_for_completed_tasks(self, task_repo):
         task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="inst-1",
@@ -831,9 +460,7 @@ class TestTaskProcessorRequeueOnContention:
         )
         task_repo.claim_pending_task(worker_id="worker-1")
         task_repo.complete_task(task.id, {"ok": True})
-        # Re-queue must be a no-op for non-RUNNING tasks.
         assert task_repo.requeue_task_with_backoff(task.id) is None
-        # Status unchanged.
         row = task_repo.get(task.id)
         assert row.status == TaskStatus.COMPLETED.value
 
@@ -843,10 +470,7 @@ class TestTaskProcessorRequeueOnContention:
     ):
         """requeue_task_with_backoff must set next_retry_at so the
         worker does NOT re-claim the same task on the next poll.
-        The cross-dispatcher contention path uses this to prevent
-        busy-spin against a sibling MESSAGE job.
         """
-        from datetime import datetime, timezone
         task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="inst-1",
@@ -858,13 +482,11 @@ class TestTaskProcessorRequeueOnContention:
         )
         assert requeued is not None
         assert requeued.status == TaskStatus.PENDING.value
-        # next_retry_at must be in the future (within the jitter
-        # window) so the next poll skips this task.
         assert requeued.next_retry_at is not None
+        from datetime import datetime, timezone
         ts = datetime.fromisoformat(requeued.next_retry_at)
         now = datetime.now(timezone.utc).timestamp()
         assert ts.timestamp() > now
-        # The worker re-poll must NOT claim it (next_retry_at > now).
         re_claimed = task_repo.claim_pending_task(worker_id="worker-2")
         assert re_claimed is None
 
@@ -882,9 +504,6 @@ class TestTaskProcessorRequeueOnContention:
         assert task_repo.requeue_task_with_backoff(task.id) is None
 
     def test_find_running_by_instance_returns_running_task(self, task_repo):
-        """TaskRepository.find_running_by_instance must return the
-        RUNNING task for an instance, or None.
-        """
         task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="inst-1",
@@ -910,187 +529,139 @@ class TestTaskProcessorRequeueOnContention:
         assert task_repo.find_running_by_instance("inst-1") is None
 
 
-# ─── In-process fast path ─────────────────────────────────────────────────────
-
-
-class TestExecutionGateLocalFastPath:
-    @pytest.mark.asyncio
-    async def test_is_held_locally_false_initially(self, gate):
-        assert gate.is_held_locally("inst-1") is False
-
-    @pytest.mark.asyncio
-    async def test_is_held_locally_true_during_run(self, gate):
-        entered = asyncio.Event()
-        release = asyncio.Event()
-
-        async def work():
-            entered.set()
-            await release.wait()
-
-        task = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                work,
-            )
-        )
-        await entered.wait()
-        assert gate.is_held_locally("inst-1") is True
-        release.set()
-        await task
-        # Local holder cleared after release.
-        assert gate.is_held_locally("inst-1") is False
-
-    @pytest.mark.asyncio
-    async def test_is_held_locally_distinct_per_instance(self, gate):
-        entered = asyncio.Event()
-        release = asyncio.Event()
-
-        async def work():
-            entered.set()
-            await release.wait()
-
-        task = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                work,
-            )
-        )
-        await entered.wait()
-        assert gate.is_held_locally("inst-1") is True
-        assert gate.is_held_locally("inst-2") is False
-        release.set()
-        await task
-
-
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
-
-# Local import to avoid polluting module-level names.
-from sqlmodel import Session as SQLModelSession
-
-
-# ─── Integration: cross-dispatcher race scenario ─────────────────────────────
+# ─── Cross-dispatcher race scenario ───────────────────────────────────────────
 
 
 class TestCrossDispatcherRaceScenario:
-    """Reproduces the original bug at a service-level.
+    """Reproduces the original "giter-report-lost" race at the
+    service level.
 
     The original bug: a MESSAGE job (JobQueue side) and a Task
     (WorkerPool side) both tried to drive ``graph.astream`` for the
-    same instance concurrently, and one's update overwrote the
-    other's message in the langgraph checkpoint (the
-    "giter-report-lost" bug).
-
-    The Execution Gate prevents this: when the second dispatcher
-    calls ``gate.run``, the first one holds the lease, and the
-    second sees ``LeaseContention`` and re-queues. This test
-    simulates the race with two coroutines and confirms the gate
-    serialises them.
+    same instance concurrently. The asyncio.Lock gate prevents
+    this: the second caller's work_fn waits for the first to
+    release. Both work_fns run, but never concurrently.
     """
 
     @pytest.mark.asyncio
-    async def test_message_job_and_task_cannot_drive_same_instance(
-        self, gate, lease_repo
+    async def test_message_job_and_task_serialize_on_same_instance(
+        self, gate
     ):
-        """A MESSAGE job holds the lease; a Task for the same
-        instance must see contention and back off without
-        executing its work.
-
-        Reproduces the scenario from
-        docs/bugs/child-completion-report-lost-cross-dispatcher-*.
+        """A MESSAGE job runs first, then a Task for the same
+        instance runs after the MESSAGE job releases. Their
+        work_fns never overlap.
         """
-        # The MESSAGE job starts running and holds the lease.
-        message_job_started = asyncio.Event()
+        instance_id = "inst-cross"
+        execution_order: list[str] = []
         message_job_release = asyncio.Event()
+        task_started = asyncio.Event()
+        active = 0
+        max_active = 0
+        counter_lock = asyncio.Lock()
 
         async def message_job_work():
-            message_job_started.set()
+            nonlocal active, max_active
+            execution_order.append("mj-start")
+            async with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            # Wait until the Task has started its blocked gate.run
+            # call (so we know the lock has been passed to us).
+            await task_started.wait()
             await message_job_release.wait()
+            async with counter_lock:
+                active -= 1
+            execution_order.append("mj-end")
             return "message_job_done"
 
-        message_job_holder = asyncio.create_task(
-            gate.run(
-                "inst-1",
-                "message_job:job-A",
-                LeaseHolderKind.MESSAGE_JOB.value,
-                message_job_work,
-            )
-        )
-        await message_job_started.wait()
-
-        # The Task tries to run for the same instance. It must
-        # see LeaseContention.
-        task_work_ran = {"count": 0}
-
         async def task_work():
-            task_work_ran["count"] += 1
+            nonlocal active, max_active
+            execution_order.append("task-start")
+            async with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            async with counter_lock:
+                active -= 1
+            execution_order.append("task-end")
             return "task_done"
 
-        task_outcome = await gate.run(
-            "inst-1",
-            "task:42",
-            LeaseHolderKind.TASK.value,
-            task_work,
+        # Launch the MESSAGE job first; it acquires the lock.
+        mj_task = asyncio.create_task(
+            gate.run(instance_id, "message_job:A", "message_job", message_job_work)
         )
-        assert isinstance(task_outcome, LeaseContention)
-        assert task_work_ran["count"] == 0  # Task's work NEVER ran
+        # Yield so the MESSAGE job acquires the lock.
+        await asyncio.sleep(0.01)
 
-        # Lease state is clean: only the MESSAGE job holds the row.
-        holder = lease_repo.get_holder("inst-1")
-        assert holder is not None
-        assert holder.holder_id == "message_job:job-A"
+        # Schedule the Task to run on the same instance. This call
+        # blocks (NEW asyncio.Lock semantics) until the MESSAGE
+        # job releases. Run it as a background task so we can
+        # coordinate the release.
+        task_task = asyncio.create_task(
+            gate.run(instance_id, "task:42", "task", task_work)
+        )
 
-        # Release the MESSAGE job. Holder finishes.
+        # Wait until the task has been scheduled (i.e. its
+        # gate.run is blocked waiting for the lock).
+        await asyncio.sleep(0.02)
+        # Signal the MESSAGE job that the task is blocked, then
+        # release the MESSAGE job so it finishes.
+        task_started.set()
         message_job_release.set()
-        result = await message_job_holder
-        assert result == "message_job_done"
 
-        # After release, the Task CAN run.
-        task_outcome2 = await gate.run(
-            "inst-1",
-            "task:42",
-            LeaseHolderKind.TASK.value,
-            task_work,
-        )
-        assert task_outcome2 == "task_done"
-        assert task_work_ran["count"] == 1
+        # Now both should complete in order.
+        mj_outcome = await mj_task
+        task_outcome = await task_task
+
+        # No work_fn overlapped.
+        assert max_active == 1
+        # Both ran, in order.
+        assert mj_outcome == "message_job_done"
+        assert task_outcome == "task_done"
+        # Execution order: MESSAGE job bracketed, then Task bracketed.
+        assert execution_order == [
+            "mj-start", "mj-end", "task-start", "task-end",
+        ]
+
 
     @pytest.mark.asyncio
-    async def test_only_one_holder_at_a_time_in_db(
-        self, gate, lease_repo
-    ):
-        """The DB-level guarantee: at most one lease row per
-        instance. Two concurrent acquirers cannot both insert
-        (the INSERT OR IGNORE is atomic).
+    async def test_concurrent_holders_serialize_via_lock(self, gate):
+        """Two ``gate.run`` calls launched in parallel for the same
+        instance must produce non-overlapping work_fns. The lock
+        guarantees this regardless of which caller was scheduled
+        first.
         """
+        instance_id = "inst-parallel-holders"
+        active = 0
+        max_active = 0
+        counter_lock = asyncio.Lock()
+
         async def holder1():
+            nonlocal active, max_active
+            async with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
             await asyncio.sleep(0.05)
+            async with counter_lock:
+                active -= 1
             return "h1"
 
         async def holder2():
+            nonlocal active, max_active
+            async with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
             await asyncio.sleep(0.05)
+            async with counter_lock:
+                active -= 1
             return "h2"
 
-        h1 = asyncio.create_task(
-            gate.run("inst-1", "message_job:A", "message_job", holder1)
+        r1, r2 = await asyncio.gather(
+            gate.run(instance_id, "message_job:A", "message_job", holder1),
+            gate.run(instance_id, "task:B", "task", holder2),
         )
-        # Tiny yield so h1 acquires first
-        await asyncio.sleep(0.01)
-        h2 = asyncio.create_task(
-            gate.run("inst-1", "task:B", "task", holder2)
-        )
-        await asyncio.sleep(0.01)
-        # Only one row exists; it's h1's.
-        holder = lease_repo.get_holder("inst-1")
-        assert holder is not None
-        assert holder.holder_id == "message_job:A"
-        # h2 saw contention; h1 wins, h2 returns LeaseContention.
-        r2 = await h2
-        assert isinstance(r2, LeaseContention)
-        # h1 finishes.
-        r1 = await h1
-        assert r1 == "h1"
+
+        # The lock serializes: at most one work_fn at a time.
+        assert max_active == 1
+        # Both completed with their own result.
+        assert {r1, r2} == {"h1", "h2"}

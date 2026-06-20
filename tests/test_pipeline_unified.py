@@ -36,10 +36,10 @@ from daemon.cancellation import (
     OperationCancelledError,
 )
 from daemon.manager import MessageResult
-from daemon.repositories.execution_lease.models import LeaseHolderKind
 from daemon.services.execution_gate import (
     LeaseContention,
     LeaseContentionReason,
+    LeaseHolderKind,
     LeaseLostError,
 )
 from daemon.services.message_processing_pipeline import (
