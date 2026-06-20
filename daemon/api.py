@@ -396,6 +396,16 @@ async def lifespan(app: FastAPI):
     # Must run AFTER JobProcessor is initialized
     job_processor.setup_message_job_handler()
     logger.info("MessageJobHandler configured")
+
+    # C7: Wire JobFeedbackObserver into JobProcessor so MESSAGE-type jobs
+    # route through the observer → Task → WorkerPool path when
+    # ``use_legacy_jobqueue_dispatch=OFF`` (the default). Both the observer
+    # and the processor are already constructed; the observer is already
+    # started (line 354) and the CM completion callback is wired (line
+    # 368). Must run AFTER ``setup_message_job_handler`` so the
+    # legacy path remains available as a kill switch.
+    job_processor.setup_job_feedback_observer(job_feedback_observer)
+    logger.info("JobFeedbackObserver wired into JobProcessor (dispatch_path=jobqueue_local)")
     
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub

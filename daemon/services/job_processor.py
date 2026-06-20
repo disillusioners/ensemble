@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
+    from daemon.services.job_feedback_observer import JobFeedbackObserver
     from daemon.manager import InstanceManager
 
 from daemon.repositories.instance.models import InstanceStatus
@@ -86,6 +87,13 @@ class JobProcessor:
         self._jobs_dispatched_immediately = 0
         self._jobs_dispatched_polling = 0
         self._message_job_handler: MessageJobHandler | None = None
+        # C7: Optional reference to the JobFeedbackObserver. When set AND
+        # ``use_legacy_jobqueue_dispatch=OFF`` (the default), the processor
+        # routes MESSAGE-type jobs through ``observer._admit_via_worker_pool``
+        # instead of ``self._message_job_handler.handle``. Wired in
+        # ``setup_job_feedback_observer`` (called from ``daemon/api.py``
+        # after both the processor and the observer are constructed).
+        self._job_feedback_observer: "JobFeedbackObserver" | None = None
         # Throttle/dedup state for in_progress notifications.
         # Keyed by job_id. ``_last_in_progress`` records (timestamp, waiting_for) of
         # the most recent in_progress emit so we can skip re-emit when nothing has
@@ -109,6 +117,91 @@ class JobProcessor:
                 source_dispatcher=self._instance_manager.source_dispatcher,
             )
             self._queue_service._message_job_handler = self._message_job_handler
+
+    def setup_job_feedback_observer(
+        self, observer: "JobFeedbackObserver"
+    ) -> None:
+        """Wire the JobFeedbackObserver into the processor.
+
+        C7: called from ``daemon/api.py`` after both the processor and the
+        observer are constructed. With this reference in place AND
+        ``use_legacy_jobqueue_dispatch=OFF`` (the default), the processor
+        routes MESSAGE-type work through
+        ``observer._admit_via_worker_pool`` instead of the legacy
+        ``MessageJobHandler.handle``.
+
+        Idempotent: setting the same observer twice is a no-op.
+
+        Args:
+            observer: The :class:`JobFeedbackObserver` instance.
+        """
+        if self._job_feedback_observer is None:
+            self._job_feedback_observer = observer
+            logger.info(
+                "JobProcessor: JobFeedbackObserver wired "
+                "(dispatch_path=jobqueue_local for MESSAGE jobs by default)"
+            )
+        elif self._job_feedback_observer is not observer:
+            # Hot-swap (rare; only happens in test setup). Update the
+            # reference and log a warning.
+            logger.warning(
+                "JobProcessor.setup_job_feedback_observer: replacing "
+                "existing observer reference"
+            )
+            self._job_feedback_observer = observer
+
+    def _is_legacy_jobqueue_dispatch_enabled(self) -> bool:
+        """Read the ``use_legacy_jobqueue_dispatch`` flag from the manager config.
+
+        Defensive ``getattr`` chain so test mocks that bypass
+        ``InstanceManager.__init__`` (e.g. ``MagicMock()`` without explicit
+        ``config``) don't crash. The default is False (kill switch OFF =
+        the new observer-based path is active), matching the config
+        field's default.
+
+        Returns:
+            True if the operator has explicitly enabled the legacy
+            ``MessageJobHandler.handle`` path; False otherwise.
+        """
+        _config = getattr(self._instance_manager, "config", None)
+        _job_system = getattr(_config, "job_system", None)
+        return bool(
+            getattr(_job_system, "use_legacy_jobqueue_dispatch", False)
+        )
+
+    def setup_job_feedback_observer(self, observer: "JobFeedbackObserver") -> None:
+        """C7: Wire the JobFeedbackObserver into the dispatch decision.
+
+        Called from ``daemon/api.py`` after both ``JobProcessor`` and
+        ``JobFeedbackObserver`` are constructed. The observer reference is
+        used by :meth:`_process_next_job` to route MESSAGE-type jobs through
+        the unified ``observer._admit_via_worker_pool`` path when
+        ``use_legacy_jobqueue_dispatch=OFF`` (the default).
+
+        Idempotent: setting the same observer twice is a no-op. The
+        observer is owned by ``InstanceManager`` (lifetime is the daemon
+        process); the JobProcessor keeps only a weak reference for
+        dispatch routing.
+
+        Args:
+            observer: The :class:`JobFeedbackObserver` instance. Must be
+                started (its ``start()`` has been called) before any jobs
+                are admitted through it — the observer's event subscription
+                is what drives the terminal JobItem transition.
+        """
+        # Imported here to avoid a circular import at module load
+        # (``daemon/services/job_feedback_observer.py`` imports from
+        # ``daemon/services/job_queue_service`` and several repositories
+        # which transitively load ``daemon/services/job_processor`` via
+        # the InstanceManager facade).
+        from daemon.services.job_feedback_observer import JobFeedbackObserver  # noqa: F401
+
+        self._job_feedback_observer = observer
+        logger.info(
+            "JobProcessor: JobFeedbackObserver wired in — MESSAGE jobs will "
+            "route through observer when use_legacy_jobqueue_dispatch=OFF "
+            "dispatch_path=jobqueue_local"
+        )
 
     async def _capture_result_summary(self, instance_id: str, job_id: str, job_type_label: str) -> str | None:
         """Try to capture agent response content for result_summary."""
@@ -754,21 +847,130 @@ class JobProcessor:
                         f"instance={started_job.instance_id[:8]}... status={started_job.status}"
                     )
 
-                    # >>> NEW: Route MESSAGE jobs to MessageJobHandler <<<
+                    # >>> C7: Route MESSAGE jobs (dispatch decision) <<<
+                    # Phase C (decouple-architecture) unifies the
+                    # JobQueue execution path with the WorkerPool path.
+                    # When ``use_legacy_jobqueue_dispatch=OFF`` (default),
+                    # the processor writes a Task row via the
+                    # JobFeedbackObserver and notifies the WorkerPool —
+                    # WorkerPool becomes the only execution path for
+                    # message work. When the flag is ON, the legacy
+                    # ``MessageJobHandler.handle`` is called directly
+                    # (the JobQueue execution path; pre-Phase-C behavior).
+                    # C9 metric: every branch below emits a structured
+                    # ``dispatch_path=`` log line so operators can
+                    # confirm which path is active in production.
                     # Use getattr with default for safety
                     if getattr(started_job, 'job_type', 'task') == "message":
-                        if self._message_job_handler is not None:
+                        use_legacy = self._is_legacy_jobqueue_dispatch_enabled()
+                        if use_legacy and self._message_job_handler is not None:
+                            # ─── Legacy path (C1, C8: kill switch ON) ───
                             try:
                                 await self._message_job_handler.handle(started_job)
                             except asyncio.CancelledError:
                                 instance_id = started_job.instance_id
                                 logger.info(
-                                    f"[TRACE] _process_next_job: CancelledError caught for instance "
-                                    f"{instance_id[:8] if instance_id else 'N/A'}..., continuing loop"
+                                    f"[TRACE] _process_next_job: CancelledError "
+                                    f"caught for instance "
+                                    f"{instance_id[:8] if instance_id else 'N/A'}..., "
+                                    f"continuing loop"
                                 )
                                 return
+                            logger.debug(
+                                f"JobProcessor: MESSAGE job "
+                                f"{started_job.job_id[:8]}... dispatched via "
+                                f"MessageJobHandler dispatch_path=jobqueue_legacy"
+                            )
                             continue
-                    # <<< END NEW >>>
+                        elif self._job_feedback_observer is not None:
+                            # ─── C7: Unified path (default) ───
+                            try:
+                                await self._job_feedback_observer._admit_via_worker_pool(
+                                    started_job
+                                )
+                            except asyncio.CancelledError:
+                                instance_id = started_job.instance_id
+                                logger.info(
+                                    f"[TRACE] _process_next_job: CancelledError "
+                                    f"caught for instance "
+                                    f"{instance_id[:8] if instance_id else 'N/A'}..., "
+                                    f"continuing loop"
+                                )
+                                return
+                            except Exception as e:
+                                # The observer's _admit_via_worker_pool
+                                # already swallows its own Task-creation /
+                                # notify errors and returns silently; the
+                                # ``except Exception`` here is the outer
+                                # safety net for unexpected errors (e.g.
+                                # the observer raising a non-Exception
+                                # error, or an async coroutine failure
+                                # we did not anticipate). Mark the job
+                                # FAILED and continue — leaving it in
+                                # PROCESSING would deadlock the
+                                # per-queue lock.
+                                logger.error(
+                                    f"JobProcessor: failed to admit MESSAGE job "
+                                    f"{started_job.job_id[:8]}... via observer: "
+                                    f"{type(e).__name__}: {e}",
+                                    exc_info=True,
+                                )
+                                try:
+                                    await self._queue_service.complete_job(
+                                        started_job.job_id,
+                                        demand_state=DemandState.FAILED,
+                                        error=f"Observer admission failed: {e}",
+                                    )
+                                except Exception:
+                                    logger.warning(
+                                        f"JobProcessor: failed to FAILED-mark "
+                                        f"job {started_job.job_id[:8]}... after "
+                                        f"observer error"
+                                    )
+                                self._cleanup_in_progress_tracking(started_job.job_id)
+                                continue
+                            # The observer handles the terminal JobItem
+                            # transition via its instance_lifecycle
+                            # subscription. Do NOT call
+                            # ``self._message_job_handler.handle`` — the
+                            # handler is NOT the dispatch authority on
+                            # this path.
+                            continue
+                        else:
+                            # ─── Misconfiguration: no dispatch available ───
+                            # The operator has not wired either path
+                            # (observer is None and legacy handler is
+                            # None — or flag is ON but the handler was
+                            # not constructed). Mark FAILED rather than
+                            # silently looping, which would wedge the
+                            # per-queue lock.
+                            logger.error(
+                                f"JobProcessor: MESSAGE job "
+                                f"{started_job.job_id[:8]}... cannot be "
+                                f"dispatched — JobFeedbackObserver is not wired "
+                                f"and MessageJobHandler is unavailable "
+                                f"(use_legacy_jobqueue_dispatch={use_legacy}). "
+                                f"Marking FAILED."
+                            )
+                            try:
+                                await self._queue_service.complete_job(
+                                    started_job.job_id,
+                                    demand_state=DemandState.FAILED,
+                                    error=(
+                                        "No dispatch path available: "
+                                        "JobFeedbackObserver not wired and "
+                                        "MessageJobHandler unavailable"
+                                    ),
+                                )
+                            except Exception:
+                                logger.warning(
+                                    f"JobProcessor: failed to FAILED-mark "
+                                    f"job {started_job.job_id[:8]}... in "
+                                    f"misconfigured dispatch path"
+                                )
+                            self._cleanup_in_progress_tracking(started_job.job_id)
+                            continue
+                    # <<< END C7 >>>
 
                     # Spawn instance for this job
                     try:

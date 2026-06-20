@@ -56,6 +56,7 @@ from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import JobLock
 from daemon.repositories.project.repository import SQLModelProjectRepository
+from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.services.correlation_manager import (
     get_correlation_manager,
     notify_corr_rearm,
@@ -443,6 +444,113 @@ class JobFeedbackObserver:
             return
 
         await self._finalize_job(job, parent_id, terminal_status, error=None)
+
+    async def _admit_via_worker_pool(self, job) -> None:
+        """C6: Route a MESSAGE-type JobItem through the WorkerPool.
+
+        Phase C (decouple-architecture) replaces the legacy JobQueue
+        execution path (``MessageJobHandler.handle``) with the unified
+        observer → Task → WorkerPool path. When JobProcessor admits a
+        ``job_type='message'`` job and ``USE_LEGACY_JOBQUEUE_DISPATCH=OFF``,
+        it calls this method. The method:
+
+          1. Extracts ``message_id`` from ``job.job_metadata`` (set by
+             :meth:`InstanceMessagingService.enqueue_message_via_jq`).
+          2. Creates a ``Task`` row pointing at the same ``message_id``
+             (same pattern as :meth:`InstanceMessagingService.enqueue_message`).
+          3. Calls ``worker_pool.notify_work()`` to wake a worker.
+          4. The ``JobItem`` is already ``PROCESSING`` (``start_job``
+             transitioned it in :class:`JobProcessor`); the observer's
+             existing event subscription (instance_lifecycle →
+             :meth:`_process_event` → :meth:`_finalize_job`) handles the
+             terminal transition when the Task completes.
+
+        The job is NOT marked ``FAILED`` here on error paths: those
+        exceptions propagate up and :class:`JobProcessor` decides
+        whether to call ``complete_job(FAILED)``. This keeps the error
+        policy (retry vs. fail) in one place.
+
+        Args:
+            job: The ``JobItem`` in ``PROCESSING`` status. Must have
+                ``job.job_metadata['message_id']`` and ``job.instance_id``
+                set, or the call is logged and returns silently — the
+                caller is expected to handle the failure (mark FAILED).
+        """
+        instance_id = job.instance_id
+        message_id: str | None = None
+        if job.job_metadata:
+            message_id = job.job_metadata.get("message_id")
+        if not message_id:
+            logger.error(
+                f"Observer._admit_via_worker_pool: MESSAGE job "
+                f"{job.job_id[:8]}... missing message_id in job_metadata; "
+                f"caller should mark FAILED"
+            )
+            return
+        if not instance_id:
+            logger.error(
+                f"Observer._admit_via_worker_pool: MESSAGE job "
+                f"{job.job_id[:8]}... missing instance_id; "
+                f"caller should mark FAILED"
+            )
+            return
+
+        # Resolve the task repository from the InstanceManager facade.
+        # The manager wires ``_task_repo`` in ``setup_worker_pool``;
+        # ``getattr`` keeps the observer safe in tests that bypass
+        # full manager initialization.
+        task_repo = getattr(self._instance_manager, "_task_repo", None)
+        if task_repo is None:
+            logger.error(
+                f"Observer._admit_via_worker_pool: InstanceManager has no "
+                f"_task_repo; cannot create Task for MESSAGE job "
+                f"{job.job_id[:8]}..."
+            )
+            return
+
+        # Create the Task row. ``TaskRepository.create`` opens its own
+        # ``SQLModelSession`` and commits — we wrap in ``asyncio.to_thread``
+        # so the sync DB call does not block the event loop (same pattern
+        # as ``_prepare_enqueued_message`` in instance_messaging.py).
+        try:
+            task = await asyncio.to_thread(
+                task_repo.create,
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id=instance_id,
+                message_id=message_id,
+            )
+        except Exception as e:
+            logger.error(
+                f"Observer._admit_via_worker_pool: failed to create Task "
+                f"for MESSAGE job {job.job_id[:8]}... "
+                f"instance={instance_id[:8]}... message_id={message_id[:8]}...: "
+                f"{type(e).__name__}: {e}",
+                exc_info=True,
+            )
+            return
+
+        # Notify the WorkerPool so an idle worker wakes immediately
+        # rather than waiting for the next poll (default 0.5s).
+        # ``notify_work`` is thread-safe; it can be called from any
+        # coroutine (the condition variable handles cross-thread
+        # signaling). Defensive ``getattr`` for tests that mock
+        # the manager without a real worker pool.
+        worker_pool = getattr(self._instance_manager, "_worker_pool", None)
+        if worker_pool is not None:
+            try:
+                worker_pool.notify_work()
+            except Exception as e:
+                logger.warning(
+                    f"Observer._admit_via_worker_pool: worker_pool.notify_work() "
+                    f"failed for MESSAGE job {job.job_id[:8]}... (non-fatal): {e}"
+                )
+
+        logger.info(
+            f"Observer._admit_via_worker_pool: admitted MESSAGE job "
+            f"{job.job_id[:8]}... instance={instance_id[:8]}... "
+            f"message_id={message_id[:8]}... task_id={task.id} "
+            f"dispatch_path=jobqueue_local"
+        )
 
     async def _process_event(self, event: dict) -> None:
         """Process a single instance_lifecycle event.

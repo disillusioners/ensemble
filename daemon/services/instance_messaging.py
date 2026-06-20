@@ -941,7 +941,16 @@ class InstanceMessagingService:
         if self._manager._worker_pool is not None:
             self._manager._worker_pool.notify_work()
 
-        logger.debug(f"Enqueued message {ctx.message_id} for instance {instance_id}")
+        logger.debug(
+            f"Enqueued message {ctx.message_id} for instance {instance_id} "
+            f"dispatch_path=workerpool_direct"
+        )
+
+        return AsyncMessageResult(
+            message_id=ctx.message_id,
+            instance_id=instance_id,
+            status="queued",
+        )
 
         return AsyncMessageResult(
             message_id=ctx.message_id,
