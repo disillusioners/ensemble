@@ -1506,6 +1506,11 @@ class InstanceMessagingService:
             images: Optional list of base64-encoded images for vision messages.
             metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
         """
+        logger.info(
+            "enqueue_message_via_jq is a legacy dispatch path (JobQueue). "
+            "C-M5 will route this through the observer. "
+            "dispatch_path=jobqueue_legacy"
+        )
         from ..manager import AsyncMessageResult
 
         # Wrap the sync DB prelude in asyncio.to_thread so the session.commit()

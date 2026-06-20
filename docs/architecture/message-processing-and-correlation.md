@@ -146,8 +146,8 @@ The JobQueue is "heavy" because parent messages may need to **wait** for their c
 
 A concrete walkthrough from entry to finalization:
 
-1. **Entry** — An HTTP API call lands in `enqueue_message_via_jq()` (in `daemon/manager.py` or `daemon/services/instance_messaging.py`), or an internal agent tool triggers `enqueue_message()` (e.g., a child completion report from `_create_completion_report` in `child_reports.py`).
-2. **Queue** — Both paths write a `MessageQueue` row (the message to process) and a dispatch row (`JobItem` for JobQueue; `Task` for WorkerPool). The dispatcher picks it up from its respective poll loop.
+1. **Entry** — An HTTP API call lands in `enqueue_message_via_jq()` (in `daemon/manager.py` or `daemon/services/instance_messaging.py`), or an internal agent tool triggers `enqueue_message()` (e.g., a child completion report from `_create_completion_report` in `child_reports.py`). **`enqueue_message_via_jq` is a legacy JobQueue dispatch path** — its structured log line (`dispatch_path=jobqueue_legacy`) marks it for monitoring. It is the JobQueue entry point used for cross-instance handoff; the unification of all dispatch paths onto a single observer-based dispatcher happens at **C-M5** in the [decouple execution plan](../plans/decouple-execution-plan.md) Phase C.
+2. **Queue** — Both paths write a `MessageQueue` row (the message to process) and a dispatch row (`JobItem` for JobQueue; `Task` for WorkerPool). The dispatcher picks it up from its respective poll loop. Post-C-M5, only the WorkerPool (`Task`) path will be the runtime dispatch path; `JobItem` rows are retained only as scheduling-only artifacts for cross-instance handoff.
 3. **Gate** — `MessageProcessingPipeline.execute()` calls `execution_gate.run()`, acquiring a per-instance lease. If contention occurs, the path-specific `on_contention` callback re-queues the work.
 4. **Process** — `_process_message_with_tracking` calls `graph.astream`, streaming results back to the caller.
 5. **Post-process** — The pipeline marks the message `COMPLETED`, resolves and dispatches the response (SSE, routing), and checks child completion via the CM.
