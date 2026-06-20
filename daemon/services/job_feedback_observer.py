@@ -756,6 +756,17 @@ class JobFeedbackObserver:
             ):
                 post_gen = cm.get_generation(instance_id)
                 if post_gen > pre_gen:
+                    # B-W1 NOTE: resolve_job also bumps the generation
+                    # counter. This means when a watched job resolves and
+                    # fires the completion callback, the generation change
+                    # can trigger a spurious COMPLETED → PROCESSING →
+                    # COMPLETED cycle on the parent job. This is
+                    # self-correcting (the second finalize commits to
+                    # COMPLETED again) and the cost is a brief DB/SSE
+                    # status flicker. This is acceptable — the alternative
+                    # (not bumping generation on resolve_job) would reopen
+                    # the orphan race for the job path.
+                    #
                     # A register_message_send bumped the generation during
                     # finalization. The register is either blocked on the
                     # lock (just released) or already enqueued on the

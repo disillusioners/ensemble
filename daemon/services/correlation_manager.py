@@ -143,9 +143,6 @@ class CorrelationManager:
         # in that case. register_job_send and resolve_job are unaffected —
         # they only mutate in-memory state and don't need a repo.
         self._watcher_repo = watcher_repository
-        # B1: may be None — rebuild_from_db skips pending_jobs reconstruction
-        # in that case (graceful degradation, not a hard error).
-        self._watcher_repo = watcher_repository
 
         # In-memory state: parent_id → ParentCorrelation
         self._pending: dict[str, ParentCorrelation] = {}
@@ -1791,7 +1788,28 @@ async def init_correlation_manager(
         # CM gracefully degrades to message-only tracking (register_job_send
         # and resolve_job still work for live correlations, but the
         # post-crash reconstruction of pending_jobs is skipped).
-        watcher_repo = getattr(manager, "_watcher_repository", None)
+        # B-F1 FIX: must read the same attribute name that ``api.py:249`` writes
+        # to the manager (``_watcher_repo``, no "y"). The previous name
+        # (``_watcher_repository``) was a typo that always returned None,
+        # silently disabling Step 5 of ``rebuild_from_db`` (watched-job
+        # crash recovery). Kept the name explicit so any future
+        # ``_watcher_repository`` vs ``_watcher_repo`` mismatch is caught
+        # at startup with a clear error rather than silently disabling the
+        # watcher repo.
+        watcher_repo = getattr(manager, "_watcher_repo", None)
+        if watcher_repo is None:
+            # Defensive: detect the original typo at startup. If somebody
+            # reintroduces ``_watcher_repository`` (or any similar variant)
+            # on the manager, log a clear warning rather than silently
+            # proceeding with a degraded CM.
+            if hasattr(manager, "_watcher_repository"):
+                logger.warning(
+                    "init_correlation_manager: manager exposes "
+                    "_watcher_repository (deprecated/typo name) but not "
+                    "_watcher_repo. rebuild_from_db will skip "
+                    "pending_jobs reconstruction. Fix the attribute "
+                    "name to restore watched-job crash recovery."
+                )
         correlation_manager = CorrelationManager(
             instance_repository=manager._instance_repository,
             message_queue_repository=manager._queue_repository,

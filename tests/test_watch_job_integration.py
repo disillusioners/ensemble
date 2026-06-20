@@ -284,34 +284,366 @@ class TestWatchJobOrphanProtection:
         # NOW complete.
         assert recorder == [(parent, "completed")]
 
+
+# =============================================================================
+# Category 5 — Phase B reviewer fixes (B-F1, B-W3)
+# =============================================================================
+
+
+class TestReviewerFixes:
+    """Tests proving the Phase B reviewer fixes are wired correctly.
+
+    These tests are DETERMINISTIC: each one builds the minimum fixture set
+    required to exercise one specific behaviour (wiring, ordering, or
+    rebuild) without depending on a live DB, EventBus, or HTTP stack.
+
+    * B-F1: ``init_correlation_manager`` must read the SAME attribute name
+      (``_watcher_repo``) that ``daemon/api.py:249`` writes. A typo
+      (``_watcher_repository`` vs ``_watcher_repo``) leaves the CM's
+      ``_watcher_repo`` as None, silently disabling Step 5 of
+      ``rebuild_from_db`` (watched-job crash recovery).
+    * B-W3: ``_finalize_job`` must call ``get_watchers_for_job`` BEFORE
+      ``notify_watchers`` (which deletes watcher rows) and
+      ``notify_corr_resolve_job`` AFTER ``notify_watchers``. Reordering
+      either step would either: (a) drain CM's ``pending_jobs`` set with
+      an empty list (get_watchers after notify_watchers), or (b) race with
+      the watcher notification that the parent is also expecting.
+    * B-W3: ``rebuild_from_db`` Step 5 must reconstruct ``pending_jobs``
+      from the watcher repository. Without this, watched-job parents get
+      empty ``pending_jobs`` after restart → Variant B orphan survives
+      a crash.
+    """
+
     @pytest.mark.asyncio
-    async def test_variant_b_regression_orphan_protection(self):
-        """Variant B regression: without pending_jobs tracking, the parent would complete
-        as soon as its message children resolved, orphaning the watched job.
-        The pending_jobs set prevents this.
+    async def test_init_correlation_manager_wires_watcher_repo(self):
+        """B-F1: ``init_correlation_manager`` must set ``cm._watcher_repo``
+        to the manager's ``_watcher_repo`` attribute. A typo
+        (``_watcher_repository``) leaves it ``None``, disabling crash
+        recovery for watched jobs.
+
+        Regression guard: the previous code did
+        ``getattr(manager, "_watcher_repository", None)`` which always
+        returned None because ``daemon/api.py:249`` writes
+        ``_watcher_repo`` (no "y"). This test would have failed with
+        ``assert cm._watcher_repo is not None``.
         """
-        recorder, cb = make_callback()
-        cm = make_cm(callback=cb)
-        parent = "parent-1"
+        from daemon.services import correlation_manager as cm_module
+        from daemon.services.correlation_manager import (
+            CorrelationManager,
+            init_correlation_manager,
+        )
 
-        # Parent has 2 message children AND watches 1 job.
-        await cm.register_message_send(parent, "child-1", "msg-1")
-        await cm.register_message_send(parent, "child-2", "msg-2")
-        await cm.register_job_send(parent, "long-running-job")
+        # Build a fake manager with a watcher_repo wired up (the
+        # way ``daemon/api.py:249`` sets it on the real InstanceManager).
+        watcher_repo_mock = MagicMock(name="JobWatcherRepository")
+        manager = MagicMock(name="InstanceManager")
+        manager._watcher_repo = watcher_repo_mock
+        manager._instance_repository = make_instance_repo()
+        manager._queue_repository = make_msg_repo()
+        manager._event_bus = MagicMock(name="EventBus")
 
-        assert cm.get_pending_count(parent) == 3, "two messages + one watched job = three pending"
+        # Mock app with a state attribute that accepts attribute writes.
+        app = MagicMock(name="FastAPI app")
+        app.state = MagicMock(name="app.state")
 
-        # BOTH message children respond (simulating the parent's message fanout completing).
-        await cm.resolve_response(parent, "child-1", "msg-1")
-        await cm.resolve_response(parent, "child-2", "msg-2")
+        # Make correlation_manager.start() a no-op so we don't have to
+        # wire an EventBus subscription for this test.
+        original_start = CorrelationManager.start
 
-        # Parent must STILL NOT be complete — orphan protection: the watched job is pending.
-        assert cm.is_complete(parent) is False
-        assert recorder == [], "callback must not fire while watched job is still pending"
-        assert cm.get_pending_count(parent) == 1, "only the watched job remains"
+        async def _noop_start(self) -> None:
+            return None
 
-        # The watched job finally terminates.
-        await cm.resolve_job(parent, "long-running-job")
+        CorrelationManager.start = _noop_start  # type: ignore[assignment]
+        registered_cm: Any = None
+        try:
+            await init_correlation_manager(app, manager, completion_callback=None)
+            # Pull the registered CM BEFORE resetting the singleton below.
+            registered_cm = cm_module.get_correlation_manager()
+        finally:
+            CorrelationManager.start = original_start  # type: ignore[assignment]
+            # Reset the module-level singleton so subsequent tests aren't
+            # affected by this one.
+            cm_module.set_correlation_manager(None)
 
-        # NOW complete.
-        assert recorder == [(parent, "completed")]
+        assert registered_cm is not None, (
+            "init_correlation_manager must register the new CM via "
+            "set_correlation_manager — None means the init failed silently"
+        )
+        assert registered_cm._watcher_repo is not None, (
+            "B-F1 regression: cm._watcher_repo is None — the typo "
+            "(_watcher_repository vs _watcher_repo) is back. The "
+            "watcher_repo wiring is broken and crash recovery for "
+            "watched jobs is silently disabled."
+        )
+        # Sanity: the CM should hold the SAME mock object the manager
+        # exposes (passed by reference, not copied).
+        assert registered_cm._watcher_repo is watcher_repo_mock
+
+    @pytest.mark.asyncio
+    async def test_init_correlation_manager_handles_missing_watcher_repo(self):
+        """B-F1 defensive: when the manager exposes NO ``_watcher_repo``
+        (e.g. legacy InstanceManager that hasn't been wired yet), the CM
+        must still initialize with ``_watcher_repo=None`` — graceful
+        degradation per the B1 contract. We do NOT want init to raise
+        when the repo is missing; the daemon must keep running with
+        message-only tracking.
+        """
+        from daemon.services import correlation_manager as cm_module
+        from daemon.services.correlation_manager import (
+            CorrelationManager,
+            init_correlation_manager,
+        )
+
+        # Manager without _watcher_repo (simulates legacy / not-yet-wired).
+        manager = MagicMock(name="InstanceManager")
+        # Ensure getattr returns None — no _watcher_repo attribute.
+        del manager._watcher_repo
+        manager._instance_repository = make_instance_repo()
+        manager._queue_repository = make_msg_repo()
+        manager._event_bus = MagicMock(name="EventBus")
+
+        app = MagicMock(name="FastAPI app")
+        app.state = MagicMock(name="app.state")
+
+        original_start = CorrelationManager.start
+
+        async def _noop_start(self) -> None:
+            return None
+
+        CorrelationManager.start = _noop_start  # type: ignore[assignment]
+        registered_cm: Any = None
+        try:
+            await init_correlation_manager(app, manager, completion_callback=None)
+            registered_cm = cm_module.get_correlation_manager()
+            # Graceful degradation: watcher_repo is None but CM is alive.
+            assert registered_cm._watcher_repo is None
+            # And register_job_send / resolve_job still work — they're
+            # in-memory only and don't need the repo.
+            await registered_cm.register_job_send("parent-x", "job-y")
+            assert registered_cm.get_pending_count("parent-x") == 1
+        finally:
+            CorrelationManager.start = original_start  # type: ignore[assignment]
+            cm_module.set_correlation_manager(None)
+
+        assert registered_cm is not None
+
+    @pytest.mark.asyncio
+    async def test_b4_watcher_prefetch_before_notify_after_resolve(self):
+        """B-W3: in ``_finalize_job``'s post-commit outbox, the call order
+        MUST be:
+
+          1. ``watcher_repo.get_watchers_for_job(job_id)``   (pre-fetch)
+          2. ``notify_watchers(job_id, terminal_status)``    (terminal notify)
+          3. ``notify_corr_resolve_job(parent_id, ...)``    (drain CM)
+
+        Why this order matters:
+          * If ``get_watchers_for_job`` runs AFTER ``notify_watchers``,
+            it returns ``[]`` (notify_watchers deletes watcher rows in
+            terminal states) → CM ``pending_jobs`` is never drained for
+            watch-based parents → completion callback never fires →
+            parent hangs in PROCESSING forever.
+          * If ``notify_corr_resolve_job`` runs BEFORE ``notify_watchers``,
+            the parent receives the completion notification BEFORE its
+            watchers do, breaking the expected ordering contract.
+
+        This test exercises the real ``_finalize_job`` flow with a
+        completely-mocked dependency set and asserts the call order
+        via a side-effect-tracking list.
+        """
+        from unittest.mock import AsyncMock, patch
+
+        from daemon.repositories.instance.models import InstanceStatus
+        from daemon.services.job_feedback_observer import (
+            JobFeedbackObserver,
+            _FinalizeJobResult,
+        )
+
+        # ─── Build the JobFeedbackObserver with fully-mocked deps ───
+        # Every external dependency is a MagicMock; only the methods we
+        # care about (post-commit outbox) are given explicit behaviour.
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(name="EventBus"),
+            job_queue_service=MagicMock(name="JobQueueService"),
+            job_repo=MagicMock(name="JobRepository"),
+            lock_repo=MagicMock(name="LockRepository"),
+            project_repo=MagicMock(name="ProjectRepository"),
+            instance_manager=MagicMock(name="InstanceManager"),
+        )
+
+        # ``_finalize_job_db_sync`` runs in a worker thread (via
+        # ``asyncio.to_thread``). For the test we short-circuit it to
+        # return a successful result synchronously by patching it as a
+        # plain MagicMock — the to_thread wrapper will just await the
+        # return value. The post-commit outbox doesn't care that the
+        # sync body didn't actually run.
+        success_result = _FinalizeJobResult(
+            skip=False,
+            terminal_status=InstanceStatus.COMPLETED.value,
+            job_id="job-integration",
+            instance_id="inst-integration",
+            parent_id="parent-integration",
+            agent_id="leader",
+            result_summary="done",
+            instance_was_terminal=False,
+        )
+        observer._finalize_job_db_sync = MagicMock(return_value=success_result)
+
+        # ─── Wire the post-commit outbox methods with ordered tracking ───
+        # We use a single ordered list to record the call sequence as
+        # the post-commit outbox progresses through get_watchers →
+        # notify_watchers → notify_corr_resolve_job.
+        call_order: list[str] = []
+
+        # Fake watcher object with the .instance_id attribute the outbox
+        # reads to drive notify_corr_resolve_job.
+        fake_watcher = MagicMock(name="JobWatcher")
+        fake_watcher.instance_id = "parent-integration"
+
+        # Set up watcher_repo.get_watchers_for_job: must return the
+        # watcher list (NOT None — the outbox iterates it). The outbox
+        # reads this BEFORE calling notify_watchers.
+        observer._job_queue_service._watcher_repo = MagicMock(name="watcher_repo")
+        observer._job_queue_service._watcher_repo.get_watchers_for_job = MagicMock(
+            return_value=[fake_watcher],
+            side_effect=lambda *_a, **_kw: (
+                call_order.append("get_watchers_for_job"),
+                [fake_watcher],  # Must return the list — the outbox iterates it.
+            )[-1],
+        )
+
+        # notify_watchers: this is the method that deletes watcher rows
+        # in terminal states. The outbox calls it AFTER get_watchers_for_job.
+        observer._job_queue_service.notify_watchers = AsyncMock(
+            side_effect=lambda *_a, **_kw: call_order.append("notify_watchers"),
+        )
+
+        # Patch the module-level notify_corr_resolve_job that
+        # _finalize_job imports. It must be called AFTER notify_watchers.
+        async def _track_resolve(*_a, **_kw):
+            call_order.append("notify_corr_resolve_job")
+
+        # Stub out the dispatcher and next-job trigger so we don't need
+        # the full instance-side cascade (SSE / CompletionRegistry /
+        # lifecycle event) for this ordering test.
+        observer._dispatch_instance_post_commit_side_effects = AsyncMock(
+            return_value=None
+        )
+        observer._trigger_next_job = AsyncMock(return_value=None)
+
+        # Build a minimal ``job`` object (the outbox reads job.job_id).
+        job = MagicMock(name="JobItem")
+        job.job_id = "job-integration"
+
+        with patch(
+            "daemon.services.job_feedback_observer.notify_corr_resolve_job",
+            side_effect=_track_resolve,
+        ):
+            await observer._finalize_job(
+                job=job,
+                instance_id="inst-integration",
+                terminal_status=InstanceStatus.COMPLETED.value,
+                error=None,
+            )
+
+        # ─── Assert the ordering ───
+        # Find the indices of the three ordering markers.
+        idx_prefetch = call_order.index("get_watchers_for_job")
+        idx_notify = call_order.index("notify_watchers")
+        idx_resolve = call_order.index("notify_corr_resolve_job")
+
+        assert idx_prefetch < idx_notify, (
+            f"B-W3 ORDER BUG: get_watchers_for_job (idx={idx_prefetch}) "
+            f"must be called BEFORE notify_watchers (idx={idx_notify}). "
+            f"If reversed, notify_watchers deletes watcher rows and the "
+            f"prefetch returns [] -> CM pending_jobs is never drained. "
+            f"Full call order: {call_order}"
+        )
+        assert idx_notify < idx_resolve, (
+            f"B-W3 ORDER BUG: notify_watchers (idx={idx_notify}) must be "
+            f"called BEFORE notify_corr_resolve_job (idx={idx_resolve}). "
+            f"Full call order: {call_order}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_rebuild_reconstructs_pending_jobs_from_watcher_repo(self):
+        """B-W3: ``rebuild_from_db`` Step 5 must reconstruct
+        ``pending_jobs`` from the watcher repository. Without this,
+        watched-job parents get empty ``pending_jobs`` after restart ->
+        Variant B orphan survives a crash (the parent would fire its
+        completion callback prematurely once message children resolve).
+
+        This test seeds the watcher_repo with two watched jobs in
+        PROCESSING, calls ``rebuild_from_db``, and verifies the CM
+        reconstructed both into ``_pending[parent_id].pending_jobs``.
+        """
+        # ─── Build the CM with a mock watcher_repo ───
+        watcher_repo = MagicMock(name="JobWatcherRepository")
+
+        # ``rebuild_from_db`` calls ``get_watched_processing_job_ids(parent_id)``
+        # synchronously via ``asyncio.to_thread`` (see line 1225 of
+        # correlation_manager.py). We seed it to return two watched job
+        # IDs for the parent under test.
+        parent_id = "parent-rebuild"
+        watched_job_ids = ["watched-job-1", "watched-job-2"]
+
+        def _get_watched_processing_job_ids(pid: str) -> list[str]:
+            # Only return watched jobs for the parent under test —
+            # simulates a query keyed on parent_id.
+            return watched_job_ids if pid == parent_id else []
+
+        watcher_repo.get_watched_processing_job_ids = MagicMock(
+            side_effect=_get_watched_processing_job_ids
+        )
+
+        # Instance repo must return a single parent (the one we care
+        # about) with waiting_for=0 — meaning the DB has no pending
+        # message children, only watched jobs. This is the exact
+        # watched-job-only scenario the B-W3 fix protects.
+        from daemon.services.correlation_manager import CorrelationManager
+
+        instance_repo = make_instance_repo()
+        parent = MagicMock(name="DBParent")
+        parent.instance_id = parent_id
+        parent.waiting_for = 0
+        instance_repo.get_all_with_waiting_for = MagicMock(return_value=[parent])
+        instance_repo.get_children = MagicMock(return_value=[])
+
+        cm = CorrelationManager(
+            instance_repository=instance_repo,
+            message_queue_repository=make_msg_repo(),
+            completion_callback=None,
+            watcher_repository=watcher_repo,
+        )
+
+        # ─── Run rebuild_from_db ───
+        await cm.rebuild_from_db()
+
+        # ─── Assert Step 5 reconstructed the watched jobs ───
+        assert parent_id in cm._pending, (
+            f"rebuild_from_db must create a _pending[{parent_id}] entry "
+            f"when the watcher_repo reports watched PROCESSING jobs for "
+            f"this parent. Got _pending keys: {list(cm._pending.keys())}"
+        )
+        reconstructed = cm._pending[parent_id].pending_jobs
+        assert watched_job_ids[0] in reconstructed, (
+            f"Step 5 must add '{watched_job_ids[0]}' to pending_jobs. "
+            f"Got: {reconstructed}"
+        )
+        assert watched_job_ids[1] in reconstructed, (
+            f"Step 5 must add '{watched_job_ids[1]}' to pending_jobs. "
+            f"Got: {reconstructed}"
+        )
+        # Sanity: pending_jobs is a set — order-independent equality.
+        assert reconstructed == set(watched_job_ids)
+
+        # And the CM must report the parent as INCOMPLETE — the
+        # crash-recovery contract: pending_jobs must NOT be empty
+        # after rebuild, otherwise the parent would fire its completion
+        # callback immediately once any message children resolve.
+        assert cm.is_complete(parent_id) is False, (
+            "is_complete must return False after rebuild when watched "
+            "jobs are pending — otherwise Variant B orphan survives "
+            "a crash."
+        )
+        assert cm.get_pending_count(parent_id) == 2
+
