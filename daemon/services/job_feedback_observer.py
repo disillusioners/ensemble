@@ -768,6 +768,7 @@ class JobFeedbackObserver:
                         f"post_gen={post_gen}). Re-arming job "
                         f"{job.job_id[:8]} from COMPLETED to PROCESSING."
                     )
+                    rearmed = False
                     try:
                         await asyncio.to_thread(
                             self._job_repo.atomic_transition,
@@ -775,6 +776,7 @@ class JobFeedbackObserver:
                             from_status=JobStatus.COMPLETED.value,
                             to_status=JobStatus.PROCESSING.value,
                         )
+                        rearmed = True
                     except InvalidTransitionError as ite:
                         # The job was transitioned by another actor
                         # (e.g. terminate_instance, a manual admin
@@ -799,6 +801,13 @@ class JobFeedbackObserver:
                             f"(COMPLETED → PROCESSING): {rearm_exc}. "
                             f"The late child may be orphaned."
                         )
+
+                    if rearmed:
+                        # Re-arm succeeded — job is back to PROCESSING.
+                        # Skip the post-commit outbox: no notify_watchers,
+                        # no SSE, no CompletionRegistry, no _trigger_next_job.
+                        # Those side effects are only valid for terminal jobs.
+                        return
 
             # ─── Handle gate-deferred skip (waiting_for > 0 or gate SELECT failed) ───
             # C2-N1 fix: ``notify_corr_rearm`` fires ONLY on gate-deferred

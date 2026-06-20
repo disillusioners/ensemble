@@ -537,6 +537,41 @@ async def test_post_commit_rearm_prevents_orphan(engine: Engine):
     # completed or be about to — either way post_gen reflects the bump).
     await asyncio.wait_for(register_done.wait(), timeout=5.0)
 
+    # Yield to the event loop so any post-re-arm outbox work that the
+    # _finalize_job coroutine may schedule (notify_watchers, SSE,
+    # _trigger_next_job) gets a chance to run BEFORE we assert it didn't.
+    # Without this yield the assertions could race ahead of the outbox
+    # and pass trivially even if the outbox was about to fire.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    # ── ASSERT 1a: post-commit outbox was SUPPRESSED during re-arm ─────────
+    # The re-arm transitioned the job COMPLETED → PROCESSING. Terminal-side
+    # outbox side effects (notify_watchers, SSE status_change, lifecycle
+    # event, _trigger_next_job) are only valid for jobs that ACTUALLY
+    # committed to a terminal state. The re-arm returned BEFORE the outbox,
+    # so none of these should have been called. If the fix is missing, all
+    # four would fire spuriously on a PROCESSING job — this assertion
+    # catches that fall-through.
+    assert not _mocks["job_queue_service"].notify_watchers.called, (
+        "notify_watchers should NOT be called during re-arm — "
+        "the job is back to PROCESSING, not terminal. "
+        "If this fails, the _finalize_job post-commit re-arm block "
+        "is falling through into the outbox (Fix 1 regression)."
+    )
+    assert not _mocks["live_hub"].stream_status_change.called, (
+        "SSE stream_status_change should NOT be called during re-arm — "
+        "the job is back to PROCESSING, not terminal."
+    )
+    assert not _mocks["events_service"]._publish_instance_lifecycle_event.called, (
+        "lifecycle event should NOT be published during re-arm — "
+        "the job is back to PROCESSING, not terminal."
+    )
+    assert not _mocks["job_queue_service"]._get_next_job.called, (
+        "_get_next_job (via _trigger_next_job) should NOT be called "
+        "during re-arm — the job is back to PROCESSING, not terminal."
+    )
+
     # ── Restore the original sync helper ───────────────────────────────────
     # The patched sync helper injects a register during the to_thread window.
     # For the second finalize (child B's resolve) we want the REAL sync
