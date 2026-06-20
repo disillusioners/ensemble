@@ -1234,17 +1234,33 @@ class JobFeedbackObserver:
             # correlation, creating a window where ``waiting_for > 0`` and
             # ``cm_pending == 0`` simultaneously.
             #
-            # C1 fix (TOCTOU hardening): on row-lock-supporting
-            # dialects (PostgreSQL, MySQL InnoDB, MariaDB),
-            # ``SELECT ... FOR UPDATE`` takes a pessimistic row-level
-            # lock (READ COMMITTED isolation). WriteGuardSession is a
+            # ─── USE_LEGACY_WAITING_FOR_CASCADE flag (A7, 2026-06-20) ───────
+            # When OFF (default), ``waiting_for`` is NOT incremented by
+            # ``send_message`` (A5) and the register-before/increment-after
+            # window is structurally closed. A12 register-window proof
+            # tests (23/23) confirm it is safe to replace the FOR UPDATE
+            # row-lock gate with a CM ``is_complete()`` check here — the
+            # CM is authoritative and there is no concurrent writer to
+            # race against. The FOR UPDATE row lock was defence-in-depth
+            # against the now-closed window.
+            #
+            # When ON (kill switch / rollback), the legacy M0 path runs
+            # unchanged — ``SELECT ... FOR UPDATE`` takes a pessimistic
+            # row-level lock (READ COMMITTED isolation) to close the
+            # TOCTOU window between the ``waiting_for`` read and the
+            # finalization UPDATE below. WriteGuardSession is a
             # Python-level write-pause counter, NOT a database-level
-            # lock — on any of these dialects another thread could
-            # commit ``waiting_for=1`` between a non-locking read and
-            # the subsequent UPDATE below, re-opening the TOCTOU
-            # window this gate exists to close. ``FOR UPDATE`` blocks
+            # lock — on row-lock-supporting dialects another thread
+            # could commit ``waiting_for=1`` between a non-locking read
+            # and the subsequent UPDATE, re-opening the TOCTOU window
+            # this gate exists to close. ``FOR UPDATE`` blocks
             # concurrent writers on this row until our transaction
             # commits or rolls back, eliminating the race.
+            #
+            # C1 fix (TOCTOU hardening, legacy path only): on
+            # row-lock-supporting dialects (PostgreSQL, MySQL InnoDB,
+            # MariaDB), ``SELECT ... FOR UPDATE`` takes a pessimistic
+            # row-level lock (READ COMMITTED isolation).
             #
             # SQLite has NO ``FOR UPDATE`` syntax — the raw keyword
             # triggers ``sqlite3.OperationalError: near "FOR": syntax
@@ -1266,110 +1282,42 @@ class JobFeedbackObserver:
             # slot on ``skip=True`` so wave 2 children whose resolves
             # arrive before their registers (e.g. via ``job_continue`` /
             # ``watch_job``) still find the parent — C2-PartA fix.
-            # ─── Dialect detection for row-level locking (F2, 2026-06-20) ───
-            # PostgreSQL, MySQL InnoDB, and MariaDB all support
-            # ``SELECT ... FOR UPDATE`` natively. Earlier versions gated
-            # this on a binary PG-vs-everything check, which silently
-            # disabled row locking on MySQL/MariaDB and reintroduced the
-            # TOCTOU window. SQLite has no ``FOR UPDATE`` syntax and
-            # relies on its global database-level write lock.
-            _dialect_name = (
-                session.bind.dialect.name
-                if session.bind is not None
-                else ""
-            )
-            _supports_row_lock = _dialect_name in (
-                "postgresql", "mysql", "mariadb",
-            )
-            try:
-                _gate_sql = (
-                    "SELECT waiting_for FROM instances "
-                    "WHERE instance_id = :iid FOR UPDATE"
-                    if _supports_row_lock
-                    else (
-                        "SELECT waiting_for FROM instances "
-                        "WHERE instance_id = :iid"
+            #
+            # ─── Flag OFF (default): CM is authoritative, no FOR UPDATE ──
+            # CM ``is_complete()`` is sync-safe — reads ``_pending`` dict
+            # under GIL protection (no asyncio.Lock taken, safe to call
+            # from the worker thread that ``asyncio.to_thread`` runs us
+            # in). Under flag OFF the legacy ``waiting_for`` writer is
+            # disabled (A5), so there is no concurrent writer to race
+            # against and the row lock would be pure overhead.
+            use_legacy_cascade = bool(
+                self._config.use_legacy_waiting_for_cascade
+            ) if self._config is not None else False
+
+            if not use_legacy_cascade:
+                # CM path: when CM says NOT complete, defer finalization.
+                # CM is the SOLE completion authority under flag OFF; if
+                # it still tracks pending work for this parent, the
+                # children are still running and we must wait.
+                cm_gate = get_correlation_manager()
+                if cm_gate is None:
+                    # CM unavailable under flag OFF is a hard error per
+                    # ADR-011 — the CM is authoritative and there is no
+                    # fallback path. Deferring here would wedge the job.
+                    raise RuntimeError(
+                        f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but "
+                        f"CorrelationManager is not initialised — "
+                        f"cannot gate finalization for "
+                        f"{instance_id[:8]}... (CM is authoritative "
+                        f"under flag OFF, see ADR-011)"
                     )
-                )
-                _gate_row = session.execute(
-                    _sa_text(_gate_sql),
-                    {"iid": instance_id},
-                ).first()
-                if _gate_row is not None:
-                    _wf_gate = _gate_row[0] or 0
-                    if _wf_gate > 0:
-                        logger.info(
-                            f"Observer: aborting terminal transition for "
-                            f"{instance_id[:8]}... — waiting_for="
-                            f"{_wf_gate} > 0 (orchestrator has active "
-                            f"children, deferring finalization)"
-                        )
-                        return _FinalizeJobResult(
-                            skip=True,
-                            terminal_status=None,
-                            job_id=None,
-                            instance_id=None,
-                            parent_id=None,
-                            agent_id=None,
-                            result_summary=None,
-                            error_message=None,
-                            locks_released=0,
-                            instance_was_terminal=False,
-                            gate_deferred=True,
-                        )
-                # Gate passed cleanly (no exception, waiting_for == 0).
-                # Reset the bounded defer counter so any future transient
-                # failure starts counting from zero rather than inheriting
-                # stale state from a prior incident.
-                _gate_defer_counts.pop(instance_id, None)
-            except Exception as e:
-                # C1-N1 fix (F1 escape valve, 2026-06-20): on the first
-                # few deferrals, return ``skip=True`` with
-                # ``gate_deferred=True`` so the wave-2 callback can
-                # re-attempt finalization (C2-PartA rearm path fires).
-                # However, the bounded counter (``_MAX_GATE_DEFERS``) is
-                # the ONLY safety net here — existing recovery mechanisms
-                # do NOT cover gate-deferred jobs:
-                #   * ``StaleTaskRecovery`` operates on the ``task``
-                #     table, not ``job_queue``.
-                #   * ``JobProcessor`` orphan recovery skips instances
-                #     that are alive (gate-deferred jobs have RUNNING
-                #     instances).
-                #   * ``JobRecoveryService.recover_on_startup`` only runs
-                #     at daemon restart.
-                # Without this counter, a persistent gate failure would
-                # silently wedge the job in PROCESSING forever — a
-                # SILENT LIVENESS bug that's operationally worse than
-                # the noisy correctness bug the deferral was originally
-                # added to prevent. After ``_MAX_GATE_DEFERS`` consecutive
-                # deferrals we fall through to the UPDATE, accepting
-                # potential premature completion as the lesser evil. If
-                # the outer transaction is poisoned, the UPDATE raises
-                # and the W3 fail-safe in the async caller transitions
-                # the job to FAILED — still better than permanent
-                # PROCESSING.
-                _defer_key = instance_id
-                _defer_count = _gate_defer_counts.get(_defer_key, 0) + 1
-                if _defer_count >= _MAX_GATE_DEFERS:
-                    logger.error(
-                        f"Observer: gate defer limit ({_MAX_GATE_DEFERS}) "
-                        f"reached for instance {_defer_key[:8]}... — "
-                        f"falling through to finalize to prevent permanent "
-                        f"stuck-job (this may indicate persistent DB "
-                        f"issues: {e})"
-                    )
-                    _gate_defer_counts.pop(_defer_key, None)
-                    # Fall through to the UPDATE / Step 1 / Step 2 /
-                    # Step 3 / commit path below — do NOT return
-                    # ``skip=True``. The W3 fail-safe in the async caller
-                    # handles the case where the poisoned outer
-                    # transaction prevents the UPDATE from committing.
-                else:
-                    _gate_defer_counts[_defer_key] = _defer_count
-                    logger.warning(
-                        f"Observer: failed to read instance for "
-                        f"waiting_for gate ({_defer_key[:8]}...): {e} "
-                        f"— deferring ({_defer_count}/{_MAX_GATE_DEFERS})"
+                if not cm_gate.is_complete(instance_id):
+                    _cm_pending_gate = cm_gate.get_pending_count(instance_id)
+                    logger.info(
+                        f"Observer: aborting terminal transition for "
+                        f"{instance_id[:8]}... — CM pending="
+                        f"{_cm_pending_gate} > 0 (orchestrator has active "
+                        f"children, deferring finalization)"
                     )
                     return _FinalizeJobResult(
                         skip=True,
@@ -1384,6 +1332,132 @@ class JobFeedbackObserver:
                         instance_was_terminal=False,
                         gate_deferred=True,
                     )
+                # Gate passed cleanly under CM authority — fall through
+                # to the UPDATE / Step 1 / Step 2 / Step 3 / commit path.
+                # Reset the bounded defer counter so any future transient
+                # failure starts counting from zero rather than inheriting
+                # stale state from a prior incident.
+                _gate_defer_counts.pop(instance_id, None)
+            else:
+                # ─── Legacy path: SELECT ... FOR UPDATE row-lock gate ───
+                # ─── Dialect detection for row-level locking (F2, 2026-06-20) ───
+                # PostgreSQL, MySQL InnoDB, and MariaDB all support
+                # ``SELECT ... FOR UPDATE`` natively. Earlier versions gated
+                # this on a binary PG-vs-everything check, which silently
+                # disabled row locking on MySQL/MariaDB and reintroduced the
+                # TOCTOU window. SQLite has no ``FOR UPDATE`` syntax and
+                # relies on its global database-level write lock.
+                _dialect_name = (
+                    session.bind.dialect.name
+                    if session.bind is not None
+                    else ""
+                )
+                _supports_row_lock = _dialect_name in (
+                    "postgresql", "mysql", "mariadb",
+                )
+                try:
+                    _gate_sql = (
+                        "SELECT waiting_for FROM instances "
+                        "WHERE instance_id = :iid FOR UPDATE"
+                        if _supports_row_lock
+                        else (
+                            "SELECT waiting_for FROM instances "
+                            "WHERE instance_id = :iid"
+                        )
+                    )
+                    _gate_row = session.execute(
+                        _sa_text(_gate_sql),
+                        {"iid": instance_id},
+                    ).first()
+                    if _gate_row is not None:
+                        _wf_gate = _gate_row[0] or 0
+                        if _wf_gate > 0:
+                            logger.info(
+                                f"Observer: aborting terminal transition for "
+                                f"{instance_id[:8]}... — waiting_for="
+                                f"{_wf_gate} > 0 (orchestrator has active "
+                                f"children, deferring finalization)"
+                            )
+                            return _FinalizeJobResult(
+                                skip=True,
+                                terminal_status=None,
+                                job_id=None,
+                                instance_id=None,
+                                parent_id=None,
+                                agent_id=None,
+                                result_summary=None,
+                                error_message=None,
+                                locks_released=0,
+                                instance_was_terminal=False,
+                                gate_deferred=True,
+                            )
+                    # Gate passed cleanly (no exception, waiting_for == 0).
+                    # Reset the bounded defer counter so any future transient
+                    # failure starts counting from zero rather than inheriting
+                    # stale state from a prior incident.
+                    _gate_defer_counts.pop(instance_id, None)
+                except Exception as e:
+                    # C1-N1 fix (F1 escape valve, 2026-06-20): on the first
+                    # few deferrals, return ``skip=True`` with
+                    # ``gate_deferred=True`` so the wave-2 callback can
+                    # re-attempt finalization (C2-PartA rearm path fires).
+                    # However, the bounded counter (``_MAX_GATE_DEFERS``) is
+                    # the ONLY safety net here — existing recovery mechanisms
+                    # do NOT cover gate-deferred jobs:
+                    #   * ``StaleTaskRecovery`` operates on the ``task``
+                    #     table, not ``job_queue``.
+                    #   * ``JobProcessor`` orphan recovery skips instances
+                    #     that are alive (gate-deferred jobs have RUNNING
+                    #     instances).
+                    #   * ``JobRecoveryService.recover_on_startup`` only runs
+                    #     at daemon restart.
+                    # Without this counter, a persistent gate failure would
+                    # silently wedge the job in PROCESSING forever — a
+                    # SILENT LIVENESS bug that's operationally worse than
+                    # the noisy correctness bug the deferral was originally
+                    # added to prevent. After ``_MAX_GATE_DEFERS`` consecutive
+                    # deferrals we fall through to the UPDATE, accepting
+                    # potential premature completion as the lesser evil. If
+                    # the outer transaction is poisoned, the UPDATE raises
+                    # and the W3 fail-safe in the async caller transitions
+                    # the job to FAILED — still better than permanent
+                    # PROCESSING.
+                    _defer_key = instance_id
+                    _defer_count = _gate_defer_counts.get(_defer_key, 0) + 1
+                    if _defer_count >= _MAX_GATE_DEFERS:
+                        logger.error(
+                            f"Observer: gate defer limit ({_MAX_GATE_DEFERS}) "
+                            f"reached for instance {_defer_key[:8]}... — "
+                            f"falling through to finalize to prevent permanent "
+                            f"stuck-job (this may indicate persistent DB "
+                            f"issues: {e})"
+                        )
+                        _gate_defer_counts.pop(_defer_key, None)
+                        # Fall through to the UPDATE / Step 1 / Step 2 /
+                        # Step 3 / commit path below — do NOT return
+                        # ``skip=True``. The W3 fail-safe in the async caller
+                        # handles the case where the poisoned outer
+                        # transaction prevents the UPDATE from committing.
+                    else:
+                        _gate_defer_counts[_defer_key] = _defer_count
+                        logger.warning(
+                            f"Observer: failed to read instance for "
+                            f"waiting_for gate ({_defer_key[:8]}...): {e} "
+                            f"— deferring ({_defer_count}/{_MAX_GATE_DEFERS})"
+                        )
+                        return _FinalizeJobResult(
+                            skip=True,
+                            terminal_status=None,
+                            job_id=None,
+                            instance_id=None,
+                            parent_id=None,
+                            agent_id=None,
+                            result_summary=None,
+                            error_message=None,
+                            locks_released=0,
+                            instance_was_terminal=False,
+                            gate_deferred=True,
+                        )
 
             now = datetime.now(timezone.utc).isoformat()
             now_dt = datetime.now(timezone.utc)

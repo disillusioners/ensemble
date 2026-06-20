@@ -658,17 +658,24 @@ Provide a concise summary:"""
             # behaviour Phase A is rolling back FROM.
             is_parent_complete = (getattr(parent, "waiting_for", None) or 0) == 0
         else:
-            # CM is None AND flag OFF: the SELECT COUNT(*) fallback at
-            # line 657 is a hard error per A8. Until A8 lands we
-            # conservatively report ``not complete`` to avoid the
-            # premature-cascade bug class the flag is designed to
-            # prevent. A8 will replace this with an explicit raise.
-            logger.warning(
+            # ─── A8: HARD ERROR (not graceful degradation) ─────────────
+            # CM is None AND ``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` is an
+            # INVALID state. The ``SELECT COUNT(*)`` fallback (Race #3) is
+            # the exact bug we are fixing — it MUST NOT be reachable when
+            # the kill switch is OFF. CM must be initialized for the new
+            # architecture to work; we raise rather than silently degrade
+            # into the TOCTOU fallback. See
+            # ``docs/configuration/completion-flags.md`` §"Required
+            # external precondition" and the decouple execution plan §A8.
+            # Flag ON (kill switch) keeps the legacy ``SELECT COUNT(*)``
+            # fallback above so the rollback path still works.
+            raise RuntimeError(
                 f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager "
                 f"is not initialized for parent={parent.instance_id[:8]}...; "
-                f"deferring cascade. A8 will turn this into a hard error."
+                f"CM must be initialized when the legacy cascade is disabled. "
+                f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
+                f"(Race #3) is disabled by design."
             )
-            is_parent_complete = False
         if (
             is_parent_complete
             and parent.status != InstanceStatus.COMPLETED.value
@@ -1377,16 +1384,24 @@ Provide a concise summary:"""
             elif use_legacy_cascade:
                 is_parent_complete = (getattr(parent, "waiting_for", None) or 0) == 0
             else:
-                # CM is None AND flag OFF: A8 turns the SELECT COUNT(*)
-                # fallback into a hard error. Until A8 lands, defer
-                # the cascade to avoid the premature-completion bug
-                # class the flag is designed to prevent.
-                logger.warning(
+                # ─── A8: HARD ERROR (not graceful degradation) ─────────────
+                # CM is None AND ``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` is an
+                # INVALID state. The ``SELECT COUNT(*)`` fallback (Race #3) is
+                # the exact bug we are fixing — it MUST NOT be reachable when
+                # the kill switch is OFF. Mirrors the hard error at the
+                # ``_update_parent_on_child_complete`` call site (line ~660)
+                # — the inlined copy here exists because
+                # ``_process_child_completion_db_sync`` runs on a worker
+                # thread via ``asyncio.to_thread`` and cannot ``await`` the
+                # async helper. Both call sites must enforce the same A8
+                # invariant.
+                raise RuntimeError(
                     f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager "
                     f"is not initialized for parent={instance.parent_id[:8] if instance.parent_id else '?'}...; "
-                    f"deferring cascade. A8 will turn this into a hard error."
+                    f"CM must be initialized when the legacy cascade is disabled. "
+                    f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
+                    f"(Race #3) is disabled by design."
                 )
-                is_parent_complete = False
             
             completed_parent_id: str | None = None
             completed_parent_parent_id: str | None = None
