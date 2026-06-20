@@ -628,7 +628,11 @@ def _format_injection(
             break
 
         score_pct = int(matched.score * 100)
-        entries.append(f"## {matched.slug}.md ({score_pct}% match)\n{content}\n")
+        # Use the full on-disk filename (with timestamp + .md) so the displayed
+        # name resolves directly via read_context_file's exact-match lookup.
+        # Displaying the bare slug would cause agents to copy the wrong name
+        # and get a "file not found" error.
+        entries.append(f"## {matched.filename} ({score_pct}% match)\n{content}\n")
         injected_slugs.add(matched.slug)
 
     # Build file index from files NOT already injected (up to 30)
@@ -655,7 +659,15 @@ def _format_injection(
                     matched = matched_by_slug.get(slug)
                     if matched is not None:
                         score = matched.score
-                        summary = matched.first_sentence[:80] if matched.first_sentence else matched.slug
+                        # Use the full on-disk filename (with timestamp + .md)
+                        # so the file-index summary matches the same name that
+                        # read_context_file will resolve. This keeps the index
+                        # consistent with the pre-loaded header above.
+                        summary = (
+                            matched.first_sentence[:80]
+                            if matched.first_sentence
+                            else matched.filename
+                        )
                     else:
                         # Score unmatched files
                         slug_tokens = _tokenize_slug(slug)
@@ -673,7 +685,10 @@ def _format_injection(
                         elif "Answer" in sections:
                             summary = _extract_first_sentence(sections["Answer"])[:80]
                         else:
-                            summary = slug
+                            # Use the full on-disk filename so the index
+                            # summary matches the name read_context_file will
+                            # resolve. The bare slug is never user-visible.
+                            summary = file_path.name
 
                     file_index_entries.append((score, file_path.name, summary))
                 except Exception:

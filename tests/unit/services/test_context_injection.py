@@ -404,7 +404,10 @@ class TestFormatInjection:
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
         assert "# Shared Context" in result
-        assert "## low-score-file.md (15% match)" in result
+        # The pre-loaded header uses the FULL on-disk filename (timestamp +
+        # .md) so agents can copy it directly into read_context_file without
+        # a "file not found" error.
+        assert "## low-score-file_20260531_120000.md (15% match)" in result
         assert "This is the full content of the file." in result
 
     def test_top_match_truncated_only_if_exceeds_cap(self, tmp_path):
@@ -461,8 +464,8 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "## match1.md (90% match)" in result
-        assert "## match2.md (65% match)" in result
+        assert "## match1_20260531_120000.md (90% match)" in result
+        assert "## match2_20260531_120001.md (65% match)" in result
         assert "Content of first match." in result
         assert "Content of second match." in result
 
@@ -494,8 +497,8 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "## match1.md (90% match)" in result
-        assert "## match2.md" not in result  # Second match should not appear
+        assert "## match1_20260531_120000.md (90% match)" in result
+        assert "## match2_20260531_120001.md" not in result  # Second match should not appear
         assert "Content of second match" not in result
 
     def test_third_match_included_only_if_score_gt_60(self, tmp_path):
@@ -535,9 +538,9 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "## match1.md (90% match)" in result
-        assert "## match2.md (70% match)" in result
-        assert "## match3.md (65% match)" in result
+        assert "## match1_20260531_120000.md (90% match)" in result
+        assert "## match2_20260531_120001.md (70% match)" in result
+        assert "## match3_20260531_120002.md (65% match)" in result
         assert "Content of first match." in result
         assert "Content of second match." in result
         assert "Content of third match." in result
@@ -579,9 +582,9 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "## match1.md (90% match)" in result
-        assert "## match2.md (70% match)" in result
-        assert "## match3.md" not in result  # Third match should not appear
+        assert "## match1_20260531_120000.md (90% match)" in result
+        assert "## match2_20260531_120001.md (70% match)" in result
+        assert "## match3_20260531_120002.md" not in result  # Third match should not appear
         assert "Content of third match" not in result
 
     def test_fourth_match_never_included(self, tmp_path):
@@ -625,10 +628,10 @@ class TestFormatInjection:
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        assert "## match1.md (90% match)" in result
-        assert "## match2.md (75% match)" in result
-        assert "## match3.md (70% match)" in result
-        assert "## match4.md" not in result  # Fourth match should not appear
+        assert "## match1_20260531_120001.md (90% match)" in result
+        assert "## match2_20260531_120002.md (75% match)" in result
+        assert "## match3_20260531_120003.md (70% match)" in result
+        assert "## match4_20260531_120004.md" not in result  # Fourth match should not appear
 
     def test_full_file_content_used_not_section_based(self, tmp_path):
         """Full file content is used, not section-based extraction."""
@@ -738,10 +741,10 @@ High
             ),
         ]
         result = _format_injection(matched, context_key="test-key", context_dir=context_dir)
-        # Match 1 should be present
-        assert "## large1.md (90% match)" in result
+        # Match 1 should be present (full filename including timestamp + .md)
+        assert "## large1_20260531_120000.md (90% match)" in result
         # Match 2 should be present but truncated
-        assert "## large2.md (70% match)" in result
+        assert "## large2_20260531_120001.md (70% match)" in result
         # Total content should fit within cap - second should be truncated
         assert "..." in result  # Some truncation occurred
 
@@ -995,8 +998,10 @@ class TestSharedContextHints:
         assert result.rstrip().endswith(
             "read_context(context_key, filename)` to read."
         )
-        # The pre-loaded slug appears BEFORE the guidelines section.
-        assert result.index("## doc.md") < result.index("## Context Guidelines:")
+        # The pre-loaded header appears BEFORE the guidelines section.
+        # Uses the FULL on-disk filename (timestamp + .md) so it resolves
+        # cleanly via read_context_file's exact-match lookup.
+        assert result.index("## doc_20260601_000000.md") < result.index("## Context Guidelines:")
 
     def test_empty_format_omits_tool_hint(self, tmp_path):
         """Internal audience: the 'Need more?' hint must NOT appear for an
@@ -1095,7 +1100,8 @@ class TestSharedContextHints:
             result = get_shared_context("no-match-hint", "zzzzz yyyyy")
 
         # Match 1 fallback is present (0% match is acceptable).
-        assert "## unrelated.md (0% match)" in result
+        # The header uses the FULL on-disk filename (timestamp + .md).
+        assert "## unrelated_20260601_000000.md (0% match)" in result
         # The "no context yet" line is gone — the dir has files.
         assert "There is no context yet" not in result
         # And the "Need more?" hint is included so the agent knows how to
@@ -1129,8 +1135,8 @@ class TestSharedContextHints:
         assert "There is no context yet" not in result
         # The most recent (highest mtime) file wins the fallback — beta was
         # written second, so it gets pre-loaded as Match 1, and alpha stays
-        # in the file index.
-        assert "## beta-topic.md (0% match)" in result
+        # in the file index. The header uses the FULL on-disk filename.
+        assert "## beta-topic_20260602_000000.md (0% match)" in result
         assert "alpha-topic_20260601_000000.md" in result
 
     def test_external_audience_uses_mcp_tool_names(self, tmp_path):
@@ -1411,3 +1417,116 @@ class TestSharedContextHints:
         # And the external form is not present.
         assert "ensemble_context_list(context_key)" not in result
         assert "ensemble_context_read(context_key, filename)" not in result
+
+
+# ─── TestRoundTripFilenameLookup (REGRESSION) ──────────────────────────────────
+
+
+class TestRoundTripFilenameLookup:
+    """Regression tests for the pre-loaded header → read_context_file round-trip.
+
+    The pre-loaded context header previously displayed ``{matched.slug}.md`` —
+    a stripped name that does NOT exist on disk (the actual file is
+    ``{slug}_{YYYYMMDD_HHMMSS}.md``). Agents copy-pasted the displayed name,
+    fed it into ``read_context_file``, and got a "file not found" error.
+
+    The fix is to display ``matched.filename`` (the full on-disk name) so the
+    displayed name round-trips through ``read_context_file`` cleanly.
+
+    These tests exercise the round-trip end-to-end:
+    1. A file is saved to disk with timestamp suffix.
+    2. The pre-loaded header surfaces the FULL filename.
+    3. ``read_context_file`` resolves that displayed name back to the file.
+    """
+
+    def test_preloaded_header_displays_full_filename(self, tmp_path):
+        """The pre-loaded header uses the full on-disk filename, not the slug."""
+        context_dir = tmp_path / "ensemble" / "context" / "rt-header"
+        context_dir.mkdir(parents=True)
+
+        # Use a realistic timestamp format: {slug}_{YYYYMMDD_HHMMSS}.md
+        filename = "context-injection-test_20260620_110000.md"
+        (context_dir / filename).write_text("## Answer\nround-trip content\n")
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("rt-header", "context injection test")
+
+        assert result is not None
+        # The header MUST display the full filename so read_context_file works.
+        assert f"## {filename}" in result
+        # And it MUST NOT display the stripped slug form (the bug).
+        assert "## context-injection-test.md" not in result
+
+    def test_preloaded_filename_resolves_via_read_context_file(self, tmp_path):
+        """The displayed filename round-trips through read_context_file.
+
+        This is the core regression: take the name shown to the agent in the
+        pre-loaded header, hand it straight to ``read_context_file``, and
+        confirm it resolves to the on-disk file (not a "file not found" error).
+        """
+        from daemon.services.context_tools import read_context_file
+
+        context_dir = tmp_path / "ensemble" / "context" / "rt-resolve"
+        context_dir.mkdir(parents=True)
+
+        filename = "round-trip-lookup_20260620_120000.md"
+        body = "## Answer\nround-trip body content\n"
+        (context_dir / filename).write_text(body)
+
+        # Both get_shared_context and read_context_file resolve the context
+        # dir through tempfile.gettempdir(), so we patch it for the whole
+        # round-trip — otherwise the second call would look in the real tmp.
+        with patch("tempfile.gettempdir", return_value=str(tmp_path)):
+            result = get_shared_context("rt-resolve", "round trip lookup")
+
+            assert result is not None
+
+            # Extract the filename the agent would copy from the pre-loaded
+            # header. The header format is "## {filename} ({score_pct}% match)".
+            import re
+            match = re.search(
+                r"^## (\S+_20\d{6}_\d{6}\.md) \(\d+% match\)",
+                result,
+                re.MULTILINE,
+            )
+            assert match is not None, (
+                "Expected the pre-loaded header to expose a full timestamped "
+                "filename, but the regex did not match the injection output:\n"
+                + result
+            )
+            displayed_filename = match.group(1)
+
+            # The displayed name MUST equal the on-disk filename.
+            assert displayed_filename == filename
+
+            # And the displayed name MUST resolve through read_context_file.
+            contents = read_context_file("rt-resolve", displayed_filename)
+            assert contents is not None, (
+                f"read_context_file returned None for the displayed filename "
+                f"{displayed_filename!r} — the round-trip is broken"
+            )
+            assert "round-trip body content" in contents
+
+    def test_preloaded_filename_round_trip_against_slug_fails(self, tmp_path):
+        """Sanity check: passing the bare slug to read_context_file MUST fail.
+
+        Guards the bug: if anyone re-introduces the old behaviour of showing
+        the slug, this test makes it obvious that the slug form does not
+        resolve on disk — so the regression test (above) catches it.
+        """
+        from daemon.services.context_tools import read_context_file
+
+        context_dir = tmp_path / "ensemble" / "context" / "rt-slug-fails"
+        context_dir.mkdir(parents=True)
+
+        # File on disk uses the timestamped name; the slug has no timestamp.
+        filename = "slug-only_20260620_130000.md"
+        (context_dir / filename).write_text("## Answer\nfoo\n")
+
+        # Hand the bare slug form (what the buggy display used to show) to
+        # read_context_file and confirm it does NOT resolve.
+        contents = read_context_file("rt-slug-fails", "slug-only.md")
+        assert contents is None, (
+            "Expected read_context_file to fail when given the slug form, "
+            "but it returned content. The slug form must not exist on disk."
+        )
