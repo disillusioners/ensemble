@@ -1386,3 +1386,212 @@ class TestCallbackExceptionRestoration:
         )
         # And _pending[parent_id] should be restored.
         assert parent in cm._pending
+
+
+# =============================================================================
+# Group 8 — rebuild_from_db() crash-safety (A0a)
+# =============================================================================
+#
+# A0a fix: rebuild_from_db() must OVERWRITE stale pre-clear state but MERGE
+# concurrent register_message_send entries that arrive between the top-level
+# clear and the per-parent rebuild loop. The per-parent write is the
+# additive complement to the W2 OVERWRITE-at-the-top: stale entries are wiped
+# by the clear, but a register that landed after the clear is preserved.
+#
+# Tests in this group cover three crash-recovery scenarios from the
+# crash-recovery contract documented in the rebuild_from_db() docstring:
+#   * Restart with stale entries (old _pending entries must be cleared)
+#   * Restart with zero children but waiting_for > 0 (orphan count)
+#   * Restart with concurrent register (must not be lost)
+
+
+class TestRebuildFromDbCrashSafety:
+    """A0a crash-safety tests for ``rebuild_from_db()``.
+
+    Each test asserts a specific clause of the crash-recovery contract:
+      * ``test_rebuild_overwrites_stale_entries`` — top-level clear wipes
+        pre-crash state.
+      * ``test_rebuild_orphan_count_zero_children`` — orphan count
+        (waiting_for > 0 but no children) is logged as a mismatch and
+        leaves _pending untouched for that parent.
+      * ``test_rebuild_concurrent_register_not_lost`` — a concurrent
+        ``register_message_send`` that lands between the clear and the
+        per-parent rebuild loop is preserved by the merge semantics.
+    """
+
+    @pytest.mark.asyncio
+    async def test_rebuild_overwrites_stale_entries(self):
+        """Pre-existing stale entries in ``_pending`` must be wiped by the
+        clear at the start of rebuild (W2 fix: OVERWRITE, not MERGE).
+
+        Scenario: daemon crashed while ``_pending`` contained entries for
+        ``parent-stale`` and ``parent-live``. After restart, only
+        ``parent-live`` has DB-backed children/messages. ``parent-stale``
+        must be gone entirely, and the stale entry in ``parent-live`` must
+        be replaced by the DB-backed entry.
+        """
+        parent_stale = "parent-stale"
+        parent_live = "parent-live"
+        child_live = "child-live"
+        msg_live = str(uuid.uuid4())
+
+        instance = make_instance(parent_live, waiting_for=1)
+        child = make_instance(child_live)
+        instance_repo = make_instance_repo(
+            instances=[instance],
+            children_by_parent={parent_live: [child]},
+        )
+        msg_repo = make_msg_repo(
+            msgs_by_status_and_instance={
+                ("ready", child_live): [make_message(msg_live, child_live)],
+            }
+        )
+        cm = make_cm(instance_repo=instance_repo, msg_repo=msg_repo)
+
+        # Pre-populate _pending with stale entries (simulating pre-crash state).
+        await cm.register_message_send(parent_stale, "stale-child", "stale-msg")
+        await cm.register_message_send(parent_live, "stale-child-2", "stale-msg-2")
+        assert cm.get_pending_count(parent_stale) == 1
+        assert cm.get_pending_count(parent_live) == 1
+        assert cm.is_complete(parent_stale) is False
+
+        # Rebuild.
+        await cm.rebuild_from_db()
+
+        # Stale parent (no DB row) must be gone entirely.
+        assert parent_stale not in cm._pending, (
+            f"Stale parent must be wiped by rebuild clear. "
+            f"_pending keys: {list(cm._pending)}"
+        )
+        assert cm.get_pending_count(parent_stale) == 0
+        assert cm.is_complete(parent_stale) is True  # no entry → complete
+
+        # Live parent must have the DB-backed entry, not the stale one.
+        assert cm.get_pending_count(parent_live) == 1
+        assert "stale-child-2:stale-msg-2" not in cm._pending[parent_live].pending, (
+            "Stale entry in live parent must be replaced by DB-backed entry"
+        )
+        assert f"{child_live}:{msg_live}" in cm._pending[parent_live].pending
+
+    @pytest.mark.asyncio
+    async def test_rebuild_orphan_count_zero_children(self, caplog: pytest.LogCaptureFixture):
+        """Parent has ``waiting_for > 0`` but zero children and zero pending
+        messages. CM tracks nothing for this parent (orphan count), and
+        logs a mismatch warning.
+
+        This documents the orphan-count clause of the crash-recovery
+        contract: the CM cannot fabricate pending entries that aren't in
+        the DB, so a parent whose ``waiting_for`` counter is non-zero but
+        whose children/messages are missing is left with no CM state.
+        External recovery code is responsible for reconciling the
+        inconsistency.
+        """
+        parent_id = "parent-orphan"
+        instance = make_instance(parent_id, waiting_for=3)  # DB says 3
+
+        instance_repo = make_instance_repo(
+            instances=[instance],
+            children_by_parent={},  # no children
+        )
+        msg_repo = make_msg_repo()  # no pending messages
+        cm = make_cm(instance_repo=instance_repo, msg_repo=msg_repo)
+
+        caplog.set_level(logging.WARNING)
+        await cm.rebuild_from_db()
+
+        # CM tracks nothing for this parent — the orphan count is a DB
+        # inconsistency that CM cannot fix on its own.
+        assert cm.get_pending_count(parent_id) == 0
+        assert parent_id not in cm._pending, (
+            "Orphan-count parent must not get a CM entry — there is no "
+            "pending state to track"
+        )
+
+        # Mismatch warning logged (DB waiting_for=3, CM found=0).
+        mismatch_logs = [
+            r for r in caplog.records if "mismatch" in r.message.lower()
+        ]
+        assert len(mismatch_logs) == 1, (
+            f"Expected exactly 1 mismatch warning for orphan count, "
+            f"got {len(mismatch_logs)}: "
+            f"{[(r.levelname, r.message) for r in mismatch_logs]}"
+        )
+        assert "waiting_for=3" in mismatch_logs[0].message
+        assert "CM found=0" in mismatch_logs[0].message
+
+    @pytest.mark.asyncio
+    async def test_rebuild_concurrent_register_not_lost(self):
+        """A ``register_message_send`` arriving between the top-level clear
+        and the per-parent rebuild loop must NOT be lost.
+
+        Regression test for the per-parent OVERWRITE hazard: previously,
+        the rebuild loop created a fresh ``ParentCorrelation`` and
+        assigned it to ``self._pending[parent_id]``, clobbering any
+        entry a concurrent register had just written. The fix is to
+        MERGE into the existing slot instead of replacing it.
+
+        Test design: the mock's ``get_all_with_waiting_for`` blocks the
+        calling thread (via ``time.sleep``) so the event loop is free to
+        run a concurrent ``register_message_send`` during the suspension.
+        The register lands AFTER the top-level clear (because we sleep
+        briefly before calling it) and BEFORE the rebuild loop reaches
+        the parent (because the thread is still blocked).
+        """
+        parent_id = "parent-concurrent"
+        child_db = "child-db"
+        msg_db = str(uuid.uuid4())
+
+        instance = make_instance(parent_id, waiting_for=1)
+        child = make_instance(child_db)
+
+        def slow_get_parents():
+            # Block the thread (not the event loop) to create a window for
+            # the concurrent register to land between the clear and the
+            # rebuild loop. 50ms is generous for the concurrent task to
+            # complete its register_message_send.
+            import time
+            time.sleep(0.05)
+            return [instance]
+
+        instance_repo = make_instance_repo(
+            instances=[instance],
+            children_by_parent={parent_id: [child]},
+        )
+        instance_repo.get_all_with_waiting_for = MagicMock(
+            side_effect=slow_get_parents
+        )
+        msg_repo = make_msg_repo(
+            msgs_by_status_and_instance={
+                ("ready", child_db): [make_message(msg_db, child_db)],
+            }
+        )
+        cm = make_cm(instance_repo=instance_repo, msg_repo=msg_repo)
+
+        new_child = "child-concurrent"
+        new_msg = str(uuid.uuid4())
+
+        async def concurrent_register():
+            # Let rebuild start and clear _pending first (the clear is
+            # synchronous and happens before the to_thread call).
+            await asyncio.sleep(0.01)
+            await cm.register_message_send(parent_id, new_child, new_msg)
+
+        register_task = asyncio.create_task(concurrent_register())
+        await cm.rebuild_from_db()
+        await register_task
+
+        # Both the DB-backed entry AND the concurrent register's entry
+        # must be tracked. If the per-parent OVERWRITE bug were still
+        # present, only the DB-backed entry would survive (count == 1).
+        assert cm.get_pending_count(parent_id) == 2, (
+            f"Concurrent register lost during rebuild: expected 2 pending "
+            f"(1 DB-backed + 1 concurrent), got {cm.get_pending_count(parent_id)}. "
+            f"Pending keys: "
+            f"{list(cm._pending.get(parent_id, ParentCorrelation(parent_id='')).pending) if parent_id in cm._pending else 'PARENT NOT TRACKED'}"
+        )
+        assert cm._pending[parent_id].pending.get(f"{child_db}:{msg_db}") is not None, (
+            "DB-backed entry must be tracked after rebuild"
+        )
+        assert cm._pending[parent_id].pending.get(f"{new_child}:{new_msg}") is not None, (
+            "Concurrent register's entry must NOT be clobbered by rebuild"
+        )

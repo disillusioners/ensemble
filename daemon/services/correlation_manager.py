@@ -493,17 +493,104 @@ class CorrelationManager:
     async def rebuild_from_db(self) -> None:
         """Reconstruct pending state from database after daemon restart.
 
-        Uses dedicated repository methods:
-          * ``get_all_with_waiting_for()`` — only parents with waiting_for > 0
-          * ``get_pending_for_instances(child_ids)`` — single batched query
-            for pending messages across all children of a parent.
+        Crash-Recovery Contract
+        -----------------------
+        Rebuild is the SOLE mechanism for recovering ``_pending`` state after
+        a daemon restart. The CM is becoming the authoritative completion
+        tracker (Phase 3+), so the correctness of this method directly
+        determines whether the system can survive a crash without wedging
+        jobs in PROCESSING forever.
 
-        This collapses the previous 1 + P + P×C×3 query pattern down to
-        1 + P + 1 per parent.
+        **What rebuild does** (per-parent, for every ``parent`` in the DB
+        with ``waiting_for > 0``):
 
-        Logs a warning if the rebuilt CM count does not match the DB
-        ``waiting_for`` value (mismatches are expected during shadow mode
-        and are the data we want to capture).
+          (a) Reads ``waiting_for > 0`` parents via
+              ``get_all_with_waiting_for()`` (single query).
+          (b) For each parent, reads its children via ``get_children()``
+              (one query per parent).
+          (c) For each parent, reads pending messages across all of its
+              children via ``get_pending_for_instances(child_ids)`` (single
+              batched query — collapses the old ``1 + P + P*C*3`` pattern
+              down to ``1 + P + 1`` per parent).
+          (d) Populates ``_pending[parent_id]`` from the
+              ``(child_id, message_id)`` tuples returned. The
+              ``correlation_key`` is ``f"{child_id}:{message_id}"`` —
+              identical to what :meth:`register_message_send` produces, so
+              a subsequent :meth:`resolve_response` with the real UUID
+              will find the rebuilt entry.
+
+        **OVERWRITE vs MERGE semantics**:
+
+          * **Top-level (``self._pending = {}``) is OVERWRITE.** Stale
+            entries from before the crash are wiped before the rebuild loop
+            starts. This is the W2 fix: previously the method merged new
+            entries into the existing dict, which could re-add stale or
+            duplicate entries if a ``register_message_send`` landed
+            between ``start()`` and ``rebuild_from_db()``.
+          * **Per-parent write is MERGE.** When the rebuild loop reaches a
+            parent, it acquires the per-parent ``asyncio.Lock`` and
+            checks ``self._pending[parent_id]``. If a concurrent
+            ``register_message_send`` already populated the slot (after
+            the top-level clear but before the rebuild loop reached this
+            parent), the rebuild MERGES the DB-backed ``(child, msg)``
+            pairs into the existing ``ParentCorrelation.pending`` instead
+            of replacing the whole object. This preserves the
+            concurrent register's entries. If the slot is empty (the
+            common case), a fresh ``ParentCorrelation`` is created.
+
+        **Concurrency safety during rebuild**:
+
+          * Concurrent ``register_message_send`` for a parent that
+            arrives AFTER the top-level clear is preserved by the merge
+            semantics above. The per-parent ``asyncio.Lock`` serializes
+            the concurrent register against the rebuild's per-parent
+            write.
+          * Concurrent ``register_message_send`` that arrives BEFORE the
+            top-level clear (i.e. before rebuild starts) will have its
+            ``_pending[parent_id]`` entry wiped by the clear. This is
+            acceptable: the CM hook contract is "DB write first, then
+            register" (see :func:`notify_corr_register`), so any
+            completed register will be reflected in the DB and picked up
+            by the rebuild query. A register whose DB write was still
+            in-flight when the clear ran is effectively dropped — this
+            is a known limitation of the current architecture and is
+            out of scope for this method.
+
+        **Orphan count (zero children, ``waiting_for > 0``)**:
+
+          If a parent has ``waiting_for > 0`` but no children (or no
+          pending messages), the CM tracks nothing for that parent. The
+          rebuild logs a mismatch warning (``DB waiting_for=N, CM
+          found=0``). This is the correct behaviour for an inconsistent
+          DB state — the CM cannot fabricate pending entries that
+          aren't there. External recovery code is responsible for
+          reconciling the orphan count (e.g. by clearing the stale
+          ``waiting_for`` or by terminating the wedged parent).
+
+        **Race windows outside rebuild's control**:
+
+          * The top-level clear (``self._pending = {}``) is NOT held
+            under any lock. This is intentional: the per-parent locks
+            protect ``_pending[parent_id]`` writes, and the clear
+            itself is an idempotent dict reassignment. A concurrent
+            ``register_message_send`` that is mid-write when the clear
+            runs will land its entry in the new dict (or the old dict,
+            which is then dropped — see the "before clear" case above).
+          * Rebuild is NOT re-entrant. Do not call it from inside a
+            :meth:`register_message_send` or :meth:`resolve_response`
+            callback. ``start()`` is the only production caller and is
+            invoked exactly once during daemon startup, before any
+            EventBus traffic.
+
+        **Logging**:
+
+          * INFO: "rebuild_from_db: starting..." at start,
+            "rebuild_from_db complete: tracked_parents=X,
+            mismatch_warnings=Y" at end.
+          * WARNING: per-parent mismatch when CM count ≠ DB
+            ``waiting_for``. These are expected in shadow mode and are
+            the data we want to capture.
+          * DEBUG: per-parent match.
 
         Must be called from the main event loop (N3 constraint).
         """
@@ -517,6 +604,11 @@ class CorrelationManager:
         # so replacing the dict is safe; subsequent register/resolve
         # calls must go through the per-parent lock and will see the
         # rebuilt state.
+        #
+        # The clear is intentionally NOT held under any lock — it is an
+        # idempotent dict reassignment, and the per-parent locks below
+        # protect per-parent writes. See the crash-recovery contract in
+        # the docstring above for the full concurrency model.
         self._pending = {}
 
         # Step 1: Single query for all parents with waiting_for > 0.
@@ -544,21 +636,45 @@ class CorrelationManager:
                 )
 
             # Step 4: Build correlation entries from (child_id, message_id) tuples.
+            #
+            # Crash-recovery contract: MERGE into the existing slot if a
+            # concurrent register_message_send populated it after the
+            # top-level clear above. This is the additive complement to
+            # the W2 OVERWRITE-at-the-top: stale pre-clear entries are
+            # wiped by the clear, but a register that landed after the
+            # clear is preserved. If the slot is empty, create fresh.
             if pending_pairs:
                 async with self._get_lock(parent_id):
-                    # W2 fix: _pending was cleared above, so this slot is
-                    # always fresh — no need to check for an existing entry.
-                    parent_state = ParentCorrelation(parent_id=parent_id)
+                    # MERGE semantics: respect any ParentCorrelation that
+                    # a concurrent register_message_send already created.
+                    if parent_id not in self._pending:
+                        self._pending[parent_id] = ParentCorrelation(
+                            parent_id=parent_id
+                        )
+                    parent_state = self._pending[parent_id]
                     for child_id, message_id in pending_pairs:
                         correlation_key = f"{child_id}:{message_id}"
-                        parent_state.pending[correlation_key] = PendingResponse(
-                            parent_id=parent_id,
-                            child_id=child_id,
-                            message_id=message_id,
-                            created_at=time.monotonic(),
-                            status=STATUS_PENDING,
-                        )
-                    self._pending[parent_id] = parent_state
+                        # Only add the DB-backed entry if no entry for
+                        # this (child, msg) pair exists yet. A concurrent
+                        # register may have added the same pair (or a
+                        # pair whose DB write hasn't been read back yet);
+                        # in either case we must not clobber the
+                        # existing PendingResponse, which represents a
+                        # live correlation that the caller expects to
+                        # resolve later.
+                        if correlation_key not in parent_state.pending:
+                            parent_state.pending[correlation_key] = PendingResponse(
+                                parent_id=parent_id,
+                                child_id=child_id,
+                                message_id=message_id,
+                                created_at=time.monotonic(),
+                                status=STATUS_PENDING,
+                            )
+                    # No `self._pending[parent_id] = parent_state` here:
+                    # we either created a fresh object (assigned above)
+                    # or we mutated the existing object in place. The
+                    # reference in self._pending[parent_id] is already
+                    # correct.
 
             # W2 fix: Compare found count with DB waiting_for UNDER the
             # per-parent lock. Reading self._pending outside the lock was a
