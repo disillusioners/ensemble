@@ -653,6 +653,19 @@ class SQLModelInstanceRepository:
     def update_waiting_for(self, instance_id: str, waiting_for: int) -> Instance | None:
         """Update instance waiting_for counter.
 
+        Thin pass-through to :meth:`update` for the ``waiting_for`` column.
+        Per ADR-011, ``waiting_for`` is the rebuild cache and is retained
+        for ``rebuild_from_db()`` — actual production writes go through
+        the raw SQL UPDATE in the gated cascade sites
+        (e.g. ``daemon/services/child_reports.py``,
+        ``daemon/services/error_reporting.py``,
+        ``daemon/services/instance_lifecycle.py``,
+        ``daemon/tools/instance.py``) so the cascade can be gated behind
+        ``use_legacy_waiting_for_cascade``. This method is kept for
+        generic update convenience and is NOT called by the gated
+        cascade paths. Do NOT add callers without first adding a gate
+        in the same pattern as A4–A9.
+
         Args:
             instance_id: The instance ID to update.
             waiting_for: New waiting_for value.

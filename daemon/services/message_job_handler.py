@@ -483,60 +483,109 @@ class MessageJobHandler:
             # pending children, emit ``in_progress`` and leave the job
             # PROCESSING so the JobFeedbackObserver completes it via
             # the CM callback when the last child resolves.
+            #
+            # A9 gate: the legacy ``SELECT waiting_for`` fallback is
+            # additionally gated behind
+            # ``use_legacy_waiting_for_cascade``. Same pattern as
+            # A4/A8 in ``child_reports.py`` — CM-first, then
+            # kill-switch flag, then hard error. The fallback case
+            # (CM is None AND
+            # ``use_legacy_waiting_for_cascade=OFF``) is an invalid
+            # state and raises ``RuntimeError`` — the
+            # ``SELECT waiting_for`` TOCTOU is the exact bug we are
+            # fixing and MUST NOT be reachable.
             skip_complete = False
             wf = 0
+            # CM lookup is OUTSIDE the try/except so the gate
+            # RuntimeError below can propagate (it is not swallowed
+            # by the DB-error fallback).
             cm = None
             try:
-                # Try CM first (authoritative) before hitting the DB.
-                try:
-                    from daemon.services.correlation_manager import (
-                        get_correlation_manager,
-                    )
-                    cm = get_correlation_manager()
-                except Exception:
-                    cm = None
+                from daemon.services.correlation_manager import (
+                    get_correlation_manager,
+                )
+                cm = get_correlation_manager()
+            except Exception:
+                cm = None
 
-                if cm is not None:
-                    wf = cm.get_pending_count(instance_id)
-                    if wf > 0:
-                        logger.info(
-                            f"MessageJobHandler: CM reports "
-                            f"{wf} unresolved child correlation(s) "
-                            f"for instance {instance_id[:8]}..., "
-                            f"deferring completion for job {job_id[:8]}..."
-                        )
-                        skip_complete = True
-                else:
-                    # Graceful degradation: legacy ``waiting_for`` DB read.
-                    # The DB ``waiting_for`` snapshot can race against a
-                    # concurrent ``register_message_send``, but the CM's
-                    # in-memory pending set is the authoritative view
-                    # inside the per-parent lock. When ``cm.is_complete``
-                    # returns False, children are still pending — defer
-                    # completion so the CM callback handles the terminal
-                    # transition when the last child resolves.
-                    #
-                    # Phase 4: ``waiting_for`` is retained only as a
-                    # fallback for graceful degradation (CM is None /
-                    # disabled) and as the rebuild cache for
-                    # ``rebuild_from_db()`` (ADR-011).
+            use_legacy_cascade = bool(
+                getattr(
+                    getattr(getattr(self._manager, "config", None), "job_system", None),
+                    "use_legacy_waiting_for_cascade",
+                    False,
+                )
+            )
+
+            if cm is not None:
+                wf = cm.get_pending_count(instance_id)
+                if wf > 0:
+                    logger.info(
+                        f"MessageJobHandler: CM reports "
+                        f"{wf} unresolved child correlation(s) "
+                        f"for instance {instance_id[:8]}..., "
+                        f"deferring completion for job {job_id[:8]}..."
+                    )
+                    skip_complete = True
+            elif use_legacy_cascade:
+                # Legacy M0 fallback (kill switch ON): use the
+                # ``waiting_for`` column directly. The DB
+                # ``waiting_for`` snapshot can race against a
+                # concurrent ``register_message_send``, but the CM's
+                # in-memory pending set is the authoritative view
+                # inside the per-parent lock. When
+                # ``cm.is_complete`` returns False, children are
+                # still pending — defer completion so the CM
+                # callback handles the terminal transition when the
+                # last child resolves.
+                #
+                # ADR-011: ``waiting_for`` retained as rebuild
+                # cache — this is a control-flow read (drives
+                # ``skip_complete``), NOT a rebuild-only or
+                # display-only read. The kill switch is the
+                # authorization.
+                try:
                     instance = await asyncio.to_thread(
                         manager._instance_repository.get, instance_id
                     )
-                    if instance is not None:
-                        wf = getattr(instance, "waiting_for", None) or 0
-                        if wf > 0:
-                            logger.info(
-                                f"MessageJobHandler: instance "
-                                f"{instance_id[:8]}... has waiting_for={wf} "
-                                f"(status={instance.status}), "
-                                f"deferring completion for job {job_id[:8]}..."
-                            )
-                            skip_complete = True
-            except Exception as e:
-                logger.warning(
-                    f"MessageJobHandler: failed to check instance status for {instance_id[:8]}..., "
-                    f"proceeding with job completion: {e}"
+                except Exception as e:
+                    logger.warning(
+                        f"MessageJobHandler: failed to fetch instance for "
+                        f"legacy waiting_for check on {instance_id[:8]}..., "
+                        f"proceeding with job completion: {e}"
+                    )
+                    instance = None
+                if instance is not None:
+                    wf = getattr(instance, "waiting_for", None) or 0
+                    if wf > 0:
+                        logger.info(
+                            f"MessageJobHandler: instance "
+                            f"{instance_id[:8]}... has waiting_for={wf} "
+                            f"(status={instance.status}), "
+                            f"deferring completion for job {job_id[:8]}..."
+                        )
+                        skip_complete = True
+            else:
+                # ─── A9: HARD ERROR (not graceful degradation) ───
+                # CM is None AND
+                # ``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` is an
+                # INVALID state. Mirrors A8 in
+                # ``child_reports.py``. The ``SELECT waiting_for``
+                # fallback (TOCTOU) is the exact bug we are fixing
+                # — it MUST NOT be reachable. CM must be
+                # initialized for the new architecture to work; we
+                # raise rather than silently degrade into the
+                # TOCTOU fallback. This propagates UP through the
+                # outer ``except Exception`` for DB errors (which
+                # is scoped to the DB query, not the gate check)
+                # and is handled by the caller as a fatal
+                # misconfiguration.
+                raise RuntimeError(
+                    "CorrelationManager is None while "
+                    "USE_LEGACY_WAITING_FOR_CASCADE=OFF — invalid state. "
+                    "Either wire the CM (Phase 2) or set "
+                    "use_legacy_waiting_for_cascade=True for the legacy "
+                    "M0 cascade path. See ADR-011 and "
+                    "docs/configuration/completion-flags.md."
                 )
 
             if skip_complete:

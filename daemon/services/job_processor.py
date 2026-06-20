@@ -147,6 +147,16 @@ class JobProcessor:
         ``waiting_for`` DB column is retained as the rebuild cache and as the
         fallback when CM is None / disabled.
 
+        A9 gate: the legacy ``SELECT waiting_for`` fallback is
+        additionally gated behind
+        ``use_legacy_waiting_for_cascade``. Same pattern as A4/A8
+        in ``child_reports.py`` — CM-first, then kill-switch flag,
+        then hard error. The fallback case (CM is None AND
+        ``use_legacy_waiting_for_cascade=OFF``) is an invalid
+        state and raises ``RuntimeError`` — the
+        ``SELECT waiting_for`` TOCTOU is the exact bug we are
+        fixing and MUST NOT be reachable.
+
         Adds two safety nets that the original 6 inline blocks did not have:
         * **Throttle/dedup** — within a 300s window we skip re-emitting when
           pending count is unchanged, so a hot poll loop cannot spam
@@ -172,14 +182,59 @@ class JobProcessor:
         # CM is None / disabled. The DB column's WRITES are retained for
         # ``rebuild_from_db()`` (ADR-011); only the READ for control flow
         # is deprecated in favor of the CM call.
+        #
+        # A9 gate: the legacy DB read is additionally gated behind
+        # ``use_legacy_waiting_for_cascade``. When OFF (default), the
+        # CM is the SOLE completion authority and the
+        # ``SELECT waiting_for`` fallback is unreachable. See
+        # ``docs/configuration/completion-flags.md``.
         assert hasattr(instance_meta, "instance_id"), "instance_meta must be an InstanceModel"
         instance_id = instance_meta.instance_id
         cm = get_correlation_manager()
+        # Read the kill-switch flag via the instance manager's config
+        # (JobProcessor has no direct config reference; the facade
+        # exposes ``config``). Use ``getattr`` so test mocks that
+        # bypass ``__init__`` (e.g. ``InstanceManager.__new__`` in
+        # tests/test_resume_gate.py) don't crash. The default is
+        # False (kill switch OFF = CM is the SOLE completion
+        # authority) — the safe default that matches the config's
+        # default.
+        _config = getattr(self._instance_manager, "config", None)
+        _job_system = getattr(_config, "job_system", None)
+        use_legacy_cascade = bool(
+            getattr(_job_system, "use_legacy_waiting_for_cascade", False)
+        )
         if cm is not None:
             wf = int(cm.get_pending_count(instance_id) or 0)
-        else:
-            # Defensive int conversion — handles None, strings, or any odd DB type.
+        elif use_legacy_cascade:
+            # Legacy M0 fallback (kill switch ON): use the
+            # ``waiting_for`` column directly. Race-prone
+            # (Phase 4 docstring) but the behaviour Phase A is
+            # rolling back FROM.
+            #
+            # ADR-011: ``waiting_for`` retained as rebuild cache —
+            # this is a control-flow read (drives
+            # ``_emit_in_progress`` deferral), NOT a rebuild-only
+            # or display-only read. The kill switch is the
+            # authorization.
             wf = int(getattr(instance_meta, "waiting_for", 0) or 0)
+        else:
+            # ─── A9: HARD ERROR (not graceful degradation) ───
+            # CM is None AND ``USE_LEGACY_WAITING_FOR_CASCADE=OFF``
+            # is an INVALID state. Mirrors A8 in
+            # ``child_reports.py``. The ``SELECT waiting_for``
+            # fallback (TOCTOU) is the exact bug we are fixing —
+            # it MUST NOT be reachable. CM must be initialized
+            # for the new architecture to work; we raise rather
+            # than silently degrade into the TOCTOU fallback.
+            raise RuntimeError(
+                "CorrelationManager is None while "
+                "USE_LEGACY_WAITING_FOR_CASCADE=OFF — invalid state. "
+                "Either wire the CM (Phase 2) or set "
+                "use_legacy_waiting_for_cascade=True for the legacy "
+                "M0 cascade path. See ADR-011 and "
+                "docs/configuration/completion-flags.md."
+            )
         if wf <= 0:
             return False
 

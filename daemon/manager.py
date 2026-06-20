@@ -2980,20 +2980,75 @@ class InstanceManager:
                 # CM tracks correlation state. ``waiting_for`` is retained only
                 # as a fallback for graceful degradation (CM is None / disabled)
                 # and as the rebuild cache for ``rebuild_from_db()`` (ADR-011).
+                #
+                # A9 gate: same pattern as A4/A8 in
+                # ``child_reports.py`` — CM-first, then
+                # ``use_legacy_waiting_for_cascade`` flag, then hard
+                # error. The legacy ``SELECT waiting_for`` is a control-flow
+                # read (drives ``skip_complete``) and must be gated the
+                # same way as the cascade in ``child_reports.py``.
+                # The config flag + CM lookup + gate enforcement are
+                # OUTSIDE the try/except so the hard-error RuntimeError
+                # (gate violation) propagates UP and is not swallowed
+                # by the DB-error fallback below. The try/except
+                # scopes ONLY the DB instance fetch.
+                #
+                # Use ``getattr`` for ``self.config`` so test mocks
+                # that bypass ``__init__`` (e.g. ``InstanceManager.__new__``
+                # in tests/test_resume_gate.py) don't crash. The
+                # default is False (kill switch OFF = CM is the SOLE
+                # completion authority) — the safe default that
+                # matches the config's default.
+                _config = getattr(self, "config", None)
+                _job_system = getattr(_config, "job_system", None)
+                use_legacy_cascade = bool(
+                    getattr(_job_system, "use_legacy_waiting_for_cascade", False)
+                )
+                cm = get_correlation_manager()
                 skip_complete = False
                 try:
                     instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
-                    if instance is not None:
-                        cm = get_correlation_manager()
-                        if cm is not None:
-                            pending = cm.get_pending_count(instance_id)
-                        else:
-                            pending = getattr(instance, 'waiting_for', None) or 0
-                        if pending > 0:
-                            skip_complete = True
                 except Exception as e:
                     logger.warning(f"Failed to check pending children for completion: {e}")
+                    instance = None
                     skip_complete = True  # Safe: don't complete if we can't verify
+
+                if not skip_complete and instance is not None:
+                    if cm is not None:
+                        pending = cm.get_pending_count(instance_id)
+                    elif use_legacy_cascade:
+                        # Legacy M0 fallback (kill switch ON): use
+                        # the ``waiting_for`` column directly.
+                        # Race-prone (Phase 4 docstring) but the
+                        # behaviour Phase A is rolling back FROM.
+                        pending = getattr(instance, 'waiting_for', None) or 0
+                    else:
+                        # ─── A9: HARD ERROR (not graceful degradation) ───
+                        # CM is None AND
+                        # ``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` is an
+                        # INVALID state in the resume path too.
+                        # Mirrors A8 in ``child_reports.py``. The
+                        # ``SELECT waiting_for`` fallback (TOCTOU) is
+                        # the exact bug we are fixing — it MUST NOT
+                        # be reachable when both the kill switch is
+                        # OFF and CM is None. CM must be initialized
+                        # for the new architecture to work; we raise
+                        # rather than silently degrade. This is a
+                        # FATAL misconfiguration — the daemon's
+                        # completion architecture is in an invalid
+                        # state and the resume path cannot make a
+                        # safe decision. The caller will see this as
+                        # an unhandled exception.
+                        raise RuntimeError(
+                            "CorrelationManager is None while "
+                            "USE_LEGACY_WAITING_FOR_CASCADE=OFF — invalid state. "
+                            "Either wire the CM (Phase 2) or set "
+                            "use_legacy_waiting_for_cascade=True for the legacy "
+                            "M0 cascade path. See ADR-011 and "
+                            "docs/configuration/completion-flags.md."
+                        )
+                    if pending > 0:
+                        skip_complete = True
 
                 if skip_complete:
                     logger.info(f"[RESUME] instance={instance_id[:8]} still waiting for children, job stays PROCESSING")
