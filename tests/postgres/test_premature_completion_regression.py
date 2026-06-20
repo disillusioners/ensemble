@@ -1305,8 +1305,11 @@ class TestProductionPathFinalizeJob:
             # Direct production-path call. The pre-fetch uses the mocked
             # ``_get_last_assistant_message_raw`` (no Session.execute).
             await observer._finalize_job(job, parent_id, "completed", error=None)
-            # Let the create_task scheduled by _finalize_job run.
-            await asyncio.sleep(0.05)
+            # Yield + poll for the create_task (notify_corr_rearm) to run.
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                if rearm_spy.await_count > 0:
+                    break
 
             # C1-N1 fix: gate raised → deferred (NOT W3 fail-safed to FAILED).
             assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
