@@ -27,12 +27,19 @@
 - `5f9ee985` — A10, A11, A13, A15: invariant, regression, crash-recovery tests
 - `ef147bfa` — Reviewer fixes: C1 (cross-thread race), C2 (threading test), W1 (re-entrancy guard), W2 (RuntimeError propagation)
 - `9414a17f` — Reviewer fix v2: post-commit orphan race closed via generation counter + re-arm mechanism
+- `272fd840` — Reviewer fix v3: return after re-arm to prevent outbox fall-through
 
-**Phase B (Close the Bug Class) — READY**
-- Route `watch_job`/`job_continue` through CM
-- Add `pending_jobs` to CM
-- All 3 repro variants structurally impossible
-- Est. 2.5 days
+**Phase B (Close the Bug Class) — COMPLETE ✅**
+- `bad3bea3` — B1-B4: pending_jobs in CM, register_job_send/resolve_job, watch_job routing, observer terminal resolution
+- `3ae8a72e` — B5: watch_job integration test pack (10 tests, Variant B regression)
+
+**Phase B Status**: All 3 premature completion repro variants structurally impossible. 260 tests pass.
+
+**Phase B (Close the Bug Class) — COMPLETE ✅**
+- Route `watch_job`/`job_continue` through CM via `pending_jobs`
+- `ParentCorrelation` now tracks `pending_jobs: set[str]` alongside `pending`
+- `is_complete()` returns True only when BOTH are empty
+- 260 tests pass (223 SQLite + 37 PostgreSQL)
 
 **Phase C (Single Dispatcher) — PENDING**
 - Unify enqueue to WorkerPool-only
