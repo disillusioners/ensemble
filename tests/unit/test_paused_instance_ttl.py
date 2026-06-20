@@ -155,7 +155,7 @@ class TestCleanupCachedInstances:
         assert diff_over_ttl > ttl_seconds, "Instance over TTL should have diff > ttl"
         
         # Case 3: Instance cached well over TTL - SHOULD be released
-        long_expired_time = (datetime.utcnow() - timedelta(hours=10)).isoformat()
+        long_expired_time = (datetime.utcnow() - timedelta(hours=48)).isoformat()
         long_expired_instance = self._make_cached_instance(instance_id, long_expired_time)
         cached_at = datetime.fromisoformat(long_expired_instance.updated_at)
         diff_long_expired = (datetime.utcnow() - cached_at).total_seconds()
@@ -297,7 +297,7 @@ class TestCleanupCachedInstances:
         from daemon.manager import InstanceManager
         
         # Create multiple instances with various invalid updated_at values
-        # valid_instance is 2h ago (within 4h TTL), so it should be kept
+        # valid_instance is 2h ago (within 24h TTL), so it should be kept
         valid_instance = self._make_cached_instance(
             "valid-instance",
             (datetime.utcnow() - timedelta(hours=2)).isoformat()
@@ -396,9 +396,9 @@ class TestCleanupCachedInstances:
         mock_graph = MagicMock()
         mock_manager.instances[instance_id] = (mock_graph, "/agents/test")
         
-        # Create cached instance that was updated 5 hours ago (past 4h TTL)
+        # Create cached instance that was updated 25 hours ago (past 24h TTL)
         # Use timezone-aware datetime (+00:00) to match production code's datetime.now(timezone.utc)
-        expired_time = (datetime.utcnow() - timedelta(hours=5)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
+        expired_time = (datetime.utcnow() - timedelta(hours=25)).strftime('%Y-%m-%dT%H:%M:%S+00:00')
         mock_instance = self._make_cached_instance(instance_id, expired_time, status=status)
         mock_manager._instance_repository.list.return_value = ([mock_instance], 1)
         
@@ -446,8 +446,8 @@ class TestHotColdResume:
         # should remain in memory for fast hot resume
         from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        # TTL should be 4 hours
-        assert INSTANCE_CACHE_TTL_HOURS == 4
+        # TTL should be 24 hours
+        assert INSTANCE_CACHE_TTL_HOURS == 24
 
     def test_cold_resume_after_ttl_concept(self):
         """After TTL release, resuming the instance works (graph rebuilt from checkpoint)."""
@@ -455,8 +455,8 @@ class TestHotColdResume:
         # involves the checkpointer and is tested elsewhere.
         # We verify the TTL constant is defined correctly.
         from daemon.manager import INSTANCE_CACHE_TTL_HOURS
-        
-        assert INSTANCE_CACHE_TTL_HOURS == 4
+
+        assert INSTANCE_CACHE_TTL_HOURS == 24
 
 
 class TestTTLConstants:
@@ -466,7 +466,7 @@ class TestTTLConstants:
         """Verify TTL constant is defined and reasonable."""
         from daemon.manager import INSTANCE_CACHE_TTL_HOURS
         
-        assert INSTANCE_CACHE_TTL_HOURS == 4
+        assert INSTANCE_CACHE_TTL_HOURS == 24
         assert INSTANCE_CACHE_TTL_HOURS > 0
         assert INSTANCE_CACHE_TTL_HOURS < 168  # Less than 1 week
 

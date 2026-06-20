@@ -95,7 +95,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # TTL for releasing in-memory graphs for non-active cached instances (in hours)
-INSTANCE_CACHE_TTL_HOURS = 4
+INSTANCE_CACHE_TTL_HOURS = 24
 
 
 def _build_message_content(message: str, images: list[str] | None) -> str | list:
