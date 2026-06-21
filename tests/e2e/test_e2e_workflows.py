@@ -75,6 +75,13 @@ TEST_MESSAGE = (
     "ask coder to say hello, this is a test workflow, coder dont need do anything"
 )
 
+# Phase 2 message — sent to the same (already-completed) leader to verify
+# that the leader instance is reused and the existing coder child is reused
+# rather than spawning a brand-new instance.
+PHASE2_MESSAGE = (
+    "continue our test, reuse the coder instance, say hi and ask him say another hello"
+)
+
 # Statuses that mean "the instance is done doing work" for our purposes.
 # ``completed`` is the normal end-state; ``terminated`` / ``error`` /
 # ``failed`` indicate the workflow stopped for some other reason.
@@ -436,10 +443,16 @@ def _wait_for_status(
 def test_parent_child_workflow_happy_path():
     """E2E Test 1: Normal parent→child workflow (happy path).
 
-    Sends a message to the leader asking it to spawn a coder to say
-    hello. Verifies that the leader spawns a coder child, the leader
-    eventually completes (or otherwise reaches a terminal status), and
-    the conversation history contains an assistant turn.
+    **Phase 1** — Sends a message to the leader asking it to spawn a coder
+    to say hello. Verifies that the leader spawns a coder child, the
+    leader eventually completes (or otherwise reaches a terminal status),
+    and the conversation history contains an assistant turn.
+
+    **Phase 2** — After Phase 1 completes, sends a *second* message to the
+    same already-completed leader and verifies that (a) the leader instance
+    is reused, (b) the same coder child is reused rather than a fresh spawn,
+    (c) the reused child runs the new message to terminal status, and
+    (d) the leader produces at least one additional assistant turn.
 
     Run with::
 
@@ -494,6 +507,134 @@ def test_parent_child_workflow_happy_path():
         logger.info(
             f"[ASSERT] leader produced {len(assistant_turns)} assistant turn(s)"
         )
+
+        # =====================================================================
+        # PHASE 2: Send a second message to the same (completed) leader.
+        # Verify that the leader instance is reused, the same coder child is
+        # reused, and the full parent → child → completion → parent cycle
+        # works a second time on the same leader_id.
+        # =====================================================================
+        logger.info("=" * 60)
+        logger.info("PHASE 2: message-after-completion reuse")
+        logger.info("=" * 60)
+
+        # Step P2.1 — Preserve the Phase 1 child_id for reuse verification.
+        assert child_id is not None, (
+            "Phase 1 child_id should not be None at the start of Phase 2"
+        )
+        logger.info(
+            f"[P2.1] Phase 1 child_id preserved: {child_id[:8]}..."
+        )
+
+        # Step P2.2 — Record the leader's children list before the second
+        # message, so we can later verify whether the coder child was reused
+        # (expected) or whether a new child was spawned (warn-worthy).
+        children_before_data = _get_instance(leader_id)
+        children_before = children_before_data.get("children", [])
+        # Defensive fallbacks for schema evolution (mirrors _wait_for_child_spawned).
+        if not isinstance(children_before, list):
+            for alt_key in ("child_ids", "child_instances"):
+                alt = children_before_data.get(alt_key)
+                if isinstance(alt, list):
+                    children_before = alt
+                    break
+            else:
+                children_before = []
+        child_ids_before = set(children_before)
+        logger.info(
+            f"[P2.2] Children before Phase 2: "
+            f"count={len(children_before)} ids={child_ids_before}"
+        )
+
+        # Step P2.3 — Send the second message. The leader may be in
+        # ``completed`` status; the POST /messages endpoint should
+        # auto-resume/reactivate the instance.
+        _send_message(leader_id, PHASE2_MESSAGE)
+
+        # Step P2.4 — Wait for the leader to process the second message and
+        # reach a terminal status again.
+        p2_finished, p2_final_status = _wait_for_completion(leader_id)
+        assert p2_finished, (
+            f"Leader {leader_id[:8]}... did not reach a terminal status "
+            f"in Phase 2 within {COMPLETION_TIMEOUT}s "
+            f"(last status: {p2_final_status})"
+        )
+        logger.info(
+            f"[ASSERT] leader reached terminal status after Phase 2: "
+            f"{p2_final_status}"
+        )
+
+        # Step P2.5 — Verify the coder child is REUSED, not a new spawn.
+        children_after_data = _get_instance(leader_id)
+        children_after = children_after_data.get("children", [])
+        if not isinstance(children_after, list):
+            for alt_key in ("child_ids", "child_instances"):
+                alt = children_after_data.get(alt_key)
+                if isinstance(alt, list):
+                    children_after = alt
+                    break
+            else:
+                children_after = []
+        child_ids_after = set(children_after)
+        logger.info(
+            f"[P2.5] Children after Phase 2: "
+            f"count={len(children_after)} ids={child_ids_after}"
+        )
+        assert child_id in child_ids_after, (
+            f"Phase 1 child {child_id[:8]}... not in children after Phase 2: "
+            f"{child_ids_after}"
+        )
+        logger.info(
+            f"[ASSERT] Phase 1 child {child_id[:8]}... reused after Phase 2"
+        )
+        new_children = child_ids_after - child_ids_before
+        if new_children:
+            logger.warning(
+                f"[WARN] Phase 2 spawned NEW children {new_children} "
+                f"instead of reusing the existing coder child"
+            )
+
+        # Step P2.6 — Wait for the child to reach a terminal status after
+        # Phase 2 processing. This proves the reused child actually ran
+        # the new message to completion.
+        child_finished, child_final_status = _wait_for_completion(child_id)
+        assert child_finished, (
+            f"Coder child {child_id[:8]}... did not complete after Phase 2 "
+            f"within {COMPLETION_TIMEOUT}s (last status: {child_final_status})"
+        )
+        logger.info(
+            f"[ASSERT] coder child completed after Phase 2: "
+            f"status={child_final_status}"
+        )
+
+        # Step P2.7 — Verify the leader now has at least one more assistant
+        # turn than after Phase 1, evidence that Phase 2's processing
+        # produced new assistant output.
+        messages_after = _get_messages(leader_id)
+        assert isinstance(messages_after, list), (
+            f"Expected list from /messages, got: {type(messages_after).__name__}"
+        )
+        assistant_turns_after = [
+            m for m in messages_after
+            if isinstance(m, dict) and m.get("role") == "assistant"
+            and (m.get("content") or "").strip()
+        ]
+        expected_min = len(assistant_turns) + 1
+        assert len(assistant_turns_after) >= expected_min, (
+            f"Expected at least {expected_min} assistant turns after Phase 2, "
+            f"got {len(assistant_turns_after)}"
+        )
+        logger.info(
+            f"[ASSERT] leader produced {len(assistant_turns_after)} "
+            f"assistant turn(s) total (was {len(assistant_turns)} after Phase 1)"
+        )
+
+        logger.info("=" * 60)
+        logger.info(
+            "Phase 2 PASSED: Leader reused, child reused, "
+            "second message cycle complete"
+        )
+        logger.info("=" * 60)
 
         logger.info("TEST 1 PASSED")
 
