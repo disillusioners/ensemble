@@ -129,7 +129,6 @@ class JobQueueService:
         self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
         self._project_repo: Any | None = None  # Project repository for pause state checks
         self._watcher_repo: Any | None = None  # Repository for job watchers
-        self._message_job_handler: Any | None = None  # MessageJobHandler for MESSAGE jobs
     
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine for auto-retry functionality.
@@ -207,8 +206,9 @@ class JobQueueService:
         use it for any control-flow decision. Callers should derive
         ``waiting_for`` from the CorrelationManager (``cm.get_pending_count()``)
         when available, falling back to the ``waiting_for`` DB column when
-        CM is None / disabled. The callers (message_job_handler.py,
-        job_processor.py, job_feedback_observer.py) own this derivation.
+        CM is None / disabled. The callers (job_processor.py and
+        job_feedback_observer.py) own this derivation — the legacy
+        ``message_job_handler.py`` was removed in Phase D.
         """
         if self._watcher_repo is None or self._instance_manager is None:
             return 0
@@ -1700,15 +1700,20 @@ class JobQueueService:
         return []
 
     async def cancel_message_job(self, job_id: str) -> None:
-        """Cancel a MESSAGE-type job. Delegates to MessageJobHandler.
+        """Backward-compat shim for the legacy MESSAGE-specific cancel entry point.
 
-        This is the public API called by instance_lifecycle.terminate_instance()
-        and any other external callers.
+        Phase D removed the :class:`MessageJobHandler`; the per-job
+        CancellationToken that ``MessageJobHandler.cancel_message_job``
+        used to signal no longer exists (unified dispatcher owns the
+        cancellation token via the WorkerPool). This shim delegates to
+        the general-purpose :meth:`cancel_job` which handles both
+        PENDING and PROCESSING states atomically and notifies watchers.
+
+        Callers:
+          * :func:`daemon.services.instance_lifecycle.terminate_instance`
+            still calls this entry point after the bulk DB cancel.
 
         Args:
             job_id: The job to cancel.
         """
-        if self._message_job_handler is None:
-            logger.warning(f"Cannot cancel MESSAGE job {job_id[:8]}... — no handler registered")
-            return
-        await self._message_job_handler.cancel_message_job(job_id)
+        await self.cancel_job(job_id)

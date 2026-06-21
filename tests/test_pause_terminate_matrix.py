@@ -1,43 +1,32 @@
 """C4.5 — Pause/terminate discrimination matrix test pack.
 
 This file snapshots the **CURRENT** pause/terminate discrimination
-behaviour of the daemon's two physical message-processing dispatchers:
+behaviour of the daemon's WorkerPool message-processing dispatcher:
 
-1. **JobQueue path** —
-   :class:`daemon.services.message_job_handler.MessageJobHandler.handle`
-   drives ``MESSAGE``-typed jobs from ``job_queue_items``.
+* **WorkerPool path** —
+  :class:`daemon.services.task_processor.ProcessMessageProcessor.process`
+  drives ``process_message`` tasks from the ``task`` table.
 
-2. **WorkerPool path** —
-   :class:`daemon.services.task_processor.ProcessMessageProcessor.process`
-   drives ``process_message`` tasks from the ``task`` table.
+The JobQueue path was removed in Phase D — message work now flows
+through the unified ``JobFeedbackObserver._admit_via_worker_pool`` path
+(Phase C) + the Dependency Bus (Phase D). The legacy
+``MessageJobHandler.handle`` is gone.
 
-The two paths share the six-stage :class:`MessageProcessingPipeline`
-since Phase 5, **but they deliberately diverge** at the cancellation
-boundary:
+This file locks in the current WorkerPool behaviour so a refactor
+cannot accidentally break pause-vs-terminate discrimination.
 
-* **JQ path** discriminates pause-vs-terminate on
-  ``asyncio.CancelledError`` by reading ``instance.status`` from the DB.
-  PAUSE → leave the job in PROCESSING (for resume). Anything else →
-  ``complete_job(CANCELLED)`` and re-raise.
-* **WP path** does **not** discriminate. It always re-raises
-  ``asyncio.CancelledError`` and lets the worker pool decide.
-
-This divergence is the precondition for C-M5 (unification). This file
-locks in the current behaviour so a post-unification re-run will catch
-any accidental regression.
-
-The tests are **unit tests with mocks**: they drive ``handle`` / ``process``
+The tests are **unit tests with mocks**: they drive ``process``
 directly with a transparent Execution Gate and assert on the public
-observable side-effects (``complete_job`` calls, ``complete_task`` calls,
-exception propagation). No real DB rows are inspected for the
-discrimination logic — the mock ``complete_job`` / ``complete_task``
-spy the calls that *would* mutate state.
+observable side-effects (``complete_task`` calls, exception
+propagation). No real DB rows are inspected for the discrimination
+logic — the mock ``complete_task`` spy records the calls that *would*
+mutate state.
 
 Run ONLY this file::
 
     pytest tests/test_pause_terminate_matrix.py -v
 
-Test count: 20 (10 JQ path + 10 WP path).
+Test count: 10 (WorkerPool path).
 """
 
 from __future__ import annotations
@@ -47,10 +36,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from daemon.cancellation import (
-    CancellationReason,
-    OperationCancelledError,
-)
 from daemon.manager import MessageResult
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import JobStatus
@@ -61,7 +46,6 @@ from daemon.services.execution_gate import (
     LeaseHolderKind,
     LeaseLostError,
 )
-from daemon.services.job_queue_service import DemandState
 
 
 # ---------------------------------------------------------------------------
@@ -289,408 +273,6 @@ def _disable_cm():
         "daemon.services.correlation_manager.get_correlation_manager",
         side_effect=RuntimeError("CM not initialized in test"),
     )
-
-
-# ===========================================================================
-# Group 1: MessageJobHandler (JobQueue path) — 10 tests
-# ===========================================================================
-
-
-class TestMessageJobHandlerPauseTerminateMatrix:
-    """Pause/terminate discrimination matrix for the JobQueue path.
-
-    Exercises ``MessageJobHandler.handle`` (438 lines) with each
-    (starting instance state × cancel reason) and asserts the
-    resulting job transition and exception propagation.
-    """
-
-    # ------------------------------------------------------------------
-    # Test 1: RUNNING + normal completion → COMPLETED
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_01_jq_running_normal_completion_completes_job(self):
-        """RUNNING instance + happy path → ``complete_job(COMPLETED)``."""
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=MessageResult(content="done", tool_calls=None),
-            instance_status=InstanceStatus.RUNNING.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            await handler.handle(job)
-
-        # Job is completed with COMPLETED demand state.
-        job_service.complete_job.assert_awaited_once()
-        call = job_service.complete_job.await_args
-        assert call.args[0] == job.job_id
-        assert call.kwargs["demand_state"] == DemandState.COMPLETED
-
-    # ------------------------------------------------------------------
-    # Test 2: RUNNING + error → FAILED
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_02_jq_running_error_marks_job_failed(self):
-        """RUNNING instance + work_fn raises → error helper marks job FAILED.
-
-        The JQ handler's outer ``except Exception`` clause runs
-        ``handle_message_processing_error(job_id=...)`` which in turn
-        calls ``complete_job(FAILED)``.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=RuntimeError("graph blew up"),
-            instance_status=InstanceStatus.RUNNING.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            # The handler swallows generic exceptions after running the
-            # error helper — no re-raise.
-            await handler.handle(job)
-
-        # complete_job must be called with FAILED by the error helper.
-        job_service.complete_job.assert_awaited()
-        failed_calls = [
-            c for c in job_service.complete_job.await_args_list
-            if c.kwargs.get("demand_state") == DemandState.FAILED
-        ]
-        assert len(failed_calls) >= 1, (
-            "Expected at least one complete_job(FAILED) call from the error helper"
-        )
-
-    # ------------------------------------------------------------------
-    # Test 3: RUNNING + asyncio.CancelledError + RUNNING instance
-    #         → CANCELLED + re-raise (NOT pause)
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_03_jq_running_cancellederror_running_instance_cancels_and_reraises(self):
-        """RUNNING instance + asyncio.CancelledError → ``complete_job(CANCELLED)`` + re-raise.
-
-        This is the **non-pause** branch of the discrimination: instance
-        status is RUNNING (e.g. shutdown in flight, status not yet
-        TERMINATED), so the handler completes the job as CANCELLED and
-        re-raises.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=asyncio.CancelledError(),
-            instance_status=InstanceStatus.RUNNING.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            with pytest.raises(asyncio.CancelledError):
-                await handler.handle(job)
-
-        job_service.complete_job.assert_awaited_once_with(
-            job.job_id,
-            demand_state=DemandState.CANCELLED,
-            error="Message processing cancelled (instance terminated)",
-        )
-
-    # ------------------------------------------------------------------
-    # Test 4: RUNNING + OperationCancelledError (token cancel)
-    #         → CANCELLED (no pause discrimination, no re-raise)
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_04_jq_operation_cancelled_error_completes_cancelled_no_reraise(self):
-        """RUNNING instance + OperationCancelledError → ``complete_job(CANCELLED)``.
-
-        Token-cancel (via ``cancel_message_job``) always completes the
-        job as CANCELLED. Unlike ``asyncio.CancelledError``, this path
-        does **not** re-raise — mirroring the original JQ handler.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=OperationCancelledError(reason=CancellationReason.MANUAL),
-            instance_status=InstanceStatus.RUNNING.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            # No re-raise — the handler swallows OperationCancelledError
-            # after completing the job.
-            await handler.handle(job)
-
-        job_service.complete_job.assert_awaited_once_with(
-            job.job_id,
-            demand_state=DemandState.CANCELLED,
-            error="Message processing cancelled",
-        )
-
-    # ------------------------------------------------------------------
-    # Test 5: PAUSED + asyncio.CancelledError → stays PROCESSING
-    #         (THE pause discrimination — no complete_job, no re-raise)
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_05_jq_paused_cancellederror_keeps_job_processing(self):
-        """PAUSED instance + asyncio.CancelledError → job STAYS PROCESSING.
-
-        This is the **core** pause discrimination test. The handler
-        reads ``instance.status`` from the DB and, finding PAUSED,
-        swallows the CancelledError so the worker pool doesn't mark the
-        job FAILED. The job stays PROCESSING so it can be resumed.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=asyncio.CancelledError(),
-            instance_status=InstanceStatus.PAUSED.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            # No exception — the handler swallows it for PAUSE.
-            await handler.handle(job)
-
-        # CRITICAL: complete_job must NOT be called. The job stays
-        # PROCESSING so the resume path can pick it back up.
-        job_service.complete_job.assert_not_called()
-
-    # ------------------------------------------------------------------
-    # Test 6: TERMINATED + asyncio.CancelledError → CANCELLED + re-raise
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_06_jq_terminated_cancellederror_cancels_and_reraises(self):
-        """TERMINATED instance + asyncio.CancelledError → CANCELLED + re-raise.
-
-        TERMINATED is not PAUSED, so the handler treats it as a hard
-        terminate: completes the job as CANCELLED and re-raises so the
-        caller (JobProcessor) can clean up.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=asyncio.CancelledError(),
-            instance_status=InstanceStatus.TERMINATED.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            with pytest.raises(asyncio.CancelledError):
-                await handler.handle(job)
-
-        job_service.complete_job.assert_awaited_once_with(
-            job.job_id,
-            demand_state=DemandState.CANCELLED,
-            error="Message processing cancelled (instance terminated)",
-        )
-
-    # ------------------------------------------------------------------
-    # Test 7: RUNNING + LeaseContention → requeue (atomic_transition PENDING)
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_07_jq_running_lease_contention_requeues_pending(self):
-        """RUNNING + gate returns LeaseContention → ``atomic_transition(PENDING)``.
-
-        The ``on_contention`` callback re-queues the job via
-        ``atomic_transition(PROCESSING→PENDING)`` and releases the queue
-        lock. No ``complete_job`` is called.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=MessageResult(content="unused", tool_calls=None),
-            instance_status=InstanceStatus.RUNNING.value,
-            gate=_make_contention_gate(),
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        await handler.handle(job)
-
-        # atomic_transition PROCESSING→PENDING.
-        job_repo.atomic_transition.assert_called_once_with(
-            job.job_id,
-            from_status="processing",
-            to_status="pending",
-        )
-        # complete_job is NOT called on contention.
-        job_service.complete_job.assert_not_called()
-
-    # ------------------------------------------------------------------
-    # Test 8: RUNNING + LeaseLostError → requeue (atomic_transition PENDING)
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_08_jq_running_lease_lost_requeues_pending(self):
-        """RUNNING + gate raises LeaseLostError → ``atomic_transition(PENDING)``.
-
-        ``LeaseLostError`` is the mid-flight variant: the lease was
-        revoked while work_fn was running. Same re-queue path as
-        LeaseContention, but with a warning-level log.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=MessageResult(content="unused", tool_calls=None),
-            instance_status=InstanceStatus.RUNNING.value,
-            gate=_make_lease_lost_gate(),
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        await handler.handle(job)
-
-        job_repo.atomic_transition.assert_called_once_with(
-            job.job_id,
-            from_status="processing",
-            to_status="pending",
-        )
-        job_service.complete_job.assert_not_called()
-
-    # ------------------------------------------------------------------
-    # Test 9: ERROR + processing → FAILED
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_09_jq_error_instance_processing_marks_job_failed(self):
-        """ERROR instance + work_fn raises → error helper marks job FAILED.
-
-        The instance is already in ERROR state when the job runs. The
-        work_fn raises; the outer ``except Exception`` runs
-        ``handle_message_processing_error`` which calls
-        ``complete_job(FAILED)``. Instance status is irrelevant to the
-        generic-error path (the discrimination only applies to
-        ``asyncio.CancelledError``).
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=ValueError("bad input"),
-            instance_status=InstanceStatus.ERROR.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            await handler.handle(job)
-
-        failed_calls = [
-            c for c in job_service.complete_job.await_args_list
-            if c.kwargs.get("demand_state") == DemandState.FAILED
-        ]
-        assert len(failed_calls) >= 1
-
-    # ------------------------------------------------------------------
-    # Test 10: WAITING_CHILDREN + new message → pre-pickup RUNNING transition
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_10_jq_waiting_children_new_message_transitions_to_running(self):
-        """WAITING_CHILDREN instance + new message → ``transition_status_if(RUNNING)``.
-
-        The JQ handler performs a pre-pickup transition so observers
-        see a status_change event. For a WAITING_CHILDREN instance
-        receiving a new message, the transition is
-        WAITING_CHILDREN → RUNNING. This makes the self-continuation
-        path's liveness explicit.
-        """
-        from daemon.services.message_job_handler import MessageJobHandler
-
-        manager = _make_mock_manager(
-            result=MessageResult(content="done", tool_calls=None),
-            instance_status=InstanceStatus.WAITING_CHILDREN.value,
-        )
-        job_service = _make_mock_job_service()
-        job_repo = _make_mock_job_repo()
-        job = _make_mock_job()
-
-        handler = MessageJobHandler(
-            manager=manager,
-            job_queue_service=job_service,
-            job_repository=job_repo,
-        )
-
-        with _disable_cm():
-            await handler.handle(job)
-
-        # Pre-pickup transition called with WAITING_CHILDREN/IDLE → RUNNING.
-        manager._instance_repository.transition_status_if.assert_called_once()
-        call = manager._instance_repository.transition_status_if.call_args
-        assert call.args[0] == job.instance_id
-        assert call.args[1] == InstanceStatus.RUNNING.value
-        allowed_from = call.args[2]
-        assert InstanceStatus.WAITING_CHILDREN.value in allowed_from
-        assert InstanceStatus.IDLE.value in allowed_from
-
-        # And the job was completed normally (happy path).
-        job_service.complete_job.assert_awaited_once()
-        assert (
-            job_service.complete_job.await_args.kwargs["demand_state"]
-            == DemandState.COMPLETED
-        )
 
 
 # ===========================================================================

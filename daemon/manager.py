@@ -1791,6 +1791,29 @@ class InstanceManager:
             for stmt in statements:
                 conn.execute(text(stmt))
 
+    def _ensure_postgres_drop_legacy_columns(self) -> None:
+        """NO-OP safety hook for the D10 column-drop migration.
+
+        The migration ``20260621_000002_drop_legacy_completion_columns.sql``
+        drops ``Instance.waiting_for``, ``Instance.children``, and the
+        ``instance_hierarchy`` table. This is IRREVERSIBLE and DATA-DESTRUCTIVE.
+
+        Per the reviewer's §7.2 recommendation, this migration is NOT
+        auto-applied. It exists as a file so operators can run it manually
+        AFTER verifying 2+ weeks of clean Dependency Bus operation in
+        production. Running this migration DESTROYS the CM rollback path
+        (``USE_DEPENDENCY_BUS=false`` will have no ``waiting_for`` data).
+
+        This method logs a WARNING if the columns are still present (reminder
+        that the migration is pending) and does nothing else.
+        """
+        # Intentionally a no-op. The migration must be applied manually.
+        logger.debug(
+            "D10 column-drop migration is pending manual application "
+            "(20260621_000002_drop_legacy_completion_columns.sql). "
+            "Do NOT auto-apply -- it is IRREVERSIBLE."
+        )
+
     def setup_worker_pool(
         self,
         num_workers: int = WORKER_POOL_SIZE,

@@ -1,35 +1,42 @@
-"""C10 — Unified dispatcher shadow test pack.
+"""Unified dispatcher admission test pack.
 
-Verifies that the **observer path**
-(:meth:`JobFeedbackObserver._admit_via_worker_pool`) produces the same
-observable result as the **legacy path**
-(:meth:`MessageJobHandler.handle`) for ``job_type='message'`` work, with
-``USE_LEGACY_JOBQUEUE_DISPATCH=OFF`` (the default per ``daemon/config.py``).
+Verifies the observer path
+(:meth:`JobFeedbackObserver._admit_via_worker_pool`) for
+``job_type='message'`` work — the single message-dispatch path after
+the JobQueue/MJH legacy code was deleted in Phase D.
 
-Scope (15 tests)
+Scope (14 tests)
 ================
 
-* **Tests 1–5** — Basic admission via observer. When the flag is OFF,
-  ``JobProcessor`` routes MESSAGE jobs through
-  ``_admit_via_worker_pool``. Each test pins one observable
-  side-effect: Task row creation with the correct ``message_id``,
-  ``worker_pool.notify_work()`` call, ``JobItem`` stays ``PROCESSING``
-  after admission, the Task is pickable by the WorkerPool, and the
-  ``JobItem`` transitions to ``COMPLETED`` when the Task completes.
+* **Tests 1–5** — Basic admission via observer. ``JobProcessor`` routes
+  MESSAGE jobs through ``_admit_via_worker_pool``. Each test pins one
+  observable side-effect: Task row creation with the correct
+  ``message_id``, ``worker_pool.notify_work()`` call, ``JobItem`` stays
+  ``PROCESSING`` after admission, the Task is pickable by the
+  WorkerPool, and the ``JobItem`` transitions to ``COMPLETED`` when the
+  Task completes.
 
-* **Tests 6–10** — 50 randomized scenarios. A deterministic RNG
+* **Tests 6–9** — 50 randomized scenarios. A deterministic RNG
   (``random.seed(42)``) generates 50 ``(instance_id, message, source,
   priority, images)`` tuples. For each, the observer path must produce
-  identical *observable* results (DB state, dispatch events, instance
-  transitions) as the legacy path. Tests 6/7/8/9/10 split these
-  invariants across the same 50-tuple population so each assertion is
+  the documented observable results (DB state, dispatch events,
+  instance transitions). Tests 6/7/8/9 split these invariants
+  across the same 50-tuple population so each assertion is
   independently debuggable.
 
-* **Tests 11–15** — Cross-instance handoff. Verifies work dispatched
-  from another daemon node still functions under BOTH flag states. The
-  flag flip is purely a local-admission switch — cross-instance
-  handoff via the observer must keep working in both ``ON`` and
-  ``OFF``. No orphaned jobs may survive in either state.
+* **Tests 10–12** — Cross-instance handoff. Verifies work dispatched
+  from another daemon node still functions under the unified
+  dispatch. Cross-instance handoff via the observer must keep working
+  with no orphaned jobs.
+
+Note: the original ``test_10_processor_routes_to_observer_when_flag_off``
+and ``test_14_processor_flag_read_is_stable_across_handoffs`` were
+removed with the Phase D MESSAGE dispatch removal — they asserted the
+deleted ``JobProcessor._is_legacy_jobqueue_dispatch_enabled()`` flag
+read. Tests 11–13 in the source retain the original 11/12/13 numbering.
+
+Scope (14 tests; the flag-state test was removed with the MJH legacy
+path in Phase D).
 
 Conventions
 ===========
@@ -370,9 +377,10 @@ def _build_job_processor(
 ) -> JobProcessor:
     """Build a real JobProcessor with the observer wired in.
 
-    The processor is not started — tests drive
-    :meth:`_is_legacy_jobqueue_dispatch_enabled` and the dispatch
-    decision branch directly.
+    The processor is not started — tests drive the dispatch branch
+    (observer ``_admit_via_worker_pool`` + ``_process_event``) directly.
+    Phase D removed the legacy MESSAGE routing decision; only the
+    unified observer path exists.
     """
     queue_service = MagicMock(name="JobQueueService")
     queue_service._repository = job_repo
@@ -737,27 +745,11 @@ class TestRandomizedScenarioEquivalence:
             "structured log marker"
         )
 
-    @pytest.mark.asyncio
-    async def test_10_processor_routes_to_observer_when_flag_off(
-        self, engine, task_repo, job_repo
-    ):
-        """JobProcessor's dispatch decision picks the observer path.
-
-        With ``USE_LEGACY_JOBQUEUE_DISPATCH=OFF`` (default), the
-        processor's ``_is_legacy_jobqueue_dispatch_enabled()`` returns
-        False — the precondition for routing MESSAGE jobs through the
-        observer.
-        """
-        manager = _build_manager_mock(engine, task_repo, instance_repo, use_legacy_jobqueue_dispatch=False)
-        observer = _build_observer(engine, manager, job_repo)
-        processor = _build_job_processor(engine, manager, observer, job_repo)
-
-        # The flag read.
-        assert processor._is_legacy_jobqueue_dispatch_enabled() is False
-
-        # And the observer is wired in — the precondition for the
-        # dispatch decision to take the unified branch.
-        assert processor._job_feedback_observer is observer
+    # NOTE: ``test_10_processor_routes_to_observer_when_flag_off`` was
+    # removed with the Phase D (D11) MESSAGE dispatch removal. The test
+    # asserted ``JobProcessor._is_legacy_jobqueue_dispatch_enabled()``
+    # returns False — the method no longer exists because there is no
+    # longer a routing decision (the observer is the ONLY path).
 
 
 # =============================================================================
@@ -899,81 +891,12 @@ class TestCrossInstanceHandoff:
         path_records = [r for r in caplog.records if "dispatch_path=" in r.getMessage()]
         assert path_records, "Cross-instance handoff must emit a dispatch_path= log marker"
 
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("flag_state", [False, True], ids=["OFF", "ON"])
-    async def test_14_processor_flag_read_is_stable_across_handoffs(
-        self, engine, task_repo, job_repo, flag_state
-    ):
-        """The flag read does not flap during cross-instance handoffs.
-
-        The dispatch decision is read fresh on every
-        ``_process_next_job`` invocation. We verify the read is stable
-        across multiple handoffs — no caching, no mutation.
-        """
-        manager = _build_manager_mock(
-            engine, task_repo, instance_repo, use_legacy_jobqueue_dispatch=flag_state
-        )
-        observer = _build_observer(engine, manager, job_repo)
-        processor = _build_job_processor(engine, manager, observer, job_repo)
-
-        # Read the flag 10 times — must always return the same value.
-        for _ in range(10):
-            assert processor._is_legacy_jobqueue_dispatch_enabled() is flag_state
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("flag_state", [False, True], ids=["OFF", "ON"])
-    async def test_15_observer_admission_does_not_touch_legacy_handler(
-        self, engine, task_repo, job_repo, flag_state
-    ):
-        """Under flag OFF, the observer path is taken and
-        ``MessageJobHandler.handle`` is NOT invoked for local work.
-
-        Under flag ON, the legacy handler IS invoked. This is the C7
-        contract: the flag controls which physical dispatcher runs the
-        MESSAGE job.
-        """
-        manager = _build_manager_mock(
-            engine, task_repo, instance_repo, use_legacy_jobqueue_dispatch=flag_state
-        )
-        observer = _build_observer(engine, manager, job_repo)
-        processor = _build_job_processor(engine, manager, observer, job_repo)
-
-        # Build a real MessageJobHandler mock on the processor.
-        mock_handler = MagicMock(name="MessageJobHandler")
-        mock_handler.handle = AsyncMock()
-        processor._message_job_handler = mock_handler
-
-        # Build a PROCESSING JobItem as ``start_job`` would return.
-        instance_id = f"inst-c7-{uuid.uuid4().hex[:8]}"
-        _seed_instance(engine, instance_id=instance_id)
-        job = _make_job(
-            instance_id=instance_id,
-            message_id=f"msg-c7-{uuid.uuid4().hex[:8]}",
-        )
-        _seed_job(engine, job)
-
-        # Spy on the observer admission so we can assert it was/wasn't called.
-        original_admit = observer._admit_via_worker_pool
-        admit_calls: list[Any] = []
-        admit_spy = AsyncMock(side_effect=original_admit)
-        observer._admit_via_worker_pool = admit_spy  # type: ignore[method-assign]
-
-        # Re-create the dispatch branch inline (mirrors
-        # _process_next_job's MESSAGE routing decision).
-        use_legacy = processor._is_legacy_jobqueue_dispatch_enabled()
-        if use_legacy and processor._message_job_handler is not None:
-            await processor._message_job_handler.handle(job)
-        elif processor._job_feedback_observer is not None:
-            await processor._job_feedback_observer._admit_via_worker_pool(job)
-
-        if flag_state:
-            # Flag ON → legacy handler called, observer NOT called.
-            mock_handler.handle.assert_awaited_once_with(job)
-            admit_spy.assert_not_called()
-        else:
-            # Flag OFF → observer called, legacy handler NOT called.
-            admit_spy.assert_awaited_once_with(job)
-            mock_handler.handle.assert_not_called()
+    # NOTE: ``test_14_processor_flag_read_is_stable_across_handoffs`` was
+    # removed with the Phase D (D11) MESSAGE dispatch removal. The test
+    # asserted ``JobProcessor._is_legacy_jobqueue_dispatch_enabled()``
+    # returns the same value across repeated reads — the method no longer
+    # exists because the dispatch decision was collapsed into a single
+    # path (the observer).
 
 
 # =============================================================================
@@ -1125,10 +1048,9 @@ class TestAdmissionFailureModesRaise:
             task_repo.create = _explode  # type: ignore[method-assign]
 
         # Drive the dispatch branch — same shape as
-        # ``_process_next_job``'s MESSAGE routing decision under
-        # ``USE_LEGACY_JOBQUEUE_DISPATCH=OFF``.
-        use_legacy = processor._is_legacy_jobqueue_dispatch_enabled()
-        assert use_legacy is False, "This test requires the unified path"
+        # ``_process_next_job``'s MESSAGE routing decision. After
+        # Phase D there is only one path (the observer), so no flag
+        # check is needed before invoking ``_admit_via_worker_pool``.
         assert processor._job_feedback_observer is not None
 
         try:

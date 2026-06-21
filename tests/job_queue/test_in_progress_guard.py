@@ -5,14 +5,15 @@ but is still waiting for child agent reports (waiting_for > 0), the notification
 says "in progress ⟳" with "Progress:" text instead of "completed ✓" with
 "Result:" text.
 
-Tests cover the 6 distinct code paths the feature touches:
+Tests cover the remaining code paths the feature touches (the
+MessageJobHandler emit-on-skip_complete path was removed with the
+handler in Phase D):
 
 1. JobFeedbackObserver._process_event() — emits in_progress when waiting_for>0
 2. JobProcessor orphan watchdog — same in_progress guard
 3. JobQueueService.notify_watchers() — formats in_progress vs terminal differently
 4. JobQueueService.notify_watchers() — only cleans up watches on terminal states
-5. MessageJobHandler.handle() — emits in_progress when skip_complete=True
-6. Watcher filter — in_progress is opt-in via watch_events list
+5. Watcher filter — in_progress is opt-in via watch_events list
 
 Reviewer fixes also covered:
 7. JobProcessor._emit_in_progress_if_children_pending() — throttle/dedup, escape
@@ -42,9 +43,7 @@ from daemon.services.job_feedback_observer import (
     _FinalizeJobResult,
 )
 from daemon.services.job_processor import JobProcessor
-from daemon.services.message_job_handler import MessageJobHandler
 from daemon.services.correlation_manager import set_correlation_manager
-from daemon.manager import MessageResult
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -694,161 +693,7 @@ class TestNotifyWatchersCleanup:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. MessageJobHandler in_progress emit
-# ══════════════════════════════════════════════════════════════════════════════
-
-
-class TestMessageJobHandlerInProgressEmit:
-    """Test that MessageJobHandler emits in_progress when skip_complete=True with waiting_for>0."""
-
-    @pytest.mark.asyncio
-    async def test_skip_complete_with_waiting_for_emits_in_progress(self):
-        """Test A: skip_complete=True + waiting_for>0 → emit in_progress, return early."""
-        # Arrange
-        mock_manager = MagicMock()
-        mock_manager._process_message_with_tracking = AsyncMock(
-            return_value=MessageResult(content="partial child response", tool_calls=None)
-        )
-        # Execution gate passthrough
-        async def _passthrough(*args, **kwargs):
-            work_fn = kwargs.get("work_fn")
-            return await work_fn()
-        from daemon.services.execution_gate import ExecutionGateService
-        gate = MagicMock(spec=ExecutionGateService)
-        gate.run = AsyncMock(side_effect=_passthrough)
-        mock_manager.execution_gate = gate
-        # No running task
-        task_repo = MagicMock()
-        task_repo.find_running_by_instance = MagicMock(return_value=None)
-        mock_manager._task_repo = task_repo
-        # _process_child_completion_and_notify_parent is invoked in the happy path
-        mock_manager._process_child_completion_and_notify_parent = AsyncMock()
-
-        # Build the handler
-        mock_jqs = MagicMock()
-        mock_jqs.complete_job = AsyncMock(return_value=None)
-        mock_jqs.notify_watchers = AsyncMock(return_value=0)
-        mock_jqs._lock_manager = MagicMock()
-        # No dispatch bus
-        mock_jqs._dispatch_bus = None
-
-        mock_jrepo = MagicMock()
-        # No other active MESSAGE jobs (pre-flight passes)
-        mock_jrepo.find_processing_message_jobs_by_instance = MagicMock(return_value=[])
-        # atomic_transition succeeds (requeue never triggered)
-        mock_jrepo.atomic_transition = MagicMock()
-
-        handler = MessageJobHandler(
-            manager=mock_manager,
-            job_queue_service=mock_jqs,
-            job_repository=mock_jrepo,
-        )
-
-        # Build a job whose instance will be in WAITING_CHILDREN state with waiting_for=2
-        job = MagicMock()
-        job.job_id = "job-msg-1"
-        job.instance_id = "instance-xyz"
-        job.message = "hello"
-        job.project_id = "test-project"
-        job.queue_id = "system_parallel_queue"
-        job.job_metadata = {}
-
-        # Instance lookup returns WAITING_CHILDREN with waiting_for=2
-        instance_meta = make_instance_meta(
-            instance_id="instance-xyz",
-            status="waiting_children",
-            waiting_for=2,
-        )
-        mock_manager._instance_repository = MagicMock()
-        mock_manager._instance_repository.get = MagicMock(return_value=instance_meta)
-
-        # Act
-        await handler.handle(job)
-
-        # Assert: in_progress was emitted
-        mock_jqs.notify_watchers.assert_called_once()
-        call = mock_jqs.notify_watchers.call_args
-        # job_id is positional; status is a kwarg in the source
-        assert call.args[0] == "job-msg-1"
-        assert call.kwargs.get("status") == "in_progress"
-        assert call.kwargs.get("waiting_for") == 2
-        # progress is the result.content
-        assert call.kwargs.get("progress") == "partial child response"
-
-        # And complete_job must NOT have been called
-        mock_jqs.complete_job.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_skip_complete_with_zero_waiting_does_not_emit_in_progress(self):
-        """Test B: skip_complete=True but waiting_for=0 → fall through to normal completion."""
-        # Build the same harness
-        mock_manager = MagicMock()
-        mock_manager._process_message_with_tracking = AsyncMock(
-            return_value=MessageResult(content="final answer", tool_calls=None)
-        )
-        async def _passthrough(*args, **kwargs):
-            work_fn = kwargs.get("work_fn")
-            return await work_fn()
-        from daemon.services.execution_gate import ExecutionGateService
-        gate = MagicMock(spec=ExecutionGateService)
-        gate.run = AsyncMock(side_effect=_passthrough)
-        mock_manager.execution_gate = gate
-
-        task_repo = MagicMock()
-        task_repo.find_running_by_instance = MagicMock(return_value=None)
-        mock_manager._task_repo = task_repo
-        # The happy path invokes this; mock it to avoid MagicMock-not-awaitable errors
-        mock_manager._process_child_completion_and_notify_parent = AsyncMock()
-
-        mock_jqs = MagicMock()
-        mock_jqs.complete_job = AsyncMock(return_value=None)
-        mock_jqs.notify_watchers = AsyncMock(return_value=0)
-        mock_jqs._lock_manager = MagicMock()
-        mock_jqs._dispatch_bus = None
-
-        mock_jrepo = MagicMock()
-        mock_jrepo.find_processing_message_jobs_by_instance = MagicMock(return_value=[])
-        mock_jrepo.atomic_transition = MagicMock()
-
-        handler = MessageJobHandler(
-            manager=mock_manager,
-            job_queue_service=mock_jqs,
-            job_repository=mock_jrepo,
-        )
-
-        job = MagicMock()
-        job.job_id = "job-msg-2"
-        job.instance_id = "instance-xyz"
-        job.message = "hello"
-        job.project_id = "test-project"
-        job.queue_id = "system_parallel_queue"
-        job.job_metadata = {}
-
-        # Instance has waiting_for=0 — skip_complete path is taken but the
-        # in_progress emit is guarded by `wf > 0`, so it must fall through
-        # to the normal complete_job(COMPLETED) call below.
-        instance_meta = make_instance_meta(
-            instance_id="instance-xyz",
-            status="waiting_children",
-            waiting_for=0,
-        )
-        mock_manager._instance_repository = MagicMock()
-        mock_manager._instance_repository.get = MagicMock(return_value=instance_meta)
-
-        await handler.handle(job)
-
-        # in_progress must NOT have been emitted (status is a kwarg in the source)
-        for call in mock_jqs.notify_watchers.call_args_list:
-            assert call.kwargs.get("status") != "in_progress"
-
-        # And the job must have been completed normally
-        mock_jqs.complete_job.assert_called_once()
-        kwargs = mock_jqs.complete_job.call_args.kwargs
-        assert kwargs["demand_state"] == DemandState.COMPLETED
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 6. Watcher event filter — in_progress is opt-in
+# 5. Watcher event filter — in_progress is opt-in
 # ══════════════════════════════════════════════════════════════════════════════
 
 

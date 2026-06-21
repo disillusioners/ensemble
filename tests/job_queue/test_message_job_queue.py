@@ -26,7 +26,6 @@ from daemon.repositories.job_queue import JobRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus, JobQueue, QueueType
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_queue_service import JobQueueService, DemandState, TERMINAL_STATUSES
-from daemon.services.message_job_handler import MessageJobHandler
 from daemon.manager import MessageResult
 
 
@@ -41,43 +40,6 @@ def message_job_data(sample_job_data):
         "job_type": "message",
         "instance_id": "test-instance-123",
     }
-
-
-@pytest.fixture
-def mock_manager(monkeypatch):
-    """Create a mock InstanceManager with _process_message_with_tracking."""
-    manager = MagicMock()
-    manager._process_message_with_tracking = AsyncMock(
-        return_value=MessageResult(content="Processed message response", tool_calls=None)
-    )
-    # Execution Gate stub: transparent, runs the work.
-    from daemon.services.execution_gate import ExecutionGateService
-
-    async def _passthrough(*args, **kwargs):
-        work_fn = kwargs.get("work_fn")
-        return await work_fn()
-
-    gate = MagicMock(spec=ExecutionGateService)
-    gate.run = AsyncMock(side_effect=_passthrough)
-    manager.execution_gate = gate
-    # Cross-dispatcher pre-flight now reads
-    # ``TaskRepository.find_running_by_instance`` via
-    # ``manager._task_repo``. Stub the repo so the handler takes
-    # the happy path.
-    task_repo_stub = MagicMock()
-    task_repo_stub.find_running_by_instance = MagicMock(return_value=None)
-    manager._task_repo = task_repo_stub
-    return manager
-
-
-@pytest.fixture
-def mock_message_job_handler(mock_manager, job_queue_service, repository):
-    """Create MessageJobHandler with mock manager and real service/repo."""
-    return MessageJobHandler(
-        manager=mock_manager,
-        job_queue_service=job_queue_service,
-        job_repository=repository,
-    )
 
 
 def create_message_job(repository, sample_job_data, instance_id, project_id="test-project", **overrides):
@@ -197,7 +159,7 @@ class TestConcurrencyGate:
     def test_concurrency_gate_requeues_on_contention(
         self, repository, sample_job_data
     ):
-        """Test MessageJobHandler requeues when another MESSAGE is PROCESSING."""
+        """Test the per-instance MESSAGE-job re-queue path on contention."""
         instance_id = "test-instance-requeue"
 
         # Create and start first message job
@@ -294,25 +256,6 @@ class TestOrphanRecoveryGuard:
         # (This tests that the distinction exists - TASK gets respawned, MESSAGE gets FAILED)
         assert job.job_type == "task"
 
-    def test_orphan_message_job_no_instance_spawned(
-        self, mock_message_job_handler, repository, sample_job_data
-    ):
-        """Test orphan MESSAGE job completes with FAILED state, no spawn called."""
-        instance_id = "no-spawn-instance"
-
-        # Create MESSAGE job without valid instance
-        job = create_message_job(repository, sample_job_data, instance_id)
-        repository.start_job(job.job_id, instance_id)
-
-        # Verify job is PROCESSING
-        retrieved = repository.get(job.job_id)
-        assert retrieved.status == JobStatus.PROCESSING.value
-
-        # The mock_manager._process_message_with_tracking should NOT be called
-        # because instance doesn't exist (simulated via handler's instance_id check)
-        # This test verifies the handler validates instance_id before processing
-        assert mock_message_job_handler._manager._process_message_with_tracking.call_count == 0
-
 
 # ── 4. Cancellation ─────────────────────────────────────────────────────────────
 
@@ -334,28 +277,6 @@ class TestMessageJobCancellation:
         updated_job = repository.get(job.job_id)
         assert updated_job.status == JobStatus.CANCELLED.value
 
-    def test_cancel_processing_message_job_signals_token(
-        self, mock_message_job_handler, repository, sample_job_data
-    ):
-        """Test cancelling PROCESSING MESSAGE job signals CancellationToken."""
-        instance_id = "cancel-processing-instance"
-
-        # Create and start job
-        job = create_message_job(repository, sample_job_data, instance_id)
-        repository.start_job(job.job_id, instance_id)
-
-        # The handler should store active token for this job
-        from daemon.cancellation import CancellationTokenSource
-
-        cts = CancellationTokenSource()
-        mock_message_job_handler._active_tokens[job.job_id] = cts
-
-        # Signal cancellation
-        cts.cancel()
-
-        # Verify token was signaled (is_cancelled is a property)
-        assert cts.token.is_cancelled
-
     def test_cancel_message_does_not_terminate_instance(
         self, repository, sample_job_data
     ):
@@ -373,148 +294,6 @@ class TestMessageJobCancellation:
         # (Instance status is managed separately by instance_lifecycle)
         # This test verifies cancellation is job-scoped, not instance-scoped
         assert job.instance_id == instance_id
-
-
-# ── 4b. CancelledError Handler (Instance Termination) ─────────────────────────────
-
-
-class TestCancelledErrorOnTerminate:
-    """Tests for cancellation handling in MessageJobHandler."""
-
-    @pytest.fixture(autouse=True)
-    def _patch_running_task_check(self, monkeypatch):
-        """Stub the cross-dispatcher task check to return None.
-
-        Same rationale as the same fixture in
-        ``TestPauseVsShutdownDistinction`` in
-        ``test_pause_while_processing.py``: the test repo's mock
-        engine returns a truthy value from the SQL query, which
-        would trigger the re-queue-for-contention path. The tests
-        in this class exercise the gate's CancelledError → pause/
-        terminate discrimination, not the contention re-queue.
-        """
-        from daemon.repositories.task.repository import TaskRepository
-        monkeypatch.setattr(
-            TaskRepository, "find_running_by_instance",
-            lambda self, instance_id: None,
-        )
-    """Tests for asyncio.CancelledError handler when instance is terminated (not paused)."""
-
-    @pytest.mark.asyncio
-    async def test_cancellederror_on_terminate_completes_job_as_cancelled(
-        self, mock_manager, job_queue_service, repository, sample_job_data
-    ):
-        """Test CancelledError handler completes job as CANCELLED when instance is terminated."""
-        instance_id = "terminate-instance"
-
-        # Create and start job
-        job = create_message_job(repository, sample_job_data, instance_id)
-        repository.start_job(job.job_id, instance_id)
-
-        # Create handler
-        handler = MessageJobHandler(
-            manager=mock_manager,
-            job_queue_service=job_queue_service,
-            job_repository=repository,
-        )
-
-        # Mock instance status to TERMINATED (not PAUSED)
-        mock_instance = MagicMock()
-        mock_instance.status = "terminated"
-        mock_manager._instance_repository.get.return_value = mock_instance
-
-        # Mock _process_message_with_tracking to raise CancelledError
-        mock_manager._process_message_with_tracking.side_effect = asyncio.CancelledError()
-
-        # Mock complete_job to verify it's called
-        with patch.object(job_queue_service, 'complete_job', new_callable=AsyncMock) as mock_complete:
-            with pytest.raises(asyncio.CancelledError):
-                await handler.handle(job)
-
-            # Verify job was completed as CANCELLED
-            mock_complete.assert_called_once_with(
-                job.job_id,
-                demand_state=DemandState.CANCELLED,
-                error="Message processing cancelled (instance terminated)",
-            )
-
-    @pytest.mark.asyncio
-    async def test_cancellederror_on_pause_leaves_job_processing(
-        self, mock_manager, job_queue_service, repository, sample_job_data
-    ):
-        """Test CancelledError handler does NOT complete job when instance is PAUSED."""
-        instance_id = "paused-instance"
-
-        # Create and start job
-        job = create_message_job(repository, sample_job_data, instance_id)
-        repository.start_job(job.job_id, instance_id)
-
-        # Create handler
-        handler = MessageJobHandler(
-            manager=mock_manager,
-            job_queue_service=job_queue_service,
-            job_repository=repository,
-        )
-
-        # Mock instance status to PAUSED
-        mock_instance = MagicMock()
-        mock_instance.status = "paused"
-        mock_manager._instance_repository.get.return_value = mock_instance
-
-        # Mock _process_message_with_tracking to raise CancelledError
-        mock_manager._process_message_with_tracking.side_effect = asyncio.CancelledError()
-
-        # Mock complete_job to verify it's NOT called
-        with patch.object(job_queue_service, 'complete_job', new_callable=AsyncMock) as mock_complete:
-            # Should return without raising (job stays PROCESSING for resume)
-            await handler.handle(job)
-
-            # Verify complete_job was NOT called
-            mock_complete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_message_job_handler_shutdown_propagates_cancelled_error(
-        self, mock_manager, job_queue_service, repository, sample_job_data
-    ):
-        """Test CancelledError handler completes job as CANCELLED and still propagates CancelledError on shutdown.
-
-        Key insight: ANY non-PAUSED CancelledError should complete the job.
-        When instance is terminated, graph task is cancelled first (status still RUNNING),
-        then status is updated to TERMINATED later. So we check for PAUSED vs non-PAUSED.
-        """
-        instance_id = "shutdown-instance"
-
-        # Create and start job
-        job = create_message_job(repository, sample_job_data, instance_id)
-        repository.start_job(job.job_id, instance_id)
-
-        # Create handler
-        handler = MessageJobHandler(
-            manager=mock_manager,
-            job_queue_service=job_queue_service,
-            job_repository=repository,
-        )
-
-        # Mock instance status to RUNNING (shutdown scenario - status not yet TERMINATED)
-        mock_instance = MagicMock()
-        mock_instance.status = "running"
-        mock_manager._instance_repository.get.return_value = mock_instance
-
-        # Mock _process_message_with_tracking to raise CancelledError
-        mock_manager._process_message_with_tracking.side_effect = asyncio.CancelledError()
-
-        # Mock complete_job to verify it's called
-        with patch.object(job_queue_service, 'complete_job', new_callable=AsyncMock) as mock_complete:
-            # a. CancelledError IS still raised
-            with pytest.raises(asyncio.CancelledError):
-                await handler.handle(job)
-
-            # b. The job IS completed as CANCELLED
-            mock_complete.assert_called_once_with(
-                job.job_id,
-                demand_state=DemandState.CANCELLED,
-                error="Message processing cancelled (instance terminated)",
-            )
 
 
 # ── 5. Instance Termination ──────────────────────────────────────────────────────
@@ -589,29 +368,6 @@ class TestBackwardCompatibility:
 
         assert job_type == "message"
         assert is_task is False
-
-    def test_process_message_with_tracking_not_modified(
-        self, mock_message_job_handler
-    ):
-        """Test _process_message_with_tracking accepts same parameters as before."""
-        # Verify the handler calls _process_message_with_tracking with expected params
-        handler = mock_message_job_handler
-
-        # Create a mock job with metadata
-        job = MagicMock()
-        job.job_id = "test-job-id"
-        job.instance_id = "test-instance"
-        job.message = "Test message"
-        job.job_metadata = {
-            "message_id": "msg-123",
-            "source": "api",
-            "images": None,
-        }
-
-        # The handler extracts these from job metadata and passes to manager
-        # This test documents the expected interface
-        assert "message_id" in job.job_metadata
-        assert "source" in job.job_metadata
 
 
 # ── 7. Side Effects Parity ──────────────────────────────────────────────────────
