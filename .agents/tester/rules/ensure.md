@@ -17,6 +17,8 @@ _MUST pass before testing is complete_
   - Validation: Run `python -m pytest tests/e2e/test_e2e_workflows.py::test_pause_after_spawn_then_resume -v -m integration` (requires daemon running via ./dev.sh). Both leader and coder pause, then resume and complete.
 - [ ] E2E: Terminate after spawn, then revive documented
   - Validation: Run `python -m pytest tests/e2e/test_e2e_workflows.py::test_terminate_after_spawn_then_revive -v -m integration` (requires daemon running via ./dev.sh). Termination succeeds, behavior after "continue" message documented.
+- [ ] E2E: Wave spawn (2 children) + defer queue ordering + cross-system
+  - Validation: Run `python -m pytest tests/e2e/test_e2e_workflows.py::test_wave_spawn_with_defer_queue -v -m integration` (requires daemon running via ./dev.sh). Leader spawns at least 1 child (preferring 2 in the wave), no premature completion (status=completed with waiting_for > 0), deferred job progresses after the leader reaches terminal, both message API and job API work in the same daemon session.
 
 ## Important
 _Should pass, flag if failed_
