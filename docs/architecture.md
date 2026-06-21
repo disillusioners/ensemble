@@ -1,6 +1,6 @@
 # Agents Ensemble Architecture
 
-> **Note (2026-06-18):** The message-processing sections of this doc describe the architecture BEFORE the CorrelationManager migration. For the current state — unified `MessageProcessingPipeline`, `CorrelationManager`, and `ExecutionGate` — see [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
+> **Note (2026-06-21):** Phase D (Dependency Bus & Cleanup) is complete. The Dependency Bus is the authoritative parent-waits-for-children mechanism (default ON); the CorrelationManager is the rollback path. `MessageJobHandler` is deleted; the JobQueue is scheduling vocabulary only. See the new [Completion Architecture (Phase D — Dependency Bus)](#completion-architecture-phase-d--dependency-bus) summary below, and [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the current authoritative reference.
 
 ## Core Design Philosophy
 
@@ -92,7 +92,7 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 
 ## Agent-to-Agent Messaging Architecture
 
-> **Current model (2026-06-18):** Parent-child correlation is now authoritative in `CorrelationManager` (in-memory `(parent, child, message_id)` triples, per-parent lock, direct async callback to `JobFeedbackObserver`). `waiting_for` is **deprecated as control-flow** and retained only as a rebuild-only cache per ADR-011. Both dispatch paths (WorkerPool, JobQueue) share a unified `MessageProcessingPipeline` and an `ExecutionGate` that serializes `graph.astream` per instance. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the full reference.
+> **Current model (2026-06-21):** The agents-ensemble uses a single-dispatcher, DB-backed completion model. The Dependency Bus (`daemon/services/dependency_bus.py`) is the authoritative parent-waits-for-children mechanism (default `use_dependency_bus=True`); the CorrelationManager is the rollback path. `waiting_for`, `children`, and `instance_hierarchy` are dead-but-present columns pending the D10 drop migration. Both the unified `MessageProcessingPipeline` and the per-instance `asyncio.Lock` `ExecutionGate` are unchanged from prior phases. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the full reference.
 
 ### Flow Overview
 
@@ -131,11 +131,11 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 
 1. **Atomic claiming**: `UPDATE-RETURNING` prevents worker race conditions
 2. **Idempotent completion**: Won't send duplicate COMPLETION_REPORT
-3. **Correlation via CM**: Parent-child tracking is authoritative in `CorrelationManager` (no longer `waiting_for` polling)
+3. **Correlation via DependencyBus**: Parent-child tracking is authoritative in the DB-backed `DependencyBus` (Phase D); `CorrelationManager` is the rollback path. `waiting_for` is dead-but-present pending the D10 drop migration.
 4. **Fire-and-forget**: Parent doesn't block, system handles timing
-5. **Crash-safe**: Workers can die, tasks retried, state preserved
+5. **Crash-safe**: Workers can die, tasks retried, state preserved; bus watcher state is durable in the `dependency_watchers` table
 
-> The `waiting_for` cascade described in earlier versions of this doc is **deprecated as control-flow** (ADR-011). Use `CM.get_pending_count()` / `CM.is_complete()` instead.
+> The `waiting_for` cascade described in earlier versions of this doc is **deprecated as control-flow** (ADR-011) and dead-but-present post-Phase-D. The DependencyBus is the source of truth.
 
 ### Message Types
 
@@ -153,15 +153,17 @@ class Instance:
     instance_id: str      # Unique per instance
     agent_id: str         # Which agent type
     parent_id: str | None # Direct parent
-    waiting_for: int      # DEPRECATED as control-flow; rebuild-only cache per ADR-011
+    waiting_for: int      # DEPRECATED (Phase D, ADR-011) — dead-but-present column; pending D10 drop migration
+    children: str         # DEPRECATED (Phase D) — denormalized JSON cache; pending D10 drop migration
     status: str           # IDLE/RUNNING/WAITING_CHILDREN/COMPLETED
 
+# instance_hierarchy table — DEPRECATED (Phase D); pending D10 drop migration
 class InstanceHierarchy:
     parent_id: str        # Composite PK
-    child_id: str        # Composite PK
+    child_id: str         # Composite PK
 ```
 
-> **Parent-child correlation** is now authoritative in `CorrelationManager` (`daemon/services/correlation_manager.py`), not on the `instance` row. The `waiting_for` column is kept only as the source for `CM.rebuild_from_db()` on startup. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
+> **Parent-child correlation** is now authoritative in the **DependencyBus** (`daemon/services/dependency_bus.py`) — the in-memory `CorrelationManager` is the rollback path (Phase D). The `waiting_for`, `children`, and `instance_hierarchy` artifacts are dead-but-present and pending the IRREVERSIBLE D10 drop migration (`20260621_000002_drop_legacy_completion_columns.sql`, manual application after 2+ weeks of clean bus operation). See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
 
 ---
 
@@ -459,6 +461,25 @@ Ensemble could add:
 
 ---
 
+## Completion Architecture (Phase D — Dependency Bus)
+
+The agents-ensemble uses a single-dispatcher, DB-backed completion model:
+
+1. **Dispatcher**: WorkerPool (4 threads) is the sole execution path for all work (messages, tasks). The JobQueue is scheduling vocabulary only (priority, queue management, project scoping).
+
+2. **Completion Authority**: The Dependency Bus (`daemon/services/dependency_bus.py`) is the authoritative parent-waits-for-children mechanism. When a parent sends a message to a child, a `dependency_watchers` row is written. When the child's task reaches a terminal event, the bus fires the watcher's FollowUp (enqueued back onto the parent). The bus is DB-backed — watcher state survives restart.
+
+3. **Rollback Path**: The CorrelationManager (in-memory `_pending` dict + generation counter) is retained as the rollback path (`use_dependency_bus=false`). It provides shadow validation for one more release.
+
+4. **Legacy Columns**: `waiting_for`, `children`, and `instance_hierarchy` are dead-but-present. A migration exists to drop them (IRREVERSIBLE, manual application after 2+ weeks of clean bus operation).
+
+Feature flags:
+- `use_dependency_bus` (default ON) — bus vs CM
+- `use_legacy_waiting_for_cascade` (default OFF) — kill switch for the original bug class
+- `debug_completion_invariant` (default OFF) — CM/waiting_for divergence observability
+
+---
+
 ## Summary
 
 | Decision | Choice | Rationale |
@@ -489,7 +510,9 @@ Ensemble could add:
 ### Message processing & correlation (current architecture)
 | Component | File | Purpose |
 |-----------|------|---------|
-| MessageProcessingPipeline | `daemon/services/message_processing_pipeline.py` | 6-stage shared pipeline (gate → process → mark → dispatch → child-check → error-handle) |
-| CorrelationManager | `daemon/services/correlation_manager.py` | Authoritative parent-child correlation; `(parent, child, message_id)` triples, per-parent asyncio.Lock, direct async callback |
-| ExecutionGate | `daemon/services/execution_gate.py` | DB-backed per-instance lease serializing `graph.astream`; required on ALL paths including resume |
+| MessageProcessingPipeline | `daemon/services/message_processing_pipeline.py` | 6-stage shared pipeline (gate → process → mark → dispatch → child-check via DependencyBus → error-handle) |
+| **DependencyBus** | `daemon/services/dependency_bus.py` | **NEW Phase D — authoritative parent-waits-for-children mechanism. DB-backed `dependency_watchers` table, `watch` / `emit_terminal` / `cancel_for_target` API. Watcher state survives restart by construction.** |
+| ~~MessageJobHandler~~ | ~~`daemon/services/message_job_handler.py`~~ | **REMOVED Phase D (D12) — pause check moved to `JobProcessor.start_job` pre-check** |
+| CorrelationManager | `daemon/services/correlation_manager.py` | **Rollback path / shadow validation post-Phase-D. In-memory `_pending` dict + per-parent asyncio.Lock. Reachable via `use_dependency_bus=False`.** |
+| ExecutionGate | `daemon/services/execution_gate.py` | Per-instance `asyncio.Lock` serializing `graph.astream`; required on ALL paths including resume (Race #5 fix) |
 | Message processing errors | `daemon/services/message_processing_errors.py` | Shared error side-effects (event write, lifecycle event, parent report, job FAILED) |
