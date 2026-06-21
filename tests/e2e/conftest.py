@@ -57,7 +57,17 @@ _PSYCOPG_STUB_ATTR = "_ensemble_e2e_psycopg_stub"
 
 def _real_mcp_available() -> bool:
     """Return True if the real ``mcp`` package is importable."""
-    return importlib.util.find_spec("mcp") is not None
+    try:
+        return importlib.util.find_spec("mcp") is not None
+    except (ValueError, ModuleNotFoundError):
+        # A mock module (with __spec__=None) may be sitting in sys.modules
+        # shadowing the real package. Temporarily remove it and retry.
+        saved = sys.modules.pop("mcp", None)
+        try:
+            return importlib.util.find_spec("mcp") is not None
+        finally:
+            if saved is not None:
+                sys.modules["mcp"] = saved
 
 
 def _real_psycopg_available() -> bool:

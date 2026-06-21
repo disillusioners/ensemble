@@ -61,10 +61,7 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 BASE_URL = "http://localhost:8079"           # Dev server port
 API_BASE = f"{BASE_URL}/api"
-PROJECT_ID = os.environ.get(
-    "ENSEMBLE_PROJECT_ID",
-    "83da04de-a410-4fb5-9e92-251a99d28a52",
-)
+PROJECT_ID = os.environ.get("ENSEMBLE_PROJECT_ID", None)
 
 # Timeouts (generous — real LLM calls are involved)
 SPAWN_TIMEOUT = 60          # seconds to wait for a child to appear
@@ -136,7 +133,7 @@ def _spawn_instance(agent_id: str, project_id: str = PROJECT_ID) -> str:
     """
     logger.info(f"[SPAWN] agent_id={agent_id} project_id={project_id}")
     payload: dict[str, Any] = {"agent_id": agent_id}
-    if project_id:
+    if project_id is not None:
         payload["project_id"] = project_id
 
     response = requests.post(
