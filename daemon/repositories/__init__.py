@@ -42,6 +42,16 @@ from .infra.repository import SQLModelInfraRepository, BootstrapResult
 from .infra.models import InfraAsset, InfraAssetType, InfraAssetHistory, InfraChangeType
 from .infra.types import JSONBType, InfraTypeDefinition, INFRA_TYPE_DEFINITIONS
 
+# Dependency Bus repository (Phase D of the decouple architecture)
+# Imported here so ``SQLModel.metadata.create_all()`` (called from
+# ``daemon/manager.py``) registers the ``dependency_watchers`` table
+# on fresh PostgreSQL databases. Fresh SQLite databases pick the
+# table up from the MigrationRunner instead; the existing migration
+# runner pipeline runs after ``create_all`` and applies the
+# ``20260621_000001_create_dependency_watchers.sql`` migration.
+from .dependency_bus.models import DependencyWatcher, DependencyWatcherState
+from .dependency_bus.repository import DependencyWatcherRepository
+
 # Factory functions
 from .factory import (
     DatabaseConfig,
@@ -112,6 +122,10 @@ __all__ = [
     "JSONBType",
     "InfraTypeDefinition",
     "INFRA_TYPE_DEFINITIONS",
+    # Dependency Bus (Phase D)
+    "DependencyWatcher",
+    "DependencyWatcherState",
+    "DependencyWatcherRepository",
     # Factory
     "DatabaseConfig",
     "create_engine_from_config",

@@ -383,6 +383,32 @@ class JobSystemConfig(BaseSettings):
         ),
     )
 
+    # ─── Phase D dependency-bus feature flag ───────────────────────────────
+    # When OFF (default), the CorrelationManager is the sole completion
+    # authority (unchanged from Phase A+B+C). When ON, the Dependency Bus
+    # (`daemon/services/dependency_bus.py`) becomes the authoritative
+    # parent-waits-for-children mechanism, backed by the
+    # `dependency_watchers` table so watcher state survives restart. The CM
+    # class is retained for shadow validation (D8). See
+    # ``docs/plans/decouple-execution-plan.md`` §13 and
+    # ``docs/configuration/completion-flags.md``.
+
+    use_dependency_bus: bool = Field(
+        default=False,
+        description=(
+            "Phase D feature flag for the DB-backed Dependency Bus. When OFF "
+            "(default), the CorrelationManager is the sole completion "
+            "authority (Phase A+B+C behavior). When ON, the Dependency Bus "
+            "is authoritative — `send_message` writes a "
+            "`dependency_watchers` row (FollowUp) instead of calling "
+            "`notify_corr_register`, and `MessageTaskProcessor.process` "
+            "calls `bus.emit_terminal(task_id, outcome)` instead of "
+            "`notify_corr_resolve`. The CM class is kept for shadow "
+            "validation for one more release. Set via env var "
+            "ENSEMBLE_JOB_SYSTEM_USE_DEPENDENCY_BUS=true."
+        ),
+    )
+
 
 class McpPoolConfig(BaseSettings):
     """MCP warm-up connection pool configuration."""
