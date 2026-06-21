@@ -3086,6 +3086,91 @@ class InstanceManager:
                 except Exception as e:
                     logger.warning(f"Job {old_job_id[:8]}... already transitioned: {e}")
 
+                # 5. Mark the original paused Task COMPLETED so the per-instance
+                #    guard in ``claim_pending_task`` releases for any subsequent
+                #    follow-up Tasks (most importantly the dependency-bus-fired
+                #    child-completion report that races with the resume).
+                #
+                #    Why this is needed (resume-path race, 2026-06-21):
+                #    The pause semantics intentionally leave the original Task
+                #    RUNNING so a subsequent worker re-claim can pick it up
+                #    (``Worker._process_with_timeout`` swallows
+                #    ``concurrent.futures.CancelledError`` and returns without
+                #    completing the task). The resume path, however, drives
+                #    ``graph.astream`` directly on the event loop via
+                #    ``_process_message_with_tracking`` — it does NOT re-claim
+                #    the Task in the worker pool. So the Task stays RUNNING
+                #    forever unless we explicitly complete it here.
+                #
+                #    Without this, the per-instance guard
+                #    (``claim_pending_task`` line ~266: ``instance_id NOT IN
+                #    (SELECT instance_id FROM task WHERE status='running')``)
+                #    blocks every follow-up Task for the leader — including
+                #    the bus-fired child completion report that lands
+                #    immediately after the resume. The leader is stranded in
+                #    WAITING_CHILDREN with a PENDING follow-up that no worker
+                #    will ever pick up. ``complete_task`` also fires
+                #    ``_notify_pending_task()`` which calls
+                #    ``worker_pool.notify_work()`` (repository.py:607), so a
+                #    sleeping worker wakes immediately rather than waiting for
+                #    the 3-second safety timeout.
+                #
+                #    Lookup chain (matches the unified-dispatcher admission
+                #    carve-out in ``Observer._admit_via_worker_pool``): the
+                #    Task was created with ``message_id`` copied from
+                #    ``JobItem.job_metadata['message_id']`` (set by
+                #    ``enqueue_message_via_jq`` at instance_messaging.py:1578),
+                #    so we recover the original message_id from the JobItem
+                #    and look up the Task via ``get_by_message``.
+                try:
+                    _task_repo = getattr(self, "_task_repo", None)
+                    _job_queue_svc = getattr(self, "_job_queue_service", None)
+                    if _task_repo is not None and _job_queue_svc is not None:
+                        _old_job = await asyncio.to_thread(
+                            _job_queue_svc._repository.get, old_job_id
+                        )
+                        _original_message_id: str | None = None
+                        if _old_job is not None and _old_job.job_metadata:
+                            _original_message_id = _old_job.job_metadata.get(
+                                "message_id"
+                            )
+                        if _original_message_id:
+                            _paused_task = await asyncio.to_thread(
+                                _task_repo.get_by_message, _original_message_id
+                            )
+                            if (
+                                _paused_task is not None
+                                and _paused_task.status
+                                == TaskStatus.RUNNING.value
+                            ):
+                                await asyncio.to_thread(
+                                    _task_repo.complete_task,
+                                    _paused_task.id,
+                                    {},
+                                )
+                                logger.info(
+                                    f"[RESUME] marked paused Task "
+                                    f"{_paused_task.id} COMPLETED for "
+                                    f"original message "
+                                    f"{_original_message_id[:8]}... "
+                                    f"(instance={instance_id[:8]}...) "
+                                    f"so per-instance guard releases for "
+                                    f"follow-up Tasks"
+                                )
+                except Exception as task_complete_err:
+                    # Defensive: never let a Task-completion failure crash the
+                    # resume path. The job is already COMPLETED; a stranded
+                    # RUNNING Task is a degraded state (follow-ups will hit
+                    # the per-instance guard until the next restart / manual
+                    # cleanup) but the resume itself succeeded.
+                    logger.warning(
+                        f"[RESUME] failed to mark paused Task COMPLETED "
+                        f"for instance={instance_id[:8]}... "
+                        f"job={old_job_id[:8]}...: "
+                        f"{type(task_complete_err).__name__}: "
+                        f"{task_complete_err}"
+                    )
+
             except Exception as e:
                 logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")
                 # Mark the job as FAILED on failure
