@@ -80,7 +80,7 @@ class _ChildCompletionDbResult(NamedTuple):
 
 class ChildReportsService:
     """Service for handling child instance completion reports.
-    
+
     Handles:
     - Idempotency per-message (won't send duplicate reports for same message)
     - Parent's waiting_for counter decrement
@@ -94,7 +94,7 @@ class ChildReportsService:
         events_service: "EventPublisherService | None" = None,
     ):
         """Initialize the child reports service.
-        
+
         Args:
             manager: The InstanceManager facade.
             events_service: Optional event publisher service for lifecycle events.
@@ -106,6 +106,133 @@ class ChildReportsService:
     def _config(self) -> "Config":
         """Access config through manager for test mockability."""
         return self._manager.config
+
+    def _is_dependency_bus_enabled(self) -> bool:
+        """Read the ``use_dependency_bus`` flag from the manager config.
+
+        Defensive ``getattr`` chain mirrors
+        ``JobProcessor._is_legacy_jobqueue_dispatch_enabled`` and the
+        sibling helper in ``daemon/tools/instance.py`` so test mocks
+        that bypass ``InstanceManager.__init__`` (e.g. ``MagicMock()``
+        without explicit ``config``) don't crash. The default is False
+        (Phase D feature flag OFF = legacy CM path is active), matching
+        the config field's default.
+
+        Returns:
+            True if the operator has enabled the DB-backed DependencyBus
+            completion-delivery path; False otherwise.
+        """
+        _config = getattr(self._manager, "config", None)
+        _job_system = getattr(_config, "job_system", None)
+        return bool(
+            getattr(_job_system, "use_dependency_bus", False)
+        )
+
+    async def _emit_terminal_via_bus(
+        self,
+        task_id: int | None,
+        status: str,
+        summary: str | None = None,
+        error: str | None = None,
+    ) -> list:
+        """Emit a terminal event via the DependencyBus and enqueue returned FollowUps.
+
+        When the ``use_dependency_bus`` flag is ON, this helper replaces
+        the ``notify_corr_resolve`` call: it asks the bus to atomically
+        transition PENDING watchers for ``task_id`` to FIRED and returns
+        the list of FollowUps for the caller (this service) to enqueue
+        onto the parent's task queue.
+
+        The bus is a state machine — it does NOT enqueue. The caller
+        (``_update_parent_on_child_complete`` /
+        ``_dispatch_post_commit_side_effects``) must call
+        ``manager.enqueue_message(...)`` for each returned FollowUp.
+        That separation keeps the bus narrow and makes the caller's
+        enqueueing policy independently testable.
+
+        Args:
+            task_id: The child task id whose terminal event is firing.
+                ``None`` short-circuits — the bus is keyed on a string
+                task id and a missing id means we can't match any
+                watchers (this can happen if the task row was already
+                GC'd; we log and return an empty list).
+            status: One of ``"completed"``, ``"error"``,
+                ``"terminated"``. Currently the bus only uses this for
+                structured logging — all PENDING watchers fire
+                regardless of outcome (the parent needs to know about
+                both success and failure).
+            summary: Optional human-readable summary of the terminal
+                event. Forwarded to the FollowUp payload for diagnostic
+                context.
+            error: Optional error message when ``status == "error"``.
+
+        Returns:
+            List of FollowUps that were atomically transitioned from
+            PENDING to FIRED. Empty list when no watchers existed or
+            when the flag is OFF (this helper is a no-op in the OFF
+            case — the caller falls through to the CM path).
+        """
+        from .dependency_bus import (
+            FollowUp,
+            Outcome,
+            get_dependency_bus,
+        )
+
+        bus = get_dependency_bus()
+        if bus is None:
+            # Bus singleton missing despite flag being ON — treat as a
+            # wiring failure and return an empty list (the caller's CM
+            # path will still run because we never replace it; the CM
+            # is the safety net).
+            logger.warning(
+                "_emit_terminal_via_bus: bus singleton is None despite "
+                "flag=ON — returning empty FollowUp list "
+                "(caller should fall back to CM path)"
+            )
+            return []
+
+        if task_id is None:
+            logger.warning(
+                "_emit_terminal_via_bus: task_id is None — cannot fire "
+                "watchers (no key to match); returning empty FollowUp list"
+            )
+            return []
+
+        outcome = Outcome(status=status, error=error, summary=summary)
+        fired = await bus.emit_terminal(task_id=str(task_id), outcome=outcome)
+
+        # Enqueue each fired FollowUp onto its target_instance_id. The
+        # bus does NOT do this — separation of concerns. We use the
+        # legacy ``enqueue_message`` path (WorkerPool Task + MessageQueue
+        # row, atomic). Metadata is forwarded so the receiver can
+        # reconstruct the original send context if needed.
+        for fu in fired:
+            try:
+                await self._manager.enqueue_message(
+                    instance_id=fu.target_instance_id,
+                    message=fu.message,
+                    source=fu.source,
+                    metadata=fu.metadata,
+                )
+                logger.debug(
+                    f"bus follow-up enqueued: target="
+                    f"{fu.target_instance_id[:8]}..., "
+                    f"source_task={str(task_id)[:8]}..., "
+                    f"outcome={status}",
+                    extra={"completion_delivery_path": "bus"},
+                )
+            except Exception as enq_err:
+                # Log and continue — the FollowUp is already FIRED in
+                # the DB. A failed enqueue is a transient problem (the
+                # caller can re-enqueue on retry); the bus invariant
+                # (exactly-once fire) is not violated.
+                logger.warning(
+                    f"bus follow-up enqueue failed: target="
+                    f"{fu.target_instance_id[:8]}..., "
+                    f"source_task={str(task_id)[:8]}...: {enq_err}"
+                )
+
+        return fired
 
     @property
     def _instance_repository(self) -> "SQLModelInstanceRepository":
@@ -587,24 +714,53 @@ Provide a concise summary:"""
         # None/empty message_id against any registered entry. Calling
         # with message_id="" would silently no-op and the pending entry
         # would stay forever.
+        #
+        # Phase D (DependencyBus): when ``use_dependency_bus=ON``, the
+        # CM ``notify_corr_resolve`` call is SKIPPED and replaced by
+        # ``bus.emit_terminal(...)`` keyed on the child task id. The
+        # two authorities are mutually exclusive — never called in
+        # parallel — to prevent double-fire (Phase A lesson: the
+        # double-decrement bug class).
         if completed_message_id:
-            try:
-                from .correlation_manager import notify_corr_resolve
-                await notify_corr_resolve(
-                    parent_id=instance.parent_id,
-                    child_id=instance.instance_id,
-                    message_id=completed_message_id,
-                    status="responded",
+            if self._is_dependency_bus_enabled():
+                # ─── Phase D: DependencyBus path (replaces CM) ───────
+                # Look up the child task id from the message_id — the
+                # bus is keyed on task id, not message_id. The lookup
+                # runs on a worker thread (sync DB call) so it doesn't
+                # block the event loop. When the task row is missing
+                # (e.g. cleared by a stale-task sweep before this
+                # completion was reported), ``_emit_terminal_via_bus``
+                # logs and returns an empty list — no FollowUps to
+                # enqueue, no harm done.
+                _child_task = None
+                _task_repo = getattr(self._manager, "_task_repo", None)
+                if _task_repo is not None:
+                    _child_task = await asyncio.to_thread(
+                        _task_repo.get_by_message, completed_message_id
+                    )
+                await self._emit_terminal_via_bus(
+                    task_id=getattr(_child_task, "id", None),
+                    status="completed",
+                    summary="child completed",
                 )
-            except Exception as hook_err:
-                # Defensive outer guard — the helper already swallows CM
-                # errors, but keep this so a failure in the import path or
-                # argument binding can never break the child-completion path.
-                logger.warning(
-                    f"CM hook: resolve path failed "
-                    f"(parent={instance.parent_id[:8] if instance.parent_id else '?'}..., "
-                    f"child={instance.instance_id[:8]}...): {hook_err}"
-                )
+            else:
+                try:
+                    from .correlation_manager import notify_corr_resolve
+                    await notify_corr_resolve(
+                        parent_id=instance.parent_id,
+                        child_id=instance.instance_id,
+                        message_id=completed_message_id,
+                        status="responded",
+                    )
+                except Exception as hook_err:
+                    # Defensive outer guard — the helper already swallows CM
+                    # errors, but keep this so a failure in the import path or
+                    # argument binding can never break the child-completion path.
+                    logger.warning(
+                        f"CM hook: resolve path failed "
+                        f"(parent={instance.parent_id[:8] if instance.parent_id else '?'}..., "
+                        f"child={instance.instance_id[:8]}...): {hook_err}"
+                    )
         else:
             logger.debug(
                 f"CM hook: skipping resolve for parent="
@@ -1691,21 +1847,43 @@ Provide a concise summary:"""
         if outcome == "regular_child_completed":
             # CM resolve hook: fires AFTER the commit so the DB state is
             # consistent before the CM's callback runs its own transaction.
+            #
+            # Phase D (DependencyBus): when ``use_dependency_bus=ON``, the
+            # CM hook is SKIPPED and replaced by ``bus.emit_terminal``,
+            # exactly as in the inline branch above
+            # (``_update_parent_on_child_complete``). The bus path here
+            # handles the post-commit side-effect variant — both call
+            # sites converge on ``_emit_terminal_via_bus`` to keep the
+            # bus wiring in one place.
             if completed_message_id:
-                try:
-                    from .correlation_manager import notify_corr_resolve
-                    await notify_corr_resolve(
-                        parent_id=parent_id,
-                        child_id=instance_id,
-                        message_id=completed_message_id,
-                        status="responded",
+                if self._is_dependency_bus_enabled():
+                    # ─── Phase D: DependencyBus path (replaces CM) ───
+                    _child_task_post = None
+                    _task_repo_post = getattr(self._manager, "_task_repo", None)
+                    if _task_repo_post is not None:
+                        _child_task_post = await asyncio.to_thread(
+                            _task_repo_post.get_by_message, completed_message_id
+                        )
+                    await self._emit_terminal_via_bus(
+                        task_id=getattr(_child_task_post, "id", None),
+                        status="completed",
+                        summary="regular child completed",
                     )
-                except Exception as hook_err:
-                    logger.warning(
-                        f"CM hook: resolve path failed "
-                        f"(parent={parent_id[:8] if parent_id else '?'}..., "
-                        f"child={instance_id[:8]}...): {hook_err}"
-                    )
+                else:
+                    try:
+                        from .correlation_manager import notify_corr_resolve
+                        await notify_corr_resolve(
+                            parent_id=parent_id,
+                            child_id=instance_id,
+                            message_id=completed_message_id,
+                            status="responded",
+                        )
+                    except Exception as hook_err:
+                        logger.warning(
+                            f"CM hook: resolve path failed "
+                            f"(parent={parent_id[:8] if parent_id else '?'}..., "
+                            f"child={instance_id[:8]}...): {hook_err}"
+                        )
 
             # CompletionRegistry
             from .completion_registry import get_completion_registry

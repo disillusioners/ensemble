@@ -60,6 +60,35 @@ class _ErrorReportDbResult(NamedTuple):
     cascade_parent_parent_id: str | None
 
 
+def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
+    """Read the ``use_dependency_bus`` flag from the manager config.
+
+    Module-level helper (not a method) because the gated call site in
+    ``_send_error_report`` is a long function and the helper is also
+    used by other call sites that receive ``manager`` as an argument.
+    Mirrors the defensive ``getattr`` chain used in
+    ``JobProcessor._is_legacy_jobqueue_dispatch_enabled``,
+    ``ChildReportsService._is_dependency_bus_enabled``, and the sibling
+    helper in ``daemon/tools/instance.py`` so test mocks that bypass
+    ``InstanceManager.__init__`` (e.g. ``MagicMock()`` without explicit
+    ``config``) don't crash. Default is False (Phase D feature flag
+    OFF = legacy CM path is active), matching the config field's
+    default.
+
+    Args:
+        manager: The InstanceManager (or test mock).
+
+    Returns:
+        True if the operator has enabled the DB-backed DependencyBus
+        completion-delivery path; False otherwise.
+    """
+    _config = getattr(manager, "config", None)
+    _job_system = getattr(_config, "job_system", None)
+    return bool(
+        getattr(_job_system, "use_dependency_bus", False)
+    )
+
+
 class ErrorReportingService:
     """Service for handling and reporting errors to parent instances.
     
@@ -584,24 +613,93 @@ class ErrorReportingService:
             # cannot resolve a None/empty message_id against any
             # registered entry. Calling with message_id="" would
             # silently no-op and the pending entry would stay forever.
+            #
+            # Phase D (DependencyBus): when ``use_dependency_bus=ON``, the
+            # CM ``notify_corr_resolve`` call is SKIPPED and replaced by
+            # ``bus.emit_terminal(...)`` keyed on the child task id,
+            # with ``status="error"`` and the error message forwarded as
+            # the Outcome's ``error`` field. The two authorities are
+            # mutually exclusive — never called in parallel — to prevent
+            # double-fire (Phase A lesson). The bus is the state machine;
+            # this helper enqueues the returned FollowUps via
+            # ``manager.enqueue_message``.
             if message_id:
-                try:
-                    from .correlation_manager import notify_corr_resolve
-                    await notify_corr_resolve(
-                        parent_id=parent_id,
-                        child_id=instance_id,
-                        message_id=message_id,
-                        status="error",
+                if _is_dependency_bus_enabled(self._manager):
+                    # ─── Phase D: DependencyBus path (replaces CM) ───────
+                    _child_task_err = None
+                    _task_repo_err = getattr(self._manager, "_task_repo", None)
+                    if _task_repo_err is not None:
+                        _child_task_err = await asyncio.to_thread(
+                            _task_repo_err.get_by_message, message_id
+                        )
+                    # Import here to avoid module-level cycle with
+                    # dependency_bus importing from this module transitively.
+                    from .dependency_bus import (
+                        Outcome,
+                        get_dependency_bus,
                     )
-                except Exception as hook_err:
-                    # Defensive outer guard — the helper already
-                    # swallows CM errors, but keep this so a failure in
-                    # the import path or argument binding can never break
-                    # the error-reporting path.
-                    logger.warning(
-                        f"CM hook: resolve (error) path failed "
-                        f"(parent={parent_id[:8]}..., child={instance_id[:8]}...): {hook_err}"
-                    )
+                    _bus = get_dependency_bus()
+                    if _bus is None:
+                        logger.warning(
+                            "use_dependency_bus=ON but bus singleton is "
+                            "None; falling back to legacy CM resolve "
+                            "(error) path"
+                        )
+                    else:
+                        try:
+                            _outcome = Outcome(
+                                status="error",
+                                error=error,
+                                summary=f"child errored: {error_type}",
+                            )
+                            _fired = await _bus.emit_terminal(
+                                task_id=str(getattr(_child_task_err, "id", None) or ""),
+                                outcome=_outcome,
+                            )
+                            for _fu in _fired:
+                                try:
+                                    await self._manager.enqueue_message(
+                                        instance_id=_fu.target_instance_id,
+                                        message=_fu.message,
+                                        source=_fu.source,
+                                        metadata=_fu.metadata,
+                                    )
+                                    logger.debug(
+                                        f"bus error follow-up enqueued: "
+                                        f"target={_fu.target_instance_id[:8]}..., "
+                                        f"outcome=error",
+                                        extra={"completion_delivery_path": "bus"},
+                                    )
+                                except Exception as enq_err:
+                                    logger.warning(
+                                        f"bus error follow-up enqueue "
+                                        f"failed: target="
+                                        f"{_fu.target_instance_id[:8]}...: {enq_err}"
+                                    )
+                        except Exception as hook_err:
+                            logger.warning(
+                                f"bus hook: emit_terminal (error) failed "
+                                f"(parent={parent_id[:8]}..., "
+                                f"child={instance_id[:8]}...): {hook_err}"
+                            )
+                else:
+                    try:
+                        from .correlation_manager import notify_corr_resolve
+                        await notify_corr_resolve(
+                            parent_id=parent_id,
+                            child_id=instance_id,
+                            message_id=message_id,
+                            status="error",
+                        )
+                    except Exception as hook_err:
+                        # Defensive outer guard — the helper already
+                        # swallows CM errors, but keep this so a failure in
+                        # the import path or argument binding can never break
+                        # the error-reporting path.
+                        logger.warning(
+                            f"CM hook: resolve (error) path failed "
+                            f"(parent={parent_id[:8]}..., child={instance_id[:8]}...): {hook_err}"
+                        )
             else:
                 logger.debug(
                     f"CM hook: skipping resolve (error) for parent="

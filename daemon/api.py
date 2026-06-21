@@ -368,6 +368,17 @@ async def lifespan(app: FastAPI):
         completion_callback=job_feedback_observer.handle_correlation_complete,
     )
 
+    # Initialize and start the DependencyBus (Phase D).
+    # Mirrors ``init_correlation_manager`` placement — between CM init and
+    # JobProcessor.start() so the bus is live when jobs flow. The bus is
+    # ALWAYS instantiated (cheap, no maintenance cost when OFF); the
+    # ``use_dependency_bus`` flag is checked at the gated call sites in
+    # ``send_message``, ``child_reports``, and ``error_reporting`` and
+    # decides whether the bus path is taken. See
+    # ``daemon/services/dependency_bus.py`` for the bus API and
+    # ``docs/configuration/completion-flags.md`` for the flag semantics.
+    await init_dependency_bus(app, manager)
+
     # Bootstrap system default project (Phase 1 of system_default_project feature)
     # This ensures the system project exists and has its queues provisioned
     # before any other services start using it. Must run BEFORE JobProcessor.start().
@@ -489,6 +500,11 @@ async def lifespan(app: FastAPI):
     # CM holds a subscription on it.
     await shutdown_correlation_manager(app)
 
+    # Stop the DependencyBus. The bus is flag-agnostic (always wired),
+    # so this stops it whenever it was started. Safe to call when the
+    # bus was never started (the helper is a no-op in that case).
+    await shutdown_dependency_bus(app)
+
     # Stop JobProcessor
     if hasattr(app.state, 'job_processor') and app.state.job_processor:
         await app.state.job_processor.stop()
@@ -503,6 +519,69 @@ async def lifespan(app: FastAPI):
     
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
+
+
+async def init_dependency_bus(app, manager) -> None:
+    """Initialize and start the DependencyBus (Phase D).
+
+    Mirrors the placement of :func:`init_correlation_manager`: runs after
+    JobFeedbackObserver is created and before JobProcessor.start(), so the
+    bus is live when jobs flow. The bus is ALWAYS instantiated — the
+    ``use_dependency_bus`` flag is checked at the gated call sites
+    (``send_message``, ``child_reports``, ``error_reporting``) and
+    decides whether the bus path is taken. When the flag is OFF, the
+    bus is wired but inert (no call sites invoke it); the CM remains
+    authoritative for completion.
+
+    Failure handling: a startup failure is logged at WARNING and the
+    daemon continues without the bus (graceful degradation — same
+    pattern as the CorrelationManager init). The ``set_dependency_bus``
+    call ensures the module singleton is reset to ``None`` on failure
+    so the call sites correctly fall through to the legacy CM path.
+
+    Args:
+        app: The FastAPI app (used to stash the instance on ``app.state``
+            for later shutdown).
+        manager: The InstanceManager (provides the shared SQLAlchemy
+            ``engine`` for the watcher repository).
+    """
+    from daemon.repositories.dependency_bus import DependencyWatcherRepository
+    from daemon.services.dependency_bus import (
+        DependencyBus,
+        set_dependency_bus,
+    )
+
+    try:
+        watcher_repo = DependencyWatcherRepository(engine=manager._engine)
+        bus = DependencyBus(watcher_repo)
+        await bus.start()
+        set_dependency_bus(bus)
+        app.state._dependency_bus = bus
+        logger.info("DependencyBus started")
+    except Exception as e:
+        logger.warning(
+            f"Failed to start DependencyBus (continuing without it): {e}"
+        )
+        set_dependency_bus(None)
+
+
+async def shutdown_dependency_bus(app) -> None:
+    """Stop the DependencyBus and clear the module singleton.
+
+    Called from the lifespan shutdown sequence. Safe to call when the
+    bus was never started (``app.state._dependency_bus`` missing) — the
+    helper logs at WARNING on failure but never raises, so the rest of
+    the shutdown sequence proceeds.
+    """
+    from daemon.services.dependency_bus import set_dependency_bus
+
+    bus = getattr(app.state, "_dependency_bus", None)
+    if bus is not None:
+        try:
+            await bus.stop()
+        except Exception as e:
+            logger.warning(f"Error stopping DependencyBus: {e}")
+        set_dependency_bus(None)
 
 
 def create_app() -> FastAPI:

@@ -260,6 +260,31 @@ def _is_null_workdir(value: str | None) -> bool:
     return str(value).strip().lower() in ("", "null", "none")
 
 
+def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
+    """Read the ``use_dependency_bus`` flag from the manager config.
+
+    Defensive ``getattr`` chain mirrors
+    ``JobProcessor._is_legacy_jobqueue_dispatch_enabled`` so test mocks
+    that bypass ``InstanceManager.__init__`` (e.g. ``MagicMock()``
+    without explicit ``config``) don't crash. The default is False
+    (Phase D feature flag OFF = legacy CM path is active), matching
+    the config field's default.
+
+    Args:
+        manager: The InstanceManager (or test mock).
+
+    Returns:
+        True if the operator has enabled the DB-backed DependencyBus
+        completion-delivery path; False otherwise (the default —
+        the CM remains the sole completion authority).
+    """
+    _config = getattr(manager, "config", None)
+    _job_system = getattr(_config, "job_system", None)
+    return bool(
+        getattr(_job_system, "use_dependency_bus", False)
+    )
+
+
 async def _resolve_instance_id(
     manager: "InstanceManager",
     instance_id: str | None,
@@ -563,6 +588,27 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         )
         message_id = result.message_id
 
+        # Resolve the freshly-created child task id. The DependencyBus
+        # (Phase D) keys watchers on the child task id, so when the
+        # ``use_dependency_bus`` flag is ON we look up the task the
+        # ``enqueue_message`` call just wrote. The lookup is gated on
+        # the flag so the default OFF path adds zero DB cost.
+        use_dep_bus = _is_dependency_bus_enabled(manager)
+        child_task = None
+        if use_dep_bus:
+            _task_repo = getattr(manager, "_task_repo", None)
+            if _task_repo is not None:
+                child_task = await asyncio.to_thread(
+                    _task_repo.get_by_message, message_id
+                )
+            else:
+                logger.warning(
+                    "use_dependency_bus=ON but manager._task_repo is "
+                    "missing — cannot resolve child task id; skipping "
+                    "bus.watch and falling back to legacy CM path"
+                )
+                use_dep_bus = False
+
         # Increment waiting_for counter if sender is the parent of the target instance
         # This handles the case where a parent reuses an existing child (vs first spawn)
         # Fix C: atomic SQL UPDATE eliminates the read-modify-write race against
@@ -611,31 +657,102 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 # the legacy ``waiting_for`` cascade is the graceful-
                 # degradation fallback (and that path is itself gated by
                 # ``use_legacy_cascade`` below).
-                cm = get_correlation_manager()
-                if cm is not None:
-                    try:
-                        await cm.register_message_send(
-                            parent_id=current_instance_id,
-                            child_id=instance_id,
-                            message_id=message_id,
-                        )
-                    except Exception as hook_err:
+                #
+                # Phase D (DependencyBus): when ``use_dependency_bus=ON``,
+                # the bus REPLACES the CM as the parent-waits-for-children
+                # authority. We skip ``register_message_send`` entirely and
+                # instead call ``bus.watch(...)`` to register a FollowUp
+                # keyed on the child task id. The CM call is skipped — not
+                # invoked in parallel — so the two authorities cannot drift.
+                # The bus path is the bus-side equivalent of CM's
+                # ``register_message_send``: a PENDING row in
+                # ``dependency_watchers``, fired on terminal event by
+                # ``emit_terminal`` (called from ``child_reports`` /
+                # ``error_reporting``).
+                if use_dep_bus and child_task is not None:
+                    # ─── Phase D: DependencyBus path (replaces CM) ───────
+                    from daemon.services.dependency_bus import (
+                        FollowUp,
+                        get_dependency_bus,
+                    )
+                    _bus = get_dependency_bus()
+                    if _bus is None:
+                        # Bus singleton missing despite the flag being ON —
+                        # treat as a wiring failure and fall through to the
+                        # CM path (graceful degradation, matches the CM's
+                        # own behavior when ``get_correlation_manager() is None``).
                         logger.warning(
-                            f"CM hook: register failed "
-                            f"(parent={current_instance_id[:8]}, "
-                            f"child={instance_id[:8]}): {hook_err}"
+                            "use_dependency_bus=ON but bus singleton is "
+                            "None; falling back to legacy CM register"
                         )
-                        if use_legacy_cascade:
-                            # Rollback is only meaningful when the legacy
-                            # path ran an SQL increment that would be left
-                            # orphaned. Under flag=OFF, no SQL write was
-                            # issued, so the session has nothing to roll
-                            # back and we can skip the call.
-                            session.rollback()
-                        return (
-                            f"ERROR: Failed to register message correlation: "
-                            f"{hook_err}"
-                        )
+                    else:
+                        try:
+                            _follow_up = FollowUp(
+                                target_instance_id=current_instance_id,
+                                message=(
+                                    f"[dependency_bus] child {instance_id} "
+                                    f"completed for message {message_id}"
+                                ),
+                                source=f"internal_agent:{current_instance_id}",
+                                metadata={
+                                    "kind": "child_complete",
+                                    "child_id": instance_id,
+                                    "parent_id": current_instance_id,
+                                    "message_id": message_id,
+                                },
+                            )
+                            await _bus.watch(
+                                source_task_id=str(child_task.id),
+                                follow_up=_follow_up,
+                            )
+                            logger.debug(
+                                f"bus.watch registered: child_task="
+                                f"{str(child_task.id)[:8]}..., "
+                                f"parent={current_instance_id[:8]}..., "
+                                f"child={instance_id[:8]}..., "
+                                f"message={message_id[:8]}...",
+                                extra={"completion_delivery_path": "bus"},
+                            )
+                        except Exception as hook_err:
+                            logger.warning(
+                                f"bus hook: watch failed "
+                                f"(parent={current_instance_id[:8]}, "
+                                f"child={instance_id[:8]}, "
+                                f"task={str(child_task.id)[:8]}): {hook_err}"
+                            )
+                            # Mirror CM's contract: surface the failure so
+                            # the agent sees an ERROR string and the caller
+                            # can decide whether to retry.
+                            return (
+                                f"ERROR: Failed to register message "
+                                f"correlation (dependency_bus): {hook_err}"
+                            )
+                else:
+                    cm = get_correlation_manager()
+                    if cm is not None:
+                        try:
+                            await cm.register_message_send(
+                                parent_id=current_instance_id,
+                                child_id=instance_id,
+                                message_id=message_id,
+                            )
+                        except Exception as hook_err:
+                            logger.warning(
+                                f"CM hook: register failed "
+                                f"(parent={current_instance_id[:8]}, "
+                                f"child={instance_id[:8]}): {hook_err}"
+                            )
+                            if use_legacy_cascade:
+                                # Rollback is only meaningful when the legacy
+                                # path ran an SQL increment that would be left
+                                # orphaned. Under flag=OFF, no SQL write was
+                                # issued, so the session has nothing to roll
+                                # back and we can skip the call.
+                                session.rollback()
+                            return (
+                                f"ERROR: Failed to register message correlation: "
+                                f"{hook_err}"
+                            )
 
                 # ─── Legacy path: only when USE_LEGACY_WAITING_FOR_CASCADE is ON ───
                 # The kill switch. With the flag OFF (default), skip both the
