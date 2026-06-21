@@ -89,13 +89,20 @@ def _pg_engine() -> Engine:
 
 @pytest.fixture(scope="module")
 def pg_engine() -> Engine:
-    """Module-scoped PG engine for the whole test module."""
+    """Module-scoped PG engine for the whole test module.
+
+    Intentionally omits ``SQLModel.metadata.drop_all`` on teardown — the
+    session-scoped ``pg_engine`` in ``tests/postgres/conftest.py`` owns
+    the schema lifecycle. A per-module ``drop_all`` would wipe tables out
+    from under the session-scoped autouse ``_pg_truncate_tables`` fixture
+    in sibling test files (``test_smoke``, ``test_optimistic_locking``),
+    causing ``UndefinedTable`` errors when the full PG suite runs.
+    """
     engine = _pg_engine()
+    SQLModel.metadata.create_all(engine)
     try:
-        SQLModel.metadata.create_all(engine)
         yield engine
     finally:
-        SQLModel.metadata.drop_all(engine)
         engine.dispose()
 
 
