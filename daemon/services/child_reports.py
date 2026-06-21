@@ -722,7 +722,22 @@ Provide a concise summary:"""
         # parallel — to prevent double-fire (Phase A lesson: the
         # double-decrement bug class).
         if completed_message_id:
-            if self._is_dependency_bus_enabled():
+            # W1 fix (2026-06-21): check the flag AND the bus singleton.
+            # When the flag is ON but the bus singleton is None (wiring
+            # failure, lazy init race, or unit-test mock), falling
+            # through to the CM path is the safe default — the bus path
+            # would otherwise silently drop the FollowUp because
+            # ``_emit_terminal_via_bus`` returns ``[]`` on bus=None.
+            # Checking both at the call site makes the CM the
+            # graceful-degradation fallback, matching the project's
+            # pattern for ``get_correlation_manager() is not None``
+            # guards elsewhere.
+            from .dependency_bus import get_dependency_bus
+            use_bus_path = (
+                self._is_dependency_bus_enabled()
+                and get_dependency_bus() is not None
+            )
+            if use_bus_path:
                 # ─── Phase D: DependencyBus path (replaces CM) ───────
                 # Look up the child task id from the message_id — the
                 # bus is keyed on task id, not message_id. The lookup
@@ -1856,7 +1871,17 @@ Provide a concise summary:"""
             # sites converge on ``_emit_terminal_via_bus`` to keep the
             # bus wiring in one place.
             if completed_message_id:
-                if self._is_dependency_bus_enabled():
+                # W1 fix (2026-06-21): same guard as the inline branch
+                # above — flag AND bus singleton. Mirrors the comment
+                # block at line ~725; the rationale (bus=None →
+                # FollowUp silently dropped) is identical. See that
+                # site for the full explanation.
+                from .dependency_bus import get_dependency_bus
+                use_bus_path = (
+                    self._is_dependency_bus_enabled()
+                    and get_dependency_bus() is not None
+                )
+                if use_bus_path:
                     # ─── Phase D: DependencyBus path (replaces CM) ───
                     _child_task_post = None
                     _task_repo_post = getattr(self._manager, "_task_repo", None)

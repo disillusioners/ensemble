@@ -123,6 +123,13 @@ class DependencyWatcher(SQLModel, table=True):
         created_at: ISO-8601 timestamp, immutable.
         fired_at: ISO-8601 timestamp set on the FIRED transition.
             ``None`` while PENDING or after CANCELLED.
+        enqueued_at: ISO-8601 timestamp set by the bus AFTER the caller
+            successfully enqueued the FollowUp (``manager.enqueue_message``).
+            Crash-recovery dedup marker: ``_recover_fired_unsent`` filters
+            to ``WHERE state='FIRED' AND enqueued_at IS NULL`` on restart,
+            so rows that were enqueued in a previous process are NOT
+            re-delivered. ``None`` while PENDING, on a fresh FIRED row
+            that has not yet been enqueued, and after CANCELLED.
         state: One of :class:`DependencyWatcherState` values.
             Default ``PENDING``. Transitioned atomically by
             :meth:`DependencyWatcherRepository.transition_state`
@@ -191,4 +198,12 @@ class DependencyWatcher(SQLModel, table=True):
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
     fired_at: str | None = Field(default=None)
+    enqueued_at: str | None = Field(
+        default=None,
+        description=(
+            "ISO-8601 timestamp stamped by the bus AFTER the caller "
+            "successfully enqueued the FollowUp. Crash-recovery dedup "
+            "marker (see C1 fix, 2026-06-21)."
+        ),
+    )
     state: str = Field(default=DependencyWatcherState.PENDING.value, max_length=16)

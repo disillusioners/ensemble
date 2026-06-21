@@ -1,0 +1,48 @@
+-- Migration: add enqueued_at marker to dependency_watchers
+-- Created: 2026-06-21
+-- Author: system
+-- Description:
+--   C1 fix for the Dependency Bus (Phase D). The bus's crash-recovery
+--   contract requires distinguishing "FIRED and enqueued" from
+--   "FIRED and crashed" — without a marker, the bus would re-enqueue
+--   ALL FIRED rows on every restart, causing duplicate delivery for any
+--   row that was already enqueued in a previous process.
+--
+--   The marker is ``enqueued_at``: NULL while PENDING or after a fresh
+--   FIRED transition (i.e. the caller has not yet enqueued the
+--   FollowUp). The bus stamps ``enqueued_at = now()`` only AFTER a
+--   successful ``manager.enqueue_message(...)`` call. On restart,
+--   ``bus._recover_fired_unsent`` filters to ``WHERE state='FIRED'
+--   AND enqueued_at IS NULL`` — only truly un-enqueued rows are
+--   re-delivered, dedup is automatic.
+--
+--   Schema mirrors daemon/repositories/dependency_bus/models.py
+--   (DependencyWatcher.enqueued_at, default None).
+--
+-- DUAL-DRIVER NOTES:
+--   This .sql is applied by MigrationRunner ONLY when the engine
+--   dialect is sqlite (runner.py skips non-sqlite). For PostgreSQL:
+--     - Fresh DBs: SQLModel.metadata.create_all() picks up the new
+--       ``enqueued_at`` column from the DependencyWatcher SQLModel
+--       automatically (nullable=True, default=None).
+--     - Existing DBs: apply manually by running the ALTER TABLE
+--       statement below:
+--           ALTER TABLE dependency_watchers ADD COLUMN enqueued_at TEXT
+--       The column is nullable so no backfill is needed for existing
+--       rows — pre-existing FIRED rows will simply be treated as
+--       "not yet stamped" on first restart (one-time duplicate
+--       delivery risk). Operators should drain FIRED rows or accept
+--       the one-time dedup cost. The runner treats
+--       "duplicate column name" errors as idempotent, so re-running
+--       this file is safe on SQLite.
+
+-- UP
+
+ALTER TABLE dependency_watchers ADD COLUMN enqueued_at TEXT;
+
+-- DOWN
+-- Reverse the column addition. SQLite 3.35+ supports DROP COLUMN; older
+-- versions will leave the column in place but it is unused by code.
+-- Trailing semicolons are deliberately omitted below because runner.py
+-- splits DOWN SQL on the statement-terminator character.
+-- ALTER TABLE dependency_watchers DROP COLUMN enqueued_at  -- SQLite <3.35 cannot drop columns

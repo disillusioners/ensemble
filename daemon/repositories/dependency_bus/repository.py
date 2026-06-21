@@ -198,6 +198,55 @@ class DependencyWatcherRepository:
     # STATE TRANSITION (atomic backpressure primitive)
     # --------------------------------------------------------
 
+    def mark_enqueued(self, watch_id: str, enqueued_at: str) -> bool:
+        """Stamp a FIRED watcher as successfully enqueued.
+
+        Crash-recovery dedup marker (C1 fix, 2026-06-21): the bus
+        stamps ``enqueued_at`` AFTER a successful
+        ``manager.enqueue_message(...)`` call. On restart,
+        :meth:`DependencyBus._recover_fired_unsent` filters to
+        ``WHERE state='FIRED' AND enqueued_at IS NULL`` — only truly
+        un-enqueued rows are re-delivered, so a crash mid-enqueue
+        does not produce duplicate deliveries.
+
+        The stamp is unconditional (no state guard) because the bus
+        calls this only on rows it has already successfully fired.
+        Idempotent: re-stamping an already-stamped row is a harmless
+        overwrite of the timestamp.
+
+        Args:
+            watch_id: The watcher to stamp. Caller passes the
+                ``watch_id`` returned from
+                :meth:`DependencyBus._recover_fired_unsent`.
+            enqueued_at: ISO-8601 timestamp (typically
+                ``self._now_iso()``).
+
+        Returns:
+            ``True`` iff the row was updated (existed). ``False`` if
+            no row with that ``watch_id`` exists (caller should treat
+            this as a stale entry from a prior migration).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                sa_update(DependencyWatcher)
+                .where(DependencyWatcher.watch_id == watch_id)
+                .values(enqueued_at=enqueued_at)
+            )
+            result = session.execute(stmt)
+            session.commit()
+            updated = result.rowcount > 0
+            if updated:
+                logger.debug(
+                    f"Marked dependency_watcher as enqueued: "
+                    f"watch_id={watch_id}, enqueued_at={enqueued_at}"
+                )
+            else:
+                logger.debug(
+                    f"mark_enqueued no-op (watch_id not found): "
+                    f"watch_id={watch_id}"
+                )
+            return updated
+
     def transition_state(
         self,
         watch_id: str,

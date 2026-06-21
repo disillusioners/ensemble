@@ -44,12 +44,14 @@ class MigrationFile:
         name: str,
         up_sql: str,
         down_sql: str,
+        manual_only: bool = False,
     ) -> None:
         self.path = path
         self.version = version
         self.name = name
         self.up_sql = up_sql.strip()
         self.down_sql = down_sql.strip()
+        self.manual_only = manual_only
     
     @property
     def checksum(self) -> str:
@@ -91,13 +93,22 @@ class MigrationFile:
         
         up_sql = up_match.group(1).strip()
         down_sql = down_match.group(1).strip() if down_match else ""
-        
+
+        # Detect manual-only migrations via a ``MANUAL: TRUE`` marker in
+        # the file header (between the version line and the ``-- UP``
+        # section). Manual-only migrations are NOT auto-applied by
+        # ``run_pending_migrations`` -- they exist for operators to
+        # apply explicitly after meeting prerequisites documented in
+        # the file. See D10 ``drop_legacy_completion_columns.sql``.
+        manual_only = bool(re.search(r"--\s*MANUAL:\s*TRUE", content, re.IGNORECASE))
+
         return cls(
             path=path,
             version=version,
             name=name,
             up_sql=up_sql,
             down_sql=down_sql,
+            manual_only=manual_only,
         )
 
 
@@ -472,19 +483,29 @@ class MigrationRunner:
         
         self.ensure_migrations_table()
         pending = self.get_pending_migrations()
-        
+
         if not pending:
             logger.info("No pending migrations")
             return []
-        
+
         applied = []
         for migration in pending:
+            if migration.manual_only:
+                # Manual-only migrations are intentionally skipped by the
+                # auto-apply path. They exist for operators to run by
+                # hand (e.g. via ``apply_migration(migration)``) after
+                # prerequisites documented in the file are met.
+                logger.info(
+                    f"Skipping manual-only migration {migration.version} "
+                    f"({migration.name}) -- apply via apply_migration()"
+                )
+                continue
             execution_time = self.apply_migration(migration)
             logger.info(
                 f"Applied migration {migration.version} in {execution_time}ms"
             )
             applied.append(migration.version)
-        
+
         return applied
     
     def get_migration_status(self) -> dict[str, object]:

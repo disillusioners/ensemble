@@ -43,9 +43,9 @@ The architecture is organized as three layers: a path-agnostic `MessageProcessin
 └───────────────────────────────────────────────────────────┘
 
 ┌───────────────────────────────────────────────────────────┐
-│  CorrelationManager — ROLLBACK PATH (shadow validation)   │
+│  CorrelationManager — ROLLBACK PATH                          │
 │  ├─ Disabled by default (use_dependency_bus=True)         │
-│  ├─ Kept for: rollback, shadow validation, kill-switch   │
+│  ├─ Kept for: rollback, kill-switch                        │
 │  └─ In-memory _pending + per-parent asyncio.Lock          │
 └───────────────────────────────────────────────────────────┘
 ```

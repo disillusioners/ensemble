@@ -548,10 +548,47 @@ async def init_dependency_bus(app, manager) -> None:
     try:
         watcher_repo = DependencyWatcherRepository(engine=manager._engine)
         bus = DependencyBus(watcher_repo)
-        await bus.start()
+        recovered = await bus.start()
+        # C1 fix: re-enqueue FIRED-but-unsent FollowUps from a prior
+        # crash. Each ``(watch_id, FollowUp)`` tuple corresponds to a
+        # row whose child task terminated and whose FollowUp was
+        # either never enqueued (process died mid-emit) or enqueued
+        # but never stamped (process died after enqueue, before
+        # ``mark_enqueued``). The dedup is the ``enqueued_at IS NULL``
+        # filter in :meth:`DependencyBus._recover_fired_unsent` — a
+        # second crash does not double-deliver because the stamp
+        # survives the restart.
+        #
+        # We deliberately call ``mark_enqueued`` AFTER a successful
+        # enqueue so a transient ``enqueue_message`` failure (e.g.
+        # WorkerPool busy) does NOT lock the FollowUp out of a future
+        # recovery — it will be picked up on the next restart.
+        for watch_id, fu in recovered:
+            try:
+                await manager.enqueue_message(
+                    instance_id=fu.target_instance_id,
+                    message=fu.message,
+                    source=fu.source,
+                    metadata=fu.metadata,
+                )
+                await bus.mark_enqueued(watch_id)
+                logger.info(
+                    f"bus crash recovery: re-enqueued FollowUp for "
+                    f"target={fu.target_instance_id[:8]}..., "
+                    f"watch_id={watch_id[:8]}...",
+                    extra={"completion_delivery_path": "bus"},
+                )
+            except Exception as enq_err:
+                logger.warning(
+                    f"bus crash recovery: failed to re-enqueue FollowUp "
+                    f"watch_id={watch_id[:8]}...: {enq_err}"
+                )
         set_dependency_bus(bus)
         app.state._dependency_bus = bus
-        logger.info("DependencyBus started")
+        logger.info(
+            f"DependencyBus started (recovered={len(recovered)} "
+            f"FIRED-but-unsent watchers)"
+        )
     except Exception as e:
         logger.warning(
             f"Failed to start DependencyBus (continuing without it): {e}"

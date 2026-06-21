@@ -294,6 +294,52 @@ class DependencyBus:
                 :meth:`FollowUp.to_payload` and stores the result
                 in the JSONB ``follow_up_payload`` column.
         """
+        # C2 fix (orphan race re-opened on bus path): bump the
+        # CorrelationManager's per-parent generation counter BEFORE
+        # acquiring the per-task lock. Phase A closed the orphan
+        # race via this generation counter (see correlation_manager.py
+        # L281 — ``register_message_send`` bumps ``_generation``
+        # BEFORE its per-parent lock, mirroring this exact pattern).
+        # ``_finalize_job`` reads ``pre_gen`` BEFORE acquiring the
+        # per-job lock and ``post_gen`` AFTER releasing it; if
+        # ``post_gen > pre_gen``, a register was in-flight and the
+        # job is re-armed (COMPLETED → PROCESSING) so a late child's
+        # resolve can find it.
+        #
+        # When ``use_dependency_bus=ON``, ``send_message`` calls
+        # ``bus.watch()`` instead of ``cm.register_message_send()``,
+        # so the CM's bump never happens — and ``_finalize_job``
+        # reads ``cm.get_generation()`` which stays unchanged, so
+        # the orphan-race re-arm check fails to detect the late
+        # register. This bump closes the gap by performing the
+        # counter increment here, OUTSIDE the bus lock (the bump is
+        # a plain dict assignment — atomic in CPython, no lock
+        # needed) and exactly the same way the CM does it on the
+        # legacy path. The target is the parent (``follow_up.
+        # target_instance_id``) — the instance whose finalization
+        # the watcher is registered against.
+        #
+        # Wrapped in try/except because the CM may be unwired
+        # (testing, missing init) — a missing CM is non-fatal on
+        # the bus path; the re-arm just won't fire for this watch
+        # (same behavior as the pre-fix state, so the bus is no
+        # worse off). Logged at debug level to avoid log noise.
+        try:
+            from .correlation_manager import get_correlation_manager
+            cm = get_correlation_manager()
+            if cm is not None:
+                _parent_id = follow_up.target_instance_id
+                cm._generation[_parent_id] = (
+                    cm._generation.get(_parent_id, 0) + 1
+                )
+        except Exception as _gen_bump_err:
+            logger.debug(
+                f"bus watch: could not bump CM generation for "
+                f"target={follow_up.target_instance_id[:8]} "
+                f"(CM not wired): {_gen_bump_err}",
+                extra={"completion_delivery_path": "bus"},
+            )
+
         lock = await self._get_lock(source_task_id)
         async with lock:
             payload = follow_up.to_payload()
@@ -560,22 +606,31 @@ class DependencyBus:
         )
         return count
 
-    async def start(self) -> None:
+    async def start(self) -> list[tuple[str, FollowUp]]:
         """Warm the in-memory cache from the DB and recover unsent fires.
 
         Called once at daemon startup, after the repository is
-        constructed and the DB is reachable. Two operations:
+        constructed and the DB is reachable. Three operations:
 
         1. :meth:`_warm_cache` — load all PENDING rows from the DB
            grouped by ``source_task_id`` into the in-memory cache,
            so :meth:`pending_watchers` hits the cache on the hot
            path instead of going to the DB.
-        2. :meth:`_recover_fired_unsent` — load all FIRED rows and
-           log them. The caller (a future wiring task) is
-           responsible for re-enqueueing them — the bus just
-           surfaces the list. This handles the crash-recovery case
-           where the process died after transitioning watchers to
-           FIRED but before the caller enqueued the FollowUps.
+        2. :meth:`_recover_fired_unsent` — load FIRED rows WHERE
+           ``enqueued_at IS NULL`` and return them as
+           ``(watch_id, FollowUp)`` tuples. The caller is
+           responsible for re-enqueueing each FollowUp and calling
+           :meth:`mark_enqueued` on success — the bus just
+           surfaces the list and stamps the marker. This handles
+           the crash-recovery case where the process died after
+           transitioning watchers to FIRED but before the caller
+           enqueued the FollowUps.
+
+        The ``enqueued_at IS NULL`` filter is the C1 crash-recovery
+        dedup marker (2026-06-21): rows stamped in a previous
+        process (or in a previous invocation of this same process)
+        are skipped, so a restart never double-delivers an already-
+        enqueued FollowUp.
 
         Both queries go through the repository's engine directly
         because the repository's public API doesn't expose
@@ -585,6 +640,11 @@ class DependencyBus:
         Adding the bulk-fetch methods to the repository is a
         follow-up; the bus is the only caller that needs them and
         it can reach the engine through the repository.
+
+        Returns:
+            List of ``(watch_id, FollowUp)`` tuples for FIRED rows
+            that have NOT been enqueued yet (caller re-enqueues).
+            Empty list on a clean restart.
         """
         self._running = True
         warmed = await self._warm_cache()
@@ -594,6 +654,7 @@ class DependencyBus:
             f"recovered={len(recovered)} fired-but-unsent watchers",
             extra={"completion_delivery_path": "bus"},
         )
+        return recovered
 
     async def stop(self) -> None:
         """Clear the in-memory cache. DB state persists for restart.
@@ -690,22 +751,34 @@ class DependencyBus:
             self._pending.setdefault(row.source_task_id, []).append(fu)
         return sum(len(v) for v in self._pending.values())
 
-    async def _recover_fired_unsent(self) -> list[FollowUp]:
-        """Load all FIRED rows for the caller to re-enqueue.
+    async def _recover_fired_unsent(self) -> list[tuple[str, FollowUp]]:
+        """Load FIRED-but-not-enqueued rows for the caller to re-enqueue.
 
-        **Crash-recovery contract**: if the process crashed after
-        transitioning some watchers to FIRED but before the caller
-        enqueued the FollowUps, the FIRED rows are persisted in
-        the DB. On restart, this method surfaces them so the
-        caller can re-enqueue.
+        **Crash-recovery contract (C1 fix, 2026-06-21)**: if the
+        process crashed after transitioning some watchers to FIRED
+        but before the caller enqueued the FollowUps, the FIRED
+        rows are persisted in the DB with ``enqueued_at IS NULL``
+        (the dedup marker). On restart, this method surfaces ONLY
+        those un-enqueued rows, paired with their ``watch_id`` so
+        the caller can call :meth:`mark_enqueued` after a
+        successful enqueue.
 
         **Caller responsibility**: the bus does NOT auto-replay.
-        The caller (a future wiring task in
-        ``task_processor`` or ``send_message`` startup) inspects
-        the returned list and enqueues each FollowUp as a new
-        task. This separation keeps the bus narrow (state machine
-        only) and makes the caller's enqueueing policy
-        independently testable.
+        The caller (the lifespan wiring in
+        ``init_dependency_bus``) inspects the returned tuples and
+        enqueues each FollowUp as a new task, then calls
+        :meth:`mark_enqueued` to stamp the dedup marker. This
+        separation keeps the bus narrow (state machine only) and
+        makes the caller's enqueueing policy independently
+        testable.
+
+        The ``enqueued_at IS NULL`` filter is what makes the
+        restart safe: a previously-clean restart (where every FIRED
+        row was either enqueued-and-stamped, or never reached
+        FIRED at all) returns an empty list, and the caller is a
+        no-op. A crash mid-enqueue (rows FIRED, some stamped, some
+        not) returns only the un-stamped ones — exactly the rows
+        that need re-delivery, no duplicates.
 
         The bus's own invariant is that
         :meth:`pending_watchers` works correctly after restart by
@@ -713,32 +786,51 @@ class DependencyBus:
         independent of whether the caller chooses to re-enqueue
         FIRED rows.
 
-        **Current model limitation**: the
-        ``dependency_watchers`` schema does not have a
-        ``fired_at_enqueued`` marker column (it has ``fired_at``,
-        set at the FIRED transition). Without that marker, the
-        bus cannot distinguish "FIRED and enqueued" from "FIRED
-        and crashed". A follow-up migration could add the marker
-        and have the caller stamp it on successful enqueue; until
-        then, this method loads ALL FIRED rows and the caller is
-        responsible for deduping (e.g. by tracking the watch_ids
-        it has already enqueued in a separate store).
-
         Returns:
-            List of FIRED FollowUps. The caller decides what to
-            do with them. Empty list on a clean restart.
+            List of ``(watch_id, FollowUp)`` tuples for FIRED rows
+            where ``enqueued_at IS NULL``. The caller enqueues
+            each FollowUp and stamps the row via
+            :meth:`mark_enqueued`. Empty list on a clean restart.
         """
         fired_state = DependencyWatcherState.FIRED.value
 
-        def _load_all_fired() -> list[DependencyWatcher]:
+        def _load_unsent_fired() -> list[DependencyWatcher]:
             with Session(self._repo.engine) as session:
                 stmt = select(DependencyWatcher).where(
-                    DependencyWatcher.state == fired_state
+                    DependencyWatcher.state == fired_state,
+                    DependencyWatcher.enqueued_at.is_(None),
                 )
                 return list(session.exec(stmt))
 
-        rows = await asyncio.to_thread(_load_all_fired)
-        return [FollowUp.from_payload(r.follow_up_payload) for r in rows]
+        rows = await asyncio.to_thread(_load_unsent_fired)
+        return [
+            (row.watch_id, FollowUp.from_payload(row.follow_up_payload))
+            for row in rows
+        ]
+
+    async def mark_enqueued(self, watch_id: str) -> None:
+        """Stamp a FIRED watcher as successfully enqueued.
+
+        Crash-recovery dedup marker (C1 fix, 2026-06-21). Called
+        by the caller (the lifespan wiring in
+        ``init_dependency_bus``, or any equivalent recovery loop)
+        AFTER a successful ``manager.enqueue_message(...)`` call
+        for a recovered FollowUp. Once stamped, the row will NOT
+        be returned by a future :meth:`_recover_fired_unsent` —
+        so a subsequent crash and restart will not re-deliver the
+        same FollowUp.
+
+        Idempotent: re-stamping an already-stamped row is a
+        harmless overwrite of the timestamp.
+
+        Args:
+            watch_id: The watcher to stamp. Typically the
+                ``watch_id`` from a tuple returned by
+                :meth:`start` / :meth:`_recover_fired_unsent`.
+        """
+        await asyncio.to_thread(
+            self._repo.mark_enqueued, watch_id, self._now_iso()
+        )
 
 
 # -------------------------------------------------------------------------

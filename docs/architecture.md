@@ -469,7 +469,7 @@ The agents-ensemble uses a single-dispatcher, DB-backed completion model:
 
 2. **Completion Authority**: The Dependency Bus (`daemon/services/dependency_bus.py`) is the authoritative parent-waits-for-children mechanism. When a parent sends a message to a child, a `dependency_watchers` row is written. When the child's task reaches a terminal event, the bus fires the watcher's FollowUp (enqueued back onto the parent). The bus is DB-backed — watcher state survives restart.
 
-3. **Rollback Path**: The CorrelationManager (in-memory `_pending` dict + generation counter) is retained as the rollback path (`use_dependency_bus=false`). It provides shadow validation for one more release.
+3. **Rollback Path**: The CorrelationManager (in-memory `_pending` dict + generation counter) is retained as the rollback path (`use_dependency_bus=false`). It provides a rollback path for one more release.
 
 4. **Legacy Columns**: `waiting_for`, `children`, and `instance_hierarchy` are dead-but-present. A migration exists to drop them (IRREVERSIBLE, manual application after 2+ weeks of clean bus operation).
 
@@ -513,6 +513,6 @@ Feature flags:
 | MessageProcessingPipeline | `daemon/services/message_processing_pipeline.py` | 6-stage shared pipeline (gate → process → mark → dispatch → child-check via DependencyBus → error-handle) |
 | **DependencyBus** | `daemon/services/dependency_bus.py` | **NEW Phase D — authoritative parent-waits-for-children mechanism. DB-backed `dependency_watchers` table, `watch` / `emit_terminal` / `cancel_for_target` API. Watcher state survives restart by construction.** |
 | ~~MessageJobHandler~~ | ~~`daemon/services/message_job_handler.py`~~ | **REMOVED Phase D (D12) — pause check moved to `JobProcessor.start_job` pre-check** |
-| CorrelationManager | `daemon/services/correlation_manager.py` | **Rollback path / shadow validation post-Phase-D. In-memory `_pending` dict + per-parent asyncio.Lock. Reachable via `use_dependency_bus=False`.** |
+| CorrelationManager | `daemon/services/correlation_manager.py` | **Rollback path post-Phase-D. In-memory `_pending` dict + per-parent asyncio.Lock. Reachable via `use_dependency_bus=False`.** |
 | ExecutionGate | `daemon/services/execution_gate.py` | Per-instance `asyncio.Lock` serializing `graph.astream`; required on ALL paths including resume (Race #5 fix) |
 | Message processing errors | `daemon/services/message_processing_errors.py` | Shared error side-effects (event write, lifecycle event, parent report, job FAILED) |

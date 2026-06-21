@@ -390,7 +390,7 @@ class JobSystemConfig(BaseSettings):
     # `dependency_watchers` table so watcher state survives restart. When OFF,
     # the CorrelationManager is the sole completion authority (Phase A+B+C
     # behavior) — this is the rollback path if a bus regression is discovered.
-    # The CM class is retained for shadow validation and rollback. See
+    # The CM class is retained for rollback safety and rollback. See
     # ``docs/plans/decouple-execution-plan.md`` §13 and
     # ``docs/configuration/completion-flags.md``.
 
@@ -403,8 +403,8 @@ class JobSystemConfig(BaseSettings):
             "`dependency_watchers` row (FollowUp) instead of calling "
             "`notify_corr_register`, and terminal events call "
             "`bus.emit_terminal(task_id, outcome)` instead of "
-            "`notify_corr_resolve`. The CM class is retained for shadow "
-            "validation for one more release. When OFF, the CM is the sole "
+            "`notify_corr_resolve`. The CM class is retained for "
+            "rollback safety for one more release. When OFF, the CM is the sole "
             "completion authority (Phase A+B+C behavior) — this is the "
             "rollback/kill-switch path if a bus regression is discovered. "
             "Set via env var ENSEMBLE_JOB_SYSTEM_USE_DEPENDENCY_BUS=false to "

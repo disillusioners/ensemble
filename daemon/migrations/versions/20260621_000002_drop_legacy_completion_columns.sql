@@ -1,6 +1,7 @@
 -- Migration: drop legacy completion columns (D10)
 -- Created: 2026-06-21
 -- Author: system
+-- MANUAL: TRUE
 -- Description:
 --   Phase D (Dependency Bus) of the decouple architecture. Drops the
 --   legacy completion-state columns and junction table that were

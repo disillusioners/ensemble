@@ -407,6 +407,156 @@ class TestFollowUpSerialization:
 
 
 # -------------------------------------------------------------------------
+# TestReviewerFixes
+# -------------------------------------------------------------------------
+
+
+class TestCrashRecoveryEnqueuedAt:
+    """C1 fix: crash between transition_state commit and enqueue → restart → FollowUp recovered exactly once."""
+
+    @pytest.mark.asyncio
+    async def test_fired_unsent_recovered_on_restart(self, bus_repo):
+        """FIRED row with enqueued_at=NULL is recovered by start()."""
+        from daemon.services.dependency_bus import DependencyBus, FollowUp, Outcome
+
+        bus1 = DependencyBus(bus_repo)
+        await bus1.start()
+        fu = FollowUp(target_instance_id="parent-crash", message="done")
+        await bus1.watch("task-crash", fu)
+        # Simulate terminal event — watcher transitions to FIRED
+        fired = await bus1.emit_terminal("task-crash", Outcome(status="completed"))
+        assert len(fired) == 1
+        # Simulate crash: stop WITHOUT enqueuing (enqueued_at stays NULL)
+        await bus1.stop()
+
+        # Restart with a new bus instance
+        bus2 = DependencyBus(bus_repo)
+        recovered = await bus2.start()
+        # The FIRED-but-unsent watcher should be recovered
+        assert len(recovered) == 1, f"expected 1 recovered, got {len(recovered)}"
+        watch_id, recovered_fu = recovered[0]
+        assert recovered_fu.target_instance_id == "parent-crash"
+        await bus2.stop()
+
+    @pytest.mark.asyncio
+    async def test_mark_enqueued_prevents_double_recovery(self, bus_repo):
+        """After mark_enqueued, the watcher is NOT recovered on next restart."""
+        from daemon.services.dependency_bus import DependencyBus, FollowUp, Outcome
+
+        bus1 = DependencyBus(bus_repo)
+        await bus1.start()
+        fu = FollowUp(target_instance_id="parent-dedup", message="done")
+        await bus1.watch("task-dedup", fu)
+        fired = await bus1.emit_terminal("task-dedup", Outcome(status="completed"))
+        assert len(fired) == 1
+        await bus1.stop()
+
+        # Restart — recover the unsent watcher
+        bus2 = DependencyBus(bus_repo)
+        recovered = await bus2.start()
+        assert len(recovered) == 1
+        watch_id, _ = recovered[0]
+        # Mark as enqueued (simulating successful re-enqueue)
+        await bus2.mark_enqueued(watch_id)
+        await bus2.stop()
+
+        # Restart again — the marked watcher should NOT be recovered
+        bus3 = DependencyBus(bus_repo)
+        recovered2 = await bus3.start()
+        assert len(recovered2) == 0, f"expected 0 after marking, got {len(recovered2)}"
+        await bus3.stop()
+
+    @pytest.mark.asyncio
+    async def test_partial_crash_only_recovers_unsent(self, bus_repo):
+        """When some watchers are enqueued and some aren't, only unsent are recovered."""
+        from daemon.services.dependency_bus import DependencyBus, FollowUp, Outcome
+
+        bus1 = DependencyBus(bus_repo)
+        await bus1.start()
+        fu1 = FollowUp(target_instance_id="parent-1", message="done-1")
+        fu2 = FollowUp(target_instance_id="parent-2", message="done-2")
+        await bus1.watch("task-multi", fu1)
+        await bus1.watch("task-multi", fu2)
+        fired = await bus1.emit_terminal("task-multi", Outcome(status="completed"))
+        assert len(fired) == 2
+        await bus1.stop()
+
+        # Restart — recover both
+        bus2 = DependencyBus(bus_repo)
+        recovered = await bus2.start()
+        assert len(recovered) == 2
+        # Mark only the first as enqueued
+        await bus2.mark_enqueued(recovered[0][0])
+        await bus2.stop()
+
+        # Restart — only the unmarked one should be recovered
+        bus3 = DependencyBus(bus_repo)
+        recovered2 = await bus3.start()
+        assert len(recovered2) == 1, f"expected 1 unmarked, got {len(recovered2)}"
+        await bus3.stop()
+
+
+class TestGenerationCounterBump:
+    """C2 fix: watch() bumps CM generation counter so _finalize_job's re-arm works."""
+
+    @pytest.mark.asyncio
+    async def test_watch_bumps_cm_generation(self, bus_repo):
+        """watch() bumps cm._generation[parent_id] before acquiring the bus lock."""
+        from daemon.services.dependency_bus import DependencyBus, FollowUp
+        from daemon.services.correlation_manager import CorrelationManager
+
+        # Create a real CM (no repos needed — we only test _generation access)
+        cm = CorrelationManager(
+            instance_repository=None,
+            message_queue_repository=None,
+        )
+
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        # Set CM as the module singleton so watch() can find it
+        from daemon.services.correlation_manager import set_correlation_manager, get_correlation_manager
+        set_correlation_manager(cm)
+
+        try:
+            parent_id = "parent-gen-test"
+            assert cm.get_generation(parent_id) == 0
+
+            fu = FollowUp(target_instance_id=parent_id, message="done")
+            await bus.watch("task-gen-test", fu)
+
+            gen_after = cm.get_generation(parent_id)
+            assert gen_after > 0, f"generation should be bumped, got {gen_after}"
+
+            # Second watch bumps again
+            await bus.watch("task-gen-test-2", fu)
+            gen_after2 = cm.get_generation(parent_id)
+            assert gen_after2 > gen_after, f"generation should increase, got {gen_after2} vs {gen_after}"
+        finally:
+            set_correlation_manager(None)
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_watch_without_cm_does_not_crash(self, bus_repo):
+        """watch() handles CM not being wired (no crash, bus still works)."""
+        from daemon.services.dependency_bus import DependencyBus, FollowUp
+        from daemon.services.correlation_manager import set_correlation_manager
+
+        set_correlation_manager(None)
+
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        fu = FollowUp(target_instance_id="parent-no-cm", message="done")
+        # Should not crash even though CM is None
+        await bus.watch("task-no-cm", fu)
+
+        pending = await bus.pending_watchers("task-no-cm")
+        assert len(pending) == 1
+        await bus.stop()
+
+
+# -------------------------------------------------------------------------
 # TestPendingWatchersFallback
 # -------------------------------------------------------------------------
 
