@@ -1786,6 +1786,19 @@ class InstanceManager:
                 "    END LOOP;\n"
                 "END $$;"
             ),
+            # ── Dependency Bus enqueued_at marker (Phase D, 2026-06-21) ────
+            # The Dependency Bus crash-recovery contract requires an
+            # ``enqueued_at`` column on ``dependency_watchers`` to distinguish
+            # "FIRED and enqueued" from "FIRED and crashed". The .sql migration
+            # at ``daemon/migrations/versions/20260621_000003_add_enqueued_at.sql``
+            # is skipped by the runner on PostgreSQL (runner.py lines 446-448),
+            # so we add the column here for parity with fresh databases where
+            # ``SQLModel.metadata.create_all()`` creates it from the model.
+            # The Python field ``DependencyWatcher.enqueued_at`` is
+            # ``str | None`` (ISO-8601 timestamp), nullable=True, default=None,
+            # so the column is nullable TEXT — matches the existing .sql
+            # migration which uses ``ALTER TABLE ... ADD COLUMN enqueued_at TEXT``.
+            "ALTER TABLE dependency_watchers ADD COLUMN IF NOT EXISTS enqueued_at TEXT",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
