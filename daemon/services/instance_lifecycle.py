@@ -128,6 +128,18 @@ class _TerminateResult(NamedTuple):
         shape (job_queue sweep results land in the same call site).
       * ``message_queue_removed`` — count of MessageQueue rows deleted
         for the [TRACE] summary log.
+      * ``tasks_removed`` — count of orphaned ``task`` rows deleted
+        alongside the ``message_queue`` cleanup. Without this cleanup
+        the WorkerPool's per-instance guard eventually releases
+        (instance row gone) and a worker claims the orphaned task —
+        ``task_processor.process`` then looks up the message by
+        ``task.message_id`` and the lookup returns ``None`` (the
+        matching ``message_queue`` row was deleted in step 7),
+        raising ``ValueError: Message <UUID> not found in
+        message_queue for task <N>``. Co-locating the task delete
+        in the same transaction as the message_queue delete closes
+        the orphan window — the worker cannot observe a task whose
+        backing message row no longer exists.
 
     The H10 fix consolidates the 10+ transaction writes into a single
     ``WriteGuardSession`` (status / waiting_for / job cancel /
@@ -141,6 +153,7 @@ class _TerminateResult(NamedTuple):
     message_jobs_cancelled: int
     all_jobs_cancelled: int
     message_queue_removed: int
+    tasks_removed: int
 
 
 class _SpawnResult(NamedTuple):
@@ -754,6 +767,7 @@ class InstanceLifecycleService:
         message_jobs_cancelled = db_result.message_jobs_cancelled
         all_jobs_cancelled = db_result.all_jobs_cancelled
         message_queue_removed = db_result.message_queue_removed
+        tasks_removed = db_result.tasks_removed
         # Total cancelled jobs (message + remaining sweep) for the summary log.
         jobs_cancelled = message_jobs_cancelled + all_jobs_cancelled
 
@@ -923,7 +937,7 @@ class InstanceLifecycleService:
             f"[TRACE] terminate_instance: {instance_id[:8]}... complete "
             f"(graph_unwind_ms={graph_unwind_ms}, jobs_cancelled={jobs_cancelled}, "
             f"children={len(child_ids)}, duration_ms={duration_ms}, "
-            f"msgq_removed={message_queue_removed})"
+            f"msgq_removed={message_queue_removed}, tasks_removed={tasks_removed})"
         )
 
         return True
@@ -1462,6 +1476,17 @@ class InstanceLifecycleService:
              instance_id=:id AND status IN ('pending', 'failed')``.
           6. DELETE ``job_locks`` WHERE instance_id=:id (lock release).
           7. DELETE ``message_queue`` WHERE instance_id=:id.
+          7b. DELETE ``task`` WHERE instance_id=:id. Closes the orphan
+              window where the WorkerPool's per-instance guard releases
+              (instance row gone), claims a PENDING ``task`` whose
+              ``message_id`` no longer resolves (matching
+              ``message_queue`` row was just deleted in step 7), and
+              raises ``ValueError: Message <UUID> not found in
+              message_queue for task <N>`` from
+              ``daemon/services/task_processor.py:184``. Deleting the
+              ``task`` row in the same transaction as the
+              ``message_queue`` row means the worker cannot observe a
+              task whose backing message row is gone.
           8. DELETE ``instance_hierarchy`` rows where this instance is the
              parent (so future tree traversals don't include the dead
              children). The child rows themselves stay (so audit logs /
@@ -1503,6 +1528,7 @@ class InstanceLifecycleService:
                     message_jobs_cancelled=0,
                     all_jobs_cancelled=0,
                     message_queue_removed=0,
+                    tasks_removed=0,
                 )
             if instance.status == InstanceStatus.TERMINATED.value:
                 # Re-entrancy guard re-discovered here. The async caller
@@ -1520,6 +1546,7 @@ class InstanceLifecycleService:
                     message_jobs_cancelled=0,
                     all_jobs_cancelled=0,
                     message_queue_removed=0,
+                    tasks_removed=0,
                 )
 
             # Capture fields needed for post-commit side effects BEFORE
@@ -1664,6 +1691,28 @@ class InstanceLifecycleService:
                 msgq_result.rowcount if msgq_result.rowcount is not None else 0
             )
 
+            # ── Step 4b: delete ``task`` rows for this instance ─────────
+            # Closes the orphan window: the WorkerPool's per-instance
+            # guard eventually releases once the instance row is gone
+            # (it can no longer find the ``status='processing'`` job's
+            # parent instance), and a worker would claim a PENDING
+            # ``task`` whose ``message_id`` no longer resolves (the
+            # matching ``message_queue`` row was just deleted in Step
+            # 4). ``task_processor.process`` would then raise
+            # ``ValueError: Message <UUID> not found in message_queue
+            # for task <N>`` at
+            # ``daemon/services/task_processor.py:184``. Deleting the
+            # ``task`` row in the same transaction as the
+            # ``message_queue`` row guarantees the worker cannot
+            # observe a task whose backing message row is gone.
+            task_result = session.execute(
+                text("DELETE FROM task WHERE instance_id = :iid"),
+                {"iid": instance_id},
+            )
+            tasks_removed = (
+                task_result.rowcount if task_result.rowcount is not None else 0
+            )
+
             # ── Step 5: clean up ``instance_hierarchy`` rows where this ──
             # instance is the parent. We keep the child rows themselves
             # so audit / completion-report lookups still resolve, but
@@ -1675,7 +1724,9 @@ class InstanceLifecycleService:
                 {"iid": instance_id},
             )
 
-            # ── COMMIT ── atomic across all 5 steps above.
+            # ── COMMIT ── atomic across all 5 steps above (Step 4b is
+            # the task-table cleanup that closes the message-not-found
+            # orphan window).
             session.commit()
 
             return _TerminateResult(
@@ -1685,6 +1736,7 @@ class InstanceLifecycleService:
                 message_jobs_cancelled=message_jobs_cancelled,
                 all_jobs_cancelled=all_jobs_cancelled,
                 message_queue_removed=message_queue_removed,
+                tasks_removed=tasks_removed,
             )
 
     def _spawn_instance_db_sync(

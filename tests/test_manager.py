@@ -308,6 +308,7 @@ class TestTerminateInstance:
                     message_jobs_cancelled=0,
                     all_jobs_cancelled=0,
                     message_queue_removed=0,
+                    tasks_removed=0,
                 )
             )
 

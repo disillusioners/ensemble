@@ -74,7 +74,10 @@ _LEGACY_FLAG_NAMES = (
 # Each entry: (file relative path, line number of the SQL string constant).
 _DOCUMENTED_CACHE_ONLY_SITES: set[tuple[str, int]] = {
     # terminate_instance: status='terminated', waiting_for=0 (atomic cleanup)
-    ("services/instance_lifecycle.py", 1536),
+    # The line of the SQL string constant — must be updated if the
+    # terminate_instance cascade in instance_lifecycle.py is refactored
+    # and the SQL is moved.
+    ("services/instance_lifecycle.py", 1563),
 }
 
 
