@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 133 packs
-- Unit: 116 | Integration: 2 | Mock: 6 | E2E: 8 | Manual: 1
+- Total: 136 packs
+- Unit: 117 | Integration: 2 | Mock: 6 | E2E: 8 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -38,6 +38,8 @@
 | concurrency_atomic_unit_test | tests/test_cascade_concurrency.py + tests/test_cascade_race3.py + tests/test_deadlock_fix.py + tests/test_instance_delete_by_project_locking.py + tests/test_instance_metadata_atomic.py + tests/test_observer_race1.py + tests/test_project_repository_atomic.py | Concurrency/atomic: cascade races, deadlock fix, instance delete locking, metadata atomic, observer race, project repository atomic | 5 min | 2026-06-19 | ✅ PASS (86/86, feature/concurrency-fixes, commit dd48be65, 0 failures) |
 | services_orchestration_unit_test | tests/services/ | Service orchestration: instance lifecycle H10/L14, instance lifecycle terminate, context usage emission | 2 min | 2026-06-19 | ✅ PASS (38/38, feature/concurrency-fixes, commit dd48be65) |
 | correlation_shadow_integration_test | tests/test_correlation_shadow.py | CorrelationManager shadow integration: basic register/resolve DB tracking, multi-message same child, error path, hook no-op without CM, rebuild from DB, shadow validation logs | 2 min | 2026-06-16 | ✅ PASS (8/8, feature/correlation-manager, commit 78881a99, 0 failures) |
+| dependency_bus_unit_test | tests/test_dependency_bus.py + tests/unit/test_service_dependency.py + tests/test_correlation_manager.py + tests/test_cascade_concurrency.py + tests/test_cascade_race3.py + tests/test_deadlock_fix.py | Phase D DependencyBus: watch/emit_terminal/cancel, backpressure (atomic one-at-a-time), crash recovery (_recover_fired_unsent), generation counter orphan prevention, CM shadow validator, flag ON/OFF equivalence, concurrency regression (cascade races, deadlock fix) | 2 min | 2026-06-21 | ✅ PASS (129/129, feature/decouple-phase-d, commits 9f496168 1545cbbe, 0 Phase D failures) |
+| dependency_bus_postgres_test | tests/postgres/test_dependency_bus_pg.py + tests/postgres/test_premature_completion_regression.py + tests/postgres/test_premature_completion_edge_cases.py + tests/postgres/test_concurrent_*.py + tests/postgres/test_smoke.py | Phase D PG: dependency bus PG-specific (watch/emit/concurrent/restart/backpressure/cancel), premature completion regression variants A/B/C, concurrency, JSONB updates, lock claims, status transitions, optimistic locking | 5 min | 2026-06-21 | ✅ PASS (80/80, feature/decouple-phase-d, commit 1545cbbe, 0 failures) |
 | inner_soul_persona_preservation_unit_test | tests/unit/tools/test_inner_soul_persona_preservation.py | Inner_soul Phase 3 persona preservation: 25+ legitimate persona reflections NOT rejected (I should..., I am..., I learned..., My approach..., Be more..., User prefers..., etc.) + boundary contrast (persona vs project with same keyword) | 2 min | 2026-06-16 | ✅ PASS (28/28, feature/inner-soul-reform, commit 1307eb25, 0 failures) |
 | inner_soul_redirect_unit_test | tests/unit/tools/test_inner_soul_redirect.py | Inner_soul RAG redirect: _should_redirect_to_rag logic, _classify_request (10 types), _format_rag_redirect format, full tool behavior with redirect, intent parameter, target="memories" routing, memory limit error messages. Phase 3: 8 tests fixed for knowledge category removal | 2 min | 2026-06-16 | ✅ PASS (85/85, feature/inner-soul-reform, commit 38de7523, 0 failures) |
 | inner_soul_compound_unit_test | tests/unit/tools/test_inner_soul_compound.py | Inner_soul compound request: _split_compound_request (AND/semicolon/sentence), compound classification end-to-end, compound+RAG redirect interaction, edge cases (empty, long, target=memories, intent). Phase 3: 1 test fixed for knowledge category removal | 2 min | 2026-06-16 | ✅ PASS (51/51, feature/inner-soul-reform, commit 38de7523, 0 failures) |
