@@ -74,7 +74,7 @@ _LEGACY_FLAG_NAMES = (
 # Each entry: (file relative path, line number of the SQL string constant).
 _DOCUMENTED_CACHE_ONLY_SITES: set[tuple[str, int]] = {
     # terminate_instance: status='terminated', waiting_for=0 (atomic cleanup)
-    ("services/instance_lifecycle.py", 1440),
+    ("services/instance_lifecycle.py", 1536),
 }
 
 

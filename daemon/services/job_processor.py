@@ -122,7 +122,7 @@ class JobProcessor:
             self._job_feedback_observer = observer
             logger.info(
                 "JobProcessor: JobFeedbackObserver wired "
-                "(dispatch_path=jobqueue_local for MESSAGE jobs by default)"
+                "(MESSAGE jobs route through observer — sole dispatch path post-Phase-D)"
             )
         elif self._job_feedback_observer is not observer:
             # Hot-swap (rare; only happens in test setup). Update the
@@ -132,40 +132,6 @@ class JobProcessor:
                 "existing observer reference"
             )
             self._job_feedback_observer = observer
-
-    def setup_job_feedback_observer(self, observer: "JobFeedbackObserver") -> None:
-        """C7: Wire the JobFeedbackObserver into the dispatch decision.
-
-        Called from ``daemon/api.py`` after both ``JobProcessor`` and
-        ``JobFeedbackObserver`` are constructed. The observer reference is
-        used by :meth:`_process_next_job` to route MESSAGE-type jobs through
-        the unified ``observer._admit_via_worker_pool`` path (the SOLE
-        message dispatch path post-Phase-D).
-
-        Idempotent: setting the same observer twice is a no-op. The
-        observer is owned by ``InstanceManager`` (lifetime is the daemon
-        process); the JobProcessor keeps only a weak reference for
-        dispatch routing.
-
-        Args:
-            observer: The :class:`JobFeedbackObserver` instance. Must be
-                started (its ``start()`` has been called) before any jobs
-                are admitted through it — the observer's event subscription
-                is what drives the terminal JobItem transition.
-        """
-        # Imported here to avoid a circular import at module load
-        # (``daemon/services/job_feedback_observer.py`` imports from
-        # ``daemon/services/job_queue_service`` and several repositories
-        # which transitively load ``daemon/services/job_processor`` via
-        # the InstanceManager facade).
-        from daemon.services.job_feedback_observer import JobFeedbackObserver  # noqa: F401
-
-        self._job_feedback_observer = observer
-        logger.info(
-            "JobProcessor: JobFeedbackObserver wired in — MESSAGE jobs will "
-            "route through observer when use_legacy_jobqueue_dispatch=OFF "
-            "dispatch_path=jobqueue_local"
-        )
 
     async def _capture_result_summary(self, instance_id: str, job_id: str, job_type_label: str) -> str | None:
         """Try to capture agent response content for result_summary."""
