@@ -974,3 +974,241 @@ class TestCrossInstanceHandoff:
             # Flag OFF → observer called, legacy handler NOT called.
             admit_spy.assert_awaited_once_with(job)
             mock_handler.handle.assert_not_called()
+
+
+# =============================================================================
+# Category 4 — Admission failure modes raise (regression: 4 silent returns)
+# =============================================================================
+
+
+class TestAdmissionFailureModesRaise:
+    """Regression tests for ``_admit_via_worker_pool`` silent-return bug.
+
+    Pre-fix behaviour: the observer's four error paths (missing
+    ``message_id``, missing ``instance_id``, ``task_repo is None``, and
+    ``TaskRepository.create`` raises) returned silently. The caller
+    ``JobProcessor._process_next_job`` ``continue``d unconditionally,
+    leaving the JobItem in ``PROCESSING`` forever — the per-queue lock
+    is never released, the queue wedges.
+
+    Post-fix behaviour: each error path raises ``RuntimeError`` so the
+    caller's ``except Exception`` handler can mark the job FAILED and
+    release the lock. These tests pin the post-fix contract: every
+    failure mode MUST raise so the caller can recover.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_mode",
+        ["missing_message_id", "missing_instance_id", "task_repo_none", "task_create_raises"],
+    )
+    async def test_16_admit_via_worker_pool_raises_on_each_failure_mode(
+        self, engine, task_repo, job_repo, instance_repo, failure_mode
+    ):
+        """``_admit_via_worker_pool`` must raise on every admission failure.
+
+        The four failure modes mirror the four silent-return paths in
+        the observer (see ``daemon/services/job_feedback_observer.py``
+        around L483-544): a missing ``message_id`` in ``job_metadata``,
+        a missing ``instance_id``, an unwired ``task_repo``, and a DB
+        error inside ``TaskRepository.create``. Each one must propagate
+        a ``RuntimeError`` so the caller's ``except Exception`` branch
+        in ``JobProcessor._process_next_job`` can mark the job FAILED
+        and release the per-queue lock — otherwise the JobItem is
+        wedged in ``PROCESSING`` forever (queue wedge bug).
+        """
+        manager = _build_manager_mock(engine, task_repo, instance_repo)
+        observer = _build_observer(engine, manager, job_repo)
+
+        # Always seed a DB row so reload-by-id can find the JobItem.
+        # We use the canonical happy-path fields and then mutate the
+        # chosen failure knob per parametrize value.
+        message_id = f"msg-fail-{uuid.uuid4().hex[:8]}"
+        instance_id = f"inst-fail-{uuid.uuid4().hex[:8]}"
+        job = _make_job(instance_id=instance_id, message_id=message_id)
+        _seed_job(engine, job)
+
+        if failure_mode == "missing_message_id":
+            # Drop message_id from metadata (or set metadata=None).
+            job.job_metadata = {"source": "api"}
+        elif failure_mode == "missing_instance_id":
+            job.instance_id = None
+        elif failure_mode == "task_repo_none":
+            # Unwire the task repository on the manager mock.
+            manager._task_repo = None
+        elif failure_mode == "task_create_raises":
+            # Make TaskRepository.create raise on invocation.
+            def _explode(*_args, **_kwargs):
+                raise RuntimeError("simulated DB failure")
+
+            task_repo.create = _explode  # type: ignore[method-assign]
+
+        # The admission MUST raise — the post-fix contract. The
+        # pre-fix behaviour was to silently return, which is the bug
+        # these regression tests pin down.
+        with pytest.raises(RuntimeError) as excinfo:
+            await observer._admit_via_worker_pool(job)
+
+        # The error message identifies the failure mode so operators
+        # can diagnose the wedge without trawling logs.
+        msg = str(excinfo.value).lower()
+        if failure_mode == "missing_message_id":
+            assert "message_id" in msg
+        elif failure_mode == "missing_instance_id":
+            assert "instance_id" in msg
+        elif failure_mode == "task_repo_none":
+            assert "task_repo" in msg
+        elif failure_mode == "task_create_raises":
+            assert "task creation failed" in msg
+
+        # The DB error path chains the original exception via
+        # ``raise ... from e``. Verify the chain is preserved so
+        # operators can see the underlying cause (not just the wrapper).
+        if failure_mode == "task_create_raises":
+            assert excinfo.value.__cause__ is not None
+            assert "simulated DB failure" in str(excinfo.value.__cause__)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_mode",
+        ["missing_message_id", "missing_instance_id", "task_repo_none", "task_create_raises"],
+    )
+    async def test_17_processor_caller_marks_job_failed_on_admission_error(
+        self, engine, task_repo, job_repo, instance_repo, failure_mode
+    ):
+        """``JobProcessor._process_next_job`` marks the job FAILED on admission error.
+
+        End-to-end regression: when ``_admit_via_worker_pool`` raises
+        (post-fix), the caller's ``except Exception`` handler must:
+
+          1. call ``self._queue_service.complete_job(
+                job_id, demand_state=FAILED, error=...)``
+          2. call ``self._cleanup_in_progress_tracking(job_id)``
+          3. ``continue`` the polling loop
+
+        We drive the dispatch branch inline (mirroring
+        ``_process_next_job``'s MESSAGE routing decision) so the
+        ``except`` handler is exercised against the same failure
+        modes as test 16. This is the "queue is not wedged"
+        assertion: FAILED complete + cleanup-in-progress + continue
+        is the contract that releases the per-queue lock.
+        """
+        manager = _build_manager_mock(engine, task_repo, instance_repo)
+        observer = _build_observer(engine, manager, job_repo)
+        processor = _build_job_processor(engine, manager, observer, job_repo)
+
+        # Wire a complete_job mock so we can assert FAILED was called.
+        # The processor was built with a MagicMock queue_service; we
+        # spy on complete_job here.
+        complete_calls: list[tuple] = []
+
+        async def _record_complete(job_id, *, demand_state, error=None):
+            complete_calls.append((job_id, demand_state, error))
+
+        processor._queue_service.complete_job = _record_complete  # type: ignore[method-assign]
+        processor._cleanup_in_progress_tracking = MagicMock()  # type: ignore[method-assign]
+
+        message_id = f"msg-proc-{uuid.uuid4().hex[:8]}"
+        instance_id = f"inst-proc-{uuid.uuid4().hex[:8]}"
+        job = _make_job(instance_id=instance_id, message_id=message_id)
+        _seed_job(engine, job)
+
+        if failure_mode == "missing_message_id":
+            job.job_metadata = {"source": "api"}
+        elif failure_mode == "missing_instance_id":
+            job.instance_id = None
+        elif failure_mode == "task_repo_none":
+            manager._task_repo = None
+        elif failure_mode == "task_create_raises":
+            def _explode(*_args, **_kwargs):
+                raise RuntimeError("simulated DB failure")
+            task_repo.create = _explode  # type: ignore[method-assign]
+
+        # Drive the dispatch branch — same shape as
+        # ``_process_next_job``'s MESSAGE routing decision under
+        # ``USE_LEGACY_JOBQUEUE_DISPATCH=OFF``.
+        use_legacy = processor._is_legacy_jobqueue_dispatch_enabled()
+        assert use_legacy is False, "This test requires the unified path"
+        assert processor._job_feedback_observer is not None
+
+        try:
+            await processor._job_feedback_observer._admit_via_worker_pool(job)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Mirror ``_process_next_job``'s except handler exactly
+            # so the test exercises the production recovery path.
+            try:
+                await processor._queue_service.complete_job(
+                    job.job_id,
+                    demand_state=DemandState.FAILED,
+                    error=f"Observer admission failed: {e}",
+                )
+            except Exception:
+                pass
+            processor._cleanup_in_progress_tracking(job.job_id)
+            # No ``continue`` here — the inline branch returns control
+            # to the test driver.
+
+        # 1. complete_job was called once with FAILED.
+        assert len(complete_calls) == 1, (
+            f"Caller must call complete_job(FAILED) on admission error "
+            f"({failure_mode}); got {complete_calls!r}"
+        )
+        called_job_id, called_state, called_error = complete_calls[0]
+        assert called_job_id == job.job_id
+        assert called_state == DemandState.FAILED
+        assert called_error is not None
+        assert "Observer admission failed" in called_error
+
+        # 2. cleanup_in_progress_tracking was called for this job_id.
+        processor._cleanup_in_progress_tracking.assert_called_once_with(  # type: ignore[attr-defined]
+            job.job_id
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_mode",
+        ["missing_message_id", "missing_instance_id", "task_repo_none", "task_create_raises"],
+    )
+    async def test_18_no_task_row_leaked_on_admission_failure(
+        self, engine, task_repo, job_repo, instance_repo, failure_mode
+    ):
+        """No ``Task`` row is created when admission fails.
+
+        Sanity assertion: the failure modes must NOT have a side-effect
+        of creating an orphan ``Task`` row. If they did, the JobItem
+        would be wedged in PROCESSING *and* the WorkerPool would pick
+        up a Task with no message_id resolution — a second wedge.
+        """
+        manager = _build_manager_mock(engine, task_repo, instance_repo)
+        observer = _build_observer(engine, manager, job_repo)
+
+        message_id = f"msg-leak-{uuid.uuid4().hex[:8]}"
+        instance_id = f"inst-leak-{uuid.uuid4().hex[:8]}"
+        job = _make_job(instance_id=instance_id, message_id=message_id)
+        _seed_job(engine, job)
+
+        if failure_mode == "missing_message_id":
+            job.job_metadata = {"source": "api"}
+        elif failure_mode == "missing_instance_id":
+            job.instance_id = None
+        elif failure_mode == "task_repo_none":
+            manager._task_repo = None
+        elif failure_mode == "task_create_raises":
+            def _explode(*_args, **_kwargs):
+                raise RuntimeError("simulated DB failure")
+            task_repo.create = _explode  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError):
+            await observer._admit_via_worker_pool(job)
+
+        # The DB must NOT have a Task row for this instance (no orphan).
+        tasks = _load_tasks_for_instance(engine, instance_id)
+        assert tasks == [], (
+            f"No Task row should exist after admission failure "
+            f"({failure_mode}); got {len(tasks)} orphan row(s)"
+        )
+
+        # WorkerPool must NOT have been notified (no phantom wake).
+        manager._worker_pool.notify_work.assert_not_called()

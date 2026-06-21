@@ -466,15 +466,20 @@ class JobFeedbackObserver:
              terminal transition when the Task completes.
 
         The job is NOT marked ``FAILED`` here on error paths: those
-        exceptions propagate up and :class:`JobProcessor` decides
-        whether to call ``complete_job(FAILED)``. This keeps the error
-        policy (retry vs. fail) in one place.
+        exceptions propagate up to ``JobProcessor._process_next_job``,
+        whose ``except Exception`` handler calls ``complete_job(FAILED)``
+        and ``_cleanup_in_progress_tracking`` so the per-queue lock is
+        released. Silently returning on these failure modes (the
+        pre-fix behaviour) wedges the JobItem in ``PROCESSING`` because
+        the caller ``continue``s without doing any cleanup — see the
+        regression test ``test_16_*`` in
+        ``tests/test_unified_dispatcher_shadow.py``.
 
         Args:
             job: The ``JobItem`` in ``PROCESSING`` status. Must have
                 ``job.job_metadata['message_id']`` and ``job.instance_id``
-                set, or the call is logged and returns silently — the
-                caller is expected to handle the failure (mark FAILED).
+                set; otherwise a ``RuntimeError`` is raised so the
+                caller's failure handler can mark the job FAILED.
         """
         instance_id = job.instance_id
         message_id: str | None = None
@@ -486,14 +491,18 @@ class JobFeedbackObserver:
                 f"{job.job_id[:8]}... missing message_id in job_metadata; "
                 f"caller should mark FAILED"
             )
-            return
+            raise RuntimeError(
+                f"Cannot admit job {job.job_id}: missing message_id in job_metadata"
+            )
         if not instance_id:
             logger.error(
                 f"Observer._admit_via_worker_pool: MESSAGE job "
                 f"{job.job_id[:8]}... missing instance_id; "
                 f"caller should mark FAILED"
             )
-            return
+            raise RuntimeError(
+                f"Cannot admit job {job.job_id}: missing instance_id"
+            )
 
         # Resolve the task repository from the InstanceManager facade.
         # The manager wires ``_task_repo`` in ``setup_worker_pool``;
@@ -506,7 +515,10 @@ class JobFeedbackObserver:
                 f"_task_repo; cannot create Task for MESSAGE job "
                 f"{job.job_id[:8]}..."
             )
-            return
+            raise RuntimeError(
+                f"Cannot admit job {job.job_id}: task_repo is None "
+                f"(repository unavailable)"
+            )
 
         # Create the Task row. ``TaskRepository.create`` opens its own
         # ``SQLModelSession`` and commits — we wrap in ``asyncio.to_thread``
@@ -527,7 +539,9 @@ class JobFeedbackObserver:
                 f"{type(e).__name__}: {e}",
                 exc_info=True,
             )
-            return
+            raise RuntimeError(
+                f"Cannot admit job {job.job_id}: Task creation failed"
+            ) from e
 
         # Notify the WorkerPool so an idle worker wakes immediately
         # rather than waiting for the next poll (default 0.5s).
