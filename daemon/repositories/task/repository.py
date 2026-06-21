@@ -190,8 +190,33 @@ class TaskRepository:
         also check the instance's ``waiting_for > 0`` / ``WAITING_CHILDREN``
         status and only treat the job as a blocker when the instance is
         NOT in that deferred state.
-        Both lookups exclude soft-deleted rows (``deleted_at IS NULL``) so a
-        soft-deleted PROCESSING job can't permanently block task claims.
+
+        Unified-dispatcher admission carve-out: in the Phase C/D unified
+        dispatcher (``USE_LEGACY_JOBQUEUE_DISPATCH=OFF``), the
+        ``JobFeedbackObserver._admit_via_worker_pool`` admits a MESSAGE
+        job to a Task row BEFORE the worker claims it. The JobItem is
+        in ``PROCESSING`` status (set by ``JobProcessor.start_job``) and
+        is intended to stay there until the instance lifecycle resolves
+        — the Task drives ``graph.astream``, the JobItem is just a FIFO
+        placeholder. The cross-system guard above would deadlock: the
+        Task can't claim because the MESSAGE job is ``PROCESSING``,
+        but the JobItem can't reach its terminal transition because the
+        Task never claimed. We therefore also exclude MESSAGE jobs that
+        have a corresponding ``task`` row for the same ``message_id``
+        with status ``pending`` or ``running`` — the dispatcher has
+        already taken ownership, the worker is allowed to claim. The
+        ``status IN ('pending', 'running')`` filter (rather than any
+        status) is deliberate: a Task in ``COMPLETED`` / ``FAILED`` /
+        ``CANCELLED`` is no longer driving ``graph.astream`` for the
+        instance, so a new admission would not race. The legacy
+        dual-path (where ``MessageJobHandler.handle`` directly drives
+        ``graph.astream`` for the parent) does NOT create a Task row
+        for the parent message, so the carve-out is inert there.
+
+        ``deleted_at IS NULL`` matches the canonical job-side query
+        (``find_processing_message_jobs_by_instance``): a soft-deleted
+        PROCESSING job never auto-completes and would otherwise
+        permanently block the instance.
 
         Heartbeat init: ``last_heartbeat_at`` is set to the same value as
         ``started_at`` on claim, so the recovery service can distinguish
@@ -210,8 +235,25 @@ class TaskRepository:
         now = datetime.now(timezone.utc)
         now_str = now.strftime("%Y-%m-%dT%H:%M:%S.%f") + now.strftime("%z")
 
+        # Build the JSON-extract fragment for the unified-dispatcher
+        # admission carve-out. The MESSAGE job's message_id lives in
+        # ``job_metadata`` (a JSONBType column mapped to the DB column
+        # ``metadata`` — see JobItem.job_metadata's sa_column override),
+        # and we need to match it against ``task.message_id`` (a VARCHAR
+        # column). The two backends use different syntax:
+        #
+        #   * PostgreSQL JSONB: ``column->>'key'`` returns TEXT directly.
+        #   * SQLite:          ``json_extract(column, '$.key')`` returns
+        #                       JSON; we cast to TEXT inline.
+        #
+        # A missing/NULL ``job_metadata`` produces NULL on both backends
+        # and ``NOT EXISTS`` correctly defaults to TRUE (blocker fires).
+        json_extract_message_id = self._json_extract_text_sql(
+            column="j.metadata", key="message_id"
+        )
+
         with self.engine.begin() as conn:
-            stmt = text("""
+            stmt = text(f"""
                 UPDATE task
                 SET status = :status_running,
                     worker_id = :worker_id,
@@ -243,12 +285,7 @@ class TaskRepository:
                         -- (``find_processing_message_jobs_by_instance``):
                         -- a soft-deleted PROCESSING job never auto-completes
                         -- and would otherwise permanently block the instance.
-                        SELECT j.instance_id FROM job_queue_items j
-                        LEFT JOIN instances i ON j.instance_id = i.instance_id
-                        WHERE j.status = :status_processing
-                        AND j.job_type = :job_type_message
-                        AND j.instance_id IS NOT NULL
-                        AND j.deleted_at IS NULL
+                        --
                         -- Phase 4: legacy ``waiting_for`` read here is a
                         -- SQL-level guard inside the FIFO carve-out. CM is
                         -- an in-memory layer and cannot be queried from SQL,
@@ -258,8 +295,30 @@ class TaskRepository:
                         -- alongside ``waiting_for``). The carve-out still
                         -- serves as a defensive filter against the rare
                         -- case where the CM singleton is None at startup.
+                        --
+                        -- Unified-dispatcher admission carve-out: when the
+                        -- unified dispatcher has already admitted the
+                        -- MESSAGE job to a Task row (same message_id,
+                        -- status pending or running), the job is the
+                        -- FIFO placeholder for that admission — it is NOT
+                        -- driving graph.astream — so the worker is
+                        -- allowed to claim the Task. Without this
+                        -- carve-out, the Task can't claim (the job is
+                        -- PROCESSING) and the job can't reach its
+                        -- terminal transition (the Task never claimed).
+                        SELECT j.instance_id FROM job_queue_items j
+                        LEFT JOIN instances i ON j.instance_id = i.instance_id
+                        WHERE j.status = :status_processing
+                        AND j.job_type = :job_type_message
+                        AND j.instance_id IS NOT NULL
+                        AND j.deleted_at IS NULL
                         AND COALESCE(i.waiting_for, 0) = 0
                         AND (i.status IS NULL OR i.status != :status_waiting_children)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM task t
+                            WHERE t.message_id = {json_extract_message_id}
+                            AND t.status IN (:status_pending, :status_running)
+                        )
                     )
                     ORDER BY created_at ASC
                     LIMIT 1
@@ -283,6 +342,42 @@ class TaskRepository:
                 return None
 
             return self._row_to_task(row)
+
+    def _json_extract_text_sql(self, column: str, key: str) -> str:
+        """Return a dialect-aware SQL fragment that extracts ``key`` from
+        a JSON/JSONB ``column`` as TEXT.
+
+        The two supported backends use different syntax for TEXT
+        extraction of a JSON value:
+
+        * PostgreSQL JSONB: ``column->>'key'`` returns TEXT directly
+          (no cast needed).
+        * SQLite: ``json_extract(column, '$.key')`` returns the JSON
+          value; we wrap it in ``CAST(... AS TEXT)`` so the comparison
+          against a VARCHAR column (e.g. ``task.message_id``) is
+          string-based, matching the ``->>`` semantics on PG.
+
+        Unlike ``_json_path_text`` in ``daemon.repositories.infra.repository``,
+        this helper returns a *raw SQL string fragment* (not a
+        SQLAlchemy expression) because the call sites here use
+        ``text("...")`` and cannot compose with SQLAlchemy expression
+        objects without a full query rewrite. The ``key`` value is
+        interpolated as a constant — callers MUST pass a static string
+        and never a user-supplied value (this method is not
+        user-input-safe by design).
+
+        Args:
+            column: Bare column reference (e.g. ``"j.job_metadata"``).
+                Callers are responsible for aliasing.
+            key: Static JSON key to extract.
+
+        Returns:
+            SQL fragment suitable for direct interpolation into a
+            ``text()`` statement.
+        """
+        if self.engine.dialect.name == "postgresql":
+            return f"{column}->>'{key}'"
+        return f"CAST(json_extract({column}, '$.{key}') AS TEXT)"
 
     def requeue_task_with_backoff(
         self, task_id: int, min_delay_seconds: float = 0.5, max_delay_seconds: float = 2.0
@@ -674,12 +769,25 @@ class TaskRepository:
         ``instances`` (via ``idx_instances_status``) and the
         ``job_queue_items.instance_id`` index, so it stays cheap.
 
+        Mirrors the unified-dispatcher admission carve-out in
+        :meth:`claim_pending_task`: a PROCESSING MESSAGE job is also NOT
+        actively blocking when a corresponding Task row exists for the
+        same ``message_id`` with status ``pending`` or ``running`` (the
+        unified dispatcher has already taken ownership — see
+        ``claim_pending_task`` for full rationale). The two methods MUST
+        use the same predicate, otherwise the worker pool makes
+        inconsistent idle/busy decisions (spurious wakeups or workers
+        sleeping through admissible work).
+
         Returns:
             True if any pending task is blocked by Fix B's per-instance guard
             (task-level or job-queue-level).
         """
+        json_extract_message_id = self._json_extract_text_sql(
+            column="j_running.metadata", key="message_id"
+        )
         with self.engine.begin() as conn:
-            stmt = text("""
+            stmt = text(f"""
                 SELECT 1
                 WHERE EXISTS (
                     SELECT 1 FROM task t_pending
@@ -704,6 +812,18 @@ class TaskRepository:
                             -- CM-aware SQL path in a future phase.
                             AND COALESCE(i.waiting_for, 0) = 0
                             AND (i.status IS NULL OR i.status != :status_waiting_children)
+                            -- Unified-dispatcher admission carve-out
+                            -- (mirror of claim_pending_task). A MESSAGE
+                            -- job with a corresponding pending/running
+                            -- Task row is the FIFO placeholder for an
+                            -- admitted dispatch — NOT driving astream —
+                            -- so it is NOT actively blocking the
+                            -- instance.
+                            AND NOT EXISTS (
+                                SELECT 1 FROM task t_admitted
+                                WHERE t_admitted.message_id = {json_extract_message_id}
+                                AND t_admitted.status IN (:status_pending, :status_running)
+                            )
                         )
                     )
                 )

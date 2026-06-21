@@ -539,6 +539,271 @@ class TestTaskClaiming:
         assert claimed is not None
         assert claimed.id == t1.id
 
+    def test_claim_allowed_when_matching_task_exists_for_processing_job(self, repository, engine):
+        """Unified-dispatcher admission carve-out: when a MESSAGE job is in
+        PROCESSING and a Task row exists for the same ``message_id`` with
+        status ``pending`` or ``running`` (the unified dispatcher has
+        already admitted the job to the worker pool), the worker MUST be
+        allowed to claim the Task. Without this carve-out, the Task
+        can't claim (the MESSAGE job is PROCESSING) and the JobItem
+        can't reach its terminal transition (the Task never claimed) —
+        self-deadlock that wedges every message in PROCESSING.
+
+        Mirror of ``test_claim_allowed_when_job_processing_but_instance_waiting_for_children``
+        but for the unified-dispatcher admission case (which is the
+        NORMAL case in Phase D — every HTTP message send creates a
+        JobItem in PROCESSING and a Task in PENDING for the same
+        message_id).
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        # Parent instance exists in normal RUNNING state (NOT
+        # WAITING_CHILDREN) — this is the path that was deadlocked
+        # before the fix. The JobItem is PROCESSING (set by
+        # JobProcessor.start_job before _admit_via_worker_pool creates
+        # the Task), and the Task is PENDING with the same message_id.
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id="inst-UD-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+                waiting_for=0,
+            ))
+            session.add(JobItem(
+                job_id="job-UD-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                status=JobStatus.PROCESSING.value,
+                job_type="message",
+                instance_id="inst-UD-1",
+                # message_id in job_metadata must match the Task's
+                # message_id for the carve-out to fire. This is the
+                # admission signal that distinguishes the unified
+                # dispatcher from the legacy dual-path.
+                job_metadata={"message_id": "m-UD-1"},
+                created_at=now,
+                started_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # Task created by _admit_via_worker_pool with the same message_id.
+        t1 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-UD-1",
+            message_id="m-UD-1",
+        )
+        # The Task MUST be claimable — the MESSAGE job is the FIFO
+        # placeholder for the unified dispatcher's admission, NOT
+        # driving graph.astream.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == t1.id
+
+        # has_pending_tasks_blocked_by_busy_instance must report False:
+        # the only blocker would be a PROCESSING MESSAGE job, but the
+        # carve-out releases it because a corresponding Task row exists.
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
+
+    def test_claim_blocked_when_message_id_mismatches(self, repository, engine):
+        """message_id specificity: a Task row for a DIFFERENT message_id
+        does NOT release the cross-system guard. This is critical because
+        ``PROCESS_MESSAGE`` tasks are reused for child-completion reports
+        (see ``daemon.services.child_reports``), which have a fresh
+        ``report_message_id`` UUID — not the parent's user message_id. A
+        child-completion report Task for a different message_id must NOT
+        release the guard when the parent's MESSAGE job is PROCESSING:
+        the parent's astream is still driving, and the child task must
+        wait for either the parent to reach WAITING_CHILDREN or the
+        parent's Task to admit itself.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id="inst-MIS-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+                waiting_for=0,
+            ))
+            session.add(JobItem(
+                job_id="job-MIS-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                status=JobStatus.PROCESSING.value,
+                job_type="message",
+                instance_id="inst-MIS-1",
+                # Parent's user message_id is "m-parent".
+                job_metadata={"message_id": "m-parent"},
+                created_at=now,
+                started_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # A different message_id (e.g. a child-completion report) does
+        # NOT release the guard — the parent's MESSAGE job is still
+        # actively driving graph.astream in the legacy path.
+        t1 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-MIS-1",
+            message_id="m-child-report",
+        )
+        assert repository.claim_pending_task(worker_id="worker-1") is None
+        # Busy-instance probe must report True: the only Task is pending
+        # with a non-matching message_id, so the parent's PROCESSING
+        # MESSAGE job still actively blocks.
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
+
+    def test_claim_blocked_when_matching_task_is_terminal(self, repository, engine):
+        """status filter: a Task row in a terminal status
+        (COMPLETED/FAILED/CANCELLED) does NOT release the guard. The
+        Task is no longer driving graph.astream, so releasing the guard
+        would race a concurrent astream call. The window is bounded by
+        the observer's event subscription; during it, the guard must
+        still block to prevent two concurrent astream calls for the
+        same instance.
+
+        This test pins the ``status IN ('pending', 'running')`` filter
+        in the carve-out — a future "simplification" that drops the
+        status filter would silently reintroduce a different deadlock
+        in this race window.
+
+        Setup: a MESSAGE job is PROCESSING with message_id="m-TERM-1".
+        A Task with the same message_id exists in COMPLETED status
+        (e.g. from a prior cycle that the observer hasn't fully
+        finalised yet). A fresh PENDING Task for a DIFFERENT message_id
+        (e.g. a child-completion report) is being claimed. The COMPLETED
+        Task must NOT release the guard for this fresh Task — the
+        fresh Task has a different message_id so it can't be the
+        unified-dispatcher admission for the MESSAGE job anyway, and
+        the guard must still fire.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id="inst-TERM-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+                waiting_for=0,
+            ))
+            session.add(JobItem(
+                job_id="job-TERM-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                status=JobStatus.PROCESSING.value,
+                job_type="message",
+                instance_id="inst-TERM-1",
+                # Parent's user message_id is "m-TERM-1".
+                job_metadata={"message_id": "m-TERM-1"},
+                created_at=now,
+                started_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # A Task with the same message_id as the parent's user message,
+        # but in COMPLETED status (e.g. from a prior cycle). This Task
+        # does NOT release the guard because ``status IN
+        # ('pending', 'running')`` excludes COMPLETED.
+        t_completed = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-TERM-1",
+            message_id="m-TERM-1",
+            status=TaskStatus.COMPLETED.value,
+        )
+        assert t_completed.id is not None
+
+        # A fresh PENDING Task for a DIFFERENT message_id (e.g. a
+        # child-completion report) must NOT be claimable — the parent's
+        # PROCESSING MESSAGE job is still actively driving astream.
+        t_pending = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-TERM-1",
+            message_id="m-TERM-1-child-report",
+        )
+        assert repository.claim_pending_task(worker_id="worker-1") is None
+        # Busy-instance probe must report True: the guard still fires
+        # because the matching Task is COMPLETED (excluded by the
+        # status filter) and the fresh Task has a non-matching
+        # message_id.
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
+
+    def test_claim_blocked_when_job_metadata_is_empty(self, repository, engine):
+        """Defensive: a JobItem with empty ``job_metadata`` (e.g. a
+        manually-injected or legacy row) must NOT release the guard.
+        On both backends, ``json_extract(NULL/'{}', '$.message_id')``
+        returns NULL, so the ``t.message_id = NULL`` comparison is
+        UNKNOWN and the ``NOT EXISTS`` defaults to TRUE (blocker
+        fires). This pins the NULL-extraction fallback so a future
+        refactor doesn't silently invert it.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id="inst-EMPTY-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+                waiting_for=0,
+            ))
+            session.add(JobItem(
+                job_id="job-EMPTY-1",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+                status=JobStatus.PROCESSING.value,
+                job_type="message",
+                instance_id="inst-EMPTY-1",
+                # Explicitly empty job_metadata — same as the
+                # ``test_claim_skips_when_message_job_processing_for_instance``
+                # fixture (line 324) but for a fresh instance so the
+                # test is self-contained.
+                job_metadata={},
+                created_at=now,
+                started_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # Even with a matching Task, the empty job_metadata means
+        # json_extract returns NULL → NOT EXISTS TRUE → blocker fires.
+        t1 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-EMPTY-1",
+            message_id="anything",
+        )
+        assert repository.claim_pending_task(worker_id="worker-1") is None
+
 
 class TestTaskCompletion:
     """Tests for task completion."""
