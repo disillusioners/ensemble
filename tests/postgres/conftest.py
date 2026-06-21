@@ -35,7 +35,6 @@ import daemon.repositories.message_queue.models  # noqa: F401
 import daemon.repositories.task.models  # noqa: F401
 import daemon.repositories.event.models  # noqa: F401
 import daemon.repositories.db_connection.models  # noqa: F401
-import daemon.repositories.execution_lease.models  # noqa: F401
 import daemon.repositories.job_queue.models  # noqa: F401
 import daemon.repositories.job_queue.watcher_models  # noqa: F401
 import daemon.repositories.mcp_server.models  # noqa: F401
