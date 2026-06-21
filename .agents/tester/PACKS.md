@@ -2,7 +2,7 @@
 
 ## Summary
 - Total: 136 packs
-- Unit: 117 | Integration: 2 | Mock: 6 | E2E: 8 | Postgres: 2 | Manual: 1
+- Unit: 117 | Integration: 2 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -150,6 +150,7 @@
 | mcp_tools_e2e_test | tests/e2e/test_mcp_tools.py | MCP tools visible to LLM: API returns MCP tool names, LLM response mentions MCP tools, daemon health check | 5 min | 2026-05-22 | ✅ PASS (8/8 checks, feature/fix-mcp-cold-load) |
 | mcp_tools_restore_e2e_test | tests/e2e/test_mcp_tools_restore.py | MCP tools on restored instances: create instance → verify MCP → restart daemon → re-verify MCP on same instance | 5 min | 2026-05-22 | ✅ PASS (16/16 checks, feature/fix-mcp-cold-load) |
 | migration_e2e_test | tests/e2e/test_migration_e2e.py | SQLite→PostgreSQL migration: full worker run, availability check, idempotent second run (real PostgreSQL) | 5 min | 2026-06-04 | ✅ PASS (3/3, feature/database-migration Phase 3, 0 failures) |
+| workflow_e2e_test | tests/e2e/test_e2e_workflows.py | 3 critical E2E workflows against live daemon: parent→child happy path, pause/resume after spawn, terminate/revive (REAL LLM calls) | 5 min | NOT RUN | 🆕 CREATED (3 tests, commits e03b0aa2 e9f56b7e, pending enqueued_at fix) |
 
 | notification_broadcaster_unit_test | tests/unit/test_notification_broadcaster.py | NotificationBroadcaster: connection management, broadcasting, queue-full, dead connection cleanup, singleton, **instance_created events** | 2 min | 2026-05-30 | ✅ PASS (23/23, instance_created SSE feature, 0 regressions) |
 | notification_sse_endpoint_test | tests/unit/test_notification_sse_endpoint.py | SSE endpoint integration: queue management, multi-client broadcast, root completion flow, event structure, JSON format, heartbeat | 2 min | 2026-05-20 | ✅ PASS (11/11, notification system) |
