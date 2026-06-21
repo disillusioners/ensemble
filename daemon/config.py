@@ -384,28 +384,31 @@ class JobSystemConfig(BaseSettings):
     )
 
     # ─── Phase D dependency-bus feature flag ───────────────────────────────
-    # When OFF (default), the CorrelationManager is the sole completion
-    # authority (unchanged from Phase A+B+C). When ON, the Dependency Bus
-    # (`daemon/services/dependency_bus.py`) becomes the authoritative
+    # When ON (default, D8 cutover), the Dependency Bus
+    # (`daemon/services/dependency_bus.py`) is the authoritative
     # parent-waits-for-children mechanism, backed by the
-    # `dependency_watchers` table so watcher state survives restart. The CM
-    # class is retained for shadow validation (D8). See
+    # `dependency_watchers` table so watcher state survives restart. When OFF,
+    # the CorrelationManager is the sole completion authority (Phase A+B+C
+    # behavior) — this is the rollback path if a bus regression is discovered.
+    # The CM class is retained for shadow validation and rollback. See
     # ``docs/plans/decouple-execution-plan.md`` §13 and
     # ``docs/configuration/completion-flags.md``.
 
     use_dependency_bus: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Phase D feature flag for the DB-backed Dependency Bus. When OFF "
-            "(default), the CorrelationManager is the sole completion "
-            "authority (Phase A+B+C behavior). When ON, the Dependency Bus "
-            "is authoritative — `send_message` writes a "
+            "Phase D feature flag for the DB-backed Dependency Bus. When ON "
+            "(default), the Dependency Bus is the authoritative "
+            "parent-waits-for-children mechanism — `send_message` writes a "
             "`dependency_watchers` row (FollowUp) instead of calling "
-            "`notify_corr_register`, and `MessageTaskProcessor.process` "
-            "calls `bus.emit_terminal(task_id, outcome)` instead of "
-            "`notify_corr_resolve`. The CM class is kept for shadow "
-            "validation for one more release. Set via env var "
-            "ENSEMBLE_JOB_SYSTEM_USE_DEPENDENCY_BUS=true."
+            "`notify_corr_register`, and terminal events call "
+            "`bus.emit_terminal(task_id, outcome)` instead of "
+            "`notify_corr_resolve`. The CM class is retained for shadow "
+            "validation for one more release. When OFF, the CM is the sole "
+            "completion authority (Phase A+B+C behavior) — this is the "
+            "rollback/kill-switch path if a bus regression is discovered. "
+            "Set via env var ENSEMBLE_JOB_SYSTEM_USE_DEPENDENCY_BUS=false to "
+            "roll back to CM."
         ),
     )
 
