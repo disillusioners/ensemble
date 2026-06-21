@@ -151,24 +151,39 @@ class ProcessMessageProcessor(BaseProcessor):
         )
 
         # ---- Pre-pipeline: load message and compute flags ----
-        # Get message content via repository (thread-safe). The
-        # message holds content, source, images, and metadata;
-        # metadata drives ``resume_mode`` / ``silent`` flags.
-        message = None
-        if self._message_repo:
-            message = await asyncio.to_thread(
-                self._message_repo.get, task.message_id
+        # The Task row (this function's ``task`` arg) only carries
+        # ``message_id`` as a foreign key — the Message itself (with
+        # content, source, images, metadata) lives in the
+        # ``message_queue`` table and must be fetched via the message
+        # repository wired in at construction time.
+        #
+        # IMPORTANT: do NOT fall back to
+        # ``self._task_repo.get_by_message`` here. That method returns a
+        # ``Task`` object (per its signature in
+        # ``daemon/repositories/task/repository.py:get_by_message``) —
+        # NOT a ``MessageQueue``. Assigning a Task to ``message`` and
+        # then accessing ``message.content`` raises
+        # ``AttributeError: 'Task' object has no attribute 'content'``
+        # and wedges message processing for every task that hit the
+        # secondary lookup path. The previous code carried this broken
+        # fallback since phase 3; once ``_message_repo.get`` returned
+        # ``None`` for any reason (race with cleanup, missing wiring in
+        # a test path, etc.) the fallback converted the situation into
+        # an opaque crash with no actionable error. Fail fast instead.
+        if self._message_repo is None:
+            raise RuntimeError(
+                f"ProcessMessageProcessor has no message_repository wired; "
+                f"cannot load message {task.message_id} for task {task.id}"
             )
 
-        if not message:
-            # Fallback: try task repo
-            message = await asyncio.to_thread(
-                self._task_repo.get_by_message, task.message_id
-            )
+        message = await asyncio.to_thread(
+            self._message_repo.get, task.message_id
+        )
 
-        if not message:
+        if message is None:
             raise ValueError(
-                f"Message {task.message_id} not found for task {task.id}"
+                f"Message {task.message_id} not found in message_queue "
+                f"for task {task.id}"
             )
 
         message_content = message.content if message else ""
