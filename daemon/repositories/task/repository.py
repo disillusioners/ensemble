@@ -192,9 +192,8 @@ class TaskRepository:
         NOT in that deferred state.
 
         Unified-dispatcher admission carve-out: in the Phase C/D unified
-        dispatcher (``USE_LEGACY_JOBQUEUE_DISPATCH=OFF``), the
-        ``JobFeedbackObserver._admit_via_worker_pool`` admits a MESSAGE
-        job to a Task row BEFORE the worker claims it. The JobItem is
+        dispatcher, the ``JobFeedbackObserver._admit_via_worker_pool``
+        admits a MESSAGE job to a Task row BEFORE the worker claims it. The JobItem is
         in ``PROCESSING`` status (set by ``JobProcessor.start_job``) and
         is intended to stay there until the instance lifecycle resolves
         — the Task drives ``graph.astream``, the JobItem is just a FIFO

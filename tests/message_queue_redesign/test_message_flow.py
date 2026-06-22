@@ -28,8 +28,8 @@ async def _passthrough_gate(*args, **kwargs):
 
     Most tests want the Gate to be transparent — the work runs, no
     contention. Tests that exercise the contention path override
-    ``manager.execution_gate.run`` to return a
-    ``LeaseContention`` instance instead.
+    ``manager.execution_gate.run`` to return a contention signal
+    instead.
 
     The signature is ``(*args, **kwargs)`` so it accepts whatever
     the production code passes (typically

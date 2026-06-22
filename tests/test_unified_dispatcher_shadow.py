@@ -294,8 +294,6 @@ def _build_manager_mock(
     engine: Engine,
     task_repo: TaskRepository,
     instance_repo: SQLModelInstanceRepository,
-    *,
-    use_legacy_jobqueue_dispatch: bool = False,
 ) -> MagicMock:
     """Build a MagicMock InstanceManager wired for the observer.
 
@@ -327,11 +325,9 @@ def _build_manager_mock(
     events._publish_instance_lifecycle_event = AsyncMock()
     manager._events_service = events
 
-    # Config carries the flag the JobProcessor reads.
+    # Config wiring for the JobProcessor.
     manager.config = MagicMock(name="Config")
-    manager.config.job_system = JobSystemConfig(
-        use_legacy_jobqueue_dispatch=use_legacy_jobqueue_dispatch,
-    )
+    manager.config.job_system = JobSystemConfig()
     return manager
 
 
@@ -425,8 +421,11 @@ def _load_job(engine: Engine, job_id: str) -> JobItem | None:
 
 
 class TestBasicAdmissionViaObserver:
-    """When ``USE_LEGACY_JOBQUEUE_DISPATCH=OFF``, ``_admit_via_worker_pool``
-    is the admission path for MESSAGE jobs."""
+    """``_admit_via_worker_pool`` is the admission path for MESSAGE jobs.
+
+    After Phase 2 removed the legacy ``MessageJobHandler.handle``
+    fallback path, this is the single MESSAGE-dispatch path.
+    """
 
     @pytest.mark.asyncio
     async def test_1_task_row_created_with_correct_message_id(
@@ -758,31 +757,29 @@ class TestRandomizedScenarioEquivalence:
 
 
 class TestCrossInstanceHandoff:
-    """Cross-instance handoff must work under BOTH flag states.
+    """Cross-instance handoff must work end-to-end.
 
     Cross-instance handoff is the observer bouncing a work unit from
-    one daemon node to another via the Task table. The flag flip is
-    purely a **local-admission** switch — the cross-node path is
-    orthogonal and must keep working in both ``ON`` and ``OFF``.
+    one daemon node to another via the Task table. After Phase 2
+    removed the legacy ``MessageJobHandler.handle`` fallback path,
+    there is no longer a "flag ON" fallback — the unified observer
+    path is the single MESSAGE-dispatch path on every node.
 
     We simulate cross-instance handoff by constructing a Task directly
     (as the observer's handoff code would) and verifying the WorkerPool
-    can pick it up, regardless of the flag state.
+    can pick it up.
     """
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("flag_state", [False, True], ids=["OFF", "ON"])
     async def test_11_cross_instance_dispatch_works(
-        self, engine, task_repo, job_repo, flag_state
+        self, engine, task_repo, job_repo
     ):
-        """Cross-instance message dispatch functions under both flags.
+        """Cross-instance message dispatch functions through the observer.
 
-        The flag governs local admission only; cross-instance Task
-        seeding is a separate code path and must succeed regardless.
+        The cross-node Task seeding is independent of local-admission
+        dispatch (no flag toggling) and must succeed.
         """
-        manager = _build_manager_mock(
-            engine, task_repo, instance_repo, use_legacy_jobqueue_dispatch=flag_state
-        )
+        manager = _build_manager_mock(engine, task_repo, instance_repo)
         observer = _build_observer(engine, manager, job_repo)
 
         instance_id = f"inst-cross-{uuid.uuid4().hex[:8]}"
@@ -798,7 +795,7 @@ class TestCrossInstanceHandoff:
         )
         manager._worker_pool.notify_work()
 
-        # The Task is pickable by the WorkerPool regardless of flag state.
+        # The Task is pickable by the WorkerPool.
         reloaded = task_repo.get(task.id)
         assert reloaded is not None
         assert reloaded.status == TaskStatus.PENDING.value
@@ -807,21 +804,18 @@ class TestCrossInstanceHandoff:
         manager._worker_pool.notify_work.assert_called()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("flag_state", [False, True], ids=["OFF", "ON"])
-    async def test_12_no_orphaned_jobs_under_either_flag(
-        self, engine, task_repo, job_repo, flag_state
+    async def test_12_no_orphaned_jobs_under_unified_dispatch(
+        self, engine, task_repo, job_repo
     ):
         """No orphaned jobs survive a cross-instance handoff.
 
         An orphaned job is a JobItem left in PROCESSING with no
-        corresponding Task row (the work unit was lost). Under both
-        flag states, every PROCESSING JobItem must have either a Task
-        row (admitted via observer) or be on the legacy inline path
-        (flag ON). We verify the observer path leaves no orphans.
+        corresponding Task row (the work unit was lost). Under the
+        unified observer path, every PROCESSING JobItem MUST have a
+        Task row (admitted via ``_admit_via_worker_pool``). We verify
+        the observer path leaves no orphans.
         """
-        manager = _build_manager_mock(
-            engine, task_repo, instance_repo, use_legacy_jobqueue_dispatch=flag_state
-        )
+        manager = _build_manager_mock(engine, task_repo, instance_repo)
         observer = _build_observer(engine, manager, job_repo)
 
         instance_id = f"inst-orphan-{uuid.uuid4().hex[:8]}"
@@ -831,24 +825,14 @@ class TestCrossInstanceHandoff:
         job = _make_job(instance_id=instance_id, message_id=message_id)
         _seed_job(engine, job)
 
-        # Flag OFF: admission via observer creates the Task.
-        # Flag ON: we simulate the legacy path by also creating a Task
-        # directly (the WorkerPool would create one for local work in
-        # the unified model). Either way, the JobItem must have a Task.
-        if not flag_state:
-            await observer._admit_via_worker_pool(job)
-        else:
-            task_repo.create(
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id=instance_id,
-                message_id=message_id,
-            )
+        # Unified path: admission via observer creates the Task.
+        await observer._admit_via_worker_pool(job)
 
         # No orphan: a Task row exists for the JobItem's message_id.
         task = _load_task_by_message(engine, message_id)
         assert task is not None, (
-            f"Cross-instance handoff under flag={'ON' if flag_state else 'OFF'} "
-            f"must leave a Task row — no orphaned JobItem"
+            "Cross-instance handoff under the unified observer path "
+            "must leave a Task row — no orphaned JobItem"
         )
 
     @pytest.mark.asyncio

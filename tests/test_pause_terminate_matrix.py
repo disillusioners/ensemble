@@ -26,7 +26,7 @@ Run ONLY this file::
 
     pytest tests/test_pause_terminate_matrix.py -v
 
-Test count: 10 (WorkerPool path).
+Test count: 7 (WorkerPool path).
 """
 
 from __future__ import annotations
@@ -39,13 +39,7 @@ import pytest
 from daemon.manager import MessageResult
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.models import JobStatus
-from daemon.services.execution_gate import (
-    ExecutionGateService,
-    LeaseContention,
-    LeaseContentionReason,
-    LeaseHolderKind,
-    LeaseLostError,
-)
+from daemon.services.execution_gate import ExecutionGateService
 
 
 # ---------------------------------------------------------------------------
@@ -69,28 +63,6 @@ def _make_passthrough_gate():
 
     gate = MagicMock(spec=ExecutionGateService)
     gate.run = AsyncMock(side_effect=_passthrough)
-    return gate
-
-
-def _make_contention_gate():
-    """Gate that returns ``LeaseContention`` (without calling work_fn)."""
-
-    gate = MagicMock(spec=ExecutionGateService)
-    gate.run = AsyncMock(
-        return_value=LeaseContention(
-            reason=LeaseContentionReason.HELD_BY_OTHER,
-            holder_id="message_job:other-job",
-            holder_kind="message_job",
-        )
-    )
-    return gate
-
-
-def _make_lease_lost_gate():
-    """Gate that raises ``LeaseLostError`` (without calling work_fn)."""
-
-    gate = MagicMock(spec=ExecutionGateService)
-    gate.run = AsyncMock(side_effect=LeaseLostError("lease revoked mid-flight"))
     return gate
 
 
@@ -415,89 +387,6 @@ class TestProcessMessageProcessorPauseTerminateMatrix:
         task_repo.complete_task.assert_not_called()
 
     # ------------------------------------------------------------------
-    # Test 14: RUNNING + LeaseContention → requeue with backoff
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_14_wp_running_lease_contention_requeues_with_backoff(self):
-        """RUNNING + gate returns LeaseContention → ``requeue_task_with_backoff``.
-
-        The WP contention callback logs (DEBUG per occurrence, INFO
-        throttled) and calls ``requeue_task_with_backoff`` to put the
-        task back in PENDING with a jittered ``next_retry_at``. The
-        processor returns a ``requeued=True`` dict so the worker loop
-        moves on to the next claim.
-        """
-        from daemon.services.task_processor import ProcessMessageProcessor
-
-        manager = _make_mock_manager(
-            result=MessageResult(content="unused", tool_calls=None),
-            instance_status=InstanceStatus.RUNNING.value,
-            gate=_make_contention_gate(),
-        )
-        message_repo = MagicMock()
-        message_repo.get = MagicMock(return_value=_make_mock_message())
-        task_repo = MagicMock()
-        task_repo.requeue_task_with_backoff = MagicMock()
-        task = _make_mock_task()
-
-        processor = ProcessMessageProcessor(
-            instance_manager=manager,
-            task_repo=task_repo,
-            event_repo=None,
-            message_repository=message_repo,
-            source_dispatcher=None,
-        )
-
-        result = await processor.process(task)
-
-        # Re-queued with backoff.
-        task_repo.requeue_task_with_backoff.assert_called_once_with(task.id)
-
-        # Result dict signals "re-queued, not failed".
-        assert result["success"] is False
-        assert result["requeued"] is True
-        assert result["content"] is None
-        assert result["message_id"] == task.message_id
-
-    # ------------------------------------------------------------------
-    # Test 15: RUNNING + LeaseLostError → requeue with backoff
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_15_wp_running_lease_lost_requeues_with_backoff(self):
-        """RUNNING + gate raises LeaseLostError → ``requeue_task_with_backoff``.
-
-        Same requeue path as LeaseContention but logs at WARNING level.
-        The lease was revoked mid-flight; the task goes back to PENDING
-        for the next worker poll.
-        """
-        from daemon.services.task_processor import ProcessMessageProcessor
-
-        manager = _make_mock_manager(
-            result=MessageResult(content="unused", tool_calls=None),
-            instance_status=InstanceStatus.RUNNING.value,
-            gate=_make_lease_lost_gate(),
-        )
-        message_repo = MagicMock()
-        message_repo.get = MagicMock(return_value=_make_mock_message())
-        task_repo = MagicMock()
-        task_repo.requeue_task_with_backoff = MagicMock()
-        task = _make_mock_task()
-
-        processor = ProcessMessageProcessor(
-            instance_manager=manager,
-            task_repo=task_repo,
-            event_repo=None,
-            message_repository=message_repo,
-            source_dispatcher=None,
-        )
-
-        result = await processor.process(task)
-
-        task_repo.requeue_task_with_backoff.assert_called_once_with(task.id)
-        assert result["success"] is False
-        assert result["requeued"] is True
-
-    # ------------------------------------------------------------------
     # Test 16: PAUSED + asyncio.CancelledError → re-raise (no discrimination)
     # ------------------------------------------------------------------
     @pytest.mark.asyncio
@@ -575,47 +464,6 @@ class TestProcessMessageProcessorPauseTerminateMatrix:
             await processor.process(task)
 
         task_repo.complete_task.assert_not_called()
-
-    # ------------------------------------------------------------------
-    # Test 18: RUNNING + LeaseContention backoff → retried (requeued dict)
-    # ------------------------------------------------------------------
-    @pytest.mark.asyncio
-    async def test_18_wp_contention_backoff_signal_is_requeued(self):
-        """RUNNING + contention → processor returns the ``requeued=True`` dict.
-
-        Variant of test 14 that focuses on the *signal* the worker
-        loop receives. The dict ``{success: False, requeued: True}``
-        tells ``Worker._run_task`` to move on without scheduling a
-        retry — the task is already back in PENDING.
-        """
-        from daemon.services.task_processor import ProcessMessageProcessor
-
-        manager = _make_mock_manager(
-            result=MessageResult(content="unused", tool_calls=None),
-            instance_status=InstanceStatus.RUNNING.value,
-            gate=_make_contention_gate(),
-        )
-        message_repo = MagicMock()
-        message_repo.get = MagicMock(return_value=_make_mock_message())
-        task_repo = MagicMock()
-        task_repo.requeue_task_with_backoff = MagicMock()
-        task = _make_mock_task()
-
-        processor = ProcessMessageProcessor(
-            instance_manager=manager,
-            task_repo=task_repo,
-            event_repo=None,
-            message_repository=message_repo,
-            source_dispatcher=None,
-        )
-
-        result = await processor.process(task)
-
-        # The worker loop expects exactly these keys.
-        assert set(result.keys()) == {"success", "requeued", "content", "message_id"}
-        assert result["success"] is False
-        assert result["requeued"] is True
-        assert result["content"] is None
 
     # ------------------------------------------------------------------
     # Test 19: COMPLETED instance + stray task → happy path succeeds

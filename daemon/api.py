@@ -404,8 +404,7 @@ async def lifespan(app: FastAPI):
     logger.info("JobProcessor started")
     
     # C7: Wire JobFeedbackObserver into JobProcessor so MESSAGE-type jobs
-    # route through the observer → Task → WorkerPool path when
-    # ``use_legacy_jobqueue_dispatch=OFF`` (the default). Both the observer
+    # route through the observer → Task → WorkerPool path. Both the observer
     # and the processor are already constructed; the observer is already
     # started (line 354) and the CM completion callback is wired (line
     # 368).

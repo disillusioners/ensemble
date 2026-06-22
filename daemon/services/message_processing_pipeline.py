@@ -83,7 +83,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from daemon.cancellation import OperationCancelledError
-from daemon.services.execution_gate import LeaseContention, LeaseLostError
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
@@ -216,19 +215,21 @@ class PipelineCallbacks:
         and return.
 
     ``on_contention``
-        Called when the Execution Gate returns ``LeaseContention``
-        OR raises ``LeaseLostError``. The callback receives the
-        exception (``LeaseContention`` instance or ``LeaseLostError``)
-        and returns a :class:`ProcessingResult` (typically
+        Defensive callback for any future gate that signals contention.
+        Under the asyncio.Lock gate this is never invoked — the second
+        caller blocks on the same event loop until the holder releases.
+        If invoked, the callback receives the gate's exception and
+        returns a :class:`ProcessingResult` (typically
         ``success=False, should_defer=True``) OR ``None`` to signal
         "use the pipeline default of re-raising the exception".
 
-        The WorkerPool path uses this to log per-instance throttled
-        summaries and call ``requeue_task_with_backoff``. The JobQueue
-        path uses this to call ``atomic_transition(PROCESSING→PENDING)``
-        and notify the dispatch bus. If ``on_contention`` is ``None``,
-        the pipeline re-raises — matching the pre-Phase-5 behaviour
-        for code paths that did not customise contention handling.
+        The WorkerPool path supplies a callback to log per-instance
+        throttled summaries and call ``requeue_task_with_backoff``.
+        The JobQueue path supplies a callback to call
+        ``atomic_transition(PROCESSING→PENDING)`` and notify the
+        dispatch bus. If ``on_contention`` is ``None``, the pipeline
+        re-raises — matching the pre-Phase-5 behaviour for code paths
+        that did not customise contention handling.
 
     ``on_cancel``
         Called when ``OperationCancelledError`` or
@@ -270,8 +271,8 @@ class MessageProcessingPipeline:
        ``manager._process_message_with_tracking``.
     2. Call ``execution_gate.run`` with the supplied ``holder_id`` /
        ``holder_kind`` to serialise ``graph.astream`` per instance.
-    3. Handle ``LeaseContention`` / ``LeaseLostError`` via
-       ``callbacks.on_contention`` (or re-raise when no callback).
+    3. Defensive ``on_contention`` dispatch (never invoked under the
+       asyncio.Lock gate).
     4. Mark the message COMPLETED via ``queue_repository.complete``.
     5. Resolve the dispatch source (internal_report →
        original_source) and call ``source_dispatcher.dispatch_completed``
@@ -350,9 +351,10 @@ class MessageProcessingPipeline:
                 ``f"task:{task.id}"`` or ``f"message_job:{job_id}"``).
                 Used by the Execution Gate's lease release to verify
                 ownership.
-            holder_kind: One of :class:`LeaseHolderKind` values
-                (``"task"`` or ``"message_job"``). Forwarded to
-                ``execution_gate.run`` so lease rows carry a kind tag.
+            holder_kind: A short string tag identifying the caller for
+                diagnostics (e.g. ``"task"`` or ``"message_job"``).
+                The asyncio.Lock gate ignores the value; it is kept
+                for log/SSE payloads.
             callbacks: Path-specific behaviour at pipeline boundaries.
                 All callbacks are optional; see :class:`PipelineCallbacks`.
             error_handler_id: Optional dict passed to
@@ -377,10 +379,6 @@ class MessageProcessingPipeline:
               ``handle_message_processing_error`` already ran.
 
         Raises:
-            LeaseContention: When ``on_contention`` is ``None`` and
-                the Execution Gate returns ``LeaseContention``.
-            LeaseLostError: When ``on_contention`` is ``None`` and
-                the Execution Gate raises ``LeaseLostError``.
             OperationCancelledError: When ``on_cancel`` is ``None``
                 and the pipeline catches
                 ``OperationCancelledError``.
@@ -421,27 +419,17 @@ class MessageProcessingPipeline:
         # proceed, since the downstream transitions remain safe.
         await self._claim_message(context.message_id)
 
-        # ---- Stage 2: acquire lease + run work_fn ----
-        # Two exit paths from the gate:
-        #   - returns LeaseContention: another holder has the lease.
-        #     Hand off to ``on_contention`` (or re-raise).
-        #   - raises LeaseLostError: the lease was revoked mid-flight
-        #     (typically by ``recover_stale_leases`` on another node).
-        #     Hand off to ``on_contention`` (or re-raise).
-        #   - returns the work_fn result: happy path, fall through to
-        #     post-processing.
-        try:
-            gate_outcome = await self._execution_gate.run(
-                instance_id=context.instance_id,
-                holder_id=holder_id,
-                holder_kind=holder_kind,
-                work_fn=_do_process,
-            )
-        except LeaseLostError as e:
-            return await self._handle_contention(e, callbacks)
-        if isinstance(gate_outcome, LeaseContention):
-            return await self._handle_contention(gate_outcome, callbacks)
-        result: "MessageResult | None" = gate_outcome
+        # ---- Stage 2: acquire lock + run work_fn ----
+        # Under the asyncio.Lock gate the only exit path is the
+        # work_fn result. The second caller blocks on the same event
+        # loop until the holder releases; there is no contention
+        # return path.
+        gate_outcome: "MessageResult | None" = await self._execution_gate.run(
+            instance_id=context.instance_id,
+            holder_id=holder_id,
+            holder_kind=holder_kind,
+            work_fn=_do_process,
+        )
 
         # ---- Stages 3-6: shared post-processing (inside try/except) ----
         try:
@@ -454,7 +442,7 @@ class MessageProcessingPipeline:
             # Stage 5: resolve dispatch source and dispatch. JQ guard
             # applied: skip when the resolved source is missing or
             # still starts with ``internal_``.
-            await self._dispatch_completed(context, result)
+            await self._dispatch_completed(context, gate_outcome)
 
             # Stage 6: child completion check. Best-effort: a
             # failure here MUST NOT fail the message — the message
@@ -488,11 +476,11 @@ class MessageProcessingPipeline:
             return ProcessingResult(success=False, error=e)
 
         # ---- Happy path return ----
-        # result.content is what the dispatcher (WorkerPool/JobQueue)
+        # gate_outcome.content is what the dispatcher (WorkerPool/JobQueue)
         # will use to populate task/job completion payloads.
         processing_result = ProcessingResult(
             success=True,
-            result_content=result.content if result else None,
+            result_content=gate_outcome.content if gate_outcome else None,
         )
         if callbacks.on_success is not None:
             try:
@@ -696,11 +684,11 @@ class MessageProcessingPipeline:
         exc: Exception,
         callbacks: PipelineCallbacks,
     ) -> ProcessingResult:
-        """Delegate contention handling to ``on_contention`` or re-raise.
-
-        Covers both ``LeaseContention`` (returned from the gate when
-        another holder has the lease) and ``LeaseLostError`` (raised
-        from the gate when the lease was revoked mid-flight).
+        """Defensive contention handler. Never invoked under the
+        asyncio.Lock gate (the second caller blocks on the same event
+        loop) but kept as a safety net for any future gate that does
+        signal contention. Delegates to ``on_contention`` if supplied,
+        otherwise re-raises the exception.
         """
         if callbacks.on_contention is None:
             raise exc

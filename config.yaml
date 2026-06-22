@@ -118,10 +118,4 @@ job_system:
   use_legacy_waiting_for_cascade: false   # Kill switch — OFF is correct in prod
   debug_completion_invariant: false       # Observability — ON in dev/CI recommended
 
-  # ─── Phase C dispatch-architecture feature flags ───────────────────────────
-  # Route JobQueue MESSAGE work through the unified observer → Task →
-  # WorkerPool path (same dispatcher as enqueue_message). When OFF (default),
-  # MessageJobHandler.handle is NOT called for local work — it remains as
-  # legacy kill-switch fallback. Removed in C11 after verification. Flip via
-  # env var (ENSEMBLE_JOB_SYSTEM_USE_LEGACY_JOBQUEUE_DISPATCH) or here.
-  use_legacy_jobqueue_dispatch: false     # Kill switch — OFF routes via observer
+  # ─── Phase D dependency-bus feature flag ───────────────────────────────

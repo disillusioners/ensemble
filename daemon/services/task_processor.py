@@ -8,7 +8,6 @@ import time
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from .execution_gate import LeaseContention, LeaseHolderKind, LeaseLostError
 from .main_loop_bridge import MainLoopBridge
 from .message_processing_pipeline import (
     MessageProcessingPipeline,
@@ -99,13 +98,13 @@ class ProcessMessageProcessor(BaseProcessor):
         self._event_repo = event_repo  # accepted for API compat; unused
         self._message_repo = message_repository
         self._source_dispatcher = source_dispatcher
-        # Per-instance contention counters. When a task hits
-        # ``LeaseContention`` against the same sibling MESSAGE job
-        # repeatedly (typical for a hot instance receiving many
-        # concurrent child reports), the per-occurrence log is at
-        # DEBUG and a periodic INFO summary is emitted instead so
-        # we don't flood the log on a hot instance. ``_last_info_at``
-        # throttles the summary to one per minute per instance.
+# Per-instance contention counters. When a task hits gate
+        # contention against the same sibling MESSAGE job repeatedly
+        # (typical for a hot instance receiving many concurrent child
+        # reports), the per-occurrence log is at DEBUG and a periodic
+        # INFO summary is emitted instead so we don't flood the log on
+        # a hot instance. ``_last_info_at`` throttles the summary to
+        # one per minute per instance.
         self._contention_counts: dict[str, int] = {}
         self._last_info_at: dict[str, float] = {}
 
@@ -235,7 +234,7 @@ class ProcessMessageProcessor(BaseProcessor):
             result = await self._pipeline.execute(
                 context=context,
                 holder_id=f"task:{task.id}",
-                holder_kind=LeaseHolderKind.TASK.value,
+                holder_kind="task",
                 callbacks=callbacks,
                 error_handler_id={"task_id": task.id},
             )
@@ -319,14 +318,14 @@ class ProcessMessageProcessor(BaseProcessor):
         task FAILED via ``fail_task`` when ``process()`` re-raises.
         No additional task-specific cleanup is required.
 
-        ``on_contention``  - throttled lease-contention logging
+        ``on_contention``  - throttled gate-contention logging
         (per-instance count + 60-second INFO summary) plus
         ``requeue_task_with_backoff``. Returns
         ``ProcessingResult(success=False, should_defer=True)`` so
-        the worker loop knows the task was re-queued. Covers both
-        ``LeaseContention`` (returned from the gate) and
-        ``LeaseLostError`` (raised by the gate) — the only
-        difference is the log level/message.
+        the worker loop knows the task was re-queued. Under the
+        asyncio.Lock gate this callback is never invoked — the
+        second caller blocks on the same event loop — but the
+        body is retained as a defensive fallback.
 
         ``on_cancel`` is intentionally left as ``None``: the
         pipeline re-raises cancellation, and ``process()``'s outer
@@ -356,51 +355,36 @@ class ProcessMessageProcessor(BaseProcessor):
             return
 
         async def on_contention(exc: Exception) -> ProcessingResult:
-            if isinstance(exc, LeaseLostError):
-                # Lease row was cleared by ``recover_stale_leases`` on
-                # another node (or otherwise revoked) while we were
-                # driving graph.astream. The in-flight work_fn was
-                # cancelled by the gate. Re-queue with backoff — the
-                # next attempt acquires a fresh lease.
-                logger.warning(
-                    f"ProcessMessageProcessor: lease lost mid-execution "
-                    f"for task {task_id} instance={instance_id[:8]}... "
-                    f"— re-queuing with backoff: {exc}"
-                )
-            elif isinstance(exc, LeaseContention):
-                # Cross-dispatcher contention: a MESSAGE job is
-                # currently driving graph.astream for this instance.
-                # Back off: re-queue the task to PENDING with a
-                # jittered ``next_retry_at`` (0.5–2.0 s) so the worker
-                # poll does NOT re-claim the same task immediately
-                # and busy-spin against the holding MESSAGE job. The
-                # MESSAGE job side is self-limiting (JobQueue polls
-                # every ~30 s) but the task side was not — without
-                # this backoff a task for the same instance would
-                # re-claim, re-run, hit contention, and re-queue in
-                # a tight loop for the entire duration of the sibling
-                # MESSAGE job.
-                #
-                # Log at DEBUG per occurrence to avoid flooding on a
-                # hot instance; emit a throttled INFO summary at most
-                # once per minute per instance.
-                counts[instance_id] = counts.get(instance_id, 0) + 1
-                logger.debug(
-                    f"ProcessMessageProcessor: lease contention for task {task_id} "
+            # Cross-dispatcher contention (defensive fallback). Under
+            # the asyncio.Lock gate this callback is never invoked —
+            # the second caller blocks on the same event loop until
+            # the holder releases. The body is retained as a safety
+            # net for any future gate that does signal contention.
+            #
+            # Back off: re-queue the task to PENDING with a jittered
+            # ``next_retry_at`` (0.5–2.0 s) so the worker poll does NOT
+            # re-claim the same task immediately and busy-spin against
+            # the holding MESSAGE job.
+            #
+            # Log at DEBUG per occurrence to avoid flooding on a
+            # hot instance; emit a throttled INFO summary at most
+            # once per minute per instance.
+            counts[instance_id] = counts.get(instance_id, 0) + 1
+            logger.debug(
+                f"ProcessMessageProcessor: gate contention for task {task_id} "
+                f"instance={instance_id[:8]}... "
+                f"— re-queuing with backoff: {type(exc).__name__}: {exc}"
+            )
+            now = time.monotonic()
+            last = last_info.get(instance_id, 0.0)
+            if now - last >= 60.0:
+                logger.info(
+                    f"ProcessMessageProcessor: gate contention summary "
                     f"instance={instance_id[:8]}... "
-                    f"(holder_id={exc.holder_id} "
-                    f"holder_kind={exc.holder_kind}) — re-queuing with backoff"
+                    f"count={counts[instance_id]} "
+                    f"in the last {int(now - last)}s"
                 )
-                now = time.monotonic()
-                last = last_info.get(instance_id, 0.0)
-                if now - last >= 60.0:
-                    logger.info(
-                        f"ProcessMessageProcessor: lease contention summary "
-                        f"instance={instance_id[:8]}... "
-                        f"count={counts[instance_id]} "
-                        f"in the last {int(now - last)}s"
-                    )
-                    last_info[instance_id] = now
+                last_info[instance_id] = now
 
             # Transition: RUNNING -> PENDING with a short jittered
             # backoff. ``requeue_task_with_backoff`` is conditional

@@ -600,9 +600,7 @@ class TestProcessMessageProcessorStillTriggersAllSideEffects:
         # processor. (Pre-Phase-5 code did dynamic lookup of
         # ``self._manager.execution_gate`` at call time, which
         # masked this ordering issue.)
-        from daemon.services.execution_gate import (
-            ExecutionGateService, LeaseContention, LeaseLostError,
-        )
+        from daemon.services.execution_gate import ExecutionGateService
 
         async def _passthrough(*a, **kw):
             return await kw["work_fn"]()

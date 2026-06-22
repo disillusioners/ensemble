@@ -17,7 +17,7 @@ This file verifies **pipeline behaviour** directly:
 
 * **TestPipelineUnit** — unit tests for
   :meth:`MessageProcessingPipeline.execute` covering the
-  happy / error / contention / cancel branches.
+  happy / error / cancel branches.
 
 These are unit tests with mocks — no real DB or real CM is required
 (unless explicitly noted). The goal is to verify the **contract**:
@@ -34,12 +34,6 @@ from daemon.cancellation import (
     OperationCancelledError,
 )
 from daemon.manager import MessageResult
-from daemon.services.execution_gate import (
-    LeaseContention,
-    LeaseContentionReason,
-    LeaseHolderKind,
-    LeaseLostError,
-)
 from daemon.services.message_processing_pipeline import (
     MessageProcessingPipeline,
     PipelineCallbacks,
@@ -113,12 +107,11 @@ class TestPipelineUnit:
 
     These tests drive the pipeline directly with mocked dependencies
     (execution_gate, manager, queue_repository, source_dispatcher) and
-    verify the four branches of ``execute``:
+    verify the three branches of ``execute``:
 
     1. Happy path — all 6 stages run in order, ``on_success`` fires.
     2. Error path — ``handle_message_processing_error`` runs, ``on_error`` fires.
-    3. Contention path — ``on_contention`` callback is invoked.
-    4. Cancel path — ``on_cancel`` is invoked, or the error re-raises.
+    3. Cancel path — ``on_cancel`` is invoked, or the error re-raises.
     """
 
     @pytest.mark.asyncio
@@ -157,7 +150,7 @@ class TestPipelineUnit:
         result = await pipeline.execute(
             context=context,
             holder_id="task:t1",
-            holder_kind=LeaseHolderKind.TASK.value,
+            holder_kind="task",
             callbacks=callbacks,
         )
 
@@ -166,7 +159,7 @@ class TestPipelineUnit:
         gate_kwargs = manager.execution_gate.run.call_args.kwargs
         assert gate_kwargs["instance_id"] == "inst-1"
         assert gate_kwargs["holder_id"] == "task:t1"
-        assert gate_kwargs["holder_kind"] == LeaseHolderKind.TASK.value
+        assert gate_kwargs["holder_kind"] == "task"
 
         # Stage 4: queue_repo.complete called with message_id
         queue_repo.complete.assert_called_once_with("msg-1")
@@ -242,7 +235,7 @@ class TestPipelineUnit:
             result = await pipeline.execute(
                 context=context,
                 holder_id="task:t-err",
-                holder_kind=LeaseHolderKind.TASK.value,
+                holder_kind="task",
                 callbacks=callbacks,
                 error_handler_id={"task_id": "t-err"},
             )
@@ -304,7 +297,7 @@ class TestPipelineUnit:
             result = await pipeline.execute(
                 context=context,
                 holder_id="task:t-sw",
-                holder_kind=LeaseHolderKind.TASK.value,
+                holder_kind="task",
                 callbacks=callbacks,
             )
 
@@ -350,7 +343,7 @@ class TestPipelineUnit:
                 await pipeline.execute(
                     context=context,
                     holder_id="task:t-s2",
-                    holder_kind=LeaseHolderKind.TASK.value,
+                    holder_kind="task",
                     callbacks=callbacks,
                 )
 
@@ -358,111 +351,6 @@ class TestPipelineUnit:
         mock_helper.assert_not_called()
         # on_error callback was NOT called for stage-2 errors
         callbacks.on_error.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_contention_path_delegates_to_on_contention(self):
-        """Contention path: when the gate returns ``LeaseContention``,
-        the pipeline delegates to ``on_contention`` and returns whatever
-        the callback returned (typically ``should_defer=True``).
-        """
-        manager = MagicMock()
-        manager._instance_repository = MagicMock()
-        manager._process_child_completion_and_notify_parent = AsyncMock()
-
-        contention = LeaseContention(
-            reason=LeaseContentionReason.HELD_BY_OTHER,
-            holder_id="message_job:other",
-            holder_kind="message_job",
-        )
-
-        async def _returns_contention(*args, **kwargs):
-            return contention
-
-        from daemon.services.execution_gate import ExecutionGateService
-
-        gate = MagicMock(spec=ExecutionGateService)
-        gate.run = AsyncMock(side_effect=_returns_contention)
-        manager.execution_gate = gate
-
-        pipeline = MessageProcessingPipeline(
-            execution_gate=manager.execution_gate,
-            manager=manager,
-        )
-
-        context = ProcessingContext(
-            instance_id="inst-c",
-            message_id="msg-c",
-            message="x",
-        )
-        on_contention = AsyncMock(
-            return_value=ProcessingResult(success=False, should_defer=True)
-        )
-        callbacks = PipelineCallbacks(on_contention=on_contention)
-
-        result = await pipeline.execute(
-            context=context,
-            holder_id="task:t-c",
-            holder_kind=LeaseHolderKind.TASK.value,
-            callbacks=callbacks,
-        )
-
-        # on_contention received the LeaseContention instance
-        on_contention.assert_awaited_once_with(contention)
-
-        # Pipeline returned the callback's result
-        assert result.success is False
-        assert result.should_defer is True
-
-        # Post-processing stages must NOT have run (we short-circuited)
-        manager._process_child_completion_and_notify_parent.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_contention_without_callback_reraises_lease_lost(self):
-        """When ``on_contention`` is None and the gate raises
-        ``LeaseLostError``, the pipeline re-raises the original error.
-
-        This covers the ``LeaseLostError`` path of ``_handle_contention``
-        (the exception form). The ``LeaseContention`` return-value
-        path has a separate quirk: ``raise`` on a ``LeaseContention``
-        dataclass is not valid in Python 3.9+ (it doesn't inherit
-        from ``BaseException``), so that branch is effectively
-        unreachable without an ``on_contention`` callback. Both
-        production paths (WP and JQ) always supply ``on_contention``,
-        so the quirk is benign.
-        """
-        manager = MagicMock()
-        manager._instance_repository = MagicMock()
-
-        lost_err = LeaseLostError("lease revoked")
-
-        async def _raises_lost(*args, **kwargs):
-            raise lost_err
-
-        from daemon.services.execution_gate import ExecutionGateService
-
-        gate = MagicMock(spec=ExecutionGateService)
-        gate.run = AsyncMock(side_effect=_raises_lost)
-        manager.execution_gate = gate
-
-        pipeline = MessageProcessingPipeline(
-            execution_gate=manager.execution_gate,
-            manager=manager,
-        )
-
-        context = ProcessingContext(
-            instance_id="inst-c2",
-            message_id="msg-c2",
-            message="x",
-        )
-        callbacks = PipelineCallbacks()  # no on_contention
-
-        with pytest.raises(LeaseLostError):
-            await pipeline.execute(
-                context=context,
-                holder_id="task:t-c2",
-                holder_kind=LeaseHolderKind.TASK.value,
-                callbacks=callbacks,
-            )
 
     @pytest.mark.asyncio
     async def test_cancel_path_delegates_to_on_cancel(self):
@@ -513,7 +401,7 @@ class TestPipelineUnit:
         result = await pipeline.execute(
             context=context,
             holder_id="message_job:j-x",
-            holder_kind=LeaseHolderKind.MESSAGE_JOB.value,
+            holder_kind="message_job",
             callbacks=callbacks,
         )
 
@@ -556,7 +444,7 @@ class TestPipelineUnit:
             await pipeline.execute(
                 context=context,
                 holder_id="task:t-x2",
-                holder_kind=LeaseHolderKind.TASK.value,
+                holder_kind="task",
                 callbacks=callbacks,
             )
 

@@ -358,31 +358,6 @@ class JobSystemConfig(BaseSettings):
         ),
     )
 
-    # ─── Phase C dispatch-architecture feature flags ──────────────────────────
-    # Routes the JobQueue (JobProcessor) through the unified
-    # observer → Task → WorkerPool path instead of the legacy
-    # MessageJobHandler.handle() direct path. See
-    # ``docs/plans/decouple-execution-plan.md`` C5-C9 and
-    # ``docs/configuration/completion-flags.md`` for the full interaction
-    # matrix. Scheduled for removal in C11 after the legacy path is
-    # verified redundant in production.
-
-    use_legacy_jobqueue_dispatch: bool = Field(
-        default=False,
-        description=(
-            "Phase C kill switch for the legacy JobQueue dispatch. When OFF "
-            "(default), JobProcessor routes MESSAGE-type work through the "
-            "JobFeedbackObserver → Task → WorkerPool path (the new unified "
-            "path; same dispatcher as ``enqueue_message``). When ON, the "
-            "legacy ``MessageJobHandler.handle(started_job)`` is called "
-            "directly (the JobQueue execution path). This flag exists so "
-            "operators can roll back to the legacy path if a regression is "
-            "discovered in the new path; it is NOT a safety mechanism. "
-            "Removed in C11 after verification. Set via env var "
-            "ENSEMBLE_JOB_SYSTEM_USE_LEGACY_JOBQUEUE_DISPATCH=true."
-        ),
-    )
-
     # ─── Phase D dependency-bus feature flag ───────────────────────────────
     # When ON (default, D8 cutover), the Dependency Bus
     # (`daemon/services/dependency_bus.py`) is the authoritative

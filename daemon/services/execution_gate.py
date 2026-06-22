@@ -41,29 +41,11 @@ The previous DB-backed implementation added:
 - a per-instance lease row in ``instance_execution_leases``
 - an in-process heartbeat task to keep the row alive
 - a startup recovery sweep (``recover_stale_leases``)
-- a mid-flight ``LeaseLostError`` escalation path
+- a mid-flight lease-revocation escalation path
 
 None of these are needed in a single-process daemon where every
 caller is on the same event loop. The ``asyncio.Lock`` is the
 correct primitive for this model.
-
-Deprecation notes
------------------
-
-``LeaseContention`` and ``LeaseLostError`` are kept as **deprecated
-stubs** because the dispatcher code (``MessageJobHandler``,
-``ProcessMessageProcessor``, ``MessageProcessingPipeline``,
-``_resume_processing_background``) still imports them and checks
-``isinstance(gate_outcome, LeaseContention)`` / catches
-``LeaseLostError``. Under the asyncio.Lock gate:
-
-- ``LeaseContention`` is never returned (second callers block,
-  not contend). The isinstance check is harmless dead code.
-- ``LeaseLostError`` is never raised. The except handler is harmless
-  dead code.
-
-A future cleanup pass can remove the dead branches from the
-dispatchers; the stubs remain so the imports keep working.
 
 The constructor accepts (and ignores) old positional/keyword
 arguments (``lease_repo``, ``stale_lease_seconds``,
@@ -77,70 +59,10 @@ now handled by the caller's ``CancellationToken`` (the
 is a no-op because there is no longer a lease row to recover.
 """
 import asyncio
-import enum
 import logging
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
-
-
-# ─── Deprecated stubs (kept for backward compat) ─────────────────────────────
-
-
-class LeaseLostError(Exception):
-    """Deprecated — kept for backward compat. Never raised by asyncio.Lock gate."""
-
-
-class LeaseContentionReason(str, enum.Enum):
-    """Deprecated — kept for backward compat.
-
-    The asyncio.Lock gate never returns ``LeaseContention`` (second
-    callers block, not contend), but the dispatcher code and
-    tests still construct ``LeaseContention(reason=LeaseContentionReason.HELD_BY_OTHER, ...)``
-    to drive the contention-handling branches. The enum members are
-    preserved so those constructions keep working.
-    """
-
-    HELD_BY_OTHER = "held_by_other"
-    """The lease/queue is held by a different holder."""
-
-    HELD_BY_LOST = "held_by_lost"
-    """Vanishingly rare under the asyncio.Lock gate: the holder
-    vanished between the lock acquire and the holder check. Kept
-    so the dataclass construction in tests does not break."""
-
-
-class LeaseContention:
-    """Deprecated — kept for backward compat. Never returned by asyncio.Lock gate."""
-
-    def __init__(self, *args, **kwargs):
-        # Accept arbitrary kwargs to mimic the old dataclass interface
-        # (e.g. ``LeaseContention(reason=..., holder_id=..., holder_kind=...)``)
-        # without raising — caller code that constructs these in tests
-        # (e.g. ``_make_contention`` in test_resume_gate.py) must keep
-        # working.
-        self.reason = kwargs.get("reason")
-        self.holder_id = kwargs.get("holder_id", "")
-        self.holder_kind = kwargs.get("holder_kind", "")
-        self.acquired_at = kwargs.get("acquired_at")
-        self.holder_lost_during_contention = kwargs.get(
-            "holder_lost_during_contention", False
-        )
-
-
-class LeaseHolderKind(str, enum.Enum):
-    """Deprecated — kept for backward compat.
-
-    The asyncio.Lock gate ignores ``holder_kind`` entirely, but the
-    dispatcher call sites still pass ``LeaseHolderKind.X.value`` as
-    a documentation/diagnostic signal. The values are preserved
-    unchanged so log lines, SSE payloads, and recorded events stay
-    identical to the pre-C12 implementation.
-    """
-
-    MESSAGE_JOB = "message_job"
-    TASK = "task"
-    RESUME = "resume"
 
 
 WorkFn = Callable[[], Awaitable[Any]]
@@ -206,10 +128,10 @@ class ExecutionGateService:
             - If the lock is free, acquire it and call ``work_fn()``. The
               result of ``work_fn()`` is returned to the caller.
             - If the lock is held by someone else (on the same event
-              loop), the call blocks until the holder releases. There
-              is no ``LeaseContention`` return path under the
-              asyncio.Lock gate — the second caller's ``work_fn``
-              runs *after* the first caller's ``work_fn`` finishes.
+              loop), the call blocks until the holder releases. The
+              second caller's ``work_fn`` runs *after* the first
+              caller's ``work_fn`` finishes — there is no contention
+              return path.
             - If ``work_fn`` raises, the lock is still released before
               the exception propagates.
             - If the awaited task is cancelled (e.g. by

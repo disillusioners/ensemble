@@ -18,8 +18,8 @@ C12 collapse
 ------------
 These tests previously ran against the OLD DB-backed
 ``ExecutionLeaseRepository`` and asserted that the second caller
-saw ``LeaseContention`` (the OLD impl returned the contention
-signal; work_fn for the second caller never ran). After the C12
+saw a contention signal (the OLD impl returned a contention
+result; work_fn for the second caller never ran). After the C12
 collapse to a per-instance ``asyncio.Lock``, the second caller
 *blocks* on the same event loop and runs its work_fn *after* the
 first caller's work_fn completes. The same serialization contract
@@ -174,10 +174,10 @@ async def test_second_caller_blocks_then_runs_after_holder(gate):
     holder-B's work_fn runs. Both work_fns complete, in order.
 
     The original "contention" test asserted that holder-B's
-    work_fn was never invoked (OLD impl returned
-    ``LeaseContention``). Under the NEW impl, holder-B's work_fn
-    DOES run — just after holder-A's. The serialization contract
-    is the same: no work_fns overlap.
+    work_fn was never invoked (OLD impl returned a contention
+    signal). Under the NEW impl, holder-B's work_fn DOES run —
+    just after holder-A's. The serialization contract is the
+    same: no work_fns overlap.
     """
     instance_id = "threading-test-contention"
     b_ever_started = False

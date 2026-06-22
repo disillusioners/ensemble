@@ -413,10 +413,10 @@ class TestTaskProcessorRequeueOnContention:
     """The gate's contention path triggers
     ``TaskRepository.requeue_task_with_backoff`` on the WorkerPool
     side. These tests exercise the requeue logic in isolation — the
-    gate itself no longer returns ``LeaseContention`` (it blocks
-    instead), but the requeue path is the same one the WorkerPool
-    would take if the gate ever needed to back off (e.g. a future
-    contention-aware variant).
+    gate itself does not implement contention (it blocks on a
+    per-instance lock instead), but the requeue path is the same one
+    the WorkerPool would take if a future contention-aware variant
+    were added.
     """
 
     @pytest.fixture
