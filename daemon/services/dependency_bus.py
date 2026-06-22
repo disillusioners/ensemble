@@ -253,6 +253,37 @@ class DependencyBus:
         # duration of the dict lookup + Lock creation (microseconds).
         self._locks_guard: asyncio.Lock = asyncio.Lock()
 
+        # Per-parent asyncio.Lock (Phase 1, 2026-06-23). Serializes
+        # the DB INSERT against a concurrent ``_finalize_job``
+        # holding the parent lock. Created lazily via
+        # :meth:`_get_parent_lock`; never deleted by individual
+        # methods (the whole dict is cleared on :meth:`stop`).
+        # Per-task locks above remain the cache serializer.
+        self._parent_locks: dict[str, asyncio.Lock] = {}
+        # Guards parent lock creation. Same pattern as ``_locks_guard``
+        # above: held only for the dict lookup + ``asyncio.Lock()``
+        # construction, then released.
+        self._parent_locks_guard: asyncio.Lock = asyncio.Lock()
+
+        # Per-parent generation counter (Phase 1, 2026-06-23,
+        # extracted from :class:`CorrelationManager`). Monotonic
+        # signal bumped by :meth:`watch` BEFORE acquiring the
+        # per-parent lock; observed by
+        # :meth:`JobFeedbackObserver._finalize_job` (now via
+        # :meth:`get_generation`) to detect in-flight registers
+        # during finalization and re-arm the job (orphan-race fix).
+        #
+        # The bump is OUTSIDE any lock (plain dict assignment,
+        # atomic in CPython) so it is visible to a reader that
+        # holds the per-parent lock — same pattern that
+        # :class:`CorrelationManager` previously used. The lock
+        # is only needed for the DB INSERT below; the counter is
+        # a monotonic signal, not a critical section.
+        #
+        # Cleared alongside the per-parent locks in :meth:`stop`
+        # to avoid unbounded growth across terminate/revive cycles.
+        self.generation: dict[str, int] = {}
+
         # Lifecycle flag. Set True by :meth:`start`, False by
         # :meth:`stop`. Public methods are tolerant of being called
         # outside the started/stopped window (e.g. :meth:`watch`
@@ -294,56 +325,15 @@ class DependencyBus:
                 :meth:`FollowUp.to_payload` and stores the result
                 in the JSONB ``follow_up_payload`` column.
         """
-        # C1 fix — re-review hardening (2026-06-22): bump the CM
-        # generation counter OUTSIDE the per-parent
-        # ``asyncio.Lock``, then acquire the lock for the DB
-        # INSERT. The original C1 fix held the lock across BOTH
-        # the bump and the INSERT, which left a subtle TOCTOU
-        # window: when ``bus.watch()`` parks on the lock during
-        # ``_finalize_job``'s critical section, T1's synchronous
-        # post_gen read (immediately after lock release, before
-        # yielding) misses T2's bump → re-arm doesn't fire →
-        # orphan race re-opens.
-        #
-        # Bumping the counter BEFORE acquiring the lock is safe
-        # and matches ``CorrelationManager.register_message_send``'s
-        # pattern (see ``correlation_manager.py:265-281``). The
-        # bump is a plain dict assignment (atomic in CPython, no
-        # extra lock needed) and is visible to any reader that
-        # holds the per-parent lock. The lock is only needed to
-        # serialize the DB INSERT against the in-session bus gate
-        # inside ``_finalize_job``'s CM-locked critical section;
-        # the generation counter is a monotonic signal, not a
-        # critical section.
-        #
-        # Race analysis with bump-outside-lock — three cases,
-        # all safe:
-        #   (a) T2 bumps and inserts BEFORE T1 reads pre_gen →
-        #       T1's in-session bus gate sees the row → defer. ✅
-        #   (b) T2 bumps BEFORE parking on the lock, then parks.
-        #       T1's post_gen read (after releasing the lock)
-        #       sees the bump → re-arm fires. ✅
-        #   (c) T2 starts AFTER T1 yields post-commit → T1's
-        #       post_gen read sees the bump → re-arm fires. ✅
-        # The bump-before-lock invariant is the key: T2's
-        # generation increment is always visible to T1's
-        # post_gen check, even when T2 is parked on the lock.
-        #
-        # Lock ordering: ``bus.watch()`` acquires CM lock (parent)
-        # → bus per-task lock. No existing path acquires the bus
-        # per-task lock first then the CM lock — ``emit_terminal``
-        # only takes the task lock, ``register_message_send`` and
-        # ``_finalize_job`` only take the CM lock. Verified safe:
-        # no cycle exists.
-        #
-        # Graceful degradation: when the CM is not wired (testing,
-        # missing init), the lock + bump are skipped and the
-        # INSERT runs without the safety net. This matches the
-        # pre-fix behaviour on that path — the re-arm just won't
-        # fire, but the bus INSERT still persists the watcher so
-        # the in-session bus gate sees it.
-        from .correlation_manager import get_correlation_manager
-        cm = get_correlation_manager()
+        # Phase 1 (2026-06-23): generation counter and per-parent
+        # locking moved from :class:`CorrelationManager` onto the
+        # bus. The counter bump is OUTSIDE any lock (plain dict
+        # assignment, atomic in CPython) so it is visible to a
+        # concurrent reader holding the per-parent lock. The
+        # per-parent lock wraps ONLY the DB INSERT. The per-task
+        # lock (below) wraps ONLY the cache update. Locks are
+        # sequential, never nested — see ``_get_parent_lock``
+        # docstring for the deadlock-cycle analysis.
         _parent_id = follow_up.target_instance_id
         payload = follow_up.to_payload()
         watcher = DependencyWatcher(
@@ -352,45 +342,44 @@ class DependencyBus:
             follow_up_payload=payload,
         )
 
-        if cm is not None:
-            # Bump the generation counter OUTSIDE the per-parent
-            # lock. The bump is a plain dict assignment — atomic in
-            # CPython — and must be visible to a concurrent
-            # ``_finalize_job`` that holds the CM lock and reads
-            # ``pre_gen`` after release. This matches
-            # ``CorrelationManager.register_message_send``'s pattern
-            # (see ``correlation_manager.py:265-281``). The lock is
-            # only held for the DB INSERT below; the generation
-            # counter is a monotonic signal, not a critical section.
-            cm._generation[_parent_id] = (
-                cm._generation.get(_parent_id, 0) + 1
-            )
-            async with cm._get_lock(_parent_id):
-                # CM is wired — INSERT under the per-parent lock.
-                # The lock is held on the event loop for the
-                # duration of the ``asyncio.to_thread`` INSERT,
-                # which is the same pattern
-                # ``job_feedback_observer._finalize_job`` uses.
-                # Worker threads do not acquire the lock
-                # (asyncio.Lock is event-loop-bound); they only
-                # run the sync SQLAlchemy INSERT while the GIL is
-                # released during I/O.
-                await asyncio.to_thread(self._repo.insert, watcher)
-        else:
-            # CM not wired — INSERT without the lock. Same
-            # graceful-degradation semantics as the pre-C1-fix
-            # state.
+        # Bump the per-parent generation counter BEFORE acquiring
+        # the per-parent lock. The bump is a plain dict assignment
+        # — atomic in CPython, no extra lock needed — and is
+        # visible to any reader that holds the per-parent lock
+        # (i.e. ``_finalize_job`` reading post-gen after the lock
+        # release sees the bump that a concurrent ``watch`` made
+        # while it was blocked on the lock). If the generation
+        # changed during finalization, the observer re-arms the
+        # job (COMPLETED → PROCESSING) so the late child's resolve
+        # can find a PROCESSING job.
+        #
+        # The bump is intentionally outside the lock so it is
+        # observable by readers that hold the lock. The lock is
+        # only needed for the DB INSERT below; the generation
+        # counter is a monotonic signal, not a critical section.
+        self.increment_generation(_parent_id)
+        # Per-parent lock — serializes the DB INSERT against a
+        # concurrent ``_finalize_job`` that holds the same lock
+        # (CM-style per-parent critical section). The lock is held
+        # only for the ``asyncio.to_thread`` INSERT and is released
+        # before the per-task lock is acquired below.
+        async with await self._get_parent_lock(_parent_id):
+            # Per-parent lock held — INSERT the watcher row. The
+            # worker thread that ``asyncio.to_thread`` runs in NEVER
+            # acquires the lock (asyncio.Lock is event-loop-bound);
+            # it only runs the sync SQLAlchemy INSERT while the GIL
+            # is released during I/O.
             await asyncio.to_thread(self._repo.insert, watcher)
 
         # Per-source-task lock — protects the in-memory cache from
         # concurrent ``watch`` / ``emit_terminal`` races for the
         # same ``source_task_id``. The DB INSERT above already
-        # committed (under the CM lock or the fallback no-lock
-        # path); the cache update is independent of the DB and
-        # only needs to serialize against ``emit_terminal`` (which
-        # removes the cache entry for this task_id on terminal
-        # emit). Keeping the cache update inside the task lock
-        # preserves the original cache-isolation contract.
+        # committed (under the per-parent lock); the cache update
+        # is independent of the DB and only needs to serialize
+        # against ``emit_terminal`` (which removes the cache entry
+        # for this task_id on terminal emit). Keeping the cache
+        # update inside the task lock preserves the original
+        # cache-isolation contract.
         lock = await self._get_lock(source_task_id)
         async with lock:
             # Update cache. Append, don't replace — multiple
@@ -768,6 +757,12 @@ class DependencyBus:
         cache_size = sum(len(v) for v in self._pending.values())
         self._pending.clear()
         self._locks.clear()
+        # Phase 1 (2026-06-23): clear per-parent locks + generation
+        # counter alongside the per-task locks so the daemon shutdown
+        # path doesn't leak dict entries. Per-parent entries are
+        # re-created lazily on the next watch after restart.
+        self._parent_locks.clear()
+        self.generation.clear()
         logger.info(
             f"bus stop: cleared {cache_size} cached watchers",
             extra={"completion_delivery_path": "bus"},
@@ -801,6 +796,91 @@ class DependencyBus:
             if source_task_id not in self._locks:
                 self._locks[source_task_id] = asyncio.Lock()
             return self._locks[source_task_id]
+
+    async def _get_parent_lock(self, parent_id: str) -> asyncio.Lock:
+        """Get or create the per-parent asyncio.Lock (Phase 1, 2026-06-23).
+
+        Lock creation is guarded by :attr:`_parent_locks_guard` so
+        concurrent first-access on the same parent can't race on
+        the ``_parent_locks`` dict mutation. The guard is held
+        only for the dict lookup + ``asyncio.Lock()`` construction
+        (microseconds), then released — the returned lock is the
+        one the caller holds for the duration of its operation.
+
+        Lock ordering — sequential, NEVER nested:
+
+          * :meth:`watch` acquires the **per-parent** lock (only
+            for the DB INSERT), releases it, then acquires the
+            **per-task** lock (only for the cache update).
+          * No path acquires both locks simultaneously.
+          * :meth:`emit_terminal` only takes the per-task lock.
+          * The observer's ``_finalize_job`` only takes the
+            per-parent lock (via the bus — see Task 1.3).
+
+        This sequence avoids any deadlock cycle: a thread holding
+        the per-parent lock never waits for the per-task lock and
+        vice versa. ``emit_terminal`` and ``_finalize_job`` are
+        serialized on different locks, so they can run
+        concurrently.
+
+        Must be called from the main asyncio event loop (N3
+        constraint, same as :class:`CorrelationManager`).
+
+        Args:
+            parent_id: The parent instance id whose lock to get.
+
+        Returns:
+            The asyncio.Lock for this parent.
+        """
+        async with self._parent_locks_guard:
+            if parent_id not in self._parent_locks:
+                self._parent_locks[parent_id] = asyncio.Lock()
+            return self._parent_locks[parent_id]
+
+    def get_generation(self, parent_id: str) -> int:
+        """Return the current per-parent generation counter (Phase 1).
+
+        Monotonic signal bumped by :meth:`watch` BEFORE acquiring
+        the per-parent lock. :meth:`JobFeedbackObserver._finalize_job`
+        reads this counter before and after its commit; if it
+        changed during the critical section, a register was
+        in-flight and the job must be re-armed (COMPLETED →
+        PROCESSING) so the late child's resolve can find a
+        PROCESSING job.
+
+        Extracted from :class:`CorrelationManager` in Phase 1
+        (2026-06-23) so the bus no longer needs CM for the
+        orphan-race detection. CM's :meth:`get_generation` is now
+        a thin passthrough to this method — see
+        ``correlation_manager.py`` for the deprecation notice.
+
+        Args:
+            parent_id: The parent instance ID.
+
+        Returns:
+            The current generation counter, or 0 if the parent
+            has no recorded generation (untracked or cleared).
+        """
+        return self.generation.get(parent_id, 0)
+
+    def increment_generation(self, parent_id: str) -> None:
+        """Bump the per-parent generation counter (Phase 1).
+
+        Called from :meth:`watch` BEFORE acquiring the per-parent
+        lock. The bump is a plain dict assignment (atomic in
+        CPython, no extra lock needed) and is visible to any
+        reader that subsequently holds the per-parent lock.
+
+        The bump is intentionally outside the lock so it is
+        observable by readers that hold the lock. The lock is
+        only needed for the DB INSERT; the generation counter is
+        a monotonic signal, not a critical section.
+
+        Args:
+            parent_id: The parent instance ID whose counter to
+                bump.
+        """
+        self.generation[parent_id] = self.generation.get(parent_id, 0) + 1
 
     def _now_iso(self) -> str:
         """Return current UTC time as ISO-8601 string.

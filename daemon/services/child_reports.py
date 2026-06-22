@@ -1365,16 +1365,18 @@ Provide a concise summary:"""
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
             last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
 
-        # MAJOR A fix (re-arm safety net, 2026-06-22): wrap the
-        # ``asyncio.to_thread`` call in the CorrelationManager's
-        # per-parent ``asyncio.Lock`` when CM is wired. The lock is
-        # held on the EVENT LOOP for the entire duration of the
+        # MAJOR A fix (re-arm safety net, 2026-06-22; Phase 1 bus
+        # migration 2026-06-23): wrap the ``asyncio.to_thread`` call in
+        # the per-parent ``asyncio.Lock`` when the bus is wired. After
+        # Phase 1 the lock lives on the bus (see
+        # ``DependencyBus._get_parent_lock``); CM's ``_get_lock`` is a
+        # deprecated passthrough and will be removed in Phase 5. The
+        # lock is held on the EVENT LOOP for the entire duration of the
         # worker-thread sync helper, blocking ``bus.watch()`` (which
-        # also acquires ``cm._get_lock(parent_id)`` after the C1 fix
-        # in ``dependency_bus.py``) from running on the loop and
-        # committing a new watcher row between the in-session bus
-        # gate inside the sync helper and the terminal status
-        # UPDATE that follows it.
+        # also acquires ``bus._get_parent_lock(parent_id)``) from
+        # running on the loop and committing a new watcher row between
+        # the in-session bus gate inside the sync helper and the
+        # terminal status UPDATE that follows it.
         #
         # Why this works (no deadlock risk):
         #   * ``asyncio.Lock`` is event-loop-bound — the worker
@@ -1383,22 +1385,23 @@ Provide a concise summary:"""
         #     while the GIL is released during I/O.
         #   * The lock serializes coroutines on the loop, not
         #     threads.
-        #   * ``bus.watch()`` acquires CM lock (parent) → bus task
-        #     lock. We acquire CM lock only here. No cycle exists.
+        #   * ``bus.watch()`` acquires per-parent lock → bus task
+        #     lock (sequential, never nested). We acquire the
+        #     per-parent lock only here. No cycle exists.
         #   * WriteGuardSession is a Python-level counter, not a DB
         #     lock — no interaction.
         #
-        # When CM is None (legacy path / not initialized), no lock
-        # is acquired — the legacy ``waiting_for`` cascade is the
+        # When the bus is None (legacy path / not initialized), no
+        # lock is acquired — the legacy ``waiting_for`` cascade is the
         # only authority and there is no concurrent writer to race
-        # against on the in-memory CM pending set.
-        from .correlation_manager import get_correlation_manager as _get_cm_for_a_fix
-        cm = _get_cm_for_a_fix()
-        if cm is not None:
-            async with cm._get_lock(instance_id):
+        # against the in-memory pending set.
+        from .dependency_bus import get_dependency_bus
+        bus = get_dependency_bus()
+        if bus is not None:
+            async with await bus._get_parent_lock(instance_id):
                 # Run the ENTIRE WriteGuardSession block on a
                 # worker thread so session.commit() cannot deadlock
-                # the event loop. The CM lock is held on the
+                # the event loop. The per-parent lock is held on the
                 # event loop for the duration — see the comment
                 # above.
                 result = await asyncio.to_thread(

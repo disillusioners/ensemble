@@ -728,6 +728,12 @@ class CorrelationManager:
         of a tracked parent; it is reset only when the parent is cleared
         via :meth:`clear_for_instance` or :meth:`rebuild_from_db`.
 
+        # DEPRECATED: Phase 5 will remove this. Phase 1 (2026-06-23)
+        # extracted the generation counter into :class:`DependencyBus`
+        # and this method is now a thin passthrough so existing CM-based
+        # callers keep working during the transition window. New code
+        # should call :meth:`DependencyBus.get_generation` directly.
+
         Args:
             parent_id: The parent instance ID.
 
@@ -735,7 +741,23 @@ class CorrelationManager:
             The current generation counter, or 0 if the parent has no
             recorded generation (untracked or cleared).
         """
-        return self._generation.get(parent_id, 0)
+        # DEPRECATED: Phase 5 will remove this. Delegate to the bus,
+        # which now owns the generation counter (Phase 1, 2026-06-23).
+        # Lazy import to avoid a circular import between
+        # ``dependency_bus`` and ``correlation_manager`` — the bus
+        # also imports this module (for ``get_correlation_manager``)
+        # for graceful-degradation guards.
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            # Bus not wired (testing, missing init) — fall back to
+            # the in-memory counter for legacy callers. The bus is
+            # the new source of truth, but we keep this fallback so
+            # a missing bus doesn't break observers that still
+            # consult the CM.
+            return self._generation.get(parent_id, 0)
+        return bus.get_generation(parent_id)
 
     def is_complete(self, parent_id: str) -> bool:
         """Check if all correlations are resolved for a parent.

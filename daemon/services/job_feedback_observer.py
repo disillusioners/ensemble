@@ -564,8 +564,7 @@ class JobFeedbackObserver:
         Phase C (decouple-architecture) replaces the legacy JobQueue
         execution path (``MessageJobHandler.handle``) with the unified
         observer → Task → WorkerPool path. When JobProcessor admits a
-        ``job_type='message'`` job and ``USE_LEGACY_JOBQUEUE_DISPATCH=OFF``,
-        it calls this method. The method:
+        ``job_type='message'`` job, it calls this method. The method:
 
           1. Extracts ``message_id`` from ``job.job_metadata`` (set by
              :meth:`InstanceMessagingService.enqueue_message_via_jq`).
@@ -913,44 +912,57 @@ class JobFeedbackObserver:
 
         # ─── Call the unified sync helper — single WriteGuardSession transaction ───
         # C1 fix (cross-thread race hardening, 2026-06-20): wrap the
-        # ``asyncio.to_thread`` call in the CorrelationManager's per-parent
-        # ``asyncio.Lock`` when CM is active. The lock is held on the EVENT
-        # LOOP for the entire duration of the worker-thread sync helper,
-        # blocking ``register_message_send`` (which also acquires
-        # ``cm._get_lock(parent_id)``) from running on the loop and
-        # registering a new pending child between the pre-check at line ~509
-        # and the commit inside ``_finalize_job_db_sync``.
+        # ``asyncio.to_thread`` call in the per-parent ``asyncio.Lock``
+        # when the bus is active (Phase 1, 2026-06-23: the lock moved
+        # from CM to the bus). The lock is held on the EVENT LOOP for
+        # the entire duration of the worker-thread sync helper,
+        # blocking ``bus.watch()`` (which also acquires
+        # ``bus._get_parent_lock(parent_id)``) from running on the loop
+        # and registering a new pending child between the pre-check at
+        # line ~509 and the commit inside ``_finalize_job_db_sync``.
         #
         # Why this works (no deadlock risk):
         #   * ``asyncio.Lock`` is event-loop-bound — the worker thread that
         #     ``asyncio.to_thread`` runs in NEVER acquires it; it only runs
         #     the sync SQLAlchemy code while the GIL is released during I/O.
         #   * The lock serializes coroutines on the loop, not threads.
-        #   * When CM is None (legacy path / not initialized), no lock is
-        #     needed — the legacy ``SELECT ... FOR UPDATE`` row-lock gate in
-        #     ``_finalize_job_db_sync`` provides the same protection.
+        #   * When the bus is None (legacy path / not initialized), no
+        #     lock is needed — the legacy ``SELECT ... FOR UPDATE``
+        #     row-lock gate in ``_finalize_job_db_sync`` provides the
+        #     same protection.
         #
-        # Orphan-race fix (2026-06-20, post-commit re-check): capture the
-        # CM generation counter BEFORE acquiring the lock. ``register_message_send``
-        # bumps the counter OUTSIDE its per-parent lock acquisition, so the
-        # bump is visible to a reader that holds the lock. After the lock
-        # is released (and the job is committed to COMPLETED), we read the
-        # counter again. If it changed, a register was in-flight during
-        # finalization — we must re-arm the job (COMPLETED → PROCESSING)
-        # so the late child's eventual resolve can find a PROCESSING job.
-        # Without this, the late child is orphaned: its resolve callback
-        # finds a COMPLETED job and silently skips.
+        # Orphan-race fix (2026-06-20, post-commit re-check; Phase 1
+        # 2026-06-23: counter now lives on the bus): capture the
+        # per-parent generation counter BEFORE acquiring the lock.
+        # ``DependencyBus.watch`` bumps the counter OUTSIDE its
+        # per-parent lock acquisition, so the bump is visible to a
+        # reader that holds the lock. After the lock is released (and
+        # the job is committed to COMPLETED), we read the counter
+        # again. If it changed, a watch was in-flight during
+        # finalization — we must re-arm the job (COMPLETED →
+        # PROCESSING) so the late child's eventual resolve can find a
+        # PROCESSING job. Without this, the late child is orphaned:
+        # its resolve callback finds a COMPLETED job and silently
+        # skips.
         try:
-            cm = get_correlation_manager()
-            # Pre-commit generation snapshot — read BEFORE the lock so we
-            # can detect any bump that happens during the critical section
-            # (lock acquire → to_thread → commit → lock release).
-            pre_gen = cm.get_generation(instance_id) if cm is not None else 0
-            if cm is not None:
-                # CM is active — hold the per-parent lock across the to_thread
-                # call so concurrent ``register_message_send`` coroutines must
-                # wait until finalization has committed.
-                async with cm._get_lock(instance_id):
+            # Phase 1 (2026-06-23): generation counter + per-parent
+            # locking moved from CM onto the bus. The bus now owns
+            # the generation signal; CM's ``get_generation`` is a
+            # thin passthrough (deprecated — Phase 5 will remove it).
+            # Read the generation snapshot BEFORE acquiring the lock
+            # so we can detect any bump that happens during the
+            # critical section (lock acquire → to_thread → commit →
+            # lock release).
+            from daemon.services.dependency_bus import get_dependency_bus
+            bus = get_dependency_bus()
+            pre_gen = bus.get_generation(instance_id) if bus is not None else 0
+            if bus is not None:
+                # Bus is wired — hold the per-parent lock across the
+                # to_thread call so concurrent ``watch()`` coroutines
+                # must wait until finalization has committed. This is
+                # the same critical-section shape the previous CM-based
+                # code used (``async with cm._get_lock(instance_id)``).
+                async with await bus._get_parent_lock(instance_id):
                     db_result = await asyncio.to_thread(
                         self._finalize_job_db_sync,
                         job.job_id,
@@ -960,7 +972,7 @@ class JobFeedbackObserver:
                         error_message,
                     )
             else:
-                # Legacy path / CM not wired — no lock needed; the FOR UPDATE
+                # Legacy path / bus not wired — no lock needed; the FOR UPDATE
                 # gate inside ``_finalize_job_db_sync`` is the only defence.
                 db_result = await asyncio.to_thread(
                     self._finalize_job_db_sync,
@@ -985,29 +997,37 @@ class JobFeedbackObserver:
             # moved to COMPLETED by us, and gate-deferred paths already
             # schedule a ``notify_corr_rearm`` for the wave 2 case.
             if (
-                cm is not None
+                bus is not None
                 and not db_result.skip
                 and not db_result.gate_deferred
             ):
-                post_gen = cm.get_generation(instance_id)
+                post_gen = bus.get_generation(instance_id)
                 if post_gen > pre_gen:
-                    # B-W1 NOTE: resolve_job also bumps the generation
-                    # counter. This means when a watched job resolves and
-                    # fires the completion callback, the generation change
-                    # can trigger a spurious COMPLETED → PROCESSING →
-                    # COMPLETED cycle on the parent job. This is
-                    # self-correcting (the second finalize commits to
-                    # COMPLETED again) and the cost is a brief DB/SSE
-                    # status flicker. This is acceptable — the alternative
-                    # (not bumping generation on resolve_job) would reopen
-                    # the orphan race for the job path.
+                    # B-W1 NOTE: ``CorrelationManager.resolve_job`` also
+                    # bumps the generation counter on CM. Phase 1
+                    # (2026-06-23) extracted the counter onto the bus;
+                    # the bump now happens on ``DependencyBus.watch``
+                    # only (no resolve bump on the bus). The CM's own
+                    # resolve_job bump can still trigger a spurious
+                    # COMPLETED → PROCESSING → COMPLETED cycle on the
+                    # parent job when the orphan-race re-arm reads via
+                    # the CM passthrough (``cm.get_generation`` returns
+                    # ``bus.get_generation``). This is self-correcting
+                    # (the second finalize commits to COMPLETED again)
+                    # and the cost is a brief DB/SSE status flicker.
+                    # Acceptable — the alternative (not bumping
+                    # generation on resolve_job) would reopen the
+                    # orphan race for the job path.
                     #
-                    # A register_message_send bumped the generation during
-                    # finalization. The register is either blocked on the
-                    # lock (just released) or already enqueued on the
-                    # event loop and about to acquire the lock. Either
-                    # way, a new child is on its way into CM. Re-arm the
-                    # job so the late child's resolve can find it.
+                    # A ``DependencyBus.watch`` (or a CM
+                    # ``register_message_send`` resolved via the CM
+                    # passthrough) bumped the generation during
+                    # finalization. The register is either blocked on
+                    # the lock (just released) or already enqueued on
+                    # the event loop and about to acquire the lock.
+                    # Either way, a new child is on its way into CM/bus.
+                    # Re-arm the job so the late child's resolve can
+                    # find it.
                     logger.info(
                         f"Observer: orphan-race post-commit re-check "
                         f"detected generation change for instance="

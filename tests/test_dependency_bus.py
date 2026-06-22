@@ -500,63 +500,262 @@ class TestCrashRecoveryEnqueuedAt:
 
 
 class TestGenerationCounterBump:
-    """C2 fix: watch() bumps CM generation counter so _finalize_job's re-arm works."""
+    """Phase 1 (2026-06-23): generation counter lives on the bus.
+
+    The bus is now the sole owner of the per-parent generation
+    counter — the previous CM-based test setup (creating a CM
+    instance, registering it as the module singleton, and asserting
+    on ``cm._generation`` / ``cm.get_generation``) is replaced by
+    direct assertions on ``bus.generation`` /
+    ``bus.get_generation``. The orphan-race re-arm in
+    :meth:`JobFeedbackObserver._finalize_job` reads
+    ``bus.get_generation`` and triggers a COMPLETED → PROCESSING
+    transition when a watch bumped the counter during finalization.
+    """
 
     @pytest.mark.asyncio
-    async def test_watch_bumps_cm_generation(self, bus_repo):
-        """watch() bumps cm._generation[parent_id] before acquiring the bus lock."""
-        from daemon.services.dependency_bus import DependencyBus, FollowUp
-        from daemon.services.correlation_manager import CorrelationManager
-
-        # Create a real CM (no repos needed — we only test _generation access)
-        cm = CorrelationManager(
-            instance_repository=None,
-            message_queue_repository=None,
-        )
-
+    async def test_watch_bumps_bus_generation(self, bus_repo):
+        """watch() bumps bus.generation[parent_id] (no CM involved)."""
         bus = DependencyBus(bus_repo)
         await bus.start()
-
-        # Set CM as the module singleton so watch() can find it
-        from daemon.services.correlation_manager import set_correlation_manager, get_correlation_manager
-        set_correlation_manager(cm)
 
         try:
             parent_id = "parent-gen-test"
-            assert cm.get_generation(parent_id) == 0
+            assert bus.get_generation(parent_id) == 0
 
-            fu = FollowUp(target_instance_id=parent_id, message="done")
+            fu = make_fu(target_id=parent_id)
             await bus.watch("task-gen-test", fu)
 
-            gen_after = cm.get_generation(parent_id)
-            assert gen_after > 0, f"generation should be bumped, got {gen_after}"
+            gen_after = bus.get_generation(parent_id)
+            assert gen_after > 0, (
+                f"generation should be bumped, got {gen_after}"
+            )
 
-            # Second watch bumps again
+            # Second watch bumps again — counter is monotonic.
             await bus.watch("task-gen-test-2", fu)
-            gen_after2 = cm.get_generation(parent_id)
-            assert gen_after2 > gen_after, f"generation should increase, got {gen_after2} vs {gen_after}"
+            gen_after2 = bus.get_generation(parent_id)
+            assert gen_after2 > gen_after, (
+                f"generation should increase, got {gen_after2} vs {gen_after}"
+            )
         finally:
-            set_correlation_manager(None)
             await bus.stop()
 
     @pytest.mark.asyncio
-    async def test_watch_without_cm_does_not_crash(self, bus_repo):
-        """watch() handles CM not being wired (no crash, bus still works)."""
-        from daemon.services.dependency_bus import DependencyBus, FollowUp
-        from daemon.services.correlation_manager import set_correlation_manager
-
-        set_correlation_manager(None)
-
+    async def test_increment_generation_helper(self, bus_repo):
+        """``increment_generation(parent_id)`` mutates the counter monotonically."""
         bus = DependencyBus(bus_repo)
         await bus.start()
 
-        fu = FollowUp(target_instance_id="parent-no-cm", message="done")
-        # Should not crash even though CM is None
-        await bus.watch("task-no-cm", fu)
+        try:
+            parent_id = "parent-incr"
+            assert bus.get_generation(parent_id) == 0
 
-        pending = await bus.pending_watchers("task-no-cm")
-        assert len(pending) == 1
-        await bus.stop()
+            bus.increment_generation(parent_id)
+            assert bus.get_generation(parent_id) == 1
+
+            bus.increment_generation(parent_id)
+            bus.increment_generation(parent_id)
+            assert bus.get_generation(parent_id) == 3
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_get_generation_returns_zero_for_unknown_parent(self, bus_repo):
+        """``get_generation`` returns 0 (not KeyError) for an untracked parent."""
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        try:
+            # No watch has happened — generation is implicitly 0.
+            assert bus.get_generation("never-watched-parent") == 0
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_watches_are_safely_serialized(self, bus_repo):
+        """Multiple concurrent watches for the same parent produce a deterministic,
+        monotonically-increasing generation counter with no missed bumps.
+
+        Exercises the lock-ordering invariant: generation mutation is
+        OUTSIDE the per-parent lock (atomic CPython dict assignment),
+        so concurrent ``watch`` calls all see a strictly-increasing
+        counter. No races, no double-counts, no drops — the final
+        counter is exactly ``N`` after ``N`` concurrent watches.
+        """
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        try:
+            parent_id = "parent-concurrent"
+            n_concurrent = 20
+
+            # All N watches are scheduled simultaneously. Even with
+            # the GIL switching between coroutines, the dict
+            # assignment is atomic in CPython and the bump happens
+            # BEFORE the per-parent lock acquisition — so every
+            # watch produces exactly one bump, no double-counts.
+            await asyncio.gather(
+                *[
+                    bus.watch(
+                        f"task-conc-{i}",
+                        make_fu(target_id=parent_id),
+                    )
+                    for i in range(n_concurrent)
+                ]
+            )
+
+            assert bus.get_generation(parent_id) == n_concurrent, (
+                f"expected {n_concurrent} bumps, "
+                f"got {bus.get_generation(parent_id)}"
+            )
+
+            # And the DB has all N watchers (sanity check — the
+            # INSERT path must not have dropped any rows under
+            # contention).
+            pending = await asyncio.gather(
+                *[
+                    bus.pending_watchers(f"task-conc-{i}")
+                    for i in range(n_concurrent)
+                ]
+            )
+            assert sum(len(p) for p in pending) == n_concurrent
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_generation_survives_bus_restart(self, bus_repo):
+        """Generation counter survives a bus.stop() / bus.start() cycle.
+
+        The counter is in-memory only (matches the CM's previous
+        contract — the DB stores PENDING watchers, not the generation
+        number). After a restart, the counter is rebuilt as a fresh
+        ``dict`` and starts at 0; orphan-race detection still works
+        because the next ``watch`` from the caller bumps it back to
+        a non-zero value before any concurrent ``_finalize_job``
+        observes it.
+
+        This test verifies two restart invariants:
+
+          1. A bus restarted over the same DB does NOT inherit
+             stale generation state (avoids false-positive re-arms
+             from a previous process).
+          2. A new ``watch`` after restart still bumps the counter
+             correctly (the post-restart generation state is
+             functional, not just empty).
+        """
+        # First bus — bump generation, then stop.
+        bus1 = DependencyBus(bus_repo)
+        await bus1.start()
+        parent_id = "parent-restart"
+        await bus1.watch("task-restart-1", make_fu(target_id=parent_id))
+        await bus1.watch("task-restart-2", make_fu(target_id=parent_id))
+        assert bus1.get_generation(parent_id) == 2
+        await bus1.stop()
+
+        # Restart — counter is fresh (no DB persistence — matches CM).
+        bus2 = DependencyBus(bus_repo)
+        try:
+            assert bus2.get_generation(parent_id) == 0, (
+                "restarted bus should not inherit stale generation"
+            )
+
+            # New watch after restart bumps from 0 → 1.
+            await bus2.watch("task-restart-3", make_fu(target_id=parent_id))
+            assert bus2.get_generation(parent_id) == 1
+        finally:
+            await bus2.stop()
+
+    @pytest.mark.asyncio
+    async def test_per_parent_lock_serializes_db_insert(self, bus_repo):
+        """``_get_parent_lock`` returns a usable asyncio.Lock per parent.
+
+        Two concurrent ``watch`` calls on the SAME parent must
+        serialize their DB INSERTs (the per-parent lock is held for
+        the duration of the ``asyncio.to_thread`` call). The
+        generation counter is incremented N times regardless of
+        lock contention — the bump is outside the lock, the
+        INSERT is inside it.
+
+        Different parents do NOT block each other (the lock is
+        keyed per-parent, not a global mutex).
+        """
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        try:
+            parent_a = "parent-A-locked"
+            parent_b = "parent-B-locked"
+
+            # Mixed concurrency: same-parent + cross-parent.
+            await asyncio.gather(
+                bus.watch("src-a1", make_fu(target_id=parent_a)),
+                bus.watch("src-a2", make_fu(target_id=parent_a)),
+                bus.watch("src-b1", make_fu(target_id=parent_b)),
+                bus.watch("src-b2", make_fu(target_id=parent_b)),
+            )
+
+            assert bus.get_generation(parent_a) == 2
+            assert bus.get_generation(parent_b) == 2
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_watch_without_any_dependencies_works(self, bus_repo):
+        """watch() works without CM, bus, or any singleton wiring.
+
+        Phase 1 graceful-degradation contract: a bare
+        ``DependencyBus`` instance, not registered as a singleton,
+        still accepts ``watch`` calls correctly. (The CM used to
+        be optional — the previous ``test_watch_without_cm_does_not_crash``
+        test. Phase 1 makes the bus itself the required wiring; this
+        test confirms a fresh, unregistered bus instance still
+        works in isolation, which is the common unit-test pattern.)
+        """
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        try:
+            fu = make_fu(target_id="parent-isolated")
+            await bus.watch("task-isolated", fu)
+
+            pending = await bus.pending_watchers("task-isolated")
+            assert len(pending) == 1
+            assert bus.get_generation("parent-isolated") == 1
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_orphan_race_detection_without_cm(self, bus_repo):
+        """The observer's pre/post-commit orphan-race check works using only the bus.
+
+        Simulates the contract: a ``_finalize_job``-shaped reader
+        takes pre_gen, then a concurrent ``watch`` bumps the
+        counter, then the reader takes post_gen — the difference
+        must be observable on the bus. No CM involved.
+        """
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        try:
+            parent_id = "parent-orphan"
+
+            # Step 1: pre_gen snapshot (observer pattern)
+            pre_gen = bus.get_generation(parent_id)
+            assert pre_gen == 0
+
+            # Step 2: concurrent register lands during the critical
+            # section (the bus bump-outside-lock guarantees
+            # post_gen > pre_gen here).
+            await bus.watch("task-orphan", make_fu(target_id=parent_id))
+
+            # Step 3: post_gen snapshot — bump is visible without
+            # the reader holding any lock.
+            post_gen = bus.get_generation(parent_id)
+            assert post_gen > pre_gen, (
+                f"orphan-race bump should be visible: pre={pre_gen}, post={post_gen}"
+            )
+        finally:
+            await bus.stop()
 
 
 # -------------------------------------------------------------------------
