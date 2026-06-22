@@ -279,6 +279,16 @@ class CorrelationManager:
         # pending-dict mutation below — the generation counter is a
         # monotonic signal, not a critical section.
         self._generation[parent_id] = self._generation.get(parent_id, 0) + 1
+        # Phase 1 C1 fix (2026-06-23): mirror the bump to the bus so the
+        # observer (``bus.get_generation``) sees it. ``cm._generation`` is
+        # deprecated — Phase 5 removes CM entirely. Until then we keep
+        # both in sync so the orphan-race detector on the bus side works
+        # regardless of which code path produced the bump.
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is not None:
+            bus.increment_generation(parent_id)
         async with self._get_lock(parent_id):
             if parent_id not in self._pending:
                 self._pending[parent_id] = ParentCorrelation(parent_id=parent_id)
@@ -341,7 +351,16 @@ class CorrelationManager:
         # as register_message_send). The bump is intentionally outside
         # the lock so it is observable by readers that hold the lock.
         # The lock is only needed for the pending_jobs mutation below.
+        # Phase 1 C1 fix (2026-06-23): mirror the bump to the bus so
+        # ``bus.get_generation`` sees it. Without the mirror, the
+        # watch_job path silently loses orphan-race protection because
+        # the observer reads the bus, not ``cm._generation``.
         self._generation[parent_id] = self._generation.get(parent_id, 0) + 1
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is not None:
+            bus.increment_generation(parent_id)
         async with self._get_lock(parent_id):
             if parent_id not in self._pending:
                 self._pending[parent_id] = ParentCorrelation(parent_id=parent_id)
@@ -581,7 +600,16 @@ class CorrelationManager:
         # lands during finalization: a bump during finalization
         # means a new watch was registered, so the re-arm gate
         # (COMPLETED → PROCESSING) must fire.
+        # Phase 1 C1 fix (2026-06-23): mirror the bump to the bus so
+        # ``bus.get_generation`` sees it — the observer reads the
+        # bus, not ``cm._generation``, and orphan-race protection on
+        # this path would be silently broken without the mirror.
         self._generation[parent_id] = self._generation.get(parent_id, 0) + 1
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is not None:
+            bus.increment_generation(parent_id)
 
         # Same control-flow structure as resolve_response — defer all
         # post-lock work (callback, invariant check) via flags captured

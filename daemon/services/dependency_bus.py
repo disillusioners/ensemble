@@ -56,6 +56,26 @@ in this class. The class is always wired; the flag decides whether
 calls :meth:`emit_terminal`. When the flag is OFF, the bus is
 inert (not called) and the legacy CM path is the active delivery
 mechanism.
+
+Multi-process limitation
+------------------------
+
+The per-parent **generation counter** (used by
+``JobFeedbackObserver._finalize_job`` for the orphan-race re-arm)
+is **in-memory only** — it is NOT persisted to the DB and is NOT
+restored by :meth:`start` / :meth:`_warm_cache`. After a bus
+restart the counter starts fresh at ``{}`` and every parent
+returns ``0`` until the next :meth:`watch` bumps it back.
+
+This is safe in single-process deployments (the only writer
+is the in-process :meth:`watch` and the only reader is the
+in-process ``_finalize_job`` — both reset/restart together).
+
+For future multi-process deployments, the counter MUST be
+shared across processes (e.g. via Redis or a DB column on
+``dependency_watchers``) so that a ``bus.watch`` in process A
+is observable to a ``_finalize_job`` reader in process B.
+Until then, multi-process deployments are NOT supported.
 """
 
 from __future__ import annotations

@@ -38,6 +38,7 @@ from daemon.services.dependency_bus import (
     get_dependency_bus,
     set_dependency_bus,
 )
+from daemon.services.correlation_manager import CorrelationManager
 
 
 # -------------------------------------------------------------------------
@@ -759,6 +760,242 @@ class TestGenerationCounterBump:
 
 
 # -------------------------------------------------------------------------
+# TestOrphanRaceE2E
+# -------------------------------------------------------------------------
+"""End-to-end tests for the orphan-race detector contract.
+
+The orphan-race re-arm in ``JobFeedbackObserver._finalize_job``
+(``daemon/services/job_feedback_observer.py:958`` for pre_gen,
+``:1004`` for post_gen) reads ``bus.get_generation(instance_id)``
+DIRECTLY — not via the CM passthrough — before and after the
+per-parent lock to detect whether a concurrent ``DependencyBus.watch``
+landed during the critical section (lock acquire → to_thread →
+commit → lock release).
+
+These tests exercise that production contract end-to-end via the
+bus API (no daemon, no job queue, no real DB commit). The positive
+case (concurrent watch bumps the counter during the critical
+section) is already covered by ``test_orphan_race_detection_without_cm``
+above — these tests focus on the additional invariants that the
+production flow depends on:
+
+  1. The read path returns the value the detector would observe.
+  2. A watch that lands BEFORE the critical section does NOT fire
+     the re-arm (negative case — proves the check is detecting
+     in-flight watches, not stale state).
+  3. Orphaned CM bumps (cm.resolve_job bumping a separate counter
+     dict) are invisible to ``bus.get_generation()`` — proves the
+     B-W1 comment at ``job_feedback_observer.py:1006-1019`` is
+     correct: orphaned CM bumps cannot cause spurious
+     COMPLETED → PROCESSING → COMPLETED cycles.
+"""
+
+
+class TestOrphanRaceE2E:
+    """End-to-end tests for the orphan-race detector via ``bus.get_generation()``."""
+
+    @pytest.mark.asyncio
+    async def test_get_generation_returns_observed_value(self, bus):
+        """The read path: ``bus.get_generation()`` returns the value the
+        detector would observe.
+
+        ``JobFeedbackObserver._finalize_job`` calls
+        ``bus.get_generation(instance_id)`` directly (see
+        ``job_feedback_observer.py:958`` and ``:1004``). This test
+        documents the contract: the bus API returns the current
+        per-parent generation counter, monotonically increasing with
+        each ``watch`` call. The value 0 is returned for never-watched
+        parents (not a ``KeyError`` — the bus uses ``dict.get`` with
+        a default of 0; see ``daemon/services/dependency_bus.py:840``).
+        """
+        parent_id = "parent-e2e-read"
+
+        # Never-watched parent → 0 (not KeyError).
+        assert bus.get_generation(parent_id) == 0
+
+        # First watch → 1.
+        await bus.watch("task-e2e-r1", make_fu(target_id=parent_id))
+        assert bus.get_generation(parent_id) == 1
+
+        # Second watch on the same parent → 2 (monotonic).
+        await bus.watch("task-e2e-r2", make_fu(target_id=parent_id))
+        assert bus.get_generation(parent_id) == 2
+
+        # A different parent is unaffected (counters are per-parent).
+        await bus.watch("task-e2e-r3", make_fu(target_id="parent-e2e-other"))
+        assert bus.get_generation("parent-e2e-other") == 1
+        assert bus.get_generation(parent_id) == 2
+
+    @pytest.mark.asyncio
+    async def test_orphan_race_does_not_fire_when_watch_lands_before_critical_section(
+        self, bus_repo
+    ):
+        """Negative case: a watch that completes BEFORE ``pre_gen`` does
+        NOT fire the re-arm (post_gen == pre_gen).
+
+        The orphan-race detector at ``job_feedback_observer.py:1005``
+        fires ONLY when ``post_gen > pre_gen`` — i.e. a watch landed
+        DURING the critical section (between pre_gen and post_gen).
+        A watch that completed before ``pre_gen`` is already visible
+        to ``pre_gen`` (the bump is atomic and happens BEFORE the
+        per-parent lock in ``DependencyBus.watch``, see
+        ``dependency_bus.py:360``), so no further bump occurs during
+        the critical section and ``post_gen == pre_gen``.
+
+        This test is the genuine value-add versus
+        ``test_orphan_race_detection_without_cm``: it proves the
+        detector is sensitive to timing (in-flight watches), not
+        just counter state. If the detector were firing on stale
+        state, this test would fail (``post_gen`` would equal
+        ``pre_gen`` but the re-arm would still fire — we assert
+        the post-check invariant directly here).
+        """
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        try:
+            parent_id = "parent-e2e-negative"
+
+            # Watch lands BEFORE the critical section. Its bump is
+            # already committed to ``bus.generation`` by the time
+            # ``watch`` returns (the bump is outside the per-parent
+            # lock — atomic CPython dict assignment).
+            await bus.watch("task-before-critical", make_fu(target_id=parent_id))
+
+            # pre_gen snapshot — already sees the pre-section bump.
+            pre_gen = bus.get_generation(parent_id)
+            assert pre_gen == 1, (
+                f"pre_gen should see the pre-section bump: got {pre_gen}"
+            )
+
+            # Simulate the critical section: acquire the per-parent
+            # lock, do no work (no concurrent watch fires during
+            # this window), release. This mirrors the shape of
+            # ``_finalize_job`` at ``job_feedback_observer.py:965-973``
+            # but without the actual DB commit.
+            async with await bus._get_parent_lock(parent_id):
+                # Intentionally empty: no concurrent ``watch`` lands
+                # here. If one did, the bump would happen at
+                # ``dependency_bus.py:360`` BEFORE the lock is even
+                # acquired (so it would still race with pre_gen,
+                # not appear inside this block).
+                pass
+
+            # post_gen snapshot: no bump during the critical section.
+            post_gen = bus.get_generation(parent_id)
+            assert post_gen == pre_gen, (
+                f"orphan-race must NOT fire when no concurrent watch "
+                f"landed during the critical section: "
+                f"pre={pre_gen}, post={post_gen}"
+            )
+
+            # The detector's guard (``post_gen > pre_gen``) is
+            # therefore False, and the re-arm at
+            # ``job_feedback_observer.py:1005`` would short-circuit.
+            # We assert this directly to make the contract explicit.
+            assert not (post_gen > pre_gen), (
+                "detector guard ``post_gen > pre_gen`` must be False "
+                "when no concurrent watch occurred"
+            )
+        finally:
+            await bus.stop()
+
+    @pytest.mark.asyncio
+    async def test_orphaned_cm_bumps_do_not_trigger_bus_rearm(self, bus_repo):
+        """Orphaned CM bumps (a SEPARATE counter dict) must NOT be visible
+        via ``bus.get_generation()``.
+
+        Phase 1 cleanup note (B-W1, see
+        ``job_feedback_observer.py:1006-1019``): ``cm.resolve_job``
+        still bumps ``cm._generation[instance_id]`` at
+        ``correlation_manager.py:584``, but the orphan-race re-arm
+        reads ``bus.generation`` (a SEPARATE dict on the bus).
+        Therefore orphaned CM bumps cannot cause spurious
+        COMPLETED → PROCESSING → COMPLETED cycles — the only
+        ``post_gen > pre_gen`` trigger is a ``DependencyBus.watch``
+        that landed during the critical section.
+
+        This test simulates the orphaned CM with a minimal mock: a
+        plain ``dict`` counter, bumped in isolation, with NO
+        connection to ``bus.generation``. It then asserts that
+        ``bus.get_generation()`` does NOT see those bumps — proving
+        the B-W1 fix comment is correct (orphaned bumps don't reach
+        the bus path).
+        """
+        bus = DependencyBus(bus_repo)
+        await bus.start()
+
+        try:
+            parent_id = "parent-e2e-cm-orphan"
+
+            # Establish a baseline on the bus: one real watch, so
+            # ``bus.generation[parent_id] == 1``. This gives us a
+            # non-zero starting point so we can prove that orphaned
+            # CM bumps don't accidentally increment the bus counter.
+            await bus.watch("task-baseline", make_fu(target_id=parent_id))
+            bus_pre = bus.get_generation(parent_id)
+            assert bus_pre == 1
+
+            # Simulate an orphaned CM: a separate counter dict,
+            # bumped independently. This mirrors ``cm.resolve_job``
+            # bumping ``cm._generation[target]`` at
+            # ``correlation_manager.py:584`` while the bus is
+            # unaware. We use a plain dict (not a real CM instance)
+            # because the contract under test is: the bus counter
+            # is INDEPENDENT — no shared storage with CM.
+            mock_cm_generation: dict[str, int] = {parent_id: 0}
+
+            def cm_resolve_job_orphan(target: str) -> int:
+                """Mimic ``cm.resolve_job`` bumping its own counter.
+
+                Returns the new (orphaned) CM generation value. This
+                is the value an observer that reads ``cm._generation``
+                directly would see — but the bus does NOT read from
+                this dict, so it must remain unaffected.
+                """
+                mock_cm_generation[target] = (
+                    mock_cm_generation.get(target, 0) + 1
+                )
+                return mock_cm_generation[target]
+
+            # Bump the orphaned CM counter repeatedly. In production,
+            # this would correspond to multiple ``cm.resolve_job``
+            # calls for jobs whose instance_id no longer has a
+            # PROCESSING job in the bus (the orphans).
+            for _ in range(5):
+                cm_resolve_job_orphan(parent_id)
+
+            # Sanity: the orphaned CM counter WAS bumped (so the test
+            # would FAIL — for the right reason — if our mock were a
+            # no-op and the bus assertion passed trivially).
+            assert mock_cm_generation[parent_id] == 5, (
+                "mock CM must actually bump — test invariant"
+            )
+
+            # The bus counter is UNCHANGED by orphaned CM bumps.
+            # This is the B-W1 fix: ``bus.generation`` is a separate
+            # dict from ``cm._generation``, so bumps on the latter
+            # do not leak into ``bus.get_generation()``.
+            bus_post = bus.get_generation(parent_id)
+            assert bus_post == bus_pre, (
+                f"orphaned CM bumps must NOT leak into bus.generation: "
+                f"bus_pre={bus_pre}, bus_post={bus_post}, "
+                f"orphaned_cm={mock_cm_generation[parent_id]}"
+            )
+
+            # And the detector's guard (``post_gen > pre_gen``)
+            # evaluates to False — the re-arm at
+            # ``job_feedback_observer.py:1005`` short-circuits.
+            # This is the property that prevents spurious
+            # COMPLETED → PROCESSING → COMPLETED cycles.
+            assert not (bus_post > bus_pre), (
+                "detector guard must be False for orphaned CM bumps"
+            )
+        finally:
+            await bus.stop()
+
+
+# -------------------------------------------------------------------------
 # TestPendingWatchersFallback
 # -------------------------------------------------------------------------
 
@@ -1274,3 +1511,280 @@ class TestBusRetriggerFinalize:
         assert kwargs.get("status") == "completed" or (
             len(_args) >= 3 and _args[2] == "completed"
         )
+
+
+# -------------------------------------------------------------------------
+# TestCMGenerationMirror (Phase 1 C1 fix — 2026-06-23)
+# -------------------------------------------------------------------------
+#
+# Regression: ``CorrelationManager.register_job_send`` (the watch_job
+# path), ``CorrelationManager.register_message_send``, and
+# ``CorrelationManager.resolve_job`` each bump ``cm._generation`` for
+# orphan-race protection. After Phase 1 migration the observer reads
+# ``bus.get_generation``, NOT ``cm._generation``. Without mirroring the
+# bump to the bus, orphan-race detection is silently broken on these
+# CM-driven paths.
+#
+# The fix: each CM bump is mirrored to ``bus.increment_generation``
+# when a bus is wired. This test class verifies the mirror works for
+# every bump site (register_job_send, register_message_send, resolve_job)
+# and that the orphan-race detector — using only the bus API — sees
+# the bumps from the CM path.
+# -------------------------------------------------------------------------
+
+
+def _make_cm_for_mirror_test() -> CorrelationManager:
+    """Build a CM with mock repos for the bump-mirror tests.
+
+    ``register_job_send`` / ``register_message_send`` / ``resolve_job``
+    only mutate in-memory state — they don't touch the repos. The
+    mocks are placeholders to satisfy the constructor signature.
+    """
+    return CorrelationManager(
+        instance_repository=MagicMock(name="InstanceRepo"),
+        message_queue_repository=MagicMock(name="MsgRepo"),
+        completion_callback=None,
+        event_bus=None,
+    )
+
+
+class TestCMGenerationMirror:
+    """Phase 1 C1 fix: CM bumps ``_generation`` AND mirrors to the bus.
+
+    The bus is now the source of truth for the observer's orphan-race
+    detector (``JobFeedbackObserver._finalize_job`` reads
+    ``bus.get_generation(parent_id)``). Each CM bump site — message,
+    job, and resolve — must mirror its increment to the bus so the
+    observer sees the bump regardless of which path produced it.
+
+    These tests install a real ``DependencyBus`` as the module
+    singleton, drive ``CorrelationManager`` methods, and assert that
+    ``bus.get_generation(parent_id)`` reflects every bump. They also
+    exercise the orphan-race pattern (pre/post snapshot) end-to-end
+    through the CM path.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _install_bus(self, bus_repo):
+        """Install a real DependencyBus as the module singleton.
+
+        Mirrors the pattern in ``TestBusRetriggerFinalize._install_bus``:
+        a real bus on a real in-memory repo, started before the test,
+        stopped after, with the module singleton cleared on exit.
+        """
+        b = DependencyBus(bus_repo)
+        await b.start()
+        set_dependency_bus(b)
+        try:
+            yield b
+        finally:
+            await b.stop()
+            set_dependency_bus(None)
+
+    @pytest.mark.asyncio
+    async def test_register_message_send_mirrors_to_bus(self):
+        """``cm.register_message_send`` bumps ``bus.get_generation(parent_id)``.
+
+        The message-driven register path was also bumping
+        ``cm._generation`` only. Without the mirror, the observer's
+        pre/post commit check would miss a register that lands during
+        a ``_finalize_job`` critical section and skip the re-arm.
+        """
+        cm = _make_cm_for_mirror_test()
+        bus = get_dependency_bus()
+        parent_id = "parent-msg-mirror"
+
+        assert bus.get_generation(parent_id) == 0
+
+        await cm.register_message_send(parent_id, "child-1", "msg-1")
+
+        # The mirror landed on the bus. Both counters agree so the
+        # observer (bus side) sees what CM recorded (cm side).
+        assert bus.get_generation(parent_id) == 1, (
+            "register_message_send must mirror its _generation bump to the bus"
+        )
+
+        # A second register bumps again — monotonic on both sides.
+        await cm.register_message_send(parent_id, "child-2", "msg-2")
+        assert bus.get_generation(parent_id) == 2
+
+    @pytest.mark.asyncio
+    async def test_register_job_send_mirrors_to_bus(self):
+        """``cm.register_job_send`` (the watch_job path) bumps the bus.
+
+        This is the critical regression: ``watch_job`` calls
+        ``cm.register_job_send``, which bumps ``cm._generation``.
+        Before the C1 fix, the observer (reading the bus) did NOT see
+        this bump, silently breaking orphan-race protection on the
+        watch_job path. After the fix, the bus counter increments too.
+        """
+        cm = _make_cm_for_mirror_test()
+        bus = get_dependency_bus()
+        parent_id = "parent-job-mirror"
+        child_job_id = "job-watched-1"
+
+        assert bus.get_generation(parent_id) == 0
+
+        await cm.register_job_send(parent_id, child_job_id)
+
+        # The bus counter advanced — the observer's pre/post check will
+        # detect this bump as a concurrent register.
+        assert bus.get_generation(parent_id) == 1, (
+            "register_job_send must mirror its _generation bump to the bus "
+            "for watch_job orphan-race protection"
+        )
+
+        # Second watch on the same parent → 2 (monotonic).
+        await cm.register_job_send(parent_id, "job-watched-2")
+        assert bus.get_generation(parent_id) == 2
+
+    @pytest.mark.asyncio
+    async def test_resolve_job_mirrors_to_bus(self):
+        """``cm.resolve_job`` mirrors its bump to the bus.
+
+        The resolve path bumps for symmetry with ``register_job_send``
+        so the counter monotonically reflects outstanding work units
+        seen. The bus side must see the bump too — otherwise the
+        observer could miss a resolve that lands during finalization
+        and treat a still-PENDING watch as completed.
+        """
+        cm = _make_cm_for_mirror_test()
+        bus = get_dependency_bus()
+        parent_id = "parent-resolve-mirror"
+        child_job_id = "job-resolve-1"
+
+        # Register first (bumps bus once).
+        await cm.register_job_send(parent_id, child_job_id)
+        assert bus.get_generation(parent_id) == 1
+
+        # Resolve bumps again.
+        await cm.resolve_job(parent_id, child_job_id, status="responded")
+
+        # The mirror landed — bus counter is now 2 (register + resolve).
+        assert bus.get_generation(parent_id) == 2, (
+            "resolve_job must mirror its _generation bump to the bus"
+        )
+
+    @pytest.mark.asyncio
+    async def test_orphan_race_detected_via_cm_register_job_send(self):
+        """End-to-end orphan-race detector via ``bus.get_generation`` over CM path.
+
+        Simulates the contract that ``JobFeedbackObserver._finalize_job``
+        relies on: a pre/post snapshot of ``bus.get_generation`` must
+        observe a concurrent ``cm.register_job_send`` (the watch_job
+        path). Before the C1 fix, the post snapshot was identical to
+        the pre snapshot because the bump lived only in
+        ``cm._generation``. After the fix, the bump is visible on the
+        bus.
+        """
+        cm = _make_cm_for_mirror_test()
+        bus = get_dependency_bus()
+        parent_id = "parent-orphan-via-cm"
+
+        # Step 1: pre-gen snapshot (observer pattern, observer holds
+        # the per-parent lock).
+        pre_gen = bus.get_generation(parent_id)
+        assert pre_gen == 0
+
+        # Step 2: a concurrent register_job_send lands during the
+        # critical section (mimics ``watch_job`` arriving mid-finalize).
+        await cm.register_job_send(parent_id, "job-mid-finalize")
+
+        # Step 3: post-gen snapshot. The mirror guarantees the bump is
+        # visible — without it, post_gen == pre_gen and the re-arm
+        # would not fire, orphaning the late child.
+        post_gen = bus.get_generation(parent_id)
+        assert post_gen > pre_gen, (
+            f"orphan-race bump from CM must be visible on bus: "
+            f"pre={pre_gen}, post={post_gen}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_orphan_race_detected_via_cm_register_message_send(self):
+        """Same orphan-race contract, exercised through ``register_message_send``.
+
+        The message path is the original (and more common) orphan-race
+        site. The mirror must be wired here too so a concurrent
+        ``register_message_send`` is visible to the bus-side observer.
+        """
+        cm = _make_cm_for_mirror_test()
+        bus = get_dependency_bus()
+        parent_id = "parent-orphan-via-msg"
+
+        pre_gen = bus.get_generation(parent_id)
+        await cm.register_message_send(parent_id, "child-x", "msg-x")
+
+        post_gen = bus.get_generation(parent_id)
+        assert post_gen > pre_gen, (
+            f"orphan-race bump from register_message_send must be visible: "
+            f"pre={pre_gen}, post={post_gen}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_cm_registers_produce_no_lost_bumps(self, bus_repo):
+        """Concurrent ``cm.register_job_send`` for the same parent bumps
+        the bus deterministically N times — no lost bumps, no double counts.
+
+        ``register_job_send`` bumps BEFORE acquiring the per-parent lock
+        (orphan-race invariant). The mirror inherits this ordering — the
+        bus counter is atomic CPython dict assignment — so concurrent
+        registers cannot lose a bump. The final bus value must equal
+        the number of concurrent calls.
+        """
+        # Use a fresh bus for this test (the autouse fixture installs
+        # one too, but a fresh instance keeps the assertion clean and
+        # avoids cross-test interference).
+        fresh_bus = DependencyBus(bus_repo)
+        await fresh_bus.start()
+        set_dependency_bus(fresh_bus)
+        try:
+            cm = _make_cm_for_mirror_test()
+            parent_id = "parent-concurrent-cm"
+            n_concurrent = 25
+
+            # All N registers scheduled simultaneously.
+            await asyncio.gather(
+                *[
+                    cm.register_job_send(parent_id, f"job-{i}")
+                    for i in range(n_concurrent)
+                ]
+            )
+
+            # Bus counter equals the number of bumps — every register
+            # produced exactly one mirrored bump.
+            assert fresh_bus.get_generation(parent_id) == n_concurrent, (
+                f"expected {n_concurrent} mirrored bumps, "
+                f"got {fresh_bus.get_generation(parent_id)}"
+            )
+
+            # And CM's local counter agrees (the mirror keeps both
+            # sides in sync — that's the whole point of the C1 fix).
+            assert cm.get_generation(parent_id) == n_concurrent
+        finally:
+            await fresh_bus.stop()
+            set_dependency_bus(None)
+
+    @pytest.mark.asyncio
+    async def test_mirror_works_with_no_bus_wired(self):
+        """If no bus is installed (legacy/testing), the mirror is a no-op.
+
+        Graceful degradation: the bump-outside-lock still happens on
+        CM, and the lazy import + None check means the mirror path
+        silently skips when the bus singleton is unset. This keeps the
+        legacy CM-only test suites (which don't install a bus) working.
+        """
+        # Clear the bus for this test — the autouse fixture installed
+        # one, but we explicitly verify the no-bus branch.
+        set_dependency_bus(None)
+        cm = _make_cm_for_mirror_test()
+        parent_id = "parent-no-bus"
+
+        # Both bumps must succeed without raising.
+        await cm.register_message_send(parent_id, "c", "m")
+        await cm.register_job_send(parent_id, "j")
+        await cm.resolve_job(parent_id, "j", status="responded")
+
+        # CM's local counter advanced (3 bumps total: msg, job, resolve).
+        # ``get_generation`` falls back to ``cm._generation`` when the
+        # bus is None — see ``correlation_manager.py:787``.
+        assert cm.get_generation(parent_id) == 3

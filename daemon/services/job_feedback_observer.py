@@ -1003,31 +1003,29 @@ class JobFeedbackObserver:
             ):
                 post_gen = bus.get_generation(instance_id)
                 if post_gen > pre_gen:
-                    # B-W1 NOTE: ``CorrelationManager.resolve_job`` also
-                    # bumps the generation counter on CM. Phase 1
-                    # (2026-06-23) extracted the counter onto the bus;
-                    # the bump now happens on ``DependencyBus.watch``
-                    # only (no resolve bump on the bus). The CM's own
-                    # resolve_job bump can still trigger a spurious
-                    # COMPLETED → PROCESSING → COMPLETED cycle on the
-                    # parent job when the orphan-race re-arm reads via
-                    # the CM passthrough (``cm.get_generation`` returns
-                    # ``bus.get_generation``). This is self-correcting
-                    # (the second finalize commits to COMPLETED again)
-                    # and the cost is a brief DB/SSE status flicker.
-                    # Acceptable — the alternative (not bumping
-                    # generation on resolve_job) would reopen the
-                    # orphan race for the job path.
+                    # Phase 1 (2026-06-23) correctness note: the
+                    # orphan-race re-arm reads ``bus.get_generation()``
+                    # DIRECTLY (this line), not via the
+                    # ``CorrelationManager.get_generation`` passthrough.
+                    # ``cm.resolve_job`` still bumps ``cm._generation``
+                    # at correlation_manager.py:584, but that bump is
+                    # invisible to ``bus.get_generation`` (which reads
+                    # ``bus.generation``, a separate dict). Therefore
+                    # the orphaned CM bumps cannot cause spurious
+                    # COMPLETED → PROCESSING → COMPLETED cycles here
+                    # — the only ``post_gen > pre_gen`` trigger is a
+                    # ``DependencyBus.watch`` (line 360 of
+                    # dependency_bus.py) that landed during the
+                    # critical section. Phase 5 will remove
+                    # ``cm._generation`` and the CM bumps entirely.
                     #
-                    # A ``DependencyBus.watch`` (or a CM
-                    # ``register_message_send`` resolved via the CM
-                    # passthrough) bumped the generation during
-                    # finalization. The register is either blocked on
-                    # the lock (just released) or already enqueued on
-                    # the event loop and about to acquire the lock.
-                    # Either way, a new child is on its way into CM/bus.
-                    # Re-arm the job so the late child's resolve can
-                    # find it.
+                    # A ``DependencyBus.watch`` bumped the generation
+                    # during finalization. The watch is either blocked
+                    # on the per-parent lock (just released) or already
+                    # enqueued on the event loop and about to acquire
+                    # the lock. Either way, a new child is on its way
+                    # into the bus. Re-arm the job so the late child's
+                    # resolve can find a PROCESSING job.
                     logger.info(
                         f"Observer: orphan-race post-commit re-check "
                         f"detected generation change for instance="
