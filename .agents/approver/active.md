@@ -1,5 +1,5 @@
-Current Plan: Decouple Job/Task/Message Correlation (Review + Execution Plan)
-Tracking File: decouple-job-task-msg-tracking.md
-Iteration: 001
+Current Plan: Cleanup Old/Legacy Architecture Parts
+Tracking File: cleanup-old-architecture-tracking.md
+Iteration: 002
 Status: APPROVED
-Last Updated: 2026-06-20 11:42
+Last Updated: 2026-06-22 17:25
