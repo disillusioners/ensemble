@@ -227,20 +227,21 @@ class ChildReportsService:
         summary: str | None = None,
         error: str | None = None,
     ) -> list:
-        """Emit a terminal event via the DependencyBus and enqueue returned FollowUps.
+        """Emit a terminal event via the DependencyBus and re-trigger parent finalization.
 
         When the ``use_dependency_bus`` flag is ON, this helper replaces
         the ``notify_corr_resolve`` call: it asks the bus to atomically
-        transition PENDING watchers for ``task_id`` to FIRED and returns
-        the list of FollowUps for the caller (this service) to enqueue
-        onto the parent's task queue.
+        transition PENDING watchers for ``task_id`` to FIRED, then
+        **directly** re-triggers ``JobFeedbackObserver._finalize_job``
+        on any parent whose watchers are all FIRED.
 
-        The bus is a state machine — it does NOT enqueue. The caller
-        (``_update_parent_on_child_complete`` /
-        ``_dispatch_post_commit_side_effects``) must call
-        ``manager.enqueue_message(...)`` for each returned FollowUp.
-        That separation keeps the bus narrow and makes the caller's
-        enqueueing policy independently testable.
+        The bus is a state machine — it does NOT enqueue messages.
+        The leader's LLM path is NEVER injected with a synthetic
+        ``[dependency_bus] child XXX completed`` message; the parent
+        learns about child completion through the normal
+        ``child_reports`` mechanism (the ``internal_report:`` message
+        enqueued by ``_process_child_completion_and_notify_parent``)
+        and the user's own prompts.
 
         Args:
             task_id: The child task id whose terminal event is firing.
@@ -254,18 +255,20 @@ class ChildReportsService:
                 regardless of outcome (the parent needs to know about
                 both success and failure).
             summary: Optional human-readable summary of the terminal
-                event. Forwarded to the FollowUp payload for diagnostic
-                context.
+                event. Used for structured logging only.
             error: Optional error message when ``status == "error"``.
 
         Returns:
             List of FollowUps that were atomically transitioned from
-            PENDING to FIRED. Empty list when no watchers existed or
-            when the flag is OFF (this helper is a no-op in the OFF
-            case — the caller falls through to the CM path).
+            PENDING to FIRED. The list is returned for backward
+            compatibility and observability (callers can log how many
+            watchers fired), but the FollowUps are NOT enqueued as
+            messages — see ``_retrigger_parent_finalize`` below for
+            the actual finalization path. Empty list when no watchers
+            existed or when the flag is OFF (this helper is a no-op in
+            the OFF case — the caller falls through to the CM path).
         """
         from .dependency_bus import (
-            FollowUp,
             Outcome,
             get_dependency_bus,
         )
@@ -293,54 +296,40 @@ class ChildReportsService:
         outcome = Outcome(status=status, error=error, summary=summary)
         fired = await bus.emit_terminal(task_id=str(task_id), outcome=outcome)
 
-        # Enqueue each fired FollowUp onto its target_instance_id. The
-        # bus does NOT do this — separation of concerns. We use the
-        # legacy ``enqueue_message`` path (WorkerPool Task + MessageQueue
-        # row, atomic). Metadata is forwarded so the receiver can
-        # reconstruct the original send context if needed.
-        for fu in fired:
-            try:
-                await self._manager.enqueue_message(
-                    instance_id=fu.target_instance_id,
-                    message=fu.message,
-                    source=fu.source,
-                    metadata=fu.metadata,
-                )
-                logger.debug(
-                    f"bus follow-up enqueued: target="
-                    f"{fu.target_instance_id[:8]}..., "
-                    f"source_task={str(task_id)[:8]}..., "
-                    f"outcome={status}",
-                    extra={"completion_delivery_path": "bus"},
-                )
-            except Exception as enq_err:
-                # Log and continue — the FollowUp is already FIRED in
-                # the DB. A failed enqueue is a transient problem (the
-                # caller can re-enqueue on retry); the bus invariant
-                # (exactly-once fire) is not violated.
-                logger.warning(
-                    f"bus follow-up enqueue failed: target="
-                    f"{fu.target_instance_id[:8]}..., "
-                    f"source_task={str(task_id)[:8]}...: {enq_err}"
-                )
-
-        # ─── Phase D re-trigger (inverse-regression fix) ──────────────
+        # ─── Phase D re-trigger (direct finalization) ────────────────
         # After the bus fires watchers, check if each target (parent)
-        # has ALL watchers resolved (0 PENDING). If so, explicitly
-        # re-trigger _finalize_job via the JobFeedbackObserver.
+        # has ALL watchers resolved (0 PENDING). If so, directly call
+        # ``_finalize_job`` on the JobFeedbackObserver — there is NO
+        # message-queue follow-up step. The bus is a state machine
+        # that drives an internal finalization transition, not an
+        # event source that the LLM consumes.
         #
         # Why this is needed: on the bus path (use_dependency_bus=ON),
         # the CM callback is starved — ``send_message`` skips
         # ``cm.register_message_send``, so the CM never invokes
         # ``handle_correlation_complete`` for wave-2 children. Without
-        # this re-trigger, the job stays PROCESSING forever (the
-        # inverse of the premature-completion bug the bus gate was
-        # added to prevent).
+        # this direct re-trigger, the job stays PROCESSING forever
+        # (the inverse of the premature-completion bug the bus gate
+        # was added to prevent).
         #
         # Guarded by a ``_retriggered`` set so a parent that received
         # multiple FollowUps from one terminal event is re-triggered
         # at most once per call (avoids redundant observer work when
         # N fired FollowUps all target the same parent).
+        #
+        # **Stamp ordering (crash-recovery invariant, 2026-06-22)**:
+        # the ``mark_enqueued_by_source_target`` stamp MUST happen
+        # AFTER the finalization attempt (not before). If we stamped
+        # first, a crash between stamp and retrigger would leave
+        # ``enqueued_at IS NOT NULL`` and a future restart's
+        # :meth:`DependencyBus._recover_fired_unsent` would skip the
+        # row — the parent would stay PROCESSING forever. Stamping
+        # AFTER the finalization attempt is correct: a crash before
+        # finalization leaves the row un-stamped → next restart
+        # retries finalization → safe because ``_finalize_job`` is
+        # idempotent (atomic ``WHERE status = PROCESSING`` UPDATE).
+        # This matches the recovery pattern in ``api.py`` which
+        # correctly orders retrigger → stamp.
         _retriggered: set[str] = set()
         for fu in fired:
             target_id = fu.target_instance_id
@@ -365,10 +354,7 @@ class ChildReportsService:
                 # outer guard here ensures a bug or unexpected
                 # error path inside the helper cannot abort the
                 # iteration and skip re-triggering the remaining
-                # targets. The enqueue loop above already
-                # succeeded — the FollowUps are on each parent's
-                # queue — so a single retrigger failure is
-                # recoverable on the next child completion.
+                # targets.
                 try:
                     await self._retrigger_parent_finalize(target_id)
                 except Exception as retrigger_err:
@@ -376,6 +362,45 @@ class ChildReportsService:
                         f"Bus re-trigger: unexpected error for "
                         f"{target_id[:8]}...: {retrigger_err}"
                     )
+
+        # ─── Crash-recovery dedup stamp (C1, 2026-06-22 reorder) ───
+        # Stamp ``enqueued_at`` on every fired FollowUp AFTER the
+        # finalization loop. Once stamped, a future restart's
+        # :meth:`DependencyBus._recover_fired_unsent` will NOT
+        # re-deliver this row — the dedup invariant the crash-
+        # recovery path relies on. The async wrapper
+        # ``bus.mark_enqueued_by_source_target`` runs the repo's
+        # sync method on a worker thread so the event loop is not
+        # blocked.
+        #
+        # Why AFTER finalization (not before, as the pre-fix code
+        # did): stamping before finalization would leave a
+        # ``enqueued_at IS NOT NULL`` row in the DB if the process
+        # crashed between stamp and retrigger — recovery would skip
+        # the row and the parent would stay PROCESSING forever.
+        # Stamping after finalization means a crash before
+        # finalization leaves the row un-stamped → next restart
+        # retries the finalization (idempotent). See the comment
+        # block above for the full invariant.
+        for fu in fired:
+            # Best-effort stamp; failure here must not abort the
+            # loop (the finalization has already run for this target
+            # above — leaving the row un-stamped means a future
+            # restart will safely retry the finalization, which is
+            # idempotent).
+            try:
+                # ``enqueued_at`` is the C1 dedup marker — once
+                # stamped, ``_recover_fired_unsent`` won't return
+                # this row on the next restart.
+                await bus.mark_enqueued_by_source_target(
+                    str(task_id), fu.target_instance_id
+                )
+            except Exception as stamp_err:
+                logger.debug(
+                    f"bus follow-up stamp failed (non-fatal): "
+                    f"source_task={str(task_id)[:8]}..., "
+                    f"target={fu.target_instance_id[:8]}...: {stamp_err}"
+                )
 
         return fired
 
@@ -473,10 +498,13 @@ class ChildReportsService:
             )
         except Exception as e:
             # Defensive guard: a single re-trigger failure must not
-            # crash the bus follow-up path (the enqueue loop above
-            # already succeeded — the FollowUps are on the parent's
-            # queue). The next child completion (or a manual recovery
-            # sweep) can retry the finalization.
+            # crash the bus finalization path. The bus no longer
+            # enqueues FollowUp messages onto the parent's queue —
+            # the bus is a pure state machine that drives a direct
+            # ``_finalize_job`` call (see ``_emit_terminal_via_bus``
+            # docstring). The next child completion (or a manual
+            # recovery sweep) can retry the finalization; the
+            # ``_finalize_job`` itself is idempotent.
             logger.warning(
                 f"Bus re-trigger: _finalize_job failed for "
                 f"{instance_id[:8]}...: {e}"
@@ -1596,13 +1624,66 @@ Provide a concise summary:"""
                         )
                         bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
                         if bus_pending > 0:
+                            # F8 carve-out (2026-06-22): if there is
+                            # NO active MESSAGE job (PENDING/PROCESSING)
+                            # for this instance, the pending-children
+                            # signal is likely stale/duplicate from a
+                            # task-claim race. Writing WAITING_CHILDREN
+                            # here would permanently strand the
+                            # instance — no code path transitions out
+                            # of WAITING_CHILDREN other than a new
+                            # message arriving on a fresh MESSAGE job,
+                            # which is exactly what is missing. In
+                            # that case, return a
+                            # ``root_skipped_terminal_job`` result
+                            # (preserves status, signals
+                            # CompletionRegistry) instead of writing
+                            # the status. Mirrors the same guard in
+                            # the regular ``root_waiting_children``
+                            # path below — bus path must be
+                            # consistent with the non-bus path.
+                            if self._has_no_active_message_job(session, instance_id):
+                                logger.warning(
+                                    f"Instance {instance_id[:8]}... has "
+                                    f"{bus_pending} bus PENDING watchers "
+                                    f"(use_dependency_bus=ON) but no active "
+                                    f"MESSAGE job — skipping WAITING_CHILDREN "
+                                    f"write (stale/duplicate from task-claim "
+                                    f"race). Status preserved as "
+                                    f"{instance.status}."
+                                )
+                                return _ChildCompletionDbResult(
+                                    outcome="root_skipped_terminal_job",
+                                    instance_id=instance_id,
+                                    agent_id=instance.agent_id,
+                                    parent_id=None,
+                                )
+
+                            # Bug fix (2026-06-22): transition
+                            # ``instance.status`` to ``WAITING_CHILDREN``
+                            # so the frontend reflects the "leader is
+                            # waiting for children" state on the bus
+                            # path. Previously the status stayed at
+                            # whatever it was (typically ``running``)
+                            # so the UI showed ``running`` even though
+                            # no LLM call was in flight. The
+                            # F8 carve-out above protects against
+                            # stale/duplicate signals from a
+                            # task-claim race.
+                            instance.status = InstanceStatus.WAITING_CHILDREN.value
+                            instance.updated_at = datetime.now(timezone.utc).isoformat()
+                            instance.version = (instance.version or 1) + 1
+                            session.commit()
                             logger.info(
                                 f"Instance {instance_id[:8]}... CM says "
                                 f"complete but bus has {bus_pending} "
                                 f"PENDING watchers "
                                 f"(use_dependency_bus=ON), "
-                                f"deferring completion"
+                                f"deferring completion, "
+                                f"status=WAITING_CHILDREN"
                             )
+                            # SSE side effect is dispatched by the
+                            # async caller.
                             return _ChildCompletionDbResult(
                                 outcome="deferred_waiting_children",
                                 instance_id=instance_id,

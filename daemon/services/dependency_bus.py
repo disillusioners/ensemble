@@ -928,6 +928,54 @@ class DependencyBus:
             self._repo.mark_enqueued, watch_id, self._now_iso()
         )
 
+    async def mark_enqueued_by_source_target(
+        self,
+        source_task_id: str,
+        target_instance_id: str,
+        enqueued_at: str | None = None,
+    ) -> int:
+        """Async wrapper around ``repo.mark_enqueued_by_source_target``.
+
+        Mirrors :meth:`mark_enqueued` (the per-watch_id variant) but
+        stamps all FIRED rows for a ``(source_task_id, target_instance_id)``
+        pair at once. Used by
+        :meth:`ChildReportsService._emit_terminal_via_bus` AFTER a
+        successful ``_retrigger_parent_finalize`` call so that:
+
+          1. A crash between ``emit_terminal`` and the finalization
+             step leaves the row un-stamped — the next restart's
+             :meth:`_recover_fired_unsent` will pick it up and retry
+             finalization (correct semantics: we do NOT lock the
+             parent out of retry by stamping too early).
+          2. A crash between finalization and the stamp leaves the
+             row un-stamped too — but finalization is idempotent
+             (atomic ``WHERE status = PROCESSING`` UPDATE), so the
+             retry is safe.
+
+        The DB call is wrapped in ``asyncio.to_thread`` to avoid
+        blocking the event loop, matching the project's standard
+        pattern (same as :meth:`pending_watchers` /
+        :meth:`count_pending_for_target`).
+
+        Args:
+            source_task_id: The child task id whose FIRED rows
+                should be stamped. String form.
+            target_instance_id: The parent instance id whose FIRED
+                rows should be stamped.
+            enqueued_at: ISO-8601 timestamp (default: now UTC).
+                Optional override for tests; production passes
+                ``None`` and lets the repo stamp the current time.
+
+        Returns:
+            The number of rows stamped. Informational only.
+        """
+        return await asyncio.to_thread(
+            self._repo.mark_enqueued_by_source_target,
+            source_task_id,
+            target_instance_id,
+            enqueued_at,
+        )
+
 
 # -------------------------------------------------------------------------
 # Module-level singleton for dependency injection

@@ -559,40 +559,144 @@ async def init_dependency_bus(app, manager) -> None:
         watcher_repo = DependencyWatcherRepository(engine=manager._engine)
         bus = DependencyBus(watcher_repo)
         recovered = await bus.start()
-        # C1 fix: re-enqueue FIRED-but-unsent FollowUps from a prior
+        # C1 fix: process FIRED-but-unsent FollowUps from a prior
         # crash. Each ``(watch_id, FollowUp)`` tuple corresponds to a
-        # row whose child task terminated and whose FollowUp was
-        # either never enqueued (process died mid-emit) or enqueued
-        # but never stamped (process died after enqueue, before
+        # row whose child task terminated and whose finalization
+        # step (direct ``_retrigger_parent_finalize`` call) was
+        # either never executed (process died mid-emit) or executed
+        # but never stamped (process died after the retrigger, before
         # ``mark_enqueued``). The dedup is the ``enqueued_at IS NULL``
         # filter in :meth:`DependencyBus._recover_fired_unsent` — a
-        # second crash does not double-deliver because the stamp
+        # second crash does not double-trigger because the stamp
         # survives the restart.
         #
-        # We deliberately call ``mark_enqueued`` AFTER a successful
-        # enqueue so a transient ``enqueue_message`` failure (e.g.
-        # WorkerPool busy) does NOT lock the FollowUp out of a future
-        # recovery — it will be picked up on the next restart.
-        for watch_id, fu in recovered:
-            try:
-                await manager.enqueue_message(
-                    instance_id=fu.target_instance_id,
-                    message=fu.message,
-                    source=fu.source,
-                    metadata=fu.metadata,
-                )
-                await bus.mark_enqueued(watch_id)
+        # Post-FollowUp-removal semantics: the bus no longer
+        # enqueues messages. The recovery step is therefore a
+        # finalization step, not a message-delivery step. For each
+        # unique target in the recovered set, we ask the bus whether
+        # the target still has any PENDING watchers. If the answer
+        # is 0 (all watchers fired before the crash), the recovery
+        # invokes ``_retrigger_parent_finalize`` so the parent job
+        # transitions PROCESSING → COMPLETED. The ``_retriggered``
+        # set dedupes the per-target invocation when multiple
+        # recovered rows share the same parent (e.g. a parent with
+        # N completed children, all FIRED in the previous process).
+        #
+        # We deliberately stamp ``enqueued_at`` AFTER a successful
+        # finalization attempt so a transient retrigger failure
+        # (e.g. observer not yet wired) does NOT lock the row out
+        # of a future recovery — it will be picked up on the next
+        # restart.
+        if recovered:
+            _retriggered_targets: set[str] = set()
+            for watch_id, fu in recovered:
+                target_id = fu.target_instance_id
+                if target_id in _retriggered_targets:
+                    # Already retried this target in this recovery
+                    # pass; just stamp and move on.
+                    try:
+                        await bus.mark_enqueued(watch_id)
+                    except Exception as stamp_err:
+                        logger.warning(
+                            f"bus crash recovery: stamp (dedup) "
+                            f"failed watch_id={watch_id[:8]}...: "
+                            f"{stamp_err}"
+                        )
+                    continue
+                _retriggered_targets.add(target_id)
+                try:
+                    remaining = await bus.count_pending_for_target(target_id)
+                except Exception as count_err:
+                    logger.warning(
+                        f"bus crash recovery: pending count failed "
+                        f"target={target_id[:8]}...: {count_err}"
+                    )
+                    # Cannot decide — stamp the row to avoid
+                    # endless recovery churn. The next child
+                    # completion will retrigger if applicable.
+                    try:
+                        await bus.mark_enqueued(watch_id)
+                    except Exception as stamp_err:
+                        logger.warning(
+                            f"bus crash recovery: stamp (post-fail) "
+                            f"failed watch_id={watch_id[:8]}...: "
+                            f"{stamp_err}"
+                        )
+                    continue
+                if remaining > 0:
+                    # Other PENDING watchers exist — the bus path
+                    # is still in flight. Stamp the recovered row
+                    # (it was successfully fired in the previous
+                    # process; the dedup is the stamp) and skip
+                    # finalization. The next terminal event on
+                    # the remaining source task will retrigger
+                    # the finalization via the normal path in
+                    # ``_emit_terminal_via_bus``.
+                    try:
+                        await bus.mark_enqueued(watch_id)
+                    except Exception as stamp_err:
+                        logger.warning(
+                            f"bus crash recovery: stamp "
+                            f"(pending-remain) failed "
+                            f"watch_id={watch_id[:8]}...: {stamp_err}"
+                        )
+                    logger.info(
+                        f"bus crash recovery: target="
+                        f"{target_id[:8]}... still has "
+                        f"{remaining} PENDING watchers — "
+                        f"skipping retrigger, stamping row"
+                    )
+                    continue
+                # No PENDING watchers — this is the LAST watcher
+                # for the target. The previous process fired it
+                # but didn't get to retrigger finalization
+                # (crash window). Trigger now and stamp the row.
                 logger.info(
-                    f"bus crash recovery: re-enqueued FollowUp for "
-                    f"target={fu.target_instance_id[:8]}..., "
-                    f"watch_id={watch_id[:8]}...",
-                    extra={"completion_delivery_path": "bus"},
+                    f"bus crash recovery: target="
+                    f"{target_id[:8]}... has 0 PENDING watchers — "
+                    f"retriggering finalize directly "
+                    f"(no FollowUp enqueue — bus path is internal "
+                    f"plumbing, not an LLM message source)"
                 )
-            except Exception as enq_err:
-                logger.warning(
-                    f"bus crash recovery: failed to re-enqueue FollowUp "
-                    f"watch_id={watch_id[:8]}...: {enq_err}"
+                _child_reports_svc = getattr(
+                    manager, "_child_reports_service", None
                 )
+                if _child_reports_svc is not None:
+                    try:
+                        await _child_reports_svc._retrigger_parent_finalize(
+                            target_id
+                        )
+                    except Exception as retrigger_err:
+                        logger.warning(
+                            f"bus crash recovery: retrigger failed "
+                            f"target={target_id[:8]}...: {retrigger_err} "
+                            f"(row will be re-picked on next restart)"
+                        )
+                        # Do NOT stamp — leave the row un-stamped
+                        # so a future restart retries the
+                        # finalization. The retrigger helper
+                        # itself is idempotent (atomic UPDATE
+                        # WHERE status=PROCESSING), so the
+                        # retry is safe.
+                        continue
+                else:
+                    logger.warning(
+                        f"bus crash recovery: child_reports "
+                        f"service not wired on manager; cannot "
+                        f"retrigger finalize for target="
+                        f"{target_id[:8]}... (row will be re-picked "
+                        f"on next restart once service is wired)"
+                    )
+                    continue
+                # Finalization dispatched — stamp the row so the
+                # next restart does not re-trigger.
+                try:
+                    await bus.mark_enqueued(watch_id)
+                except Exception as stamp_err:
+                    logger.warning(
+                        f"bus crash recovery: stamp (post-finalize) "
+                        f"failed watch_id={watch_id[:8]}...: {stamp_err}"
+                    )
         set_dependency_bus(bus)
         app.state._dependency_bus = bus
         logger.info(

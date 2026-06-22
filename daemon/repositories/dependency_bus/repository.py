@@ -246,6 +246,68 @@ class DependencyWatcherRepository:
     # STATE TRANSITION (atomic backpressure primitive)
     # --------------------------------------------------------
 
+    def mark_enqueued_by_source_target(
+        self,
+        source_task_id: str,
+        target_instance_id: str,
+        enqueued_at: str | None = None,
+    ) -> int:
+        """Stamp all FIRED watcher rows for a (source_task, target) tuple as enqueued.
+
+        Used by ``child_reports._emit_terminal_via_bus`` after firing
+        the watchers for a (source_task, target) pair. The stamp
+        marks the row as "processed" so a future restart's
+        :meth:`DependencyBus._recover_fired_unsent` will not re-
+        deliver it.
+
+        This is the post-FollowUp-removal equivalent of the old
+        ``manager.enqueue_message(...)`` + ``mark_enqueued(...)``
+        pair: the bus no longer enqueues messages, but the dedup
+        marker still applies — a row that has been processed by
+        the finalization path must NOT be re-processed on restart.
+
+        Filters to ``state='FIRED'`` so the stamp is only applied
+        to rows the bus actually fired in this terminal event. A
+        row in PENDING state (the watcher hasn't fired yet) is
+        left untouched, and a row already stamped by a prior
+        emit is a harmless re-stamp (idempotent overwrite).
+
+        Args:
+            source_task_id: The child task id that just terminated.
+                String form (matches the ``source_task_id`` column
+                type).
+            target_instance_id: The parent instance id that was
+                watching this source.
+            enqueued_at: ISO-8601 timestamp (default: now UTC).
+                Optional override for tests; production passes
+                ``None`` and lets the helper stamp the current
+                time.
+
+        Returns:
+            The number of rows stamped (0 if no FIRED rows
+            matched). The return is informational — callers do
+            not branch on it.
+        """
+        if enqueued_at is None:
+            enqueued_at = self._now_iso()
+        fired_state = DependencyWatcherState.FIRED.value
+        with Session(self.engine) as session:
+            stmt = (
+                sa_update(DependencyWatcher)
+                .where(DependencyWatcher.source_task_id == source_task_id)
+                .where(DependencyWatcher.target_instance_id == target_instance_id)
+                .where(DependencyWatcher.state == fired_state)
+                .values(enqueued_at=enqueued_at)
+            )
+            result = session.execute(stmt)
+            session.commit()
+            updated = int(result.rowcount or 0)
+            logger.debug(
+                f"mark_enqueued_by_source_target: source={source_task_id[:8]}, "
+                f"target={target_instance_id[:8]}, updated={updated}"
+            )
+            return updated
+
     def mark_enqueued(self, watch_id: str, enqueued_at: str) -> bool:
         """Stamp a FIRED watcher as successfully enqueued.
 

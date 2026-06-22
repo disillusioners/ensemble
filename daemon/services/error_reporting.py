@@ -620,9 +620,11 @@ class ErrorReportingService:
             # with ``status="error"`` and the error message forwarded as
             # the Outcome's ``error`` field. The two authorities are
             # mutually exclusive — never called in parallel — to prevent
-            # double-fire (Phase A lesson). The bus is the state machine;
-            # this helper enqueues the returned FollowUps via
-            # ``manager.enqueue_message``.
+            # double-fire (Phase A lesson).
+            # The bus is a pure state machine — it does NOT deliver
+            # messages to the LLM. The re-trigger of ``_finalize_job``
+            # is the actual finalization path (see
+            # ``_emit_terminal_via_bus`` docstring).
             if message_id:
                 if _is_dependency_bus_enabled(self._manager):
                     # ─── Phase D: DependencyBus path (replaces CM) ───────
@@ -686,20 +688,26 @@ class ErrorReportingService:
                             # service is not wired (unit tests with a
                             # bare MagicMock manager, or partial init
                             # during early daemon startup). Replicate
-                            # the legacy direct bus call so the
-                            # FollowUp enqueue still works — but the
-                            # re-trigger loop is lost, leaving the
-                            # inverse-regression bug latent. In
-                            # production this branch should never
-                            # trigger; the ``_child_reports_service``
-                            # attribute is set in
+                            # the bus emit so the FIRED transition
+                            # happens on the bus DB, but DO NOT
+                            # enqueue a FollowUp message — the bus
+                            # path is internal plumbing, not a
+                            # message source the LLM consumes. The
+                            # re-trigger finalization is also lost in
+                            # this branch (the helper lives on
+                            # ``ChildReportsService``), so the parent
+                            # may stay PROCESSING in this extremely
+                            # rare fallback path. In production this
+                            # branch should never trigger; the
+                            # ``_child_reports_service`` attribute is
+                            # set in
                             # ``InstanceManager.__init__`` before the
                             # error-reporting service is wired.
                             logger.warning(
                                 f"bus hook (error): child_reports "
                                 f"service not wired; falling back to "
-                                f"direct _bus.emit_terminal "
-                                f"(re-trigger loop will NOT run — "
+                                f"direct _bus.emit_terminal (no "
+                                f"FollowUp enqueue, no re-trigger — "
                                 f"parent may be stuck in PROCESSING). "
                                 f"parent={parent_id[:8]}..., "
                                 f"child={instance_id[:8]}..."
@@ -716,26 +724,19 @@ class ErrorReportingService:
                                     ),
                                     outcome=_outcome,
                                 )
+                                # No FollowUp enqueue — the bus does
+                                # not deliver messages. The FollowUp
+                                # payload is logged for observability
+                                # but discarded.
                                 for _fu in _fired:
-                                    try:
-                                        await self._manager.enqueue_message(
-                                            instance_id=_fu.target_instance_id,
-                                            message=_fu.message,
-                                            source=_fu.source,
-                                            metadata=_fu.metadata,
-                                        )
-                                        logger.debug(
-                                            f"bus error follow-up enqueued: "
-                                            f"target={_fu.target_instance_id[:8]}..., "
-                                            f"outcome=error",
-                                            extra={"completion_delivery_path": "bus"},
-                                        )
-                                    except Exception as enq_err:
-                                        logger.warning(
-                                            f"bus error follow-up enqueue "
-                                            f"failed: target="
-                                            f"{_fu.target_instance_id[:8]}...: {enq_err}"
-                                        )
+                                    logger.debug(
+                                        f"bus error: FIRED watcher "
+                                        f"target={_fu.target_instance_id[:8]}..., "
+                                        f"outcome=error (no FollowUp "
+                                        f"enqueue — re-trigger lost in "
+                                        f"this fallback path)",
+                                        extra={"completion_delivery_path": "bus"},
+                                    )
                             except Exception as hook_err:
                                 logger.warning(
                                     f"bus hook: emit_terminal (error) failed "
