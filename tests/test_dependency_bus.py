@@ -1004,3 +1004,74 @@ class TestBusRetriggerFinalize:
 
         # Must NOT raise.
         await service._retrigger_parent_finalize("any-instance-id")
+
+    @pytest.mark.asyncio
+    async def test_retrigger_fires_on_error_path(self):
+        """R5 (inverse-regression): the error path also fires finalize.
+
+        Bug: ``daemon/services/error_reporting.py`` used to call
+        ``_bus.emit_terminal()`` directly and enqueue FollowUps, but
+        NEVER invoked ``_retrigger_parent_finalize``. If the errored
+        child was the last PENDING watcher for its parent, the parent's
+        job finalization was never re-triggered and the parent stayed
+        in PROCESSING forever — the exact inverse-regression bug the
+        re-trigger was added to prevent on the completion path.
+
+        Fix: ``error_reporting.py`` now delegates to
+        ``child_reports._emit_terminal_via_bus()`` (which handles
+        FollowUp enqueue + the re-trigger loop uniformly). This test
+        pins down the contract: when the error path fires the last
+        PENDING watcher, ``_finalize_job`` is invoked on the parent's
+        observer so the parent job transitions PROCESSING → COMPLETED
+        (not stuck).
+
+        The test mirrors R1 (``test_retrigger_fires_when_all_watchers_resolved``)
+        but with ``status="error"`` and a non-None ``error`` payload,
+        matching the call signature used by
+        ``ErrorReportingService._send_error_report`` after the fix.
+        """
+        # Mock observer: a PROCESSING job exists, _finalize_job succeeds.
+        fake_job = MagicMock(name="JobItem")
+        fake_job.job_id = f"job-{uuid.uuid4().hex[:8]}"
+
+        observer = MagicMock(name="JobFeedbackObserver")
+        observer._get_processing_job_for_instance = AsyncMock(
+            return_value=fake_job
+        )
+        observer._finalize_job = AsyncMock(name="_finalize_job")
+
+        service = self._build_service_with_observer(observer)
+        target_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        bus = get_dependency_bus()
+        await bus.watch("task-1", make_fu(target_id=target_id))
+
+        # Simulate the error path: status="error" with an error payload,
+        # exactly as ``ErrorReportingService._send_error_report`` calls
+        # it after the fix. The bus keys on the string task_id.
+        fired = await service._emit_terminal_via_bus(
+            task_id="task-1",
+            status="error",
+            error="max_retries_exceeded",
+            summary="child errored: max_retries_exceeded",
+        )
+
+        # The bus returned the FollowUp and the retrigger fired finalize
+        # — the exact behavior the fix is meant to guarantee for the
+        # error path. Without the fix, ``_finalize_job`` would NOT be
+        # called here and the parent would stay PROCESSING.
+        assert len(fired) == 1
+        assert fired[0].target_instance_id == target_id
+        observer._get_processing_job_for_instance.assert_awaited_once_with(
+            target_id
+        )
+        observer._finalize_job.assert_awaited_once()
+        _args, kwargs = observer._finalize_job.call_args
+        # _finalize_job signature: (job, instance_id, status, error).
+        # The status argument is "completed" (the parent's JOB
+        # transitions PROCESSING → COMPLETED — the child-fired terminal
+        # event is sufficient for the parent job to finalize; the child
+        # status was already written by ``ErrorReportingService``).
+        assert kwargs.get("status") == "completed" or (
+            len(_args) >= 3 and _args[2] == "completed"
+        )

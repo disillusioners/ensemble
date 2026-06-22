@@ -646,42 +646,102 @@ class ErrorReportingService:
                             "(error) path"
                         )
                     else:
-                        try:
-                            _outcome = Outcome(
-                                status="error",
-                                error=error,
-                                summary=f"child errored: {error_type}",
-                            )
-                            _fired = await _bus.emit_terminal(
-                                task_id=str(getattr(_child_task_err, "id", None) or ""),
-                                outcome=_outcome,
-                            )
-                            for _fu in _fired:
-                                try:
-                                    await self._manager.enqueue_message(
-                                        instance_id=_fu.target_instance_id,
-                                        message=_fu.message,
-                                        source=_fu.source,
-                                        metadata=_fu.metadata,
-                                    )
-                                    logger.debug(
-                                        f"bus error follow-up enqueued: "
-                                        f"target={_fu.target_instance_id[:8]}..., "
-                                        f"outcome=error",
-                                        extra={"completion_delivery_path": "bus"},
-                                    )
-                                except Exception as enq_err:
-                                    logger.warning(
-                                        f"bus error follow-up enqueue "
-                                        f"failed: target="
-                                        f"{_fu.target_instance_id[:8]}...: {enq_err}"
-                                    )
-                        except Exception as hook_err:
+                        # ─── Phase D re-trigger (inverse-regression fix) ──
+                        # Delegate the bus emission + FollowUp enqueue
+                        # + re-trigger loop to
+                        # ``child_reports._emit_terminal_via_bus`` so the
+                        # finalize re-trigger fires uniformly for BOTH
+                        # completion and error paths. Previously this
+                        # code called ``_bus.emit_terminal`` directly
+                        # and enqueued FollowUps, but never invoked
+                        # ``_retrigger_parent_finalize`` — meaning a
+                        # child error could leave the parent stuck in
+                        # PROCESSING forever (the inverse-regression
+                        # bug the re-trigger was added to prevent on
+                        # the completion path). See
+                        # ``child_reports._emit_terminal_via_bus``
+                        # docstring for the full rationale and the
+                        # ``_retriggered`` set guard that prevents
+                        # redundant observer work.
+                        _child_reports_svc = getattr(
+                            self._manager, "_child_reports_service", None
+                        )
+                        if _child_reports_svc is not None:
+                            try:
+                                await _child_reports_svc._emit_terminal_via_bus(
+                                    task_id=getattr(_child_task_err, "id", None),
+                                    status="error",
+                                    error=error,
+                                    summary=f"child errored: {error_type}",
+                                )
+                            except Exception as hook_err:
+                                logger.warning(
+                                    f"bus hook: _emit_terminal_via_bus "
+                                    f"(error) failed "
+                                    f"(parent={parent_id[:8]}..., "
+                                    f"child={instance_id[:8]}...): {hook_err}"
+                                )
+                        else:
+                            # Defensive fallback: ``child_reports``
+                            # service is not wired (unit tests with a
+                            # bare MagicMock manager, or partial init
+                            # during early daemon startup). Replicate
+                            # the legacy direct bus call so the
+                            # FollowUp enqueue still works — but the
+                            # re-trigger loop is lost, leaving the
+                            # inverse-regression bug latent. In
+                            # production this branch should never
+                            # trigger; the ``_child_reports_service``
+                            # attribute is set in
+                            # ``InstanceManager.__init__`` before the
+                            # error-reporting service is wired.
                             logger.warning(
-                                f"bus hook: emit_terminal (error) failed "
-                                f"(parent={parent_id[:8]}..., "
-                                f"child={instance_id[:8]}...): {hook_err}"
+                                f"bus hook (error): child_reports "
+                                f"service not wired; falling back to "
+                                f"direct _bus.emit_terminal "
+                                f"(re-trigger loop will NOT run — "
+                                f"parent may be stuck in PROCESSING). "
+                                f"parent={parent_id[:8]}..., "
+                                f"child={instance_id[:8]}..."
                             )
+                            try:
+                                _outcome = Outcome(
+                                    status="error",
+                                    error=error,
+                                    summary=f"child errored: {error_type}",
+                                )
+                                _fired = await _bus.emit_terminal(
+                                    task_id=str(
+                                        getattr(_child_task_err, "id", None) or ""
+                                    ),
+                                    outcome=_outcome,
+                                )
+                                for _fu in _fired:
+                                    try:
+                                        await self._manager.enqueue_message(
+                                            instance_id=_fu.target_instance_id,
+                                            message=_fu.message,
+                                            source=_fu.source,
+                                            metadata=_fu.metadata,
+                                        )
+                                        logger.debug(
+                                            f"bus error follow-up enqueued: "
+                                            f"target={_fu.target_instance_id[:8]}..., "
+                                            f"outcome=error",
+                                            extra={"completion_delivery_path": "bus"},
+                                        )
+                                    except Exception as enq_err:
+                                        logger.warning(
+                                            f"bus error follow-up enqueue "
+                                            f"failed: target="
+                                            f"{_fu.target_instance_id[:8]}...: {enq_err}"
+                                        )
+                            except Exception as hook_err:
+                                logger.warning(
+                                    f"bus hook: emit_terminal (error) failed "
+                                    f"(parent={parent_id[:8]}..., "
+                                    f"child={instance_id[:8]}...): {hook_err}"
+                                )
                 else:
                     try:
                         from .correlation_manager import notify_corr_resolve
