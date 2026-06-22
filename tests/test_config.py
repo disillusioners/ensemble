@@ -372,7 +372,7 @@ class TestPersistenceConfig:
         assert config.checkpoint_interval == 1
         assert config.checkpoint_ttl_hours == 168
         assert config.checkpoint_cleanup_interval == 24
-        assert config.max_instance_history == 300
+        assert config.max_instance_history == 500
 
 
 class TestAgentsConfig:

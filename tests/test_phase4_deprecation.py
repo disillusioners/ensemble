@@ -786,44 +786,6 @@ class TestWaitingChildrenNotSetWhenCmActive:
             set_correlation_manager(None)
 
     @pytest.mark.asyncio
-    async def test_cm_none_parent_gets_waiting_children_fallback(self) -> None:
-        """CM None (graceful degradation) + waiting_for=0 + pending messages>0
-        → the legacy path sets ``WAITING_CHILDREN`` on the parent. This is
-        the intentional fallback for environments without CM.
-        """
-        from daemon.services.child_reports import ChildReportsService
-
-        set_correlation_manager(None)
-        try:
-            parent = _make_parent(
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=0,
-                parent_id="parent-p4-s3b",
-            )
-            child = _make_child(parent_id="parent-p4-s3b")
-            # Legacy path: pending messages present → WAITING_CHILDREN.
-            session = _setup_cascade_session(parent, pending_count=3)
-
-            mock_manager = _make_mock_manager()
-            service = ChildReportsService(manager=mock_manager)
-
-            result = await service._update_parent_on_child_complete(
-                session, child, completed_message_id=None
-            )
-
-            # Legacy: transitioned to WAITING_CHILDREN (transient signal).
-            assert result == (True, None, None), (
-                f"CM-disabled fallback must return (True, None, None) for "
-                f"WAITING_CHILDREN transition; got {result!r}"
-            )
-            assert parent.status == InstanceStatus.WAITING_CHILDREN.value, (
-                f"CM-disabled fallback must set WAITING_CHILDREN; "
-                f"got {parent.status!r}"
-            )
-        finally:
-            set_correlation_manager(None)
-
-    @pytest.mark.asyncio
     async def test_cm_active_skips_legacy_cascade_entirely(self) -> None:
         """Structural invariant: with CM active, the legacy inline cascade
         block is unreachable — verified by ``session.exec`` call count.
@@ -882,106 +844,18 @@ class TestWaitingChildrenNotSetWhenCmActive:
 
 
 class TestGracefulDegradationCmDisabled:
-    """Phase 4 invariant: when ``get_correlation_manager()`` returns
-    ``None`` (CM not wired), the system falls back to the legacy
-    ``waiting_for`` reads for control flow. The system must still work
-    correctly in this degraded mode.
+    """Phase 3 cleanup removed the CM=None graceful-degradation fallback
+    path from ``_update_parent_on_child_complete`` (see commit f3ba9e4c:
+    "remove USE_LEGACY_WAITING_FOR_CASCADE flag and gated paths"). The
+    SELECT COUNT(*) TOCTOU fallback (Race #3) is now a hard error — CM
+    must be initialized in production. The graceful-degradation invariant
+    tested here is intentionally no longer reachable; see the W3
+    fail-safe in ``_finalize_job`` for the production crash semantics.
     """
 
-    @pytest.mark.asyncio
-    async def test_cm_none_uses_waiting_for_zero_to_complete(self) -> None:
-        """CM None + ``waiting_for=0`` + no pending messages → the legacy
-        cascade runs end-to-end: SELECT COUNT(*) → 0 pending → COMPLETED.
-        """
-        from daemon.services.child_reports import ChildReportsService
 
-        set_correlation_manager(None)
-        try:
-            parent = _make_parent(
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=0,
-                parent_id="parent-p4-s4a",
-            )
-            child = _make_child(parent_id="parent-p4-s4a")
-            # Legacy: 0 pending messages → COMPLETED.
-            session = _setup_cascade_session(parent, pending_count=0)
-
-            mock_manager = _make_mock_manager()
-            service = ChildReportsService(manager=mock_manager)
-
-            result = await service._update_parent_on_child_complete(
-                session, child, completed_message_id=None
-            )
-
-            # Legacy: parent reported as completed.
-            assert result == (False, parent.instance_id, None)
-            assert parent.status == InstanceStatus.COMPLETED.value
-            # Legacy SELECT COUNT(*) WAS executed.
-            assert session.exec.call_count == 1
-        finally:
-            set_correlation_manager(None)
-
-    @pytest.mark.asyncio
-    async def test_cm_none_pending_messages_keep_waiting_children(self) -> None:
-        """CM None + ``waiting_for=0`` + pending messages>0 → parent stays
-        alive in ``WAITING_CHILDREN`` (legacy fallback for Phase 4).
-        """
-        from daemon.services.child_reports import ChildReportsService
-
-        set_correlation_manager(None)
-        try:
-            parent = _make_parent(
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=0,
-                parent_id="parent-p4-s4b",
-            )
-            child = _make_child(parent_id="parent-p4-s4b")
-            session = _setup_cascade_session(parent, pending_count=2)
-
-            mock_manager = _make_mock_manager()
-            service = ChildReportsService(manager=mock_manager)
-
-            result = await service._update_parent_on_child_complete(
-                session, child, completed_message_id=None
-            )
-
-            assert result == (True, None, None)
-            assert parent.status == InstanceStatus.WAITING_CHILDREN.value
-        finally:
-            set_correlation_manager(None)
-
-    @pytest.mark.asyncio
-    async def test_cm_none_write_paused_does_not_crash(self) -> None:
-        """CM None fallback must not depend on CM APIs at all — verified by
-        the fact that the cascade never references ``get_correlation_manager``
-        successfully (it returns None) and never calls ``cm.is_complete``.
-        """
-        from daemon.services.child_reports import ChildReportsService
-
-        # The autouse fixture already clears the singleton. Be explicit.
-        set_correlation_manager(None)
-        try:
-            parent = _make_parent(
-                status=InstanceStatus.RUNNING.value,
-                waiting_for=0,
-                parent_id="parent-p4-s4c",
-            )
-            child = _make_child(parent_id="parent-p4-s4c")
-            session = _setup_cascade_session(parent, pending_count=0)
-
-            mock_manager = _make_mock_manager()
-            service = ChildReportsService(manager=mock_manager)
-
-            # The cascade must complete successfully with CM=None.
-            result = await service._update_parent_on_child_complete(
-                session, child, completed_message_id=None
-            )
-            assert result == (False, parent.instance_id, None)
-            assert parent.status == InstanceStatus.COMPLETED.value
-        finally:
-            set_correlation_manager(None)
-
-
+# =============================================================================
+# Scenario 5: _locks dict cleanup
 # =============================================================================
 # Scenario 5: _locks dict cleanup
 # =============================================================================
