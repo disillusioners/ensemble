@@ -437,6 +437,119 @@ def _wait_for_status(
     return False
 
 
+def _get_child_statuses(child_ids: list[str]) -> dict[str, str]:
+    """Fetch the current status of each child instance.
+
+    Used by premature-completion checks that need to verify all children
+    are terminal when the parent reaches a terminal status. This is
+    **architecture-agnostic** — it inspects child instance status
+    directly rather than relying on the ``waiting_for`` column, which is
+    vestigial under ``USE_DEPENDENCY_BUS=ON`` (always reads 0 on the
+    DependencyBus code path; tracking is done via ``dependency_watchers``
+    instead).
+
+    Args:
+        child_ids: Child instance IDs to inspect.
+
+    Returns:
+        Dict mapping each ``child_id`` to its lowercase status string.
+        On fetch error, the child's status is recorded as ``"unknown"``
+        (treated as non-terminal by callers — conservative).
+    """
+    statuses: dict[str, str] = {}
+    for cid in child_ids:
+        try:
+            child = _get_instance(cid)
+            statuses[cid] = str(child.get("status", "unknown")).lower()
+        except requests.exceptions.RequestException as exc:
+            logger.warning(
+                f"[CHILD_STATUS] failed to get child {cid[:8]}...: {exc}"
+            )
+            statuses[cid] = "unknown"
+    return statuses
+
+
+def _wait_for_leader_completion_safe(
+    leader_id: str,
+    child_ids: list[str],
+    timeout: int = COMPLETION_TIMEOUT,
+) -> tuple[bool, str, str | None]:
+    """Wait for leader to reach terminal status, verifying no premature completion.
+
+    Polls the leader's status until it reaches a terminal state. At that
+    moment, checks ALL children — if ANY child is still non-terminal,
+    that's a premature completion bug.
+
+    This check is **architecture-agnostic**: it directly inspects child
+    instance status rather than relying on the ``waiting_for`` column
+    (which is vestigial under DependencyBus / ``USE_DEPENDENCY_BUS=ON``
+    and always reads 0 on that code path). This means the check works
+    correctly under BOTH the legacy CorrelationManager path and the
+    DependencyBus path.
+
+    Args:
+        leader_id: The leader/parent instance to watch.
+        child_ids: Child instance IDs to check at leader terminal time.
+        timeout: Maximum seconds to wait for the leader.
+
+    Returns:
+        ``(finished, final_status, premature_detail)``:
+
+        * ``finished``: ``True`` if the leader reached a terminal status.
+        * ``final_status``: Last observed leader status string.
+        * ``premature_detail``: ``None`` if no premature completion was
+          detected, or a human-readable description string identifying
+          the still-running child.
+    """
+    logger.info(
+        f"[WAIT_SAFE] leader={leader_id[:8]}... "
+        f"children={[c[:8] + '...' for c in child_ids]} "
+        f"timeout={timeout}s"
+    )
+    deadline = time.time() + timeout
+    last_status: str = "unknown"
+
+    while time.time() < deadline:
+        try:
+            data = _get_instance(leader_id)
+            last_status = str(data.get("status", "unknown")).lower()
+
+            if last_status in TERMINAL_STATUSES:
+                # Leader reached terminal — verify ALL children are
+                # also terminal. If any child is still non-terminal,
+                # that's a premature completion bug.
+                child_statuses = _get_child_statuses(child_ids)
+                non_terminal = {
+                    cid: st for cid, st in child_statuses.items()
+                    if st not in TERMINAL_STATUSES
+                }
+
+                if non_terminal:
+                    detail = (
+                        f"leader {leader_id[:8]}... reached "
+                        f"'{last_status}' but child(ren) still "
+                        f"non-terminal: {non_terminal}"
+                    )
+                    logger.error(f"[WAIT_SAFE] ❌ PREMATURE: {detail}")
+                    return True, last_status, detail
+
+                logger.info(
+                    f"[WAIT_SAFE] ✅ leader reached '{last_status}' "
+                    f"with all children terminal: {child_statuses}"
+                )
+                return True, last_status, None
+
+        except requests.exceptions.RequestException as exc:
+            logger.warning(f"[WAIT_SAFE] GET failed (will retry): {exc}")
+
+        time.sleep(POLL_INTERVAL)
+
+    logger.warning(
+        f"[WAIT_SAFE] timed out after {timeout}s; last_status={last_status}"
+    )
+    return False, last_status, None
+
+
 # --------------------------------------------------------------------------- #
 # Job + project helpers (used by Test 4: wave + defer queue + cross-system)
 # --------------------------------------------------------------------------- #
@@ -700,14 +813,25 @@ def test_parent_child_workflow_happy_path():
             f"within {SPAWN_TIMEOUT}s"
         )
 
-        # Step 4: wait for the leader to reach a terminal status.
-        finished, final_status = _wait_for_completion(leader_id)
+        # Step 4: wait for the leader to reach a terminal status, while
+        # verifying NO premature completion. Architecture-agnostic check:
+        # at the moment the leader becomes terminal, the child must also
+        # be terminal. We check child instance status directly rather
+        # than relying on the ``waiting_for`` column (which is vestigial
+        # under DependencyBus / ``USE_DEPENDENCY_BUS=ON``).
+        finished, final_status, premature = _wait_for_leader_completion_safe(
+            leader_id, [child_id], timeout=COMPLETION_TIMEOUT
+        )
+        assert not premature, (
+            f"PREMATURE COMPLETION DETECTED: {premature}"
+        )
         assert finished, (
             f"Leader {leader_id[:8]}... did not reach a terminal status "
             f"within {COMPLETION_TIMEOUT}s (last status: {final_status})"
         )
         logger.info(
-            f"[ASSERT] leader reached terminal status: {final_status}"
+            f"[ASSERT] leader reached terminal status: {final_status} "
+            f"(child also terminal — no premature completion)"
         )
 
         # Step 5: verify the leader's conversation history has at least
@@ -1116,9 +1240,13 @@ def test_wave_spawn_with_defer_queue():
        and the leader must stay ``waiting_children`` (or non-terminal)
        until BOTH children report back.
 
-    2. **No premature completion** — the leader MUST NOT report
-       ``completed`` while ``waiting_for > 0``. A full status timeline is
-       captured for post-mortem verification.
+    2. **No premature completion** — the leader MUST NOT reach a
+       terminal status while ANY child is still non-terminal. Child
+       instance status is checked directly (architecture-agnostic —
+       does not rely on the ``waiting_for`` column, which is vestigial
+       under DependencyBus / ``USE_DEPENDENCY_BUS=ON`` and always
+       reads 0 on that code path). A full status timeline is captured
+       for post-mortem verification.
 
     3. **Defer queue ordering** — a deferred job is enqueued via
        ``POST /api/jobs`` immediately after the wave message. If a
@@ -1175,9 +1303,11 @@ def test_wave_spawn_with_defer_queue():
 
         # ── Step 2: Send wave message — spawn 2 coders ────────────────────
         # The first coder sleeps 10s, the second sleeps 20s. The wave is
-        # intentionally staggered so we can observe ``waiting_for > 0``
-        # for a meaningful window. Both must complete before the leader
-        # can report back.
+        # intentionally staggered so that one child is still running while
+        # the other completes — this creates a window where a premature
+        # completion bug would be detectable (leader terminal while a
+        # child is still non-terminal). Both must complete before the
+        # leader can report back.
         WAVE_MESSAGE = (
             "Spawn 2 coder instances. The first coder should sleep for "
             "10 seconds then say hello. The second coder should sleep for "
@@ -1253,60 +1383,85 @@ def test_wave_spawn_with_defer_queue():
             )
 
         # ── Step 5: Monitor for premature completion ─────────────────────
-        # While children are running, the leader should NOT be 'completed'
-        # with ``waiting_for > 0``. We poll every 2s and capture a full
-        # timeline for post-mortem analysis.
+        # While children are running, the leader should NOT reach a
+        # terminal status while ANY child is still non-terminal. We check
+        # child instance status directly — this is architecture-agnostic
+        # and works regardless of whether ``waiting_for`` (legacy CM
+        # path) or ``dependency_watchers`` (DependencyBus path) is the
+        # tracking mechanism. The ``waiting_for`` column is vestigial
+        # under ``USE_DEPENDENCY_BUS=ON`` (always 0), so relying on it
+        # would never detect a premature completion.
+        #
+        # We poll every 2s and capture a full status timeline for
+        # post-mortem analysis.
         WAVE_COMPLETION_TIMEOUT = 180  # 20s sleep + LLM overhead + spawn lag
-        status_timeline: list[tuple[str, str, int]] = []
+        status_timeline: list[tuple[str, str, str]] = []
         premature_completion = False
+        premature_detail = ""
         completed_observed = False
 
-        logger.info("[STEP5] monitoring leader status during child execution...")
+        logger.info(
+            "[STEP5] monitoring leader + child status during child execution..."
+        )
         monitor_deadline = time.time() + WAVE_COMPLETION_TIMEOUT
         while time.time() < monitor_deadline:
             try:
                 info = _get_instance(leader_id)
                 status = str(info.get("status", "")).lower()
-                waiting_for = int(info.get("waiting_for", 0) or 0)
             except requests.exceptions.RequestException as exc:
                 logger.warning(f"[STEP5] poll failed (will retry): {exc}")
                 time.sleep(2)
                 continue
 
-            ts = time.strftime("%H:%M:%S")
-            status_timeline.append((ts, status, waiting_for))
+            # Fetch child statuses for the timeline + premature check.
+            child_statuses = _get_child_statuses(child_ids)
+            child_summary = ", ".join(
+                f"{cid[:8]}={st}" for cid, st in child_statuses.items()
+            ) or "(no children)"
 
-            # CRITICAL invariant: status == 'completed' while waiting_for > 0
-            # means the leader reported back while children were still running.
-            if status == "completed" and waiting_for > 0:
+            ts = time.strftime("%H:%M:%S")
+            status_timeline.append((ts, status, child_summary))
+
+            all_children_terminal = bool(child_statuses) and all(
+                st in TERMINAL_STATUSES for st in child_statuses.values()
+            )
+
+            # CRITICAL invariant: leader terminal while ANY child is
+            # still non-terminal = premature completion bug.
+            if status in TERMINAL_STATUSES and not all_children_terminal:
                 premature_completion = True
+                premature_detail = (
+                    f"leader='{status}' at {ts} but children not all "
+                    f"terminal: [{child_summary}]"
+                )
                 logger.error(
                     f"[STEP5] ❌ PREMATURE COMPLETION at {ts}: "
-                    f"status=completed but waiting_for={waiting_for}"
+                    f"leader status={status} but children: [{child_summary}]"
                 )
+                break
 
-            if status in TERMINAL_STATUSES and waiting_for == 0:
+            if status in TERMINAL_STATUSES and all_children_terminal:
                 if not completed_observed:
                     logger.info(
                         f"[STEP5] ✅ leader reached terminal: {status} "
-                        f"at {ts} (waiting_for={waiting_for})"
+                        f"at {ts} (all children terminal)"
                     )
                 completed_observed = True
-                # Allow a brief post-terminal window to log late transitions
-                # (e.g. status briefly staying 'completed' while GC runs).
                 break
 
             time.sleep(2)
 
         # Log the full status timeline for debugging.
         logger.info("[STEP5] status timeline:")
-        for ts, st, wf in status_timeline:
-            marker = "❌" if (st == "completed" and wf > 0) else ""
-            logger.info(f"  {ts}: status={st:<12} waiting_for={wf} {marker}")
+        for i, (ts, st, cs) in enumerate(status_timeline):
+            is_last = (i == len(status_timeline) - 1)
+            marker = "❌" if (premature_completion and is_last) else ""
+            logger.info(f"  {ts}: leader={st:<12} children=[{cs}] {marker}")
 
         assert not premature_completion, (
-            "PREMATURE COMPLETION DETECTED: Leader reported 'completed' while "
-            "waiting_for > 0 — children were still running. See timeline above."
+            f"PREMATURE COMPLETION DETECTED: {premature_detail}. "
+            "The leader reached a terminal status while at least one child "
+            "was still non-terminal. See timeline above."
         )
         assert completed_observed, (
             f"Leader did not reach a terminal status within "
