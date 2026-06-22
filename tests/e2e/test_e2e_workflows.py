@@ -228,6 +228,58 @@ def _get_messages(instance_id: str) -> list:
     return response.json()
 
 
+# ── Internal bus message leak detection ─────────────────────────────────────
+# These patterns should NEVER appear in the leader's message history.
+# They indicate internal dependency_bus FollowUp content leaking into the
+# user-visible message stream.
+_BUS_LEAK_PATTERNS = [
+    "[dependency_bus]",
+    "dependency_bus",
+    "child ... completed for message",
+    "completed for message",
+    "[FollowUp",
+    "FollowUp",
+    "bus_followup",
+    "bus: emit_terminal",
+    "dependency_bus_followup",
+]
+
+
+def _check_bus_message_leak(instance_id, label=""):
+    """Check leader's message history for internal bus message leaks.
+
+    Returns (leak_found: bool, leaked_messages: list).
+    """
+    messages = _get_messages(instance_id)
+    if not isinstance(messages, list):
+        return False, []
+
+    leaked = []
+    for msg in messages:
+        content = str(msg.get("content", ""))
+        role = msg.get("role", "")
+        # Check all leak patterns (case-insensitive)
+        content_lower = content.lower()
+        for pattern in _BUS_LEAK_PATTERNS:
+            if pattern.lower() in content_lower:
+                leaked.append({
+                    "pattern_matched": pattern,
+                    "role": role,
+                    "content_preview": content[:300],
+                    "message_id": msg.get("message_id", "unknown"),
+                })
+                break  # one match per message is enough
+
+    if leaked:
+        logger.error(f"{'[' + label + '] ' if label else ''}BUS MESSAGE LEAK DETECTED: {len(leaked)} leaked messages in instance {instance_id}")
+        for lm in leaked:
+            logger.error(f"  Pattern: '{lm['pattern_matched']}' | Role: {lm['role']} | Preview: {lm['content_preview'][:200]}")
+    else:
+        logger.info(f"{'[' + label + '] ' if label else ''}✅ No bus message leaks in instance {instance_id} ({len(messages)} messages checked)")
+
+    return len(leaked) > 0, leaked
+
+
 def _pause_instance(instance_id: str) -> dict:
     """POST ``/api/instances/{id}/pause`` and return the response body.
 
@@ -854,6 +906,14 @@ def test_parent_child_workflow_happy_path():
             f"[ASSERT] leader produced {len(assistant_turns)} assistant turn(s)"
         )
 
+        # ── Verify no bus message leaks after Phase 1 ────────────────────
+        leak_found, leaked = _check_bus_message_leak(leader_id, label="Test 1 Phase 1")
+        assert not leak_found, (
+            f"Internal bus messages leaked into leader's message history: "
+            f"{len(leaked)} messages with bus content. "
+            f"First leak: {leaked[0] if leaked else 'N/A'}"
+        )
+
         # =====================================================================
         # PHASE 2: Send a second message to the same (completed) leader.
         # Verify that the leader instance is reused, the same coder child is
@@ -982,6 +1042,14 @@ def test_parent_child_workflow_happy_path():
         )
         logger.info("=" * 60)
 
+        # ── Verify no bus message leaks after Phase 2 ────────────────────
+        leak_found, leaked = _check_bus_message_leak(leader_id, label="Test 1 Phase 2")
+        assert not leak_found, (
+            f"Internal bus messages leaked into leader's message history: "
+            f"{len(leaked)} messages with bus content. "
+            f"First leak: {leaked[0] if leaked else 'N/A'}"
+        )
+
         logger.info("TEST 1 PASSED")
 
     finally:
@@ -1101,6 +1169,14 @@ def test_pause_after_spawn_then_resume():
             f"[ASSERT] leader reached terminal status after resume: {final_status}"
         )
 
+        # ── Verify no bus message leaks ───────────────────────────────────
+        leak_found, leaked = _check_bus_message_leak(leader_id, label="Test 2")
+        assert not leak_found, (
+            f"Internal bus messages leaked into leader's message history: "
+            f"{len(leaked)} messages with bus content. "
+            f"First leak: {leaked[0] if leaked else 'N/A'}"
+        )
+
         logger.info("TEST 2 PASSED")
 
     finally:
@@ -1218,6 +1294,14 @@ def test_terminate_after_spawn_then_revive():
             "TEST 3 COMPLETED — documented behavior "
             f"(revive_status_code={send_status_code}, "
             f"observed_statuses={observed_statuses})"
+        )
+
+        # ── Verify no bus message leaks ───────────────────────────────────
+        leak_found, leaked = _check_bus_message_leak(leader_id, label="Test 3")
+        assert not leak_found, (
+            f"Internal bus messages leaked into leader's message history: "
+            f"{len(leaked)} messages with bus content. "
+            f"First leak: {leaked[0] if leaked else 'N/A'}"
         )
 
     finally:
@@ -1469,6 +1553,20 @@ def test_wave_spawn_with_defer_queue():
             f"{status_timeline[-1][1] if status_timeline else 'unknown'!r})"
         )
 
+        # ── Verify waiting_children status appeared during wave ──────────
+        saw_waiting_children = any(
+            st == "waiting_children"
+            for ts, st, wf in status_timeline
+        )
+        if saw_waiting_children:
+            logger.info("Wave test: ✅ Leader entered waiting_children status during wave")
+        else:
+            logger.warning(
+                "Wave test: ⚠️ Leader did not enter waiting_children status during wave. "
+                "This may be OK if the wave completed too quickly (LLM shortcut the sleep delays). "
+                "Status transitions observed: " + ", ".join(set(st for _, st, _ in status_timeline))
+            )
+
         # ── Step 6: Verify deferred job progression ───────────────────────
         # The deferred job should have stayed pending (or progressed) but
         # should not be stuck in 'pending' forever after the leader
@@ -1534,6 +1632,14 @@ def test_wave_spawn_with_defer_queue():
         logger.info(
             f"[STEP7] ✅ job round-trip OK: id={job_id[:8]}... "
             f"status={job_final.get('status')}"
+        )
+
+        # ── Verify no bus message leaks ───────────────────────────────────
+        leak_found, leaked = _check_bus_message_leak(leader_id, label="Test 4")
+        assert not leak_found, (
+            f"Internal bus messages leaked into leader's message history: "
+            f"{len(leaked)} messages with bus content. "
+            f"First leak: {leaked[0] if leaked else 'N/A'}"
         )
 
         logger.info("=" * 60)
