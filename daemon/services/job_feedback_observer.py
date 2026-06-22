@@ -49,7 +49,7 @@ import time
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from sqlmodel import Session, select, update as sqlmodel_update
-from sqlalchemy import text as _sa_text
+from sqlalchemy import func, text as _sa_text
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
@@ -57,6 +57,7 @@ from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import JobLock
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
+from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from daemon.services.correlation_manager import (
     get_correlation_manager,
     notify_corr_rearm,
@@ -222,6 +223,118 @@ class JobFeedbackObserver:
         self._subscriber_id: str = "job_feedback_observer"
         self._queue: asyncio.Queue | None = None
         self._task: asyncio.Task | None = None
+
+    def _is_dependency_bus_enabled(self) -> bool:
+        """Read the ``use_dependency_bus`` flag from the JobSystemConfig.
+
+        Defensive ``getattr`` chain mirrors the sibling helper in
+        ``ChildReportsService._is_dependency_bus_enabled`` so test
+        mocks that bypass ``InstanceManager.__init__`` (e.g.
+        ``MagicMock()`` without explicit ``config``) don't crash.
+        The default is False (Phase D feature flag OFF = legacy CM
+        path is active), matching the config field's default.
+
+        Returns:
+            True if the operator has enabled the DB-backed
+            DependencyBus completion-delivery path; False otherwise.
+        """
+        return bool(
+            getattr(self._config, "use_dependency_bus", False)
+        )
+
+    def _bus_count_pending_for_target_sync(
+        self, target_instance_id: str
+    ) -> int:
+        """Sync helper: count PENDING watchers targeting ``target_instance_id`` in the bus.
+
+        **Fail-OPEN semantics (warning)**: this helper catches all
+        exceptions and returns ``0`` (treated as "no pending
+        watchers"). This is fail-OPEN — a transient DB failure
+        passes the gate and may allow premature finalization.
+
+        **Caller contract**: only use this helper for **defense-in-
+        depth checks** that have a separate safety net (the in-
+        session bus gate inside ``WriteGuardSession``, a parent
+        ``cm.is_complete`` check, etc.). The **authoritative bus
+        gate** at the finalization decision point must use the
+        inline COUNT query directly on the ``WriteGuardSession``'s
+        session object (see ``_finalize_job_db_sync``), so the
+        COUNT and UPDATE share one transaction. The inline query
+        lets exceptions propagate to the caller's fail-safe path
+        instead of silently returning ``0``.
+
+        Kept for: (a) tests that exercise the bus counter path
+        directly without going through the finalization gate, (b)
+        the early defense-in-depth check above
+        ``_finalize_job_db_sync`` (which has its own in-session
+        gate as the authoritative decision point).
+
+        Used by the sync job-finalization gate in
+        :meth:`_finalize_job_db_sync` (which runs inside
+        ``WriteGuardSession`` on a worker thread — an ``await`` is
+        impossible there) to consult the bus under
+        ``use_dependency_bus=ON``. When the bus flag is ON, the
+        CM's in-memory pending set is starved (send_message skips
+        ``cm.register_message_send``), so the CM-side gates
+        (``cm.get_pending_count`` / ``cm.is_complete``) return 0
+        / True for parents tracked via the bus — and the job would
+        be finalized prematurely while children tracked via the
+        bus are still running. The bus DB is the authoritative
+        source of pending-children truth on the bus path, and
+        this gate MUST consult it to prevent premature job
+        finalization.
+
+        Graceful-degradation semantics (matches the
+        ``get_correlation_manager() is not None`` guards elsewhere):
+        bus singleton missing or flag OFF → returns 0.
+
+        The implementation delegates to
+        :meth:`DependencyBus.count_pending_for_target_sync` which
+        wraps the sync repository's ``count_pending_for_target``
+        COUNT(*) query (dialect-portable — works on both SQLite
+        and PostgreSQL).
+
+        Args:
+            target_instance_id: The parent instance ID whose
+                PENDING watcher count is being queried.
+
+        Returns:
+            Non-negative integer count of PENDING watchers for
+            the given target. Returns 0 when the bus singleton is
+            not wired, the flag is OFF, or the DB query fails.
+        """
+        from daemon.services.dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            return 0
+
+        # Mirror the W1-fix defensive flag check from the call
+        # sites in ``child_reports._emit_terminal_via_bus`` callers:
+        # the flag must be ON for the bus to be the source of
+        # truth. If the operator flipped the flag OFF mid-flight,
+        # treat the bus as inert (the CM path is the fallback).
+        if not self._is_dependency_bus_enabled():
+            return 0
+
+        try:
+            return bus.count_pending_for_target_sync(target_instance_id)
+        except Exception as e:
+            # FAIL-OPEN (see method docstring): a DB failure here
+            # returns 0 and PASSES the gate. Callers that use this
+            # helper at the finalization decision point MUST have a
+            # separate safety net (typically the in-session bus
+            # gate inline query that shares a transaction with the
+            # UPDATE). Logged at warning level so persistent
+            # failures surface in observability without taking
+            # down the finalization path.
+            logger.warning(
+                f"bus.count_pending_for_target_sync failed for "
+                f"{target_instance_id[:8]}...: {e} — treating as 0 "
+                f"(FAIL-OPEN: bus pending-children check skipped, "
+                f"may cause premature job finalization if persistent)"
+            )
+            return 0
 
     async def start(self) -> None:
         """Start the observer.
@@ -1594,6 +1707,56 @@ class JobFeedbackObserver:
                     instance_was_terminal=False,
                 )
 
+        # ─── Phase D bus gate (premature-finalization fix) ─────────
+        # When ``use_dependency_bus=ON``, ``send_message`` skips
+        # ``cm.register_message_send`` so the CM's in-memory pending
+        # set is starved — the two CM-based checks above (C1
+        # re-check + the in-session gate below) both pass with
+        # "complete" even while children tracked via the bus are
+        # still running. The bus DB is the authoritative source of
+        # pending-children truth on the bus path; this gate MUST
+        # consult it BEFORE the terminal cascade commits, or the
+        # parent job would be marked COMPLETED while children
+        # tracked via the bus are still working (the exact
+        # premature-finalization bug Phase D was designed to
+        # prevent).
+        #
+        # The bus check is a sync DB query against the
+        # ``dependency_watchers`` table (the bus singleton exposes
+        # ``count_pending_for_target_sync`` for caller contexts that
+        # can't await, which is this sync gate inside
+        # ``WriteGuardSession`` on a worker thread).
+        #
+        # If the bus reports PENDING watchers, defer finalization
+        # with ``skip=True, gate_deferred=True`` — same shape the
+        # existing CM-busy branch returns. The async caller in
+        # ``_finalize_job`` re-arms the job (COMPLETED → PROCESSING
+        # via ``atomic_transition`` in the post-commit re-check path)
+        # so a late child's resolve can find a PROCESSING job. The
+        # generation counter is already bumped by ``DependencyBus.
+        # watch`` (C2 fix), so the orphan-race re-arm path detects
+        # the in-flight register correctly.
+        if self._bus_count_pending_for_target_sync(instance_id) > 0:
+            logger.info(
+                f"Observer: aborting terminal transition for "
+                f"{instance_id[:8]}... — bus has PENDING watchers "
+                f"(use_dependency_bus=ON, CM starved on bus path), "
+                f"deferring finalization"
+            )
+            return _FinalizeJobResult(
+                skip=True,
+                terminal_status=None,
+                job_id=None,
+                instance_id=None,
+                parent_id=None,
+                agent_id=None,
+                result_summary=None,
+                error_message=None,
+                locks_released=0,
+                instance_was_terminal=False,
+                gate_deferred=True,
+            )
+
         # ─── Single WriteGuardSession for ALL three DB writes ───
         with WriteGuardSession(
             Session(self._instance_manager.engine),
@@ -1704,6 +1867,104 @@ class JobFeedbackObserver:
                         instance_was_terminal=False,
                         gate_deferred=True,
                     )
+                # ─── Phase D bus gate (in-session) ─────────────────
+                # When ``use_dependency_bus=ON``, the CM is starved
+                # (``send_message`` skips ``cm.register_message_send``)
+                # so ``cm_gate.is_complete()`` above returns True even
+                # while children tracked via the bus are still running.
+                # The bus DB is the authoritative source of pending-
+                # children truth on the bus path — we MUST consult it
+                # here, INSIDE the WriteGuardSession immediately before
+                # the in-session UPDATE, to prevent premature
+                # finalization. Same query and semantics as the early
+                # C1 re-check above (TOCTOU hardening: this is the
+                # authoritative gate; the early re-check is a
+                # defense-in-depth that catches races between the
+                # pre-fetch and the WriteGuardSession).
+                #
+                # C2 fix (TOCTOU hardening, 2026-06-22): inline the
+                # COUNT query directly on the WriteGuardSession's
+                # ``session`` object so the COUNT and the in-session
+                # UPDATE share the SAME transaction. The previous
+                # helper opened its own short-lived Session via the
+                # bus repository, creating transaction A — while
+                # the UPDATE below commits in transaction B (the
+                # WriteGuardSession). A concurrent ``bus.watch()``
+                # INSERT on a different connection could commit
+                # between A and B, re-opening the premature-
+                # finalization window this gate exists to close.
+                # With the inline query, the COUNT and UPDATE are
+                # atomic at the DB level (SQLite full write lock;
+                # PostgreSQL READ COMMITTED within one transaction).
+                #
+                # B fix (2026-06-22): the inline query must NOT
+                # catch exceptions — see MEDIUM B in the review.
+                # Catching and returning 0 would silently pass the
+                # gate, reintroducing the premature-finalization
+                # bug on transient DB errors. Exceptions propagate
+                # to the existing W3 fail-safe path in
+                # ``_finalize_job``.
+                #
+                # The per-parent CM lock acquired in ``_finalize_job``
+                # (the async caller) serializes this gate against
+                # ``bus.watch()`` — a watch INSERT that commits
+                # inside the lock is guaranteed visible to the COUNT
+                # here, regardless of who wins the race.
+                #
+                # Defensive wiring check: only consult the bus when
+                # BOTH the flag is ON AND the bus singleton is
+                # wired. Mirrors the original
+                # ``_bus_count_pending_for_target_sync`` helper
+                # semantics — when the singleton is None (testing,
+                # missing init, config drift), the gate is dormant
+                # so we don't defer a finalization that should
+                # proceed. Without this guard, a config that leaves
+                # the flag ON without wiring the bus singleton
+                # would still execute the inline COUNT against an
+                # empty table — usually harmless, but in degraded
+                # states (mock MagicMock truthiness, partial
+                # migrations) it could defer a finalization that
+                # should proceed.
+                from daemon.services.dependency_bus import (
+                    get_dependency_bus as _get_bus_for_gate,
+                )
+                if (
+                    self._is_dependency_bus_enabled()
+                    and _get_bus_for_gate() is not None
+                ):
+                    _bus_pending_stmt = (
+                        select(func.count())
+                        .select_from(DependencyWatcher)
+                        .where(
+                            DependencyWatcher.target_instance_id == instance_id
+                        )
+                        .where(
+                            DependencyWatcher.state
+                            == DependencyWatcherState.PENDING.value
+                        )
+                    )
+                    _bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
+                    if _bus_pending > 0:
+                        logger.info(
+                            f"Observer: aborting terminal transition for "
+                            f"{instance_id[:8]}... — CM says complete but "
+                            f"bus has {_bus_pending} PENDING watchers "
+                            f"(use_dependency_bus=ON, in-session gate), "
+                            f"deferring finalization"
+                        )
+                        return _FinalizeJobResult(
+                            skip=True,
+                            terminal_status=None,
+                            job_id=None,
+                            instance_id=None,
+                            parent_id=None,
+                            agent_id=None,
+                            result_summary=None,
+                            error_message=None,
+                            locks_released=0,
+                            instance_was_terminal=False,
+                            gate_deferred=True,
+                        )
                 # Gate passed cleanly under CM authority — fall through
                 # to the UPDATE / Step 1 / Step 2 / Step 3 / commit path.
                 # Reset the bounded defer counter so any future transient

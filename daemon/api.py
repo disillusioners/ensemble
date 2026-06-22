@@ -411,6 +411,16 @@ async def lifespan(app: FastAPI):
     # 368).
     job_processor.setup_job_feedback_observer(job_feedback_observer)
     logger.info("JobFeedbackObserver wired into JobProcessor (dispatch_path=jobqueue_local)")
+
+    # Phase D (DependencyBus): wire the JobFeedbackObserver onto the
+    # InstanceManager facade so ``ChildReportsService`` can re-trigger
+    # ``_finalize_job`` after the bus fires the last watcher for a
+    # parent. Without this wiring the bus path would starve the
+    # terminal-transition callback (CM is bypassed, observer is never
+    # reached) — see fix/bus-retrigger-finalize-job for the full
+    # inverse-regression analysis.
+    manager.set_job_feedback_observer(job_feedback_observer)
+    logger.info("JobFeedbackObserver wired into InstanceManager (bus_retrigger=ON)")
     
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub

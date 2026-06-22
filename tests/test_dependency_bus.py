@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -34,6 +35,8 @@ from daemon.services.dependency_bus import (
     DependencyBus,
     FollowUp,
     Outcome,
+    get_dependency_bus,
+    set_dependency_bus,
 )
 
 
@@ -588,3 +591,416 @@ class TestPendingWatchersFallback:
             assert len(result) == 2
         finally:
             await b2.stop()
+
+
+# -------------------------------------------------------------------------
+# TestCountPendingForTarget (premature-completion gate helper)
+# -------------------------------------------------------------------------
+
+
+class TestCountPendingForTarget:
+    """Tests for ``count_pending_for_target`` (the bus-side pending-children
+    count used by the completion gates in ``child_reports`` and
+    ``job_feedback_observer``).
+
+    This is the read-side companion to ``cancel_for_target``: both filter
+    the same ``dependency_watchers`` table by ``target_instance_id`` and
+    ``state='PENDING'``. ``cancel_for_target`` transitions matching rows
+    to CANCELLED; this method just counts them — the cheap hot-path query
+    the gates run inside ``WriteGuardSession`` on a worker thread.
+
+    Contract:
+      * Returns 0 when no PENDING watchers exist (the common case).
+      * Returns the integer count when matching rows exist.
+      * Only counts PENDING rows — FIRED / CANCELLED rows are excluded.
+      * Does NOT mutate state (read-only).
+      * Both async (``count_pending_for_target``) and sync
+        (``count_pending_for_target_sync``) variants are tested — the
+        sync variant is the one the completion gates call.
+    """
+
+    @pytest.mark.asyncio
+    async def test_count_pending_for_target_zero_when_no_watchers(self, bus):
+        """Empty bus → count is 0 (the common case for completed parents)."""
+        count = await bus.count_pending_for_target("nonexistent-parent")
+        assert count == 0
+        assert bus.count_pending_for_target_sync("nonexistent-parent") == 0
+
+    @pytest.mark.asyncio
+    async def test_count_pending_for_target_counts_all_pending(self, bus):
+        """Multiple watchers across multiple sources → all counted."""
+        await bus.watch("task-1", make_fu(target_id="parent-A"))
+        await bus.watch("task-1", make_fu(target_id="parent-A"))
+        await bus.watch("task-2", make_fu(target_id="parent-A"))
+        await bus.watch("task-3", make_fu(target_id="parent-B"))
+
+        # Parent-A has 3 watchers (2 on task-1, 1 on task-2).
+        assert bus.count_pending_for_target_sync("parent-A") == 3
+        assert await bus.count_pending_for_target("parent-A") == 3
+        # Parent-B has 1 watcher (on task-3).
+        assert bus.count_pending_for_target_sync("parent-B") == 1
+        # Parent-C has none.
+        assert bus.count_pending_for_target_sync("parent-C") == 0
+
+    @pytest.mark.asyncio
+    async def test_count_pending_for_target_excludes_fired_rows(self, bus):
+        """After emit_terminal, the count drops (FIRED rows excluded)."""
+        await bus.watch("task-1", make_fu(target_id="parent-X"))
+        await bus.watch("task-2", make_fu(target_id="parent-X"))
+        await bus.watch("task-3", make_fu(target_id="parent-X"))
+
+        assert bus.count_pending_for_target_sync("parent-X") == 3
+
+        # Fire task-1 → 2 remaining
+        await bus.emit_terminal("task-1", make_outcome())
+        assert bus.count_pending_for_target_sync("parent-X") == 2
+
+        # Fire task-2 → 1 remaining
+        await bus.emit_terminal("task-2", make_outcome())
+        assert bus.count_pending_for_target_sync("parent-X") == 1
+
+    @pytest.mark.asyncio
+    async def test_count_pending_for_target_excludes_cancelled_rows(self, bus):
+        """After cancel_for_target, the count drops to 0 (CANCELLED excluded)."""
+        for i in range(3):
+            await bus.watch(f"task-{i}", make_fu(target_id="parent-Y"))
+
+        assert bus.count_pending_for_target_sync("parent-Y") == 3
+
+        cancelled = await bus.cancel_for_target("parent-Y")
+        assert cancelled == 3
+        assert bus.count_pending_for_target_sync("parent-Y") == 0
+
+    @pytest.mark.asyncio
+    async def test_count_pending_for_target_only_counts_target_match(self, bus):
+        """Filter is exact match on target_instance_id — not prefix/substring."""
+        await bus.watch("task-1", make_fu(target_id="parent-1"))
+        await bus.watch("task-1", make_fu(target_id="parent-10"))
+        await bus.watch("task-1", make_fu(target_id="parent-100"))
+
+        # Each parent has exactly 1 watcher.
+        assert bus.count_pending_for_target_sync("parent-1") == 1
+        assert bus.count_pending_for_target_sync("parent-10") == 1
+        assert bus.count_pending_for_target_sync("parent-100") == 1
+
+    def test_count_pending_for_target_sync_reads_db_directly(self, bus_repo):
+        """The sync variant reads from the DB (source of truth) — no cache.
+
+        Inserts a watcher via the repo (bypassing the bus's async cache),
+        then constructs a fresh bus and checks the count. This proves the
+        sync variant doesn't depend on the in-memory cache and is safe to
+        call from sync contexts that have no event loop.
+        """
+        bus = DependencyBus(bus_repo)
+        # NOTE: do NOT call bus.start() — we want to verify the sync
+        # variant hits the DB even when the cache is cold.
+        try:
+            w = DependencyWatcher(
+                source_task_id="pre-existing",
+                target_instance_id="parent-sync",
+                follow_up_payload=make_fu(target_id="parent-sync").to_payload(),
+            )
+            bus_repo.insert(w)
+            # Sync variant returns the DB count regardless of cache state.
+            assert bus.count_pending_for_target_sync("parent-sync") == 1
+        finally:
+            # Async cleanup if any — but bus was never started, so no cache.
+            pass
+
+
+# -------------------------------------------------------------------------
+# TestBusRetriggerFinalize (Phase D re-trigger via _emit_terminal_via_bus)
+# -------------------------------------------------------------------------
+#
+# The ``_emit_terminal_via_bus`` helper in ``daemon/services/child_reports.py``
+# re-triggers ``_finalize_job`` on the parent's ``JobFeedbackObserver`` after
+# the bus fires all of its PENDING watchers. This block exercises the
+# retrigger path end-to-end against a real bus + a mocked observer.
+#
+# Critical safety properties under test:
+#   * Fires exactly once per target when ALL watchers have been fired
+#     (count_pending_for_target(target) == 0).
+#   * Does NOT fire when any watcher is still PENDING for the target.
+#   * Does NOT fire when there is no PROCESSING job (job-already-terminal
+#     case is a clean no-op).
+#   * Loop-level guard: a failure on one target's re-trigger does not
+#     abort the rest of the loop.
+#   * Helper-level guard: ``_get_processing_job_for_instance`` raising
+#     does not propagate out of ``_retrigger_parent_finalize``.
+
+
+class TestBusRetriggerFinalize:
+    """Tests for the bus re-trigger finalize path in ``_emit_terminal_via_bus``.
+
+    The re-trigger is the inverse-regression fix for the bus-path
+    ``send_message`` starves the CM callback bug — without it, jobs on
+    the bus path stay PROCESSING forever. The tests below pin down the
+    three safety contracts that the fix relies on.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _install_bus(self, bus_repo):
+        """Install a real DependencyBus as the module singleton for the
+        duration of the test. Tears down on exit so other test files that
+        expect ``get_dependency_bus() is None`` are not affected.
+        """
+        b = DependencyBus(bus_repo)
+        await b.start()
+        set_dependency_bus(b)
+        try:
+            yield b
+        finally:
+            await b.stop()
+            set_dependency_bus(None)
+
+    def _build_service_with_observer(
+        self, observer: MagicMock | None
+    ) -> "ChildReportsService":
+        """Build a ChildReportsService against a mock manager.
+
+        The mock manager exposes:
+          * ``_job_feedback_observer`` — the mocked observer (or None)
+          * ``enqueue_message`` — AsyncMock so the bus-followup enqueue
+            loop completes without touching the DB
+
+        The service is constructed via ``__new__`` to skip ``__init__``
+        (which would touch the real manager). Mirrors the pattern used
+        in ``tests/unit/services/test_child_reports.py``.
+        """
+        from daemon.services.child_reports import ChildReportsService
+
+        manager = MagicMock(name="InstanceManager")
+        manager._job_feedback_observer = observer
+        manager.enqueue_message = AsyncMock(name="enqueue_message")
+
+        service = ChildReportsService.__new__(ChildReportsService)
+        service._manager = manager
+        service._events_service = None
+        return service
+
+    @pytest.mark.asyncio
+    async def test_retrigger_fires_when_all_watchers_resolved(self):
+        """R1: register one watcher → fire it → _finalize_job called once.
+
+        When the bus transitions the only PENDING watcher to FIRED, the
+        post-fire ``count_pending_for_target`` returns 0 for the target,
+        and the retrigger guard fires ``observer._finalize_job`` exactly
+        once with the COMPLETED status. This is the happy path that
+        releases the parent job lock after the bus has fully resolved.
+        """
+        # Mock observer: a PROCESSING job exists, _finalize_job succeeds.
+        fake_job = MagicMock(name="JobItem")
+        fake_job.job_id = f"job-{uuid.uuid4().hex[:8]}"
+
+        observer = MagicMock(name="JobFeedbackObserver")
+        observer._get_processing_job_for_instance = AsyncMock(
+            return_value=fake_job
+        )
+        observer._finalize_job = AsyncMock(name="_finalize_job")
+
+        service = self._build_service_with_observer(observer)
+        target_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        bus = get_dependency_bus()
+        await bus.watch("task-1", make_fu(target_id=target_id))
+
+        # task_id is converted to str() inside _emit_terminal_via_bus
+        # before being passed to bus.emit_terminal(), so use the string
+        # form directly to match the watcher's source_task_id.
+        fired = await service._emit_terminal_via_bus(
+            task_id="task-1", status="completed"
+        )
+
+        # The bus returned the FollowUp and the retrigger fired finalize.
+        assert len(fired) == 1
+        assert fired[0].target_instance_id == target_id
+        observer._get_processing_job_for_instance.assert_awaited_once_with(
+            target_id
+        )
+        observer._finalize_job.assert_awaited_once()
+        _args, kwargs = observer._finalize_job.call_args
+        # _finalize_job signature: (job, instance_id, status, error)
+        # The status argument must be "completed" so the parent job
+        # transitions PROCESSING → COMPLETED.
+        assert kwargs.get("status") == "completed" or (
+            len(_args) >= 3 and _args[2] == "completed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_retrigger_skipped_when_watchers_remain(self):
+        """R2: 2 watchers on same target → fire only 1 → finalize NOT called.
+
+        The gate is ``count_pending_for_target(target) == 0``. When one
+        watcher is still PENDING, the retrigger MUST skip — calling
+        ``_finalize_job`` prematurely would race the bus and risk
+        double-fire / premature completion (the bug class the gate
+        exists to prevent).
+        """
+        # Observer with a real-looking job so the helper would otherwise
+        # proceed — but the gate must skip it.
+        fake_job = MagicMock(name="JobItem")
+        fake_job.job_id = f"job-{uuid.uuid4().hex[:8]}"
+        observer = MagicMock(name="JobFeedbackObserver")
+        observer._get_processing_job_for_instance = AsyncMock(
+            return_value=fake_job
+        )
+        observer._finalize_job = AsyncMock(name="_finalize_job")
+
+        service = self._build_service_with_observer(observer)
+        target_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        bus = get_dependency_bus()
+        # Two watchers on different sources targeting the same parent.
+        await bus.watch("task-1", make_fu(target_id=target_id))
+        await bus.watch("task-2", make_fu(target_id=target_id))
+
+        # Fire only task-1 → 1 PENDING remains for target_id.
+        fired = await service._emit_terminal_via_bus(
+            task_id="task-1", status="completed"
+        )
+
+        assert len(fired) == 1
+        # CRITICAL: the gate must have blocked the retrigger — the other
+        # watcher is still PENDING.
+        observer._get_processing_job_for_instance.assert_not_called()
+        observer._finalize_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retrigger_skipped_when_job_already_terminal(self):
+        """R3: no PROCESSING job exists → _retrigger_parent_finalize no-ops.
+
+        The observer's ``_get_processing_job_for_instance`` returns
+        ``None`` (the job was already finalized or never existed).
+        ``_retrigger_parent_finalize`` MUST return cleanly without
+        raising — the helper is called from the post-commit dispatch
+        path where any propagated exception would surface as a job
+        error and re-trigger subsequent failures.
+        """
+        # Observer where the job lookup returns None (already terminal).
+        observer = MagicMock(name="JobFeedbackObserver")
+        observer._get_processing_job_for_instance = AsyncMock(return_value=None)
+        observer._finalize_job = AsyncMock(name="_finalize_job")
+
+        service = self._build_service_with_observer(observer)
+        target_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        bus = get_dependency_bus()
+        await bus.watch("task-1", make_fu(target_id=target_id))
+
+        # Should NOT raise — clean skip on None job.
+        fired = await service._emit_terminal_via_bus(
+            task_id="task-1", status="completed"
+        )
+
+        assert len(fired) == 1
+        observer._get_processing_job_for_instance.assert_awaited_once_with(
+            target_id
+        )
+        # The critical assertion: _finalize_job was NEVER called.
+        observer._finalize_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retrigger_helper_swallows_lookup_exception(self):
+        """E1 (review fix): ``_get_processing_job_for_instance`` raising
+        does NOT propagate out of ``_retrigger_parent_finalize``.
+
+        A transient DB error during the job lookup must be logged and
+        swallowed — the helper returns ``None`` semantically (we don't
+        know if there's a job to finalize), so the safe behavior is to
+        skip and let the next child completion retry. The previous
+        version of the helper would propagate the exception out to the
+        retrigger loop in ``_emit_terminal_via_bus`` and abort
+        re-triggering of all subsequent targets.
+        """
+        observer = MagicMock(name="JobFeedbackObserver")
+        observer._get_processing_job_for_instance = AsyncMock(
+            side_effect=RuntimeError("transient DB failure")
+        )
+        observer._finalize_job = AsyncMock(name="_finalize_job")
+
+        service = self._build_service_with_observer(observer)
+        target_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        # Should NOT raise — the helper swallows the lookup error.
+        await service._retrigger_parent_finalize(target_id)
+
+        # _finalize_job MUST NOT be called when the lookup failed.
+        observer._finalize_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retrigger_loop_continues_after_target_failure(self):
+        """E2 (review fix): a failure on one target's retrigger does not
+        abort re-triggering the remaining targets.
+
+        The outer ``for fu in fired`` loop in ``_emit_terminal_via_bus``
+        wraps ``_retrigger_parent_finalize`` in its own try/except. If
+        the inner helper were to raise (bug, unexpected error path),
+        the loop MUST continue to the next target — the enqueue above
+        already succeeded for all targets, so abandoning the rest would
+        strand multiple parents.
+        """
+        # Observer whose _finalize_job raises on the first target and
+        # succeeds on the second. _get_processing_job_for_instance
+        # always returns a fake job (so the helper proceeds to the
+        # _finalize_job call).
+        fake_job_a = MagicMock(name="JobItem-a")
+        fake_job_a.job_id = f"job-a-{uuid.uuid4().hex[:8]}"
+        fake_job_b = MagicMock(name="JobItem-b")
+        fake_job_b.job_id = f"job-b-{uuid.uuid4().hex[:8]}"
+
+        observer = MagicMock(name="JobFeedbackObserver")
+
+        async def lookup_job(instance_id: str):
+            return {"parent-A": fake_job_a, "parent-B": fake_job_b}[instance_id]
+
+        observer._get_processing_job_for_instance = AsyncMock(side_effect=lookup_job)
+
+        finalize_calls: list[str] = []
+
+        async def finalize(job, instance_id, status, error):
+            finalize_calls.append(instance_id)
+            if instance_id == "parent-A":
+                raise RuntimeError("simulated finalize failure")
+
+        observer._finalize_job = AsyncMock(side_effect=finalize)
+
+        service = self._build_service_with_observer(observer)
+        target_a = "parent-A"
+        target_b = "parent-B"
+
+        bus = get_dependency_bus()
+        # Two watchers on the SAME source task, each targeting a
+        # different parent. The bus fires both FollowUps atomically;
+        # the retrigger loop then visits each distinct target once.
+        await bus.watch("task-both", make_fu(target_id=target_a))
+        await bus.watch("task-both", make_fu(target_id=target_b))
+
+        # Fire the single source — both FollowUps come back in one
+        # call, so the retrigger loop hits both targets. The first
+        # target's finalize raises; the second must still run.
+        fired = await service._emit_terminal_via_bus(
+            task_id="task-both", status="completed"
+        )
+
+        assert len(fired) == 2
+        # CRITICAL: the second target's finalize was reached despite the
+        # first target's exception. Without the loop-level guard, the
+        # first exception would propagate and parent-B would stay
+        # PROCESSING forever (the inverse-regression bug).
+        assert finalize_calls == [target_a, target_b], (
+            f"Loop-level exception guard failed: expected both targets "
+            f"finalized, got {finalize_calls}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_retrigger_helper_noop_without_observer(self):
+        """R4 (graceful degradation): no observer wired → clean no-op.
+
+        In unit tests and during partial init, the manager may not have
+        ``_job_feedback_observer`` set yet. The helper must return
+        cleanly (logged at DEBUG) rather than raise AttributeError.
+        """
+        service = self._build_service_with_observer(observer=None)
+
+        # Must NOT raise.
+        await service._retrigger_parent_finalize("any-instance-id")

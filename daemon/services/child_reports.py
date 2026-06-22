@@ -17,6 +17,7 @@ from ..repositories.message_queue.models import MessageQueue, MessageStatus, Mes
 from ..repositories.job_queue.models import JobItem, JobStatus
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
+from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
 from ..registry import get_registry
 from ..write_pause_guard import WriteGuardSession
 from .main_loop_bridge import MainLoopBridge
@@ -128,6 +129,97 @@ class ChildReportsService:
             getattr(_job_system, "use_dependency_bus", False)
         )
 
+    def _bus_count_pending_for_target_sync(
+        self, target_instance_id: str
+    ) -> int:
+        """Sync helper: count PENDING watchers targeting ``target_instance_id`` in the bus.
+
+        **Fail-OPEN semantics (warning)**: this helper catches all
+        exceptions and returns ``0`` (treated as "no pending
+        watchers"). This is fail-OPEN — a transient DB failure
+        passes the gate and may allow premature completion.
+
+        **Caller contract**: only use this helper for **defense-in-
+        depth checks** that have a separate safety net (the in-
+        session bus gate inside ``WriteGuardSession``, a parent
+        ``cm.is_complete`` check, etc.). The **authoritative bus
+        gate** at the completion decision point must use the inline
+        COUNT query directly on the ``WriteGuardSession``'s session
+        object (see ``_process_child_completion_db_sync``), so the
+        COUNT and UPDATE share one transaction. The inline query
+        lets exceptions propagate to the caller's fail-safe path
+        instead of silently returning ``0``.
+
+        Kept for: (a) tests that exercise the bus counter path
+        directly without going through the completion gate, (b)
+        the early defense-in-depth check at line 1718 in
+        ``job_feedback_observer.py`` (which has its own in-session
+        gate as the authoritative decision point).
+
+        Used by the sync completion gate in
+        :meth:`_process_child_completion_db_sync` (which runs inside
+        ``WriteGuardSession`` on a worker thread — an ``await`` is
+        impossible there) to consult the bus under
+        ``use_dependency_bus=ON``. When the bus flag is ON, the CM's
+        in-memory pending set is starved (send_message skips
+        ``cm.register_message_send``), so the bus DB is the
+        authoritative source of pending-children truth. Without this
+        check, the root-instance completion gate falls through to
+        COMPLETED prematurely while children are still running —
+        the exact bug Phase D was designed to prevent.
+
+        Graceful-degradation semantics (matches the
+        ``get_correlation_manager() is not None`` guards elsewhere):
+        bus singleton missing or flag OFF → returns 0.
+
+        The implementation delegates to
+        :meth:`DependencyBus.count_pending_for_target_sync` which
+        wraps the sync repository's ``count_pending_for_target``
+        COUNT(*) query (dialect-portable — works on both SQLite
+        and PostgreSQL).
+
+        Args:
+            target_instance_id: The parent instance ID whose
+                PENDING watcher count is being queried.
+
+        Returns:
+            Non-negative integer count of PENDING watchers for
+            the given target. Returns 0 when the bus singleton is
+            not wired, the flag is OFF, or the DB query fails.
+        """
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        if bus is None:
+            return 0
+
+        # Mirror the W1-fix defensive flag check from the call
+        # sites in ``_emit_terminal_via_bus`` callers: the flag
+        # must be ON for the bus to be the source of truth. If the
+        # operator flipped the flag OFF mid-flight, treat the bus
+        # as inert (the CM path is the fallback).
+        if not self._is_dependency_bus_enabled():
+            return 0
+
+        try:
+            return bus.count_pending_for_target_sync(target_instance_id)
+        except Exception as e:
+            # FAIL-OPEN (see method docstring): a DB failure here
+            # returns 0 and PASSES the gate. Callers that use this
+            # helper at the completion decision point MUST have a
+            # separate safety net (typically the in-session bus
+            # gate inline query that shares a transaction with the
+            # UPDATE). Logged at warning level so persistent
+            # failures surface in observability without taking
+            # down the completion path.
+            logger.warning(
+                f"bus.count_pending_for_target_sync failed for "
+                f"{target_instance_id[:8]}...: {e} — treating as 0 "
+                f"(FAIL-OPEN: bus pending-children check skipped, "
+                f"may cause premature completion if persistent)"
+            )
+            return 0
+
     async def _emit_terminal_via_bus(
         self,
         task_id: int | None,
@@ -232,7 +324,163 @@ class ChildReportsService:
                     f"source_task={str(task_id)[:8]}...: {enq_err}"
                 )
 
+        # ─── Phase D re-trigger (inverse-regression fix) ──────────────
+        # After the bus fires watchers, check if each target (parent)
+        # has ALL watchers resolved (0 PENDING). If so, explicitly
+        # re-trigger _finalize_job via the JobFeedbackObserver.
+        #
+        # Why this is needed: on the bus path (use_dependency_bus=ON),
+        # the CM callback is starved — ``send_message`` skips
+        # ``cm.register_message_send``, so the CM never invokes
+        # ``handle_correlation_complete`` for wave-2 children. Without
+        # this re-trigger, the job stays PROCESSING forever (the
+        # inverse of the premature-completion bug the bus gate was
+        # added to prevent).
+        #
+        # Guarded by a ``_retriggered`` set so a parent that received
+        # multiple FollowUps from one terminal event is re-triggered
+        # at most once per call (avoids redundant observer work when
+        # N fired FollowUps all target the same parent).
+        _retriggered: set[str] = set()
+        for fu in fired:
+            target_id = fu.target_instance_id
+            if target_id in _retriggered:
+                continue
+            _retriggered.add(target_id)
+            try:
+                remaining = await bus.count_pending_for_target(target_id)
+            except Exception as e:
+                logger.warning(
+                    f"Bus re-trigger check failed for {target_id[:8]}...: {e}"
+                )
+                continue
+            if remaining == 0:
+                logger.info(
+                    f"Bus: all watchers fired for {target_id[:8]}... "
+                    f"(remaining PENDING=0), re-triggering finalize"
+                )
+                # Loop-level exception guard: even though
+                # ``_retrigger_parent_finalize`` now has internal
+                # try/except around its two DB calls, a defensive
+                # outer guard here ensures a bug or unexpected
+                # error path inside the helper cannot abort the
+                # iteration and skip re-triggering the remaining
+                # targets. The enqueue loop above already
+                # succeeded — the FollowUps are on each parent's
+                # queue — so a single retrigger failure is
+                # recoverable on the next child completion.
+                try:
+                    await self._retrigger_parent_finalize(target_id)
+                except Exception as retrigger_err:
+                    logger.warning(
+                        f"Bus re-trigger: unexpected error for "
+                        f"{target_id[:8]}...: {retrigger_err}"
+                    )
+
         return fired
+
+    async def _retrigger_parent_finalize(self, instance_id: str) -> None:
+        """Re-trigger job finalization for a parent after all bus watchers fired.
+
+        On the bus path (``use_dependency_bus=ON``), the CM callback never
+        re-fires because ``send_message`` skips ``cm.register_message_send``.
+        After the bus fires the last watcher, we must explicitly re-attempt
+        job finalization via the :class:`JobFeedbackObserver` so the job
+        transitions PROCESSING → COMPLETED and locks are released.
+
+        Safety properties:
+          * **No deadlock**: ``_emit_terminal_via_bus`` runs in post-commit
+            dispatch (after ``WriteGuardSession`` closed). The observer's
+            ``_finalize_job`` acquires the CM per-parent lock and opens its
+            own ``WriteGuardSession``. No shared transaction, no nested locks.
+          * **Idempotent**: ``_finalize_job_db_sync`` uses an atomic
+            ``WHERE status = PROCESSING`` guard. If the job was already
+            finalized by another path, ``rowcount=0`` and the helper
+            returns ``skip=True`` — no duplicate side effects.
+          * **Defense-in-depth**: ``getattr(manager, "_job_feedback_observer",
+            None)`` lets the helper degrade gracefully when the observer
+            has not been wired (unit tests, partial init). A missing
+            observer is logged at DEBUG, not WARN, because it is the
+            expected state for tests.
+
+        Args:
+            instance_id: The parent instance whose job may need to be
+                finalized. Resolved to its PROCESSING ``JobItem`` via
+                ``JobFeedbackObserver._get_processing_job_for_instance``.
+        """
+        observer = getattr(self._manager, "_job_feedback_observer", None)
+        if observer is None:
+            # Expected in unit tests where ChildReportsService is built
+            # against a bare MagicMock manager; the bus re-trigger is a
+            # no-op there. In production the observer is wired by
+            # ``daemon/api.py`` via ``InstanceManager.set_job_feedback_observer``.
+            logger.debug(
+                f"Bus re-trigger: no observer available for "
+                f"{instance_id[:8]}... (skipping — not wired in test?)"
+            )
+            return
+
+        # Find the PROCESSING job for this instance. Uses the same
+        # helper as ``handle_correlation_complete`` (job_feedback_observer
+        # line 551) so the stale-job defense-in-depth re-query is applied
+        # uniformly across both re-trigger paths.
+        #
+        # Exception-safety: the helper opens its own ``WriteGuardSession``
+        # and runs sync DB queries on a worker thread. A transient DB
+        # failure here would propagate out of ``_retrigger_parent_finalize``
+        # and break the retrigger loop in ``_emit_terminal_via_bus`` for
+        # all subsequent targets. Wrap so a single failure logs and
+        # returns cleanly — the next child completion (or a manual
+        # recovery sweep) can retry the finalization.
+        try:
+            job = await observer._get_processing_job_for_instance(instance_id)
+        except Exception as e:
+            logger.warning(
+                f"Bus re-trigger: job lookup failed for "
+                f"{instance_id[:8]}...: {e}"
+            )
+            return
+        if job is None:
+            # The job is already terminal or never existed — finalization
+            # is either already complete or irrelevant. Silent skip
+            # matches the behaviour of the CM callback when no
+            # PROCESSING job exists (see ``handle_correlation_complete``
+            # line 552-557).
+            logger.debug(
+                f"Bus re-trigger: no PROCESSING job for "
+                f"{instance_id[:8]}..., may already be finalized"
+            )
+            return
+
+        logger.info(
+            f"Bus re-trigger: calling _finalize_job for {instance_id[:8]}... "
+            f"(job={job.job_id[:8]}...)"
+        )
+        try:
+            # _finalize_job re-checks ALL gates (bus=0, CM empty,
+            # waiting_for=0) before transitioning. On the bus path the
+            # bus gate passes (0 PENDING), the CM gate passes (empty
+            # slot, is_complete=True — bus-path children never
+            # registered), and waiting_for passes (either decremented
+            # to 0 by ``_update_parent_on_child_complete`` or already 0
+            # when the bus flag is ON). Result: PROCESSING → COMPLETED,
+            # instance → COMPLETED, locks released.
+            await observer._finalize_job(
+                job,
+                instance_id,
+                InstanceStatus.COMPLETED.value,
+                error=None,
+            )
+        except Exception as e:
+            # Defensive guard: a single re-trigger failure must not
+            # crash the bus follow-up path (the enqueue loop above
+            # already succeeded — the FollowUps are on the parent's
+            # queue). The next child completion (or a manual recovery
+            # sweep) can retry the finalization.
+            logger.warning(
+                f"Bus re-trigger: _finalize_job failed for "
+                f"{instance_id[:8]}...: {e}"
+            )
 
     @property
     def _instance_repository(self) -> "SQLModelInstanceRepository":
@@ -1088,16 +1336,57 @@ Provide a concise summary:"""
         if last_content is None:
             logger.warning(f"No assistant content found for instance {instance_id[:8]}..., using empty content for completion check")
             last_content = "[No response content]"  # Proceed with empty content — state transition must still happen
-        
-        # Run the ENTIRE WriteGuardSession block on a worker thread so
-        # session.commit() cannot deadlock the event loop.
-        result = await asyncio.to_thread(
-            self._process_child_completion_db_sync,
-            instance_id,
-            completed_message_id,
-            last_content,
-        )
-        
+
+        # MAJOR A fix (re-arm safety net, 2026-06-22): wrap the
+        # ``asyncio.to_thread`` call in the CorrelationManager's
+        # per-parent ``asyncio.Lock`` when CM is wired. The lock is
+        # held on the EVENT LOOP for the entire duration of the
+        # worker-thread sync helper, blocking ``bus.watch()`` (which
+        # also acquires ``cm._get_lock(parent_id)`` after the C1 fix
+        # in ``dependency_bus.py``) from running on the loop and
+        # committing a new watcher row between the in-session bus
+        # gate inside the sync helper and the terminal status
+        # UPDATE that follows it.
+        #
+        # Why this works (no deadlock risk):
+        #   * ``asyncio.Lock`` is event-loop-bound — the worker
+        #     thread that ``asyncio.to_thread`` runs in NEVER
+        #     acquires it; it only runs the sync SQLAlchemy code
+        #     while the GIL is released during I/O.
+        #   * The lock serializes coroutines on the loop, not
+        #     threads.
+        #   * ``bus.watch()`` acquires CM lock (parent) → bus task
+        #     lock. We acquire CM lock only here. No cycle exists.
+        #   * WriteGuardSession is a Python-level counter, not a DB
+        #     lock — no interaction.
+        #
+        # When CM is None (legacy path / not initialized), no lock
+        # is acquired — the legacy ``waiting_for`` cascade is the
+        # only authority and there is no concurrent writer to race
+        # against on the in-memory CM pending set.
+        from .correlation_manager import get_correlation_manager as _get_cm_for_a_fix
+        cm = _get_cm_for_a_fix()
+        if cm is not None:
+            async with cm._get_lock(instance_id):
+                # Run the ENTIRE WriteGuardSession block on a
+                # worker thread so session.commit() cannot deadlock
+                # the event loop. The CM lock is held on the
+                # event loop for the duration — see the comment
+                # above.
+                result = await asyncio.to_thread(
+                    self._process_child_completion_db_sync,
+                    instance_id,
+                    completed_message_id,
+                    last_content,
+                )
+        else:
+            result = await asyncio.to_thread(
+                self._process_child_completion_db_sync,
+                instance_id,
+                completed_message_id,
+                last_content,
+            )
+
         # Dispatch post-commit side effects on the event loop.
         await self._dispatch_post_commit_side_effects(
             result, last_content, completed_message_id
@@ -1228,6 +1517,98 @@ Provide a concise summary:"""
                             agent_id=instance.agent_id,
                             parent_id=None,
                         )
+
+                # ─── Phase D bus gate (premature-completion fix) ───────────
+                # When ``use_dependency_bus=ON``, the CM is starved
+                # (``send_message`` skips ``cm.register_message_send``),
+                # so the two checks above (CM pending count + CM
+                # is_complete) both pass with "complete" even while
+                # children tracked via the bus are still running. The
+                # bus DB is the authoritative source of pending-
+                # children truth on the bus path — we MUST consult it
+                # here, before falling through to COMPLETED, or the
+                # root instance will be marked COMPLETED while a child
+                # is still working (the exact premature-completion
+                # bug Phase D was designed to prevent).
+                #
+                # C2 fix (TOCTOU hardening, 2026-06-22): inline the
+                # COUNT query directly on the WriteGuardSession's
+                # ``session`` object so the COUNT and the in-session
+                # status UPDATE below share the SAME transaction.
+                # The previous helper
+                # (``_bus_count_pending_for_target_sync``) opened its
+                # own short-lived Session via the bus repository,
+                # creating transaction A — while the UPDATE below
+                # commits in transaction B (the WriteGuardSession).
+                # A concurrent ``bus.watch()`` INSERT on a different
+                # connection could commit between A and B,
+                # re-opening the premature-completion window this
+                # gate exists to close. With the inline query, the
+                # COUNT and UPDATE are atomic at the DB level (on
+                # SQLite full write lock; on PostgreSQL READ
+                # COMMITTED within a single transaction).
+                #
+                # The query is the same dialect-portable COUNT(*)
+                # the helper uses, but executed on the existing
+                # ``session`` so it joins this transaction. No try/
+                # except — exceptions propagate to the existing
+                # W3 fail-safe path in the async caller
+                # (``_process_child_completion_and_notify_parent``).
+                # This is fail-CLOSED (a transient DB failure aborts
+                # the transition, not silently passes the gate).
+                #
+                # B fix (2026-06-22): the inline query must NOT
+                # catch exceptions — see MEDIUM B in the review.
+                # Catching and returning 0 would silently pass the
+                # gate, reintroducing the premature-completion bug
+                # on transient DB errors.
+                #
+                # The per-parent CM lock from Fix A (above the
+                # ``asyncio.to_thread`` call) serializes this gate
+                # against ``bus.watch()`` — a watch INSERT that
+                # commits inside the lock is guaranteed visible to
+                # the COUNT here, regardless of who wins the race.
+                #
+                # Defensive wiring check: only consult the bus when
+                # BOTH the flag is ON AND the bus singleton is
+                # wired. When the singleton is None (testing, missing
+                # init, config drift), the gate is dormant — same
+                # semantics as the original
+                # ``_bus_count_pending_for_target_sync`` helper
+                # before the C2 inline refactor. Without this guard,
+                # a test or config that leaves the flag ON without
+                # wiring the bus singleton would still execute the
+                # inline COUNT against an empty table — usually
+                # harmless (returns 0), but in degraded states
+                # (mock MagicMock truthiness, partial migrations) it
+                # could defer a completion that should proceed.
+                if self._is_dependency_bus_enabled():
+                    from .dependency_bus import get_dependency_bus as _get_bus
+                    if _get_bus() is not None:
+                        _bus_pending_stmt = (
+                            select(func.count())
+                            .select_from(DependencyWatcher)
+                            .where(DependencyWatcher.target_instance_id == instance_id)
+                            .where(
+                                DependencyWatcher.state
+                                == DependencyWatcherState.PENDING.value
+                            )
+                        )
+                        bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
+                        if bus_pending > 0:
+                            logger.info(
+                                f"Instance {instance_id[:8]}... CM says "
+                                f"complete but bus has {bus_pending} "
+                                f"PENDING watchers "
+                                f"(use_dependency_bus=ON), "
+                                f"deferring completion"
+                            )
+                            return _ChildCompletionDbResult(
+                                outcome="deferred_waiting_children",
+                                instance_id=instance_id,
+                                agent_id=instance.agent_id,
+                                parent_id=None,
+                            )
 
                 # waiting_for == 0, but check for pending messages before completing.
                 # This handles the case where child completion reports are still queued

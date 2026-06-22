@@ -1487,12 +1487,12 @@ class InstanceManager:
 
     def set_job_queue_service(self, service: Any) -> None:
         """Set the JobQueueService reference.
-        
+
         This is called by api.py after both SessionManager and JobQueueService
         are created during application startup. The service is also wired into
         the SourceRegistry so that SchedulerAdapter can route jobs through the
         job queue when project_id is configured.
-        
+
         Args:
             service: The JobQueueService instance to use for lock management.
         """
@@ -1502,6 +1502,31 @@ class InstanceManager:
             self.source_registry._job_queue_service = service
             logger.info("JobQueueService wired into SourceRegistry for scheduler routing")
         logger.info("JobQueueService connected to SessionManager")
+
+    def set_job_feedback_observer(self, observer: Any) -> None:
+        """Set the JobFeedbackObserver reference.
+
+        Wired by ``daemon/api.py`` during FastAPI lifespan startup, AFTER
+        the observer is constructed. The observer is the sole owner of
+        ``_finalize_job`` (the PROCESSING → COMPLETED/FAILED terminal
+        transition path).
+
+        Why the manager needs this: ``ChildReportsService`` runs as part
+        of the dependency-bus path. When ``use_dependency_bus=ON`` and the
+        bus fires the last watcher for a parent, the CM callback never
+        re-fires (bus-path children skip ``cm.register_message_send``),
+        so the bus must explicitly re-trigger ``_finalize_job`` via the
+        observer. ``ChildReportsService`` reaches the observer through
+        ``getattr(self._manager, "_job_feedback_observer", None)`` — a
+        defensive lookup that gracefully no-ops in unit tests where the
+        observer is not wired.
+
+        Args:
+            observer: The JobFeedbackObserver instance. Stored on
+                ``self._job_feedback_observer`` for service-level access.
+        """
+        self._job_feedback_observer = observer
+        logger.info("JobFeedbackObserver wired into InstanceManager")
 
     def set_job_queue_mgmt_service(self, service: Any) -> None:
         """Set the job queue management service.

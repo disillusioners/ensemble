@@ -294,66 +294,109 @@ class DependencyBus:
                 :meth:`FollowUp.to_payload` and stores the result
                 in the JSONB ``follow_up_payload`` column.
         """
-        # C2 fix (orphan race re-opened on bus path): bump the
-        # CorrelationManager's per-parent generation counter BEFORE
-        # acquiring the per-task lock. Phase A closed the orphan
-        # race via this generation counter (see correlation_manager.py
-        # L281 — ``register_message_send`` bumps ``_generation``
-        # BEFORE its per-parent lock, mirroring this exact pattern).
-        # ``_finalize_job`` reads ``pre_gen`` BEFORE acquiring the
-        # per-job lock and ``post_gen`` AFTER releasing it; if
-        # ``post_gen > pre_gen``, a register was in-flight and the
-        # job is re-armed (COMPLETED → PROCESSING) so a late child's
-        # resolve can find it.
+        # C1 fix — re-review hardening (2026-06-22): bump the CM
+        # generation counter OUTSIDE the per-parent
+        # ``asyncio.Lock``, then acquire the lock for the DB
+        # INSERT. The original C1 fix held the lock across BOTH
+        # the bump and the INSERT, which left a subtle TOCTOU
+        # window: when ``bus.watch()`` parks on the lock during
+        # ``_finalize_job``'s critical section, T1's synchronous
+        # post_gen read (immediately after lock release, before
+        # yielding) misses T2's bump → re-arm doesn't fire →
+        # orphan race re-opens.
         #
-        # When ``use_dependency_bus=ON``, ``send_message`` calls
-        # ``bus.watch()`` instead of ``cm.register_message_send()``,
-        # so the CM's bump never happens — and ``_finalize_job``
-        # reads ``cm.get_generation()`` which stays unchanged, so
-        # the orphan-race re-arm check fails to detect the late
-        # register. This bump closes the gap by performing the
-        # counter increment here, OUTSIDE the bus lock (the bump is
-        # a plain dict assignment — atomic in CPython, no lock
-        # needed) and exactly the same way the CM does it on the
-        # legacy path. The target is the parent (``follow_up.
-        # target_instance_id``) — the instance whose finalization
-        # the watcher is registered against.
+        # Bumping the counter BEFORE acquiring the lock is safe
+        # and matches ``CorrelationManager.register_message_send``'s
+        # pattern (see ``correlation_manager.py:265-281``). The
+        # bump is a plain dict assignment (atomic in CPython, no
+        # extra lock needed) and is visible to any reader that
+        # holds the per-parent lock. The lock is only needed to
+        # serialize the DB INSERT against the in-session bus gate
+        # inside ``_finalize_job``'s CM-locked critical section;
+        # the generation counter is a monotonic signal, not a
+        # critical section.
         #
-        # Wrapped in try/except because the CM may be unwired
-        # (testing, missing init) — a missing CM is non-fatal on
-        # the bus path; the re-arm just won't fire for this watch
-        # (same behavior as the pre-fix state, so the bus is no
-        # worse off). Logged at debug level to avoid log noise.
-        try:
-            from .correlation_manager import get_correlation_manager
-            cm = get_correlation_manager()
-            if cm is not None:
-                _parent_id = follow_up.target_instance_id
-                cm._generation[_parent_id] = (
-                    cm._generation.get(_parent_id, 0) + 1
-                )
-        except Exception as _gen_bump_err:
-            logger.debug(
-                f"bus watch: could not bump CM generation for "
-                f"target={follow_up.target_instance_id[:8]} "
-                f"(CM not wired): {_gen_bump_err}",
-                extra={"completion_delivery_path": "bus"},
-            )
+        # Race analysis with bump-outside-lock — three cases,
+        # all safe:
+        #   (a) T2 bumps and inserts BEFORE T1 reads pre_gen →
+        #       T1's in-session bus gate sees the row → defer. ✅
+        #   (b) T2 bumps BEFORE parking on the lock, then parks.
+        #       T1's post_gen read (after releasing the lock)
+        #       sees the bump → re-arm fires. ✅
+        #   (c) T2 starts AFTER T1 yields post-commit → T1's
+        #       post_gen read sees the bump → re-arm fires. ✅
+        # The bump-before-lock invariant is the key: T2's
+        # generation increment is always visible to T1's
+        # post_gen check, even when T2 is parked on the lock.
+        #
+        # Lock ordering: ``bus.watch()`` acquires CM lock (parent)
+        # → bus per-task lock. No existing path acquires the bus
+        # per-task lock first then the CM lock — ``emit_terminal``
+        # only takes the task lock, ``register_message_send`` and
+        # ``_finalize_job`` only take the CM lock. Verified safe:
+        # no cycle exists.
+        #
+        # Graceful degradation: when the CM is not wired (testing,
+        # missing init), the lock + bump are skipped and the
+        # INSERT runs without the safety net. This matches the
+        # pre-fix behaviour on that path — the re-arm just won't
+        # fire, but the bus INSERT still persists the watcher so
+        # the in-session bus gate sees it.
+        from .correlation_manager import get_correlation_manager
+        cm = get_correlation_manager()
+        _parent_id = follow_up.target_instance_id
+        payload = follow_up.to_payload()
+        watcher = DependencyWatcher(
+            source_task_id=source_task_id,
+            target_instance_id=follow_up.target_instance_id,
+            follow_up_payload=payload,
+        )
 
-        lock = await self._get_lock(source_task_id)
-        async with lock:
-            payload = follow_up.to_payload()
-            watcher = DependencyWatcher(
-                source_task_id=source_task_id,
-                target_instance_id=follow_up.target_instance_id,
-                follow_up_payload=payload,
+        if cm is not None:
+            # Bump the generation counter OUTSIDE the per-parent
+            # lock. The bump is a plain dict assignment — atomic in
+            # CPython — and must be visible to a concurrent
+            # ``_finalize_job`` that holds the CM lock and reads
+            # ``pre_gen`` after release. This matches
+            # ``CorrelationManager.register_message_send``'s pattern
+            # (see ``correlation_manager.py:265-281``). The lock is
+            # only held for the DB INSERT below; the generation
+            # counter is a monotonic signal, not a critical section.
+            cm._generation[_parent_id] = (
+                cm._generation.get(_parent_id, 0) + 1
             )
+            async with cm._get_lock(_parent_id):
+                # CM is wired — INSERT under the per-parent lock.
+                # The lock is held on the event loop for the
+                # duration of the ``asyncio.to_thread`` INSERT,
+                # which is the same pattern
+                # ``job_feedback_observer._finalize_job`` uses.
+                # Worker threads do not acquire the lock
+                # (asyncio.Lock is event-loop-bound); they only
+                # run the sync SQLAlchemy INSERT while the GIL is
+                # released during I/O.
+                await asyncio.to_thread(self._repo.insert, watcher)
+        else:
+            # CM not wired — INSERT without the lock. Same
+            # graceful-degradation semantics as the pre-C1-fix
+            # state.
             await asyncio.to_thread(self._repo.insert, watcher)
 
-            # Update cache. Append, don't replace — multiple watches
-            # on the same source_task_id (siblings watching the same
-            # child) all land here and all must be returned by
-            # :meth:`pending_watchers`.
+        # Per-source-task lock — protects the in-memory cache from
+        # concurrent ``watch`` / ``emit_terminal`` races for the
+        # same ``source_task_id``. The DB INSERT above already
+        # committed (under the CM lock or the fallback no-lock
+        # path); the cache update is independent of the DB and
+        # only needs to serialize against ``emit_terminal`` (which
+        # removes the cache entry for this task_id on terminal
+        # emit). Keeping the cache update inside the task lock
+        # preserves the original cache-isolation contract.
+        lock = await self._get_lock(source_task_id)
+        async with lock:
+            # Update cache. Append, don't replace — multiple
+            # watches on the same source_task_id (siblings
+            # watching the same child) all land here and all must
+            # be returned by :meth:`pending_watchers`.
             if source_task_id not in self._pending:
                 self._pending[source_task_id] = []
             self._pending[source_task_id].append(follow_up)
@@ -530,6 +573,59 @@ class DependencyBus:
             self._repo.fetch_pending_for_source, source_task_id
         )
         return [FollowUp.from_payload(r.follow_up_payload) for r in rows]
+
+    async def count_pending_for_target(
+        self, target_instance_id: str
+    ) -> int:
+        """Async wrapper around the repo's ``count_pending_for_target``.
+
+        Used by async callers (e.g. async completion handlers that
+        need to check whether a parent is still waiting on children
+        tracked via the bus). The DB call is wrapped in
+        ``asyncio.to_thread`` to avoid blocking the event loop,
+        matching the project's standard pattern (same as
+        :meth:`pending_watchers`).
+
+        Args:
+            target_instance_id: The parent instance id to query.
+
+        Returns:
+            Non-negative integer count of PENDING watchers for the
+            given target instance.
+        """
+        return await asyncio.to_thread(
+            self._repo.count_pending_for_target, target_instance_id
+        )
+
+    def count_pending_for_target_sync(
+        self, target_instance_id: str
+    ) -> int:
+        """Sync variant of :meth:`count_pending_for_target`.
+
+        For sync callers — gates running inside ``asyncio.to_thread``
+        worker threads (e.g.
+        ``child_reports._process_child_completion_db_sync`` and
+        ``job_feedback_observer._finalize_job_db_sync``) where an
+        ``await`` is impossible. The completion gate is the critical
+        reader of pending-children state under Phase D; without
+        consulting the bus under ``use_dependency_bus=ON``, the
+        root-instance completion gate falls through to COMPLETED
+        prematurely because the CM is starved.
+
+        Mirrors :class:`CorrelationManager`'s sync/async split
+        (e.g. ``get_pending_count`` is sync, ``is_complete`` has
+        both variants): the bus exposes an async primary API and a
+        sync convenience API for the rare caller inside a worker
+        thread.
+
+        Args:
+            target_instance_id: The parent instance id to query.
+
+        Returns:
+            Non-negative integer count of PENDING watchers for the
+            given target instance.
+        """
+        return self._repo.count_pending_for_target(target_instance_id)
 
     async def cancel_for_target(self, target_instance_id: str) -> int:
         """Cancel all PENDING watchers targeting ``target_instance_id``.

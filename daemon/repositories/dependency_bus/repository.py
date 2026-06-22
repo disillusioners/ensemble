@@ -51,7 +51,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import update as sa_update
+from sqlalchemy import func, update as sa_update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -193,6 +193,54 @@ class DependencyWatcherRepository:
                 .where(DependencyWatcher.state == _PENDING_STATE)
             )
             return list(session.exec(stmt))
+
+    def count_pending_for_target(self, target_instance_id: str) -> int:
+        """Return the PENDING watcher COUNT for a given parent instance id.
+
+        Cheap hot-path query used by completion gates
+        (``child_reports._process_child_completion_db_sync`` and
+        ``job_feedback_observer._finalize_job_db_sync``) to decide
+        whether a parent instance is still waiting on children under
+        the ``use_dependency_bus=ON`` path. When Phase D is active,
+        the CM's in-memory pending set is starved (send_message
+        skips ``cm.register_message_send``), so the bus DB is the
+        authoritative source of pending-children truth — and these
+        gates MUST consult it to avoid premature completion.
+
+        Returns 0 when no PENDING watchers exist (the common case
+        for completed parents). Uses ``func.count()`` which is
+        dialect-portable across SQLite and PostgreSQL — no
+        SQL-syntax branches needed.
+
+        Implementation note: ``session.scalar()`` is preferred over
+        ``session.exec(stmt).scalar_one()`` here because for a
+        single-column scalar select (``select(func.count())``),
+        ``session.exec`` returns a ``ScalarResult`` (not a
+        ``Result``) on SQLAlchemy ≥ 2.0 — and ``ScalarResult`` has
+        no ``scalar_one`` method. ``session.scalar()`` short-
+        circuits to the underlying scalar value cleanly across
+        SQLAlchemy versions, matching how the project uses
+        ``session.exec(select(func.count()))`` elsewhere.
+
+        Args:
+            target_instance_id: The parent instance id whose
+                PENDING watcher count is being computed.
+
+        Returns:
+            Integer count of PENDING :class:`DependencyWatcher`
+            rows for the given target instance. Always a non-negative
+            int (0 when no rows match).
+        """
+        with Session(self.engine) as session:
+            stmt = (
+                select(func.count())
+                .select_from(DependencyWatcher)
+                .where(
+                    DependencyWatcher.target_instance_id == target_instance_id
+                )
+                .where(DependencyWatcher.state == _PENDING_STATE)
+            )
+            return int(session.scalar(stmt) or 0)
 
     # --------------------------------------------------------
     # STATE TRANSITION (atomic backpressure primitive)
