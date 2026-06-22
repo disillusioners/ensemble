@@ -106,53 +106,90 @@ class MockInstanceMeta:
         self.waiting_for = waiting_for
 
 
-def _make_manager(gate: MagicMock) -> InstanceManager:
+@pytest.fixture
+def _make_manager():
     """Build a minimally-mocked ``InstanceManager`` for exercising
     ``_resume_processing_background`` directly.
 
-    Only the attributes / methods the resume path actually touches
-    are wired up. Anything else on the manager is the default
-    ``MagicMock`` created by ``__new__`` + manual attribute setting.
+    Yields a factory ``factory(gate) -> InstanceManager``. Only the
+    attributes / methods the resume path actually touches are wired up.
+    Anything else on the manager is the default ``MagicMock`` created
+    by ``__new__`` + manual attribute setting.
+
+    Phase 3: the ``use_legacy_waiting_for_cascade`` flag was removed.
+    The resume path now expects CM to be initialized; if it isn't, the
+    A9 hard error fires per ADR-011. We patch
+    ``daemon.manager.get_correlation_manager`` — the binding imported
+    into manager.py's namespace (``from .services.correlation_manager
+    import get_correlation_manager`` at line 62). Patching the source
+    module alone is insufficient due to Python's ``from X import Y``
+    binding semantics; the lookup in ``_resume_processing_background``
+    resolves to the manager.py binding. The patch is scoped to the
+    test via the fixture's teardown.
     """
-    job_queue_service = MagicMock()
-    job_queue_service.complete_job = AsyncMock()
+    patchers: list = []
 
-    instance_repository = MagicMock()
-    instance_repository.update_instance = MagicMock()
-    # Default: instance is RUNNING with no pending children. The
-    # resume path's ``waiting_for > 0`` check would raise TypeError
-    # on a bare MagicMock; the real-looking object avoids that.
-    instance_repository.get = MagicMock(return_value=MockInstanceMeta())
+    def _factory(gate: MagicMock) -> InstanceManager:
+        job_queue_service = MagicMock()
+        job_queue_service.complete_job = AsyncMock()
 
-    # Real CancellationTokenSource so we can verify the token
-    # threaded through ``_process_message_with_tracking`` is the
-    # same instance the registry returned. ``register`` returns the
-    # source; ``unregister`` is a no-op mock.
-    request_registry = MagicMock()
-    request_registry.register = MagicMock(
-        return_value=CancellationTokenSource()
-    )
-    request_registry.unregister = MagicMock()
+        instance_repository = MagicMock()
+        instance_repository.update_instance = MagicMock()
+        # Default: instance is RUNNING with no pending children. The
+        # resume path's ``waiting_for > 0`` check would raise TypeError
+        # on a bare MagicMock; the real-looking object avoids that.
+        instance_repository.get = MagicMock(return_value=MockInstanceMeta())
 
-    manager = InstanceManager.__new__(InstanceManager)
-    manager._job_queue_service = job_queue_service
-    manager._instance_repository = instance_repository
-    manager._execution_gate = gate
-    manager._request_registry = request_registry
-    manager._process_message_with_tracking = AsyncMock(
-        return_value=MockMessageResult()
-    )
-    manager._process_child_completion_and_notify_parent = AsyncMock()
-    manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
-    manager._graph_tasks = {}
-    # Phase 3: the ``use_legacy_waiting_for_cascade`` flag was removed.
-    # The resume path now expects CM to be initialized; if it isn't, the
-    # A9 hard error fires per ADR-011. The test exercises the resume
-    # path's gate-wrapping logic, not the completion cascade — so we
-    # wire a minimal ``config`` mock for any config-shaped API surface.
-    manager.config = MagicMock()
-    manager.config.job_system = MagicMock()
-    return manager
+        # Real CancellationTokenSource so we can verify the token
+        # threaded through ``_process_message_with_tracking`` is the
+        # same instance the registry returned. ``register`` returns the
+        # source; ``unregister`` is a no-op mock.
+        request_registry = MagicMock()
+        request_registry.register = MagicMock(
+            return_value=CancellationTokenSource()
+        )
+        request_registry.unregister = MagicMock()
+
+        manager = InstanceManager.__new__(InstanceManager)
+        manager._job_queue_service = job_queue_service
+        manager._instance_repository = instance_repository
+        manager._execution_gate = gate
+        manager._request_registry = request_registry
+        manager._process_message_with_tracking = AsyncMock(
+            return_value=MockMessageResult()
+        )
+        manager._process_child_completion_and_notify_parent = AsyncMock()
+        manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
+        manager._graph_tasks = {}
+        # Minimal ``config`` mock for any config-shaped API surface
+        # the resume path may touch (currently none, but defensive).
+        manager.config = MagicMock()
+        manager.config.job_system = MagicMock()
+
+        # Phase 3: wire CM mock so the A9 hard-error at
+        # ``daemon/manager.py:2913`` does not fire when the resume
+        # path checks ``cm is not None``. The CM mock reports 0
+        # pending children for any instance so the resume path
+        # proceeds to job completion.
+        cm_mock = MagicMock()
+        cm_mock.get_pending_count = lambda iid: 0
+        cm_patcher = patch(
+            "daemon.manager.get_correlation_manager",
+            return_value=cm_mock,
+        )
+        cm_patcher.start()
+        patchers.append(cm_patcher)
+        manager._cm_mock = cm_mock
+        return manager
+
+    yield _factory
+
+    # Teardown: stop all patchers started during the test
+    for p in patchers:
+        try:
+            p.stop()
+        except RuntimeError:
+            pass
 
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
@@ -162,7 +199,7 @@ class TestResumeGateWrapping:
     """Verify the resume path goes through ``_execution_gate.run``."""
 
     @pytest.mark.asyncio
-    async def test_happy_path_acquires_gate_and_completes_job(self):
+    async def test_happy_path_acquires_gate_and_completes_job(self, _make_manager):
         """When the gate is free, resume acquires it and runs to completion.
 
         Verifies:
@@ -205,7 +242,7 @@ class TestResumeGateWrapping:
         manager._instance_repository.update_instance.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_gate_uses_message_job_kind_not_resume(self):
+    async def test_gate_uses_message_job_kind_not_resume(self, _make_manager):
         """The resume path uses ``holder_kind="message_job"`` — the
         production resume implementation does not introduce a new
         holder-kind value. This test pins that choice so a future
@@ -230,7 +267,7 @@ class TestResumeGateWrapping:
         assert kwargs["holder_id"].startswith("resume:")
 
     @pytest.mark.asyncio
-    async def test_other_exception_inside_gate_propagates_to_error_handler(self):
+    async def test_other_exception_inside_gate_propagates_to_error_handler(self, _make_manager):
         """If the gate raises an exception that is NOT a gate-specific
         error, it must propagate to the existing error handler (job
         FAILED, instance ERROR). The race-fix should not break the
@@ -278,7 +315,7 @@ class TestResumeCleanupAndCancellation:
     """
 
     @pytest.mark.asyncio
-    async def test_graph_tasks_entry_popped_on_happy_path(self):
+    async def test_graph_tasks_entry_popped_on_happy_path(self, _make_manager):
         """W3: cleanup also runs on the happy path (lease free, resume
         completes successfully). The pre-existing tests verify the
         processing logic but did not pin this — the outer call
@@ -302,7 +339,7 @@ class TestResumeCleanupAndCancellation:
         assert "inst-cleanup-happy" not in manager._graph_tasks
 
     @pytest.mark.asyncio
-    async def test_cancellation_token_passed_to_process_message_with_tracking(self):
+    async def test_cancellation_token_passed_to_process_message_with_tracking(self, _make_manager):
         """W4: a ``CancellationToken`` passed to
         ``_resume_processing_background`` is propagated by identity to
         ``_process_message_with_tracking`` so the LLM streaming
@@ -346,7 +383,7 @@ class TestResumeCleanupAndCancellation:
         assert kwargs["cancellation_token"] is token
 
     @pytest.mark.asyncio
-    async def test_cancellation_token_default_is_none(self):
+    async def test_cancellation_token_default_is_none(self, _make_manager):
         """W4: when ``_resume_processing_background`` is called
         without a token (legacy callers that have not been migrated),
         ``_process_message_with_tracking`` receives ``None``. The
@@ -378,7 +415,7 @@ class TestResumeCleanupAndCancellation:
         assert kwargs["cancellation_token"] is None
 
     @pytest.mark.asyncio
-    async def test_request_registry_unregister_called_in_finally(self):
+    async def test_request_registry_unregister_called_in_finally(self, _make_manager):
         """W4: the outermost finally block calls
         ``_request_registry.unregister(message_id)`` so the CTS that
         ``resume_processing_job`` registered is released. This test

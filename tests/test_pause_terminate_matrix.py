@@ -233,21 +233,6 @@ def _make_mock_job_repo(active_message_jobs: list | None = None):
     return repo
 
 
-def _disable_cm():
-    """Context-manager patch that makes ``get_correlation_manager`` return None.
-
-    With CM ``None`` and the legacy ``waiting_for`` SQL fallback removed
-    in Phase 3, the JQ path's ``on_success`` callback now follows the
-    A9 hard-error path (CM must be initialized) per ADR-011. This
-    helper is kept as a hook for future tests that need to exercise
-    the ``cm is None`` invariant.
-    """
-    return patch(
-        "daemon.services.correlation_manager.get_correlation_manager",
-        side_effect=RuntimeError("CM not initialized in test"),
-    )
-
-
 # ===========================================================================
 # Group 2: ProcessMessageProcessor (WorkerPool path) — 10 tests
 # ===========================================================================

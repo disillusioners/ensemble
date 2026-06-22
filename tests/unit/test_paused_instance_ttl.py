@@ -690,12 +690,10 @@ class TestPausedAtField:
             tree_ids,
             paused_at_iso,
             paused_instances_data,
-            use_legacy_cascade: bool = False,
         ):
             captured["pause_calls"].append(
                 {"tree_ids": list(tree_ids), "paused_at_iso": paused_at_iso,
-                 "paused_instances_data": list(paused_instances_data),
-                 "use_legacy_cascade": use_legacy_cascade}
+                 "paused_instances_data": list(paused_instances_data)}
             )
             return _CascadeUpdateResult(
                 updated_ids=[iid for iid, _a, _w in paused_instances_data],
