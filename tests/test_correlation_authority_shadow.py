@@ -584,7 +584,6 @@ class TestWaitingForCMConsistency:
 
     These tests use a mock instance_repo that always reports the CM's pending
     count as ``waiting_for`` — simulating the in-sync state after A6 migration.
-    They also test the ``DEBUG_COMPLETION_INVARIANT`` check fires correctly.
     """
 
     @pytest.mark.asyncio
@@ -664,59 +663,3 @@ class TestWaitingForCMConsistency:
         assert cm_count == 2
         assert cm_count == waiting_for["count"]
         assert cm.is_complete(parent_id) is False
-
-    @pytest.mark.asyncio
-    async def test_debug_invariant_fires_on_mismatch(self, caplog: pytest.LogCaptureFixture):
-        """``DEBUG_COMPLETION_INVARIANT`` fires a structured WARNING when
-        CM's pending count disagrees with the DB ``waiting_for``."""
-        parent_id = "parent-invariant-1"
-        child_id = "child-1"
-        msg = str(uuid.uuid4())
-
-        # Mock instance repo that reports waiting_for=99 (mismatch with CM's 1).
-        instance_repo = make_instance_repo(
-            instance_by_id={
-                parent_id: make_instance(parent_id, waiting_for=99)
-            }
-        )
-        cm = make_cm(instance_repo=instance_repo)
-        cm._debug_invariant_enabled = True  # Enable the invariant check.
-
-        caplog.set_level(logging.WARNING)
-        await cm.register_message_send(parent_id, child_id, msg)
-
-        # CM has 1 pending, DB says 99 — mismatch must be logged.
-        mismatch_logs = [
-            r for r in caplog.records
-            if r.levelno >= logging.WARNING
-            and "CM_WAITING_FOR_DIVERGENCE" in r.message
-        ]
-        assert len(mismatch_logs) >= 1
-        assert "cm_pending_count=1" in mismatch_logs[0].message
-        assert "db_waiting_for=99" in mismatch_logs[0].message
-
-    @pytest.mark.asyncio
-    async def test_debug_invariant_silent_on_match(self, caplog: pytest.LogCaptureFixture):
-        """``DEBUG_COMPLETION_INVARIANT`` produces no warning when CM and DB agree."""
-        parent_id = "parent-match-1"
-        child_id = "child-1"
-        msg = str(uuid.uuid4())
-
-        # Mock instance repo that reports the same count as CM.
-        instance_repo = make_instance_repo(
-            instance_by_id={
-                parent_id: make_instance(parent_id, waiting_for=1)
-            }
-        )
-        cm = make_cm(instance_repo=instance_repo)
-        cm._debug_invariant_enabled = True
-
-        caplog.set_level(logging.WARNING)
-        await cm.register_message_send(parent_id, child_id, msg)
-
-        # CM has 1, DB has 1 — no mismatch logged.
-        mismatch_logs = [
-            r for r in caplog.records
-            if "CM_WAITING_FOR_DIVERGENCE" in r.message
-        ]
-        assert mismatch_logs == []

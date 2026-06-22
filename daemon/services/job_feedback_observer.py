@@ -1780,50 +1780,31 @@ class JobFeedbackObserver:
             Session(self._instance_manager.engine),
             self._instance_manager.write_guard,
         ) as session:
-            # ─── In-session waiting_for gate (premature-completion fix) ───
+            # ─── In-session completion gate (premature-completion fix) ───
             # The CM tracks per-message-batch correlations. When its pending
             # set reaches zero it fires the callback — but ``send_message``
             # increments ``waiting_for`` BEFORE registering the CM
             # correlation, creating a window where ``waiting_for > 0`` and
             # ``cm_pending == 0`` simultaneously.
             #
-            # ─── USE_LEGACY_WAITING_FOR_CASCADE flag (A7, 2026-06-20) ───────
-            # When OFF (default), ``waiting_for`` is NOT incremented by
-            # ``send_message`` (A5) and the register-before/increment-after
+            # A5 (Phase 3): ``waiting_for`` is NO LONGER incremented by
+            # ``send_message`` — the register-before/increment-after
             # window is structurally closed. A12 register-window proof
-            # tests (23/23) confirm it is safe to replace the FOR UPDATE
-            # row-lock gate with a CM ``is_complete()`` check here — the
-            # CM is authoritative and there is no concurrent writer to
-            # race against. The FOR UPDATE row lock was defence-in-depth
-            # against the now-closed window.
+            # tests (23/23) confirm it is safe to replace the legacy
+            # ``SELECT waiting_for ... FOR UPDATE`` row-lock gate with a
+            # CM ``is_complete()`` check here. The CM is authoritative
+            # and there is no concurrent writer to race against. The
+            # FOR UPDATE row lock was defence-in-depth against the
+            # now-closed window and was removed with the
+            # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
             #
-            # When ON (kill switch / rollback), the legacy M0 path runs
-            # unchanged — ``SELECT ... FOR UPDATE`` takes a pessimistic
-            # row-level lock (READ COMMITTED isolation) to close the
-            # TOCTOU window between the ``waiting_for`` read and the
-            # finalization UPDATE below. WriteGuardSession is a
-            # Python-level write-pause counter, NOT a database-level
-            # lock — on row-lock-supporting dialects another thread
-            # could commit ``waiting_for=1`` between a non-locking read
-            # and the subsequent UPDATE, re-opening the TOCTOU window
-            # this gate exists to close. ``FOR UPDATE`` blocks
-            # concurrent writers on this row until our transaction
-            # commits or rolls back, eliminating the race.
-            #
-            # C1 fix (TOCTOU hardening, legacy path only): on
+            # C1 fix (TOCTOU hardening, bus path): on
             # row-lock-supporting dialects (PostgreSQL, MySQL InnoDB,
-            # MariaDB), ``SELECT ... FOR UPDATE`` takes a pessimistic
-            # row-level lock (READ COMMITTED isolation).
-            #
-            # SQLite has NO ``FOR UPDATE`` syntax — the raw keyword
-            # triggers ``sqlite3.OperationalError: near "FOR": syntax
-            # error``. SQLite relies on its global database-level write
-            # lock for serialisation; row-level locking is meaningless
-            # there. We therefore branch on dialect and emit ``FOR
-            # UPDATE`` on PostgreSQL, MySQL, and MariaDB (matching the
-            # pattern used in ``SQLModelInstanceRepository.delete_by_project``,
-            # ``ExecutionLeaseRepository.try_acquire``, and
-            # ``SQLModelProjectRepository.delete``).
+            # MariaDB), the inline ``SELECT COUNT(*)`` from
+            # ``dependency_watchers`` runs in the SAME transaction as
+            # the in-session UPDATE below — atomic at the DB level
+            # (SQLite full write lock; PostgreSQL READ COMMITTED within
+            # one transaction).
             #
             # If the orchestrator still has active children, defer
             # finalization for BOTH the job and the instance — they stay
@@ -1836,41 +1817,129 @@ class JobFeedbackObserver:
             # arrive before their registers (e.g. via ``job_continue`` /
             # ``watch_job``) still find the parent — C2-PartA fix.
             #
-            # ─── Flag OFF (default): CM is authoritative, no FOR UPDATE ──
+            # ─── CM path: when CM says NOT complete, defer finalization ───
             # CM ``is_complete()`` is sync-safe — reads ``_pending`` dict
             # under GIL protection (no asyncio.Lock taken, safe to call
             # from the worker thread that ``asyncio.to_thread`` runs us
-            # in). Under flag OFF the legacy ``waiting_for`` writer is
-            # disabled (A5), so there is no concurrent writer to race
+            # in). The legacy ``waiting_for`` writer was removed in
+            # Phase 3 (A5), so there is no concurrent writer to race
             # against and the row lock would be pure overhead.
-            use_legacy_cascade = bool(
-                self._config.use_legacy_waiting_for_cascade
-            ) if self._config is not None else False
-
-            if not use_legacy_cascade:
-                # CM path: when CM says NOT complete, defer finalization.
-                # CM is the SOLE completion authority under flag OFF; if
-                # it still tracks pending work for this parent, the
-                # children are still running and we must wait.
-                cm_gate = get_correlation_manager()
-                if cm_gate is None:
-                    # CM unavailable under flag OFF is a hard error per
-                    # ADR-011 — the CM is authoritative and there is no
-                    # fallback path. Deferring here would wedge the job.
-                    raise RuntimeError(
-                        f"USE_LEGACY_WAITING_FOR_CASCADE=OFF but "
-                        f"CorrelationManager is not initialised — "
-                        f"cannot gate finalization for "
-                        f"{instance_id[:8]}... (CM is authoritative "
-                        f"under flag OFF, see ADR-011)"
+            cm_gate = get_correlation_manager()
+            if cm_gate is None:
+                # CM unavailable is a hard error per ADR-011 — the CM
+                # is authoritative and there is no fallback path.
+                # Deferring here would wedge the job.
+                raise RuntimeError(
+                    f"CorrelationManager is not initialised — "
+                    f"cannot gate finalization for "
+                    f"{instance_id[:8]}... (CM is authoritative, "
+                    f"see ADR-011)"
+                )
+            if not cm_gate.is_complete(instance_id):
+                _cm_pending_gate = cm_gate.get_pending_count(instance_id)
+                logger.info(
+                    f"Observer: aborting terminal transition for "
+                    f"{instance_id[:8]}... — CM pending="
+                    f"{_cm_pending_gate} > 0 (orchestrator has active "
+                    f"children, deferring finalization)"
+                )
+                return _FinalizeJobResult(
+                    skip=True,
+                    terminal_status=None,
+                    job_id=None,
+                    instance_id=None,
+                    parent_id=None,
+                    agent_id=None,
+                    result_summary=None,
+                    error_message=None,
+                    locks_released=0,
+                    instance_was_terminal=False,
+                    gate_deferred=True,
+                )
+            # ─── Phase D bus gate (in-session) ───────────────────────
+            # When ``use_dependency_bus=ON``, the CM is starved
+            # (``send_message`` skips ``cm.register_message_send``)
+            # so ``cm_gate.is_complete()`` above returns True even
+            # while children tracked via the bus are still running.
+            # The bus DB is the authoritative source of pending-
+            # children truth on the bus path — we MUST consult it
+            # here, INSIDE the WriteGuardSession immediately before
+            # the in-session UPDATE, to prevent premature
+            # finalization. Same query and semantics as the early
+            # C1 re-check above (TOCTOU hardening: this is the
+            # authoritative gate; the early re-check is a
+            # defense-in-depth that catches races between the
+            # pre-fetch and the WriteGuardSession).
+            #
+            # C2 fix (TOCTOU hardening, 2026-06-22): inline the
+            # COUNT query directly on the WriteGuardSession's
+            # ``session`` object so the COUNT and the in-session
+            # UPDATE share the SAME transaction. The previous
+            # helper opened its own short-lived Session via the
+            # bus repository, creating transaction A — while
+            # the UPDATE below commits in transaction B (the
+            # WriteGuardSession). A concurrent ``bus.watch()``
+            # INSERT on a different connection could commit
+            # between A and B, re-opening the premature-
+            # finalization window this gate exists to close.
+            # With the inline query, the COUNT and UPDATE are
+            # atomic at the DB level (SQLite full write lock;
+            # PostgreSQL READ COMMITTED within one transaction).
+            #
+            # B fix (2026-06-22): the inline query must NOT
+            # catch exceptions — see MEDIUM B in the review.
+            # Catching and returning 0 would silently pass the
+            # gate, reintroducing the premature-finalization
+            # bug on transient DB errors. Exceptions propagate
+            # to the existing W3 fail-safe path in
+            # ``_finalize_job``.
+            #
+            # The per-parent CM lock acquired in ``_finalize_job``
+            # (the async caller) serializes this gate against
+            # ``bus.watch()`` — a watch INSERT that commits
+            # inside the lock is guaranteed visible to the COUNT
+            # here, regardless of who wins the race.
+            #
+            # Defensive wiring check: only consult the bus when
+            # BOTH the flag is ON AND the bus singleton is
+            # wired. Mirrors the original
+            # ``_bus_count_pending_for_target_sync`` helper
+            # semantics — when the singleton is None (testing,
+            # missing init, config drift), the gate is dormant
+            # so we don't defer a finalization that should
+            # proceed. Without this guard, a config that leaves
+            # the flag ON without wiring the bus singleton
+            # would still execute the inline COUNT against an
+            # empty table — usually harmless, but in degraded
+            # states (mock MagicMock truthiness, partial
+            # migrations) it could defer a finalization that
+            # should proceed.
+            from daemon.services.dependency_bus import (
+                get_dependency_bus as _get_bus_for_gate,
+            )
+            if (
+                self._is_dependency_bus_enabled()
+                and _get_bus_for_gate() is not None
+            ):
+                _bus_pending_stmt = (
+                    select(func.count())
+                    .select_from(DependencyWatcher)
+                    .where(
+                        DependencyWatcher.target_instance_id == instance_id
                     )
-                if not cm_gate.is_complete(instance_id):
-                    _cm_pending_gate = cm_gate.get_pending_count(instance_id)
+                    .where(
+                        DependencyWatcher.state
+                        == DependencyWatcherState.PENDING.value
+                    )
+                )
+                _bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
+                if _bus_pending > 0:
                     logger.info(
                         f"Observer: aborting terminal transition for "
-                        f"{instance_id[:8]}... — CM pending="
-                        f"{_cm_pending_gate} > 0 (orchestrator has active "
-                        f"children, deferring finalization)"
+                        f"{instance_id[:8]}... — CM says complete but "
+                        f"bus has {_bus_pending} PENDING watchers "
+                        f"(use_dependency_bus=ON, in-session gate), "
+                        f"deferring finalization"
                     )
                     return _FinalizeJobResult(
                         skip=True,
@@ -1885,230 +1954,12 @@ class JobFeedbackObserver:
                         instance_was_terminal=False,
                         gate_deferred=True,
                     )
-                # ─── Phase D bus gate (in-session) ─────────────────
-                # When ``use_dependency_bus=ON``, the CM is starved
-                # (``send_message`` skips ``cm.register_message_send``)
-                # so ``cm_gate.is_complete()`` above returns True even
-                # while children tracked via the bus are still running.
-                # The bus DB is the authoritative source of pending-
-                # children truth on the bus path — we MUST consult it
-                # here, INSIDE the WriteGuardSession immediately before
-                # the in-session UPDATE, to prevent premature
-                # finalization. Same query and semantics as the early
-                # C1 re-check above (TOCTOU hardening: this is the
-                # authoritative gate; the early re-check is a
-                # defense-in-depth that catches races between the
-                # pre-fetch and the WriteGuardSession).
-                #
-                # C2 fix (TOCTOU hardening, 2026-06-22): inline the
-                # COUNT query directly on the WriteGuardSession's
-                # ``session`` object so the COUNT and the in-session
-                # UPDATE share the SAME transaction. The previous
-                # helper opened its own short-lived Session via the
-                # bus repository, creating transaction A — while
-                # the UPDATE below commits in transaction B (the
-                # WriteGuardSession). A concurrent ``bus.watch()``
-                # INSERT on a different connection could commit
-                # between A and B, re-opening the premature-
-                # finalization window this gate exists to close.
-                # With the inline query, the COUNT and UPDATE are
-                # atomic at the DB level (SQLite full write lock;
-                # PostgreSQL READ COMMITTED within one transaction).
-                #
-                # B fix (2026-06-22): the inline query must NOT
-                # catch exceptions — see MEDIUM B in the review.
-                # Catching and returning 0 would silently pass the
-                # gate, reintroducing the premature-finalization
-                # bug on transient DB errors. Exceptions propagate
-                # to the existing W3 fail-safe path in
-                # ``_finalize_job``.
-                #
-                # The per-parent CM lock acquired in ``_finalize_job``
-                # (the async caller) serializes this gate against
-                # ``bus.watch()`` — a watch INSERT that commits
-                # inside the lock is guaranteed visible to the COUNT
-                # here, regardless of who wins the race.
-                #
-                # Defensive wiring check: only consult the bus when
-                # BOTH the flag is ON AND the bus singleton is
-                # wired. Mirrors the original
-                # ``_bus_count_pending_for_target_sync`` helper
-                # semantics — when the singleton is None (testing,
-                # missing init, config drift), the gate is dormant
-                # so we don't defer a finalization that should
-                # proceed. Without this guard, a config that leaves
-                # the flag ON without wiring the bus singleton
-                # would still execute the inline COUNT against an
-                # empty table — usually harmless, but in degraded
-                # states (mock MagicMock truthiness, partial
-                # migrations) it could defer a finalization that
-                # should proceed.
-                from daemon.services.dependency_bus import (
-                    get_dependency_bus as _get_bus_for_gate,
-                )
-                if (
-                    self._is_dependency_bus_enabled()
-                    and _get_bus_for_gate() is not None
-                ):
-                    _bus_pending_stmt = (
-                        select(func.count())
-                        .select_from(DependencyWatcher)
-                        .where(
-                            DependencyWatcher.target_instance_id == instance_id
-                        )
-                        .where(
-                            DependencyWatcher.state
-                            == DependencyWatcherState.PENDING.value
-                        )
-                    )
-                    _bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
-                    if _bus_pending > 0:
-                        logger.info(
-                            f"Observer: aborting terminal transition for "
-                            f"{instance_id[:8]}... — CM says complete but "
-                            f"bus has {_bus_pending} PENDING watchers "
-                            f"(use_dependency_bus=ON, in-session gate), "
-                            f"deferring finalization"
-                        )
-                        return _FinalizeJobResult(
-                            skip=True,
-                            terminal_status=None,
-                            job_id=None,
-                            instance_id=None,
-                            parent_id=None,
-                            agent_id=None,
-                            result_summary=None,
-                            error_message=None,
-                            locks_released=0,
-                            instance_was_terminal=False,
-                            gate_deferred=True,
-                        )
-                # Gate passed cleanly under CM authority — fall through
-                # to the UPDATE / Step 1 / Step 2 / Step 3 / commit path.
-                # Reset the bounded defer counter so any future transient
-                # failure starts counting from zero rather than inheriting
-                # stale state from a prior incident.
-                _gate_defer_counts.pop(instance_id, None)
-            else:
-                # ─── Legacy path: SELECT ... FOR UPDATE row-lock gate ───
-                # ─── Dialect detection for row-level locking (F2, 2026-06-20) ───
-                # PostgreSQL, MySQL InnoDB, and MariaDB all support
-                # ``SELECT ... FOR UPDATE`` natively. Earlier versions gated
-                # this on a binary PG-vs-everything check, which silently
-                # disabled row locking on MySQL/MariaDB and reintroduced the
-                # TOCTOU window. SQLite has no ``FOR UPDATE`` syntax and
-                # relies on its global database-level write lock.
-                _dialect_name = (
-                    session.bind.dialect.name
-                    if session.bind is not None
-                    else ""
-                )
-                _supports_row_lock = _dialect_name in (
-                    "postgresql", "mysql", "mariadb",
-                )
-                try:
-                    _gate_sql = (
-                        "SELECT waiting_for FROM instances "
-                        "WHERE instance_id = :iid FOR UPDATE"
-                        if _supports_row_lock
-                        else (
-                            "SELECT waiting_for FROM instances "
-                            "WHERE instance_id = :iid"
-                        )
-                    )
-                    _gate_row = session.execute(
-                        _sa_text(_gate_sql),
-                        {"iid": instance_id},
-                    ).first()
-                    if _gate_row is not None:
-                        _wf_gate = _gate_row[0] or 0
-                        if _wf_gate > 0:
-                            logger.info(
-                                f"Observer: aborting terminal transition for "
-                                f"{instance_id[:8]}... — waiting_for="
-                                f"{_wf_gate} > 0 (orchestrator has active "
-                                f"children, deferring finalization)"
-                            )
-                            return _FinalizeJobResult(
-                                skip=True,
-                                terminal_status=None,
-                                job_id=None,
-                                instance_id=None,
-                                parent_id=None,
-                                agent_id=None,
-                                result_summary=None,
-                                error_message=None,
-                                locks_released=0,
-                                instance_was_terminal=False,
-                                gate_deferred=True,
-                            )
-                    # Gate passed cleanly (no exception, waiting_for == 0).
-                    # Reset the bounded defer counter so any future transient
-                    # failure starts counting from zero rather than inheriting
-                    # stale state from a prior incident.
-                    _gate_defer_counts.pop(instance_id, None)
-                except Exception as e:
-                    # C1-N1 fix (F1 escape valve, 2026-06-20): on the first
-                    # few deferrals, return ``skip=True`` with
-                    # ``gate_deferred=True`` so the wave-2 callback can
-                    # re-attempt finalization (C2-PartA rearm path fires).
-                    # However, the bounded counter (``_MAX_GATE_DEFERS``) is
-                    # the ONLY safety net here — existing recovery mechanisms
-                    # do NOT cover gate-deferred jobs:
-                    #   * ``StaleTaskRecovery`` operates on the ``task``
-                    #     table, not ``job_queue``.
-                    #   * ``JobProcessor`` orphan recovery skips instances
-                    #     that are alive (gate-deferred jobs have RUNNING
-                    #     instances).
-                    #   * ``JobRecoveryService.recover_on_startup`` only runs
-                    #     at daemon restart.
-                    # Without this counter, a persistent gate failure would
-                    # silently wedge the job in PROCESSING forever — a
-                    # SILENT LIVENESS bug that's operationally worse than
-                    # the noisy correctness bug the deferral was originally
-                    # added to prevent. After ``_MAX_GATE_DEFERS`` consecutive
-                    # deferrals we fall through to the UPDATE, accepting
-                    # potential premature completion as the lesser evil. If
-                    # the outer transaction is poisoned, the UPDATE raises
-                    # and the W3 fail-safe in the async caller transitions
-                    # the job to FAILED — still better than permanent
-                    # PROCESSING.
-                    _defer_key = instance_id
-                    _defer_count = _gate_defer_counts.get(_defer_key, 0) + 1
-                    if _defer_count >= _MAX_GATE_DEFERS:
-                        logger.error(
-                            f"Observer: gate defer limit ({_MAX_GATE_DEFERS}) "
-                            f"reached for instance {_defer_key[:8]}... — "
-                            f"falling through to finalize to prevent permanent "
-                            f"stuck-job (this may indicate persistent DB "
-                            f"issues: {e})"
-                        )
-                        _gate_defer_counts.pop(_defer_key, None)
-                        # Fall through to the UPDATE / Step 1 / Step 2 /
-                        # Step 3 / commit path below — do NOT return
-                        # ``skip=True``. The W3 fail-safe in the async caller
-                        # handles the case where the poisoned outer
-                        # transaction prevents the UPDATE from committing.
-                    else:
-                        _gate_defer_counts[_defer_key] = _defer_count
-                        logger.warning(
-                            f"Observer: failed to read instance for "
-                            f"waiting_for gate ({_defer_key[:8]}...): {e} "
-                            f"— deferring ({_defer_count}/{_MAX_GATE_DEFERS})"
-                        )
-                        return _FinalizeJobResult(
-                            skip=True,
-                            terminal_status=None,
-                            job_id=None,
-                            instance_id=None,
-                            parent_id=None,
-                            agent_id=None,
-                            result_summary=None,
-                            error_message=None,
-                            locks_released=0,
-                            instance_was_terminal=False,
-                            gate_deferred=True,
-                        )
+            # Gate passed cleanly under CM authority — fall through
+            # to the UPDATE / Step 1 / Step 2 / Step 3 / commit path.
+            # Reset the bounded defer counter so any future transient
+            # failure starts counting from zero rather than inheriting
+            # stale state from a prior incident.
+            _gate_defer_counts.pop(instance_id, None)
 
             now = datetime.now(timezone.utc).isoformat()
             now_dt = datetime.now(timezone.utc)

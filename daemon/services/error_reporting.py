@@ -183,17 +183,6 @@ class ErrorReportingService:
         from sqlalchemy import func, select
         from .correlation_manager import get_correlation_manager
 
-        # A9 gate: read the legacy ``waiting_for`` cascade flag (kill
-        # switch). When ON, the error path runs the legacy SQL decrement
-        # + the ``parent.waiting_for == 0`` cascade check. When OFF
-        # (default), the CorrelationManager is the SOLE completion
-        # authority — the SQL decrement is SKIPPED and the cascade check
-        # uses ``cm.is_complete()``. See ADR-011 and
-        # ``docs/configuration/completion-flags.md``.
-        use_legacy_cascade = bool(
-            self._config.job_system.use_legacy_waiting_for_cascade
-        )
-
         with WriteGuardSession(
             Session(self._manager.engine), self._manager.write_guard
         ) as session:
@@ -227,65 +216,20 @@ class ErrorReportingService:
                     message.status = MessageStatus.FAILED.value
                     message.completed_at = datetime.now(timezone.utc)
 
-            # d) Decrement parent's waiting_for counter atomically.
-            # Fix C: symmetric to the decrement in child_reports.py. A
-            # non-atomic read-modify-write races with concurrent
-            # child-completion decrements. SQL UPDATE is atomic in both
-            # SQLite and Postgres. Use CASE (not MAX, not GREATEST) for
-            # the clamp-at-zero: PostgreSQL's MAX is aggregate-only and
-            # errors on multi-arg scalar ``MAX(0, ...)``; GREATEST is a
-            # SQLite *extension* function the stdlib sqlite3 driver
-            # doesn't load. CASE is portable SQL — same shape in both
-            # dialects, no dialect branch needed. RETURNING gives us the
-            # post-UPDATE value for accurate logging (see child_reports.py
-            # for the rationale on why we don't log a from-value).
-            #
-            # A9 gate: this SQL decrement is GATED behind
-            # ``USE_LEGACY_WAITING_FOR_CASCADE``. When the kill switch
-            # is OFF (default), the CorrelationManager is the SOLE
-            # completion authority and the ``waiting_for`` column is the
-            # rebuild cache (ADR-011) — we MUST NOT decrement it here or
-            # we would clobber the rebuild cache. When ON, the legacy
-            # M0 path runs unchanged (rollback path only).
+            # d) Read the rebuild-cache snapshot for logging and the
+            # cascade check below. ``waiting_for`` is NOT mutated by the
+            # error path — the CorrelationManager is the SOLE completion
+            # authority and the DB column is rebuild cache (ADR-011).
+            # The legacy ``UPDATE ... waiting_for = ...`` decrement was
+            # removed with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in
+            # Phase 3.
             parent = session.get(Instance, parent_id)
             if parent:
-                if use_legacy_cascade:
-                    result = session.execute(
-                        text(
-                            "UPDATE instances "
-                            "SET waiting_for = CASE "
-                            "    WHEN COALESCE(waiting_for, 0) - 1 > 0 "
-                            "        THEN COALESCE(waiting_for, 0) - 1 "
-                            "    ELSE 0 "
-                            "END "
-                            "WHERE instance_id = :pid "
-                            "RETURNING waiting_for"
-                        ),
-                        {"pid": parent_id},
-                    )
-                    new_waiting_row = result.first()
-                    new_waiting = (
-                        int(new_waiting_row[0]) if new_waiting_row is not None else 0
-                    )
-                    logger.info(
-                        f"waiting_for decremented (error path) -> {new_waiting} "
-                        f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
-                    )
-                else:
-                    # A9: do NOT decrement the DB ``waiting_for`` column.
-                    # The CM is the SOLE completion authority; the column
-                    # is the rebuild cache (ADR-011) and writes here
-                    # would clobber it. Read the post-error value as a
-                    # rebuild-cache snapshot for the cascade check below
-                    # (and for logging) — we do NOT mutate it.
-                    new_waiting = (
-                        int(getattr(parent, "waiting_for", 0) or 0)
-                    )
-                    logger.info(
-                        f"USE_LEGACY_WAITING_FOR_CASCADE=OFF: skipping waiting_for SQL "
-                        f"decrement (error path); rebuild cache snapshot -> {new_waiting} "
-                        f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
-                    )
+                new_waiting = int(getattr(parent, "waiting_for", 0) or 0)
+                logger.info(
+                    f"error path: rebuild cache snapshot -> {new_waiting} "
+                    f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
+                )
 
                 # NOTE: The CM hook (``await notify_corr_resolve``) that
                 # used to live here has been moved out of this sync helper
@@ -332,39 +276,25 @@ class ErrorReportingService:
                 # replaced by ``cm.is_complete(parent_id)`` when the
                 # CorrelationManager is wired up. The DB column
                 # ``waiting_for`` is retained as the rebuild cache
-                # (ADR-011) and the graceful-degradation fallback.
+                # (ADR-011) and will be dropped in Phase 4 once the
+                # column is removed from the schema.
                 #
-                # A9 gate: same pattern as A4/A8 in
-                # ``child_reports.py``. CM-first, then
-                # ``use_legacy_waiting_for_cascade`` flag, then hard
-                # error. The ``SELECT COUNT(*)`` fallback (Race #3) is
-                # the exact bug we are fixing — it MUST NOT be reachable
-                # when both the kill switch is OFF and CM is None.
+                # A9 hard error: the legacy ``SELECT waiting_for``
+                # fallback (Race #3) is the exact bug we are fixing —
+                # it MUST NOT be reachable when CM is None. Mirrors A8
+                # in ``child_reports.py``.
                 cm = get_correlation_manager()
                 if cm is not None:
                     all_children_done = cm.is_complete(parent.instance_id)
-                elif use_legacy_cascade:
-                    # Legacy M0 fallback (kill switch ON): use the
-                    # ``waiting_for`` column directly. Race-prone
-                    # (Phase 4 docstring) but the behaviour Phase A is
-                    # rolling back FROM.
-                    all_children_done = (
-                        getattr(parent, "waiting_for", None) or 0
-                    ) == 0
                 else:
                     # ─── A9: HARD ERROR (not graceful degradation) ───
-                    # CM is None AND ``USE_LEGACY_WAITING_FOR_CASCADE=OFF``
-                    # is an INVALID state. Mirrors A8 in
-                    # ``child_reports.py``. CM must be initialized for
-                    # the new architecture to work; we raise rather than
-                    # silently degrade into the TOCTOU fallback.
+                    # CM is None is an INVALID state. CM must be
+                    # initialized for the new architecture to work; we
+                    # raise rather than silently degrade into the
+                    # TOCTOU fallback.
                     raise RuntimeError(
-                        "CorrelationManager is None while "
-                        "USE_LEGACY_WAITING_FOR_CASCADE=OFF — invalid state. "
-                        "Either wire the CM (Phase 2) or set "
-                        "use_legacy_waiting_for_cascade=True for the legacy "
-                        "M0 cascade path. See ADR-011 and "
-                        "docs/configuration/completion-flags.md."
+                        "CorrelationManager is None — invalid state. "
+                        "The CM must be initialized (see ADR-011)."
                     )
                 if (
                     all_children_done

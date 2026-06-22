@@ -1,18 +1,16 @@
-"""A15 — In-flight flag-flip tests (PostgreSQL).
+"""A15 — In-flight crash-recovery tests (PostgreSQL).
 
 Crash-recovery tests that verify ``CorrelationManager.rebuild_from_db()``
 correctly reconstructs the ``_pending`` state when the daemon restarts
-with mid-flight parents under ``USE_LEGACY_WAITING_FOR_CASCADE=OFF``
-(the default per ADR-011).
+with mid-flight parents.
 
 Scenario
 --------
 A parent instance has spawned children that are still running. The daemon
-restarts (crash or deploy). The ``USE_LEGACY_WAITING_FOR_CASCADE`` flag
-is OFF, so the production read path goes through the CM, not the
-``waiting_for`` SQL counter. The DB column ``waiting_for`` is the
-**rebuild cache** (per ADR-011): on startup, ``rebuild_from_db()`` uses
-it as the seed query to find parents that need state reconstruction.
+restarts (crash or deploy). The ``CorrelationManager`` is the SOLE
+completion authority; the DB column ``waiting_for`` is the **rebuild
+cache** (per ADR-011): on startup, ``rebuild_from_db()`` uses it as the
+seed query to find parents that need state reconstruction.
 
 This test pack verifies:
 
@@ -22,8 +20,9 @@ This test pack verifies:
      pending entries are in ``_pending``.
   4. Concurrent ``register_message_send`` during rebuild is preserved
      (A0a MERGE semantics — top-level clear + per-parent MERGE).
-  5. Flag-flip mid-flight → ``rebuild_from_db()`` reads the
-     ``waiting_for`` rebuild cache and reconstructs CM state correctly.
+  5. Restart with various wait-count scenarios → ``rebuild_from_db()``
+     correctly reconstructs CM state from the ``waiting_for`` rebuild
+     cache.
 
 These tests use the **real PostgreSQL engine** (not mocks) so the actual
 ``get_all_with_waiting_for()``, ``get_children()``, and
@@ -40,10 +39,9 @@ Run with::
 Notes
 -----
 * Uses module-scoped PG engine + autouse TRUNCATE for isolation.
-* ``USE_LEGACY_WAITING_FOR_CASCADE`` is implicit: the flag governs the
-  *production read path*, not the rebuild path. ``rebuild_from_db()``
-  always reads ``waiting_for`` as the rebuild cache, regardless of
-  flag state, so the tests don't toggle the flag directly.
+* ``rebuild_from_db()`` always reads ``waiting_for`` as the rebuild
+  cache (regardless of any feature flag state, since Phase 3 removed
+  the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag entirely).
 """
 from __future__ import annotations
 
@@ -576,21 +574,19 @@ class TestConcurrentRegisterDuringRebuild:
 
 
 class TestFlagFlipMidFlightRebuild:
-    """The "in-flight during flag flip" scenario:
+    """The "in-flight during migration" scenario:
 
-      * Under ``USE_LEGACY_WAITING_FOR_CASCADE=ON`` (legacy path),
-        ``send_message`` incremented ``waiting_for`` and decremented it
-        in ``_process_child_completion_and_notify_parent``.
-      * The flag flips to OFF (default per ADR-011) and the daemon
-        restarts.
-      * The daemon's production read path now goes through the CM
-        (``cm.get_pending_count``), not the SQL counter. But the column
-        is RETAINED as the rebuild cache per ADR-011.
+      * Historically, ``send_message`` wrote to ``waiting_for`` (this is
+        the pre-Phase-3 behavior — see git history).
+      * Phase 3 removed the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag
+        entirely. The daemon's production read path now goes through
+        the CM (``cm.get_pending_count``), not the SQL counter. The
+        column is RETAINED as the rebuild cache per ADR-011.
       * ``rebuild_from_db()`` must read ``waiting_for > 0`` parents and
         reconstruct CM state correctly.
 
-    The point: ``waiting_for`` written under the OLD flag is sufficient
-    for rebuild to recover state under the NEW flag.
+    The point: ``waiting_for`` written under the old architecture is
+    sufficient for rebuild to recover state under the new architecture.
     """
 
     @pytest.mark.asyncio

@@ -145,17 +145,13 @@ def _make_manager(gate: MagicMock) -> InstanceManager:
     manager._process_child_completion_and_notify_parent = AsyncMock()
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
     manager._graph_tasks = {}
-    # A9: wire a minimal ``config`` so the legacy ``waiting_for`` gate
-    # in the resume path can read ``use_legacy_waiting_for_cascade``.
-    # The test exercises the resume path's gate-wrapping logic, not
-    # the completion cascade — so we set the kill switch ON to
-    # authorize the legacy ``SELECT waiting_for`` fallback that the
-    # resume path uses when CM is None. Without this, the A9 hard
-    # error fires (CM=None + flag=OFF is an invalid state per
-    # ADR-011).
+    # Phase 3: the ``use_legacy_waiting_for_cascade`` flag was removed.
+    # The resume path now expects CM to be initialized; if it isn't, the
+    # A9 hard error fires per ADR-011. The test exercises the resume
+    # path's gate-wrapping logic, not the completion cascade — so we
+    # wire a minimal ``config`` mock for any config-shaped API surface.
     manager.config = MagicMock()
     manager.config.job_system = MagicMock()
-    manager.config.job_system.use_legacy_waiting_for_cascade = True
     return manager
 
 

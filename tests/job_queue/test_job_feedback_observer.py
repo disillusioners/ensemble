@@ -1139,11 +1139,11 @@ class TestObserverLifecycleResilience:
         through ``_process_event`` as a hard configuration error, NOT as a
         per-job FAILED transition.
 
-        The A8 hard error (``USE_LEGACY_WAITING_FOR_CASCADE=OFF`` but CM is
-        ``None``) is a global misconfiguration — the system is in an
-        undefined state. Silently converting it to per-job FAILED transitions
-        would hide the misconfiguration from operators and create a flood of
-        spurious job failures.
+        The A8 hard error (``CorrelationManager is None``) is a global
+        misconfiguration — the system is in an undefined state. Silently
+        converting it to per-job FAILED transitions would hide the
+        misconfiguration from operators and create a flood of spurious
+        job failures.
 
         The fix: ``_finalize_job`` adds an explicit ``except RuntimeError:
         raise`` clause BEFORE the W3 ``except Exception`` handler. The
@@ -1180,9 +1180,8 @@ class TestObserverLifecycleResilience:
         )
         # Install a sync mock that raises the canonical A8 hard error.
         a8_message = (
-            "USE_LEGACY_WAITING_FOR_CASCADE=OFF but CorrelationManager is "
-            "not initialised — cannot gate finalization for instance... "
-            "(CM is authoritative under flag OFF, see ADR-011)"
+            "CorrelationManager is not initialised — invalid state. "
+            "The CM must be initialized (see ADR-011)"
         )
         sync_mock = MagicMock(side_effect=make_fake_sync(
             raise_exc=RuntimeError(a8_message)
@@ -1200,7 +1199,7 @@ class TestObserverLifecycleResilience:
 
         # RuntimeError MUST propagate — it is a configuration error, not a
         # per-job failure.
-        with pytest.raises(RuntimeError, match="USE_LEGACY_WAITING_FOR_CASCADE=OFF"):
+        with pytest.raises(RuntimeError, match="CorrelationManager is not initialised"):
             await observer._process_event(event)
 
         # The sync helper was called (and raised).

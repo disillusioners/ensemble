@@ -329,34 +329,11 @@ class JobSystemConfig(BaseSettings):
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
     # ─── Phase A completion-architecture feature flags ──────────────────────
-    # These gates protect the migration from the legacy ``waiting_for`` cascade
-    # path to the CorrelationManager-authoritative path. See
-    # ``docs/configuration/completion-flags.md`` for the full interaction matrix
-    # and operational guidance (when to flip USE_LEGACY_WAITING_FOR_CASCADE ON).
-
-    use_legacy_waiting_for_cascade: bool = Field(
-        default=False,
-        description=(
-            "Phase A kill switch for the legacy `waiting_for` cascade path. "
-            "When OFF (default), the CorrelationManager is the SOLE completion "
-            "authority and the premature-completion bug class is structurally "
-            "impossible. When ON, the legacy `waiting_for` SQL decrement + "
-            "`waiting_for == 0` cascade runs in 18 gated call sites — this is "
-            "the rollback path, not a safe revert. See the [W6] note in "
-            "docs/configuration/completion-flags.md before flipping ON."
-        ),
-    )
-    debug_completion_invariant: bool = Field(
-        default=False,
-        description=(
-            "Phase A observability flag. When ON, the runtime emits a structured "
-            "warning with event=CM_WAITING_FOR_DIVERGENCE whenever CM's in-memory "
-            "pending count disagrees with the DB `waiting_for` counter. "
-            "Default OFF. Recommended ON in dev/CI; flip ON in production for "
-            "the first 2 weeks post-release, then OFF if no divergence logs "
-            "appeared. Set via env var ENSEMBLE_JOB_SYSTEM_DEBUG_COMPLETION_INVARIANT=true."
-        ),
-    )
+    # These gates protected the migration from the legacy ``waiting_for`` cascade
+    # path to the CorrelationManager-authoritative path. The legacy flag was
+    # removed in Phase 3 (cleanup-old-architecture) once the Dependency Bus
+    # became the sole completion authority. See
+    # ``docs/configuration/completion-flags.md`` for historical context.
 
     # ─── Phase D dependency-bus feature flag ───────────────────────────────
     # When ON (default, D8 cutover), the Dependency Bus

@@ -259,22 +259,21 @@ def _make_observer(
     pg_engine: Engine,
     job: JobItem,
     *,
-    use_legacy_cascade: bool = False,
     get_last_message_returns: str | None = "agent response",
 ) -> tuple[JobFeedbackObserver, dict]:
     """Build a JobFeedbackObserver wired to the real PG engine + mocked deps.
 
     The observer uses the REAL engine so ``_finalize_job_db_sync`` exercises
-    actual DB writes (SELECT FOR UPDATE, job transition, instance update,
-    lock release). Side-effect deps (notify_watchers, SSE hub, events) are
-    mocked.
+    actual DB writes (job transition, instance update, lock release).
+    Side-effect deps (notify_watchers, SSE hub, events) are mocked.
+
+    Phase 3: the ``use_legacy_waiting_for_cascade`` flag was removed — the
+    CM is the SOLE completion authority. The ``use_legacy_cascade``
+    parameter is gone; the observer is wired with the production config.
 
     Args:
         pg_engine: The real PostgreSQL engine.
         job: The JobItem the observer will operate on.
-        use_legacy_cascade: If True, sets the ``use_legacy_waiting_for_cascade``
-            flag ON (legacy ``SELECT ... FOR UPDATE`` gate path). If False
-            (default), the CM-authoritative path is used (flag OFF).
         get_last_message_returns: Stub return value for the
             ``_get_last_assistant_message_raw`` pre-fetch in ``_finalize_job``.
     """
@@ -315,7 +314,7 @@ def _make_observer(
         lock_repo=mock_lock_repo,
         project_repo=MagicMock(name="ProjectRepo"),
         instance_manager=manager,
-        config=JobSystemConfig(use_legacy_waiting_for_cascade=use_legacy_cascade),
+        config=JobSystemConfig(),
     )
 
     return observer, {
@@ -419,7 +418,7 @@ class TestEmptyChildrenList:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
+        observer, _ = _make_observer(pg_engine, job)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -668,7 +667,7 @@ class TestMultipleConcurrentWaves:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
+        observer, _ = _make_observer(pg_engine, job)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -787,7 +786,7 @@ class TestMultipleConcurrentWaves:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
+        observer, _ = _make_observer(pg_engine, job)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -1060,7 +1059,7 @@ class TestJobContinueWatchJobPattern:  # Phase B scope
 
         job = pg_job_repo.get(parent_job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
+        observer, _ = _make_observer(pg_engine, job)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,
@@ -1210,7 +1209,7 @@ class TestOriginalBugReproduction:
 
         job = pg_job_repo.get(job_id)
         assert job is not None
-        observer, _ = _make_observer(pg_engine, job, use_legacy_cascade=False)
+        observer, _ = _make_observer(pg_engine, job)
 
         cm = CorrelationManager(
             instance_repository=pg_instance_repo,

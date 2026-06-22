@@ -192,10 +192,10 @@ def _make_mock_manager(
     m._event_bus.create_error_event = AsyncMock()
     m._publish_instance_lifecycle_event = AsyncMock()
     m._send_error_report = AsyncMock()
-    # JQ path's on_success legacy cascade kill switch (off ⇒ CM must be wired).
+    # Phase 3: the ``use_legacy_waiting_for_cascade`` flag was removed.
+    # Wire a minimal ``config`` mock for any config-shaped API surface.
     m.config = MagicMock()
     m.config.job_system = MagicMock()
-    m.config.job_system.use_legacy_waiting_for_cascade = True
     return m
 
 
@@ -236,10 +236,11 @@ def _make_mock_job_repo(active_message_jobs: list | None = None):
 def _disable_cm():
     """Context-manager patch that makes ``get_correlation_manager`` return None.
 
-    Combined with ``use_legacy_waiting_for_cascade=True`` on the manager
-    config, this routes the JQ path's ``on_success`` callback through the
-    legacy ``waiting_for`` fallback (which is mocked to 0 ⇒
-    ``skip_complete=False`` ⇒ normal ``complete_job(COMPLETED)``).
+    With CM ``None`` and the legacy ``waiting_for`` SQL fallback removed
+    in Phase 3, the JQ path's ``on_success`` callback now follows the
+    A9 hard-error path (CM must be initialized) per ADR-011. This
+    helper is kept as a hook for future tests that need to exercise
+    the ``cm is None`` invariant.
     """
     return patch(
         "daemon.services.correlation_manager.get_correlation_manager",
