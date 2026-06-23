@@ -75,25 +75,13 @@ class SQLModelInstanceRepository:
             return self._load_children(db_session, instance_id)
 
     def _enrich_instance(self, db_session: SQLModelSession, instance: Instance | None) -> Instance | None:
-        """Hook for subclasses / tests to enrich a freshly-read instance.
-
-        Default implementation returns the instance unchanged. The
-        legacy ``Instance.children`` denormalized cache column is no
-        longer written to — the ``instance_hierarchy`` junction table is
-        the canonical source of child IDs. Callers that need the
-        working-set child list should call :meth:`_load_children`
-        directly with their own session.
-        """
+        """Hook for subclasses/tests to enrich a freshly-read instance. Default returns unchanged."""
         return instance
 
     def _enrich_instances(
         self, db_session: SQLModelSession, instances: list[Instance]
     ) -> list[Instance]:
-        """Hook for subclasses / tests to enrich freshly-read instances.
-
-        Default implementation returns the list unchanged. See
-        :meth:`_enrich_instance` for rationale.
-        """
+        """Hook for subclasses/tests to enrich freshly-read instances. Default returns unchanged."""
         return instances
 
     # --------------------------------------------------------

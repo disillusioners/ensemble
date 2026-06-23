@@ -1028,14 +1028,8 @@ Provide a concise summary:"""
 
         parent.last_activity_at = datetime.now(timezone.utc)
         parent.version = (parent.version or 1) + 1
-        
-        # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
-        # The ``instance_hierarchy`` junction table is the canonical
-        # source of parent-child relationships — _enrich_instance() in
-        # daemon/repositories/instance/repository.py loads children
-        # from it on every read. Writes to the JSON cache were doubly
-        # broken (RMW races + overridden on read) and persistently
-        # useless (no code ever reads the corrupted value). See C10.
+
+        # NOTE: parent.children cache column was dropped in Phase 4.
 
         # Remove from instance_hierarchy junction table
         # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
@@ -1893,15 +1887,10 @@ Provide a concise summary:"""
             parent.last_activity_at = datetime.now(timezone.utc)
             parent.version = (parent.version or 1) + 1
 
-            # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
-            # The ``instance_hierarchy`` junction table is the canonical
-            # source of parent-child relationships — _enrich_instance() in
-            # daemon/repositories/instance/repository.py loads children
-            # from it on every read. Writes to the JSON cache were doubly
-            # broken (RMW races + overridden on read) and persistently
-            # useless (no code ever reads the corrupted value). See C10.
+            # NOTE: parent.children cache column was dropped in Phase 4.
 
             # Remove from instance_hierarchy junction table
+            # NOTE: Do NOT delete the instance from instances table - terminate means stop tasks, not delete
             session.execute(
                 text("DELETE FROM instance_hierarchy WHERE child_id = :child_id"),
                 {"child_id": instance.instance_id}

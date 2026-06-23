@@ -56,9 +56,15 @@ def create_test_instance(
     instance_id: str,
     parent_id: str | None = None,
     status: str = InstanceStatus.IDLE.value,
-    waiting_for: int = 0,
 ) -> None:
-    """Create a test instance with optional parent relationship."""
+    """Create a test instance with optional parent relationship.
+
+    Phase 4: ``waiting_for`` and ``children`` columns have been dropped from the
+    ``instances`` table. Parent-child state is tracked in the
+    ``instance_hierarchy`` junction table; the ``waiting_for`` counter is
+    vestigial and no longer mutated by production code. These tests therefore
+    no longer set those fields.
+    """
     with Session(engine) as session:
         instance = Instance(
             instance_id=instance_id,
@@ -66,8 +72,6 @@ def create_test_instance(
             agent_dir="./agents/test",
             status=status,
             parent_id=parent_id,
-            waiting_for=waiting_for,
-            children="[]",
             version=1,
         )
         session.add(instance)
@@ -333,7 +337,7 @@ class TestCheckChildCompletionV2:
         """FIX C3 UPDATE: When content is None, should proceed with sentinel content."""
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
-        create_test_instance(engine, parent_id, waiting_for=1)
+        create_test_instance(engine, parent_id)
         create_test_instance(engine, child_id, parent_id=parent_id)
 
         # FIX C3: If content is None, use sentinel and proceed with completion
@@ -358,7 +362,7 @@ class TestCheckChildCompletionV2:
         """Should not create duplicate completion reports (idempotent)."""
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
-        create_test_instance(engine, parent_id, waiting_for=1)
+        create_test_instance(engine, parent_id)
         create_test_instance(engine, child_id, parent_id=parent_id)
 
         # Check if report already exists before creating
@@ -436,8 +440,15 @@ class TestCheckChildCompletionV2:
 # ============================================================================
 
 
+@pytest.mark.skip(reason="Phase 4: waiting_for column removed from instances table")
 class TestParentStateTransitions:
-    """Tests for parent's waiting_for counter and status transitions."""
+    """Tests for parent's waiting_for counter and status transitions.
+
+    Skipped after Phase 4: the ``waiting_for`` column is no longer present in
+    the ``instances`` table (the column is vestigial — production code never
+    mutates it). The completion handshake now uses ``InstanceHierarchy`` as
+    the working set, so these counter-mechanic tests are obsolete.
+    """
 
     def test_waiting_for_decremented_on_child_completion(self, engine):
         """Parent's waiting_for counter decremented when child completes."""
@@ -652,12 +663,12 @@ class TestIntegrationScenarios:
     """Integration tests for full message flow scenarios."""
 
     def test_full_child_completion_flow(self, engine, message_repo, task_repo, event_repo):
-        """Test complete flow: child completes, parent notified, waiting_for decremented."""
+        """Test complete flow: child completes, parent notified."""
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
 
-        # Setup: parent waiting for child
-        create_test_instance(engine, parent_id, waiting_for=1)
+        # Setup: parent and child
+        create_test_instance(engine, parent_id)
         create_test_instance(engine, child_id, parent_id=parent_id)
 
         # Child processes its messages
@@ -703,10 +714,7 @@ class TestIntegrationScenarios:
                 )
                 session.add(report)
 
-                # Decrement parent's waiting_for
-                parent = session.get(Instance, parent_id)
-                parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
-
+                # Phase 4: waiting_for column removed — no decrement.
                 session.commit()
 
         # Verify: completion report exists
@@ -714,16 +722,12 @@ class TestIntegrationScenarios:
         completion_reports = [m for m in reports if m.type == MessageType.COMPLETION_REPORT.value]
         assert len(completion_reports) == 1
 
-        # Verify: waiting_for decremented
-        parent = get_instance(engine, parent_id)
-        assert parent.waiting_for == 0
-
     def test_multiple_children_completion(self, engine):
         """Test parent with multiple children completing."""
         parent_id = str(uuid.uuid4())
         child_ids = [str(uuid.uuid4()) for _ in range(3)]
 
-        create_test_instance(engine, parent_id, waiting_for=len(child_ids))
+        create_test_instance(engine, parent_id)
         for child_id in child_ids:
             create_test_instance(engine, child_id, parent_id=parent_id)
 
@@ -743,14 +747,8 @@ class TestIntegrationScenarios:
                 )
                 session.add(report)
 
-                # Decrement waiting_for
-                parent = session.get(Instance, parent_id)
-                parent.waiting_for = max(0, (parent.waiting_for or 0) - 1)
+                # Phase 4: waiting_for column removed — no decrement.
                 session.commit()
-
-        # Verify: all children reported
-        parent = get_instance(engine, parent_id)
-        assert parent.waiting_for == 0
 
         # Verify: all completion reports exist
         with Session(engine) as session:
@@ -802,7 +800,7 @@ class TestCheckChildCompletionC3Fix:
         child_id = str(uuid.uuid4())
         
         # Setup parent and child instances
-        create_test_instance(engine, parent_id, waiting_for=1)
+        create_test_instance(engine, parent_id)
         create_test_instance(engine, child_id, parent_id=parent_id)
         
         # Verify child is not completed initially
@@ -833,7 +831,7 @@ class TestCheckChildCompletionC3Fix:
         child_id = str(uuid.uuid4())
         
         # Setup parent and child instances
-        create_test_instance(engine, parent_id, waiting_for=1)
+        create_test_instance(engine, parent_id)
         create_test_instance(engine, child_id, parent_id=parent_id)
         
         # Simulate FIX C3 behavior
@@ -854,6 +852,7 @@ class TestCheckChildCompletionC3Fix:
         assert len(completion_reports) == 1, "FIX C3 violation: Completion report should be created with sentinel content"
         assert completion_reports[0].content == sentinel_content, "Completion report should have sentinel content"
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for column removed from instances table")
     def test_proceeds_with_empty_content_decrements_parent_waiting(self, engine, manager_with_mocked_content):
         """FIX C3: When content is None, parent's waiting_for SHOULD be decremented."""
         parent_id = str(uuid.uuid4())
@@ -887,7 +886,7 @@ class TestCheckChildCompletionC3Fix:
         child_id = str(uuid.uuid4())
         
         # Setup parent and child
-        create_test_instance(engine, parent_id, waiting_for=1)
+        create_test_instance(engine, parent_id)
         create_test_instance(engine, child_id, parent_id=parent_id)
         
         # Simulate FIX C3 behavior with actual content
@@ -934,7 +933,7 @@ class TestCheckChildCompletionC3Fix:
         parent_id = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
         
-        create_test_instance(engine, parent_id, waiting_for=1)
+        create_test_instance(engine, parent_id)
         create_test_instance(engine, child_id, parent_id=parent_id)
         
         # Step 1: Content fetch (OUTSIDE transaction) - this is FIX C3
@@ -999,7 +998,6 @@ class TestWaitingChildrenToRunningTransition:
             engine,
             instance_id,
             status=InstanceStatus.WAITING_CHILDREN.value,
-            waiting_for=1,
         )
 
         # Verify initial status is WAITING_CHILDREN
@@ -1035,7 +1033,6 @@ class TestWaitingChildrenToRunningTransition:
             engine,
             instance_id,
             status=InstanceStatus.WAITING_CHILDREN.value,
-            waiting_for=1,
         )
 
         # Verify initial status is WAITING_CHILDREN
@@ -1063,16 +1060,19 @@ class TestWaitingChildrenToRunningTransition:
         )
 
     def test_waiting_children_with_zero_waiting_for_still_transitions(self, engine):
-        """FIX C3: WAITING_CHILDREN → RUNNING even when waiting_for is 0."""
+        """FIX C3: WAITING_CHILDREN → RUNNING even when no children are pending.
+
+        Edge case: all children completed but instance is still in
+        WAITING_CHILDREN status — the next message enqueue must still flip
+        the state machine to RUNNING.
+        """
         instance_id = str(uuid.uuid4())
 
-        # Create instance in WAITING_CHILDREN but with waiting_for=0
-        # (edge case: all children completed but instance still in WAITING_CHILDREN)
+        # Create instance in WAITING_CHILDREN (no children registered).
         create_test_instance(
             engine,
             instance_id,
             status=InstanceStatus.WAITING_CHILDREN.value,
-            waiting_for=0,  # All children done, but status wasn't updated
         )
 
         # Verify initial status

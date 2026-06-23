@@ -100,7 +100,7 @@ class TestSetMetadataFunctional:
         assert result.instance_metadata["null"] is None
 
     def test_set_returns_enriched_instance(self, repo):
-        """Returned instance should have children list populated."""
+        """Returned instance should expose children via list_child_ids()."""
         repo.create(instance_id="i1", agent_id="test", agent_dir="agents/test")
         repo.create(
             instance_id="i2",
@@ -111,7 +111,8 @@ class TestSetMetadataFunctional:
 
         result = repo.set_metadata("i1", "foo", "bar")
         assert result is not None
-        assert "i2" in result.children
+        # Phase 4: children column removed; canonical source is instance_hierarchy.
+        assert "i2" in repo.list_child_ids("i1")
 
     def test_set_returns_none_for_missing_instance(self, repo):
         assert repo.set_metadata("missing", "k", "v") is None

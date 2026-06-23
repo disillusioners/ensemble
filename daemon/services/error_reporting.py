@@ -236,10 +236,7 @@ class ErrorReportingService:
                 parent.last_activity_at = datetime.now(timezone.utc)
                 parent.version = (parent.version or 1) + 1
 
-                # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
-                # The ``instance_hierarchy`` junction table is the canonical
-                # source of parent-child relationships. See Phase 4 migration
-                # 20260621_000002.
+                # NOTE: parent.children cache column was dropped in Phase 4.
 
                 # f) Delete from instance_hierarchy
                 session.execute(

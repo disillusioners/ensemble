@@ -696,10 +696,9 @@ class TestPausedAtField:
                  "paused_instances_data": list(paused_instances_data)}
             )
             return _CascadeUpdateResult(
-                updated_ids=[iid for iid, _a, _w in paused_instances_data],
+                updated_ids=[iid for iid, _a in paused_instances_data],
                 skipped_ids=[],
-                agent_ids_by_instance={iid: a for iid, a, _w in paused_instances_data},
-                waiting_for_by_instance={iid: w for iid, _a, w in paused_instances_data},
+                agent_ids_by_instance={iid: a for iid, a in paused_instances_data},
             )
 
         mock_manager._lifecycle_service._pause_cascade_db_sync = _mock_pause_db_sync
@@ -730,7 +729,7 @@ class TestPausedAtField:
         assert pause_call["paused_at_iso"] is not None
         assert pause_call["paused_at_iso"] != ""
         # The single running instance should be in the batch payload
-        data_ids = {iid for iid, _a, _w in pause_call["paused_instances_data"]}
+        data_ids = {iid for iid, _a in pause_call["paused_instances_data"]}
         assert data_ids == {instance_id}
 
     def test_paused_at_cleared_on_resume(self, mock_manager):

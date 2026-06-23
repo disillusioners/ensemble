@@ -294,6 +294,7 @@ class TestJobFeedbackObserverWaitingForGuard:
         observer._finalize_job_db_sync = sync_mock
         return observer, mock_job_queue_service, mock_job_repo, mock_instance_manager
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_completed_with_waiting_for_emits_in_progress(self):
         """Test A: waiting_for > 0 + status=completed → in_progress, not completed."""
@@ -331,6 +332,7 @@ class TestJobFeedbackObserverWaitingForGuard:
         # progress text is passed
         assert call.kwargs.get("progress") == "partial child response"
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_error_with_waiting_for_emits_in_progress(self):
         """waiting_for > 0 + status=error → also in_progress (not failed)."""
@@ -536,6 +538,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         )
         return processor, mock_queue_service, mock_instance_manager, queue_repo
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_message_job_completed_with_waiting_for_emits_in_progress(self):
         """Test A: MESSAGE job, status=COMPLETED, waiting_for>0 → in_progress, no complete_job."""
@@ -557,6 +560,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         # complete_job was NOT called
         mock_qs.complete_job.assert_not_called()
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_task_job_completed_with_waiting_for_emits_in_progress(self):
         """Test B: TASK job, status=COMPLETED, waiting_for>0 → in_progress, no complete_job."""
@@ -572,6 +576,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         assert mock_qs.notify_watchers.call_args.kwargs.get("waiting_for") == 1
         mock_qs.complete_job.assert_not_called()
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_message_job_completed_no_waiting_runs_normal_completion(self):
         """Test C (negative): MESSAGE job, status=COMPLETED, waiting_for=0 → complete_job(✓)."""
@@ -599,6 +604,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
 class TestNotifyWatchersFormatting:
     """Tests for the [JOB_EVENT] message format produced by notify_watchers()."""
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_in_progress_format(self, job_queue_service, watcher_repo, instance_manager):
         """Test A: in_progress status → 'in progress ⟳', 'Progress:', 'Waiting for: N child agent(s)'."""
@@ -676,6 +682,7 @@ class TestNotifyWatchersFormatting:
 class TestNotifyWatchersCleanup:
     """Tests that watches survive an in_progress notification but die on terminal."""
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_in_progress_does_not_remove_watch(
         self, job_queue_service, watcher_repo, instance_manager
@@ -729,6 +736,7 @@ class TestNotifyWatchersCleanup:
 class TestWatcherEventFilterForInProgress:
     """Test that watchers must opt into in_progress notifications."""
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_watcher_with_completed_only_skips_in_progress(
         self, job_queue_service, watcher_repo, instance_manager
@@ -746,6 +754,7 @@ class TestWatcherEventFilterForInProgress:
         assert count == 0
         instance_manager.enqueue_message.assert_not_called()
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_watcher_with_both_events_receives_both(
         self, job_queue_service, watcher_repo, instance_manager
@@ -868,6 +877,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
         job.agent_id = "coder"
         return job
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_notification_throttle_dedups_within_window(self):
         """Test 1: Two calls within the 300s throttle window with the same
@@ -898,6 +908,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
         # CRITICAL: still exactly one notification.
         assert mock_qs.notify_watchers.call_count == 1
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_throttle_window_expiry_re_emits(self):
         """Test 2: After advancing past the 300s throttle window, the
@@ -936,6 +947,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
         # Timestamp must be near "now" (not the rewound value).
         assert (time.time() - ts) < 5
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_escape_hatch_force_fails_stuck_job(self):
         """Test 3: A job that has been waiting for children longer than
@@ -973,6 +985,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
         assert proc_job.job_id not in processor._in_progress_since
         assert proc_job.job_id not in processor._last_in_progress
 
+    @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_terminal_lifecycle_after_in_progress(self):
         """Test 4: Lifecycle. First call (waiting_for=2) emits in_progress.

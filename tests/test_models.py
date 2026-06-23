@@ -57,7 +57,6 @@ class TestInstanceInfo:
         assert instance.agent_dir == "/path/to/agent"
         assert instance.status == InstanceStatus.RUNNING
         assert instance.parent_id is None
-        assert instance.children == []
         assert instance.created_at == datetime(2024, 1, 1, 0, 0, 0)
         assert instance.updated_at == datetime(2024, 1, 1, 0, 1, 0)
 
@@ -77,27 +76,36 @@ class TestInstanceInfo:
             "agent_dir": "/path/to/agent",
             "status": "running",
             "parent_id": "parent-instance",
-            "children": [],
             "created_at": datetime(2024, 1, 1, 0, 0, 0),
         }
         
         instance = InstanceInfo(**data)
         assert instance.parent_id == "parent-instance"
 
-    def test_instance_info_with_children(self):
-        """Test InstanceInfo with children."""
+    def test_instance_info_does_not_have_children_field(self):
+        """Phase 4: InstanceInfo no longer carries a denormalized children field.
+
+        Parent-child relationships are now exposed via the ``instance_hierarchy``
+        junction table (and surfaced as ``child_ids`` elsewhere). The Pydantic
+        model must not accept or expose a ``children`` field — passing one is
+        silently dropped by Pydantic.
+        """
         data = {
             "instance_id": "parent-instance",
             "agent_id": "coder",
             "agent_dir": "/path/to/agent",
             "status": "running",
             "parent_id": None,
-            "children": ["child-1", "child-2"],
             "created_at": datetime(2024, 1, 1, 0, 0, 0),
         }
         
         instance = InstanceInfo(**data)
-        assert instance.children == ["child-1", "child-2"]
+        # Field must not be present on the model.
+        assert "children" not in instance.model_dump()
+        assert "children" not in instance.__class__.model_fields
+        # Pydantic silently drops unknown kwargs — assert that passing it is a no-op.
+        with_extra = InstanceInfo(**{**data, "children": ["child-1", "child-2"]})
+        assert "children" not in with_extra.model_dump()
 
 
 class TestMessageCreate:

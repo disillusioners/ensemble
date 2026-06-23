@@ -193,17 +193,12 @@ class JobQueueService:
         status: str,
         error: str | None = None,
         progress: str | None = None,
-        waiting_for: int | None = None,
     ) -> int:
         """Notify ALL watchers for a job. Called from EVERY terminal path.
 
         Returns number of watchers notified.
         Safe to call even if no watchers exist (returns 0).
         If watching instance is not running, message queues in DB for later delivery.
-
-        Phase 4: parameter is display-only (formatted into the
-        in_progress message); no control-flow decision uses it. The
-        legacy ``message_job_handler.py`` was removed in Phase D.
         """
         if self._watcher_repo is None or self._instance_manager is None:
             return 0
@@ -243,8 +238,6 @@ class JobQueueService:
                 if status == "in_progress":
                     if progress:
                         notification_parts.append(f"  Progress:\n{progress}")
-                    if waiting_for is not None:
-                        notification_parts.append(f"  Waiting for: {waiting_for} child agent(s)")
                 else:
                     if job.result_summary:
                         notification_parts.append(f"  Result:\n{job.result_summary}")

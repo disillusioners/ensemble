@@ -42,19 +42,10 @@ class InstanceInfo(BaseModel):
     status: InstanceStatus = Field(..., description="Current instance status")
     title: str | None = Field(default=None, description="Auto-generated instance title from first message")
     parent_id: str | None = Field(default=None, description="Parent instance ID if this is a child instance")
-    children: list[str] = Field(default_factory=list, description="List of child instance IDs")
     mcp_tool_names: list[str] | None = Field(default=None, description="List of MCP tool names available to this instance")
     created_at: datetime = Field(..., description="Instance creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")
     pending_count: int | None = Field(default=None, description="Count of incomplete message jobs (READY + PROCESSING + RETRYING)")
-    waiting_for: int | None = Field(
-        default=None,
-        description=(
-            "Rebuild-only cache. Written but not read for control flow — "
-            "use CorrelationManager.is_complete() / get_pending_count() instead. "
-            "Count of pending child completions (persisted for crash-recovery rebuild)."
-        ),
-    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -65,7 +56,6 @@ class InstanceInfo(BaseModel):
                 "status": "running",
                 "title": "Help with Python debugging",
                 "parent_id": None,
-                "children": [],
                 "mcp_tool_names": ["webfetch", "context7_fetch_docs"],
                 "created_at": "2024-01-01T00:00:00Z",
                 "updated_at": "2024-01-01T00:01:00Z"
@@ -92,7 +82,6 @@ class InstanceListResponse(BaseModel):
                         "agent_dir": "/path/to/agent",
                         "status": "running",
                         "parent_id": None,
-                        "children": [],
                         "created_at": "2024-01-01T00:00:00Z",
                         "updated_at": "2024-01-01T00:01:00Z"
                     }

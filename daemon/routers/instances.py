@@ -84,11 +84,12 @@ async def create_instance(
         agent_dir=instance_meta["agent_dir"],
         status=InstanceStatus(instance_meta["status"]),
         parent_id=instance_meta.get("parent_id"),
-        children=instance_meta.get("children", []),
+        title=instance_meta.get("title"),
         mcp_tool_names=instance_meta.get("metadata", {}).get("mcp_tool_names"),
         created_at=parse_utc_datetime(instance_meta["created_at"]),
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
         project_id=instance_meta.get("project_id"),
+        pending_count=(await manager.get_queue_stats(instance_id)).get("pending_count"),
     )
 
 
@@ -136,7 +137,6 @@ async def list_instances(
             agent_dir=inst["agent_dir"],
             status=InstanceStatus(inst["status"]),
             parent_id=inst.get("parent_id"),
-            children=inst.get("children", []),
             title=inst.get("title"),
             mcp_tool_names=inst.get("metadata", {}).get("mcp_tool_names"),
             created_at=parse_utc_datetime(inst["created_at"]),
@@ -181,17 +181,11 @@ async def get_instance(
         agent_dir=instance_meta["agent_dir"],
         status=InstanceStatus(instance_meta["status"]),
         parent_id=instance_meta.get("parent_id"),
-        children=instance_meta.get("children", []),
         title=instance_meta.get("title"),
         mcp_tool_names=instance_meta.get("metadata", {}).get("mcp_tool_names"),
         created_at=parse_utc_datetime(instance_meta["created_at"]),
         updated_at=parse_utc_datetime(instance_meta.get("updated_at")),
         project_id=instance_meta.get("project_id"),
-        # Display field — value is rebuild cache, not authoritative
-        # for runtime decisions. The CorrelationManager is the runtime
-        # source of truth (Phase 4+). External consumers may still
-        # read this field for observability / UI display.
-        waiting_for=instance_meta.get("waiting_for"),
         pending_count=(await manager.get_queue_stats(instance_id)).get("pending_count"),
     )
 

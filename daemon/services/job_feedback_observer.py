@@ -745,9 +745,7 @@ class JobFeedbackObserver:
                     # to the bus callback (``_retrigger_parent_finalize``).
                     # This is the Race #1 fix: no LLM fetch, no TOCTOU —
                     # we simply notify watchers and wait for the bus.
-                    await self._emit_in_progress(
-                        job, instance_id, pending_count=cm_pending
-                    )
+                    await self._emit_in_progress(job, instance_id)
                     return
                 # cm_pending == 0: no pending watchers in bus.
                 # Fall through to the shared terminal transition. This handles:
@@ -771,7 +769,7 @@ class JobFeedbackObserver:
         await self._finalize_job(job, instance_id, status, error=error)
 
     async def _emit_in_progress(
-        self, job, instance_id: str, pending_count: int
+        self, job, instance_id: str
     ) -> None:
         """Emit an ``in_progress`` watcher notification.
 
@@ -782,7 +780,6 @@ class JobFeedbackObserver:
         Args:
             job: The JobItem for the parent instance.
             instance_id: The parent instance ID (for LLM checkpoint fetch).
-            pending_count: Number of children still resolving (display).
         """
         try:
             progress_text = (
@@ -794,7 +791,6 @@ class JobFeedbackObserver:
                 job.job_id,
                 status="in_progress",
                 progress=progress_text,
-                waiting_for=pending_count,
             )
         except Exception as e:
             logger.warning(

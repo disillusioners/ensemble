@@ -1,21 +1,17 @@
-"""Tests for C10 — drop Instance.children JSON cache column writes.
+"""Tests for C10 — Instance.children JSON column removed; instance_hierarchy is canonical.
 
-The ``Instance.children`` JSON column is **doubly broken**:
-  1. It has read-modify-write (RMW) race conditions at 4 sites.
-  2. It is overridden on every read by ``_enrich_instance()``, which loads
-     children from the ``instance_hierarchy`` junction table.
+After Phase 4 the ``Instance.children`` JSON column was removed from the
+model entirely (it had 4 RMW race sites and was overridden on every read
+by ``_enrich_instance()`` / ``list_child_ids()`` which loads from
+``instance_hierarchy``). The canonical working set is the junction table.
 
-Writes to the JSON column are persistently useless (no code ever reads the
-corrupted value), so C10 removed all 4 write sites:
-  - ``daemon/services/instance_lifecycle.py`` (spawn)
-  - ``daemon/services/child_reports.py`` (completion path 1)
-  - ``daemon/services/child_reports.py`` (completion path 2)
-  - ``daemon/services/error_reporting.py`` (error path)
-
-These tests verify the junction table is the canonical source end-to-end:
-spawn writes to ``instance_hierarchy`` (not the JSON column), reads via
-``_load_children``/``_enrich_instance`` see the child, and the completion
-DELETE removes the row.
+These tests verify:
+  * Spawn writes to ``instance_hierarchy`` (not the JSON column).
+  * ``list_child_ids()`` returns the junction-table children.
+  * Completion paths DELETE from ``instance_hierarchy`` (junction cleanup).
+  * The ``Instance`` model exposes NO ``children`` attribute (column is
+    gone, not just unwritten).
+  * The end-to-end spawn→complete cycle uses only the junction table.
 """
 
 from __future__ import annotations
@@ -59,19 +55,13 @@ def _hierarchy_child_ids(engine: Engine, parent_id: str) -> list[str]:
         )
 
 
-def _raw_instance_row(engine: Engine, instance_id: str) -> Instance | None:
-    """Fetch a raw Instance row (no enrichment)."""
-    with Session(engine) as session:
-        return session.get(Instance, instance_id)
-
-
 # =============================================================================
 # Tests
 # =============================================================================
 
 
 class TestSpawnWritesJunctionTable:
-    """Spawning a child must insert into ``instance_hierarchy`` (not the JSON cache)."""
+    """Spawning a child must insert into ``instance_hierarchy`` (canonical source)."""
 
     def test_spawn_inserts_into_instance_hierarchy(self, repo, engine):
         """``create(parent_id=X)`` must add a row to ``instance_hierarchy``."""
@@ -93,29 +83,20 @@ class TestSpawnWritesJunctionTable:
             f"got {children}"
         )
 
-    def test_spawn_does_not_mutate_children_json_column(self, repo, engine):
-        """The deprecated ``Instance.children`` JSON column MUST stay at its default
-        (``"[]"``). After spawn, no JSON mutation should happen — that column is
-        no longer written to anywhere in the codebase (C10)."""
+    def test_instance_model_has_no_children_attribute(self, repo, engine):
+        """Phase 4: the ``Instance.children`` JSON column was dropped from the
+        model. Verify the column is gone (not just unwritten)."""
         repo.create(
             instance_id="parent-2",
             agent_id="leader",
             agent_dir="./agents/leader",
         )
-        repo.create(
-            instance_id="child-2",
-            agent_id="coder",
-            agent_dir="./agents/coder",
-            parent_id="parent-2",
-        )
-
-        # Read raw row — no enrichment — so we see the actual stored JSON.
-        raw_parent = _raw_instance_row(engine, "parent-2")
+        with Session(engine) as session:
+            raw_parent = session.get(Instance, "parent-2")
         assert raw_parent is not None
-        # The deprecated JSON column must be untouched (still the default "[]").
-        assert raw_parent.children == "[]", (
-            f"Expected Instance.children to remain at default '[]' after spawn "
-            f"(C10 removed JSON mutations), got {raw_parent.children!r}"
+        # The deprecated JSON column must not exist as an attribute.
+        assert not hasattr(raw_parent, "children"), (
+            "Instance.children column should be removed in Phase 4"
         )
 
     def test_multiple_children_all_appear_in_junction_table(self, repo, engine):
@@ -149,11 +130,12 @@ class TestSpawnWritesJunctionTable:
         assert count == 0, "Root instances must not create instance_hierarchy rows"
 
 
-class TestEnrichInstanceReadsJunctionTable:
-    """``_enrich_instance`` / ``_load_children`` must read from the junction table."""
+class TestListChildIdsReadsJunctionTable:
+    """``list_child_ids()`` must read from the junction table (the canonical
+    source after Phase 4 dropped the JSON column)."""
 
-    def test_enrich_instance_populates_children_from_junction(self, repo, engine):
-        """``instance.children`` after enrichment must equal the junction table."""
+    def test_list_child_ids_returns_junction_children(self, repo, engine):
+        """``repo.list_child_ids(parent)`` returns junction-table children."""
         repo.create(
             instance_id="parent-4",
             agent_id="leader",
@@ -172,15 +154,12 @@ class TestEnrichInstanceReadsJunctionTable:
             parent_id="parent-4",
         )
 
-        # Real repository read (triggers _enrich_instance)
-        fetched = repo.get("parent-4")
-        assert fetched is not None
-        assert isinstance(fetched.children, list), (
-            f"Enriched children must be list[str], got {type(fetched.children)}"
+        children = sorted(repo.list_child_ids("parent-4"))
+        assert children == ["child-4a", "child-4b"], (
+            f"list_child_ids must return junction-table children, got {children}"
         )
-        assert sorted(fetched.children) == ["child-4a", "child-4b"]
 
-    def test_load_children_returns_empty_when_no_children(self, repo, engine):
+    def test_list_child_ids_returns_empty_when_no_children(self, repo, engine):
         """An instance with no children returns ``[]`` from the junction table."""
         repo.create(
             instance_id="lonely",
@@ -188,43 +167,7 @@ class TestEnrichInstanceReadsJunctionTable:
             agent_dir="./agents/leader",
         )
 
-        fetched = repo.get("lonely")
-        assert fetched is not None
-        assert fetched.children == []
-
-    def test_enriched_children_does_not_reflect_json_column_value(
-        self, repo, engine
-    ):
-        """Even if ``Instance.children`` JSON contains stale data, the enriched
-        children list must reflect ONLY the junction table. This proves the
-        junction table is the canonical source (overriding any stale JSON)."""
-        repo.create(
-            instance_id="parent-5",
-            agent_id="leader",
-            agent_dir="./agents/leader",
-        )
-        repo.create(
-            instance_id="child-5",
-            agent_id="coder",
-            agent_dir="./agents/coder",
-            parent_id="parent-5",
-        )
-
-        # Tamper with the deprecated JSON column to simulate stale data from a
-        # pre-C10 deployment. The enrichment MUST ignore it.
-        with Session(engine) as session:
-            parent = session.get(Instance, "parent-5")
-            parent.children = '["ghost-1", "ghost-2"]'  # lies
-            session.add(parent)
-            session.commit()
-
-        fetched = repo.get("parent-5")
-        assert fetched is not None
-        # Only the real junction-table child, not the ghosts.
-        assert fetched.children == ["child-5"], (
-            f"Enrichment must use junction table, not the JSON column. "
-            f"Got {fetched.children}"
-        )
+        assert repo.list_child_ids("lonely") == []
 
 
 class TestCompletionDeletesJunctionRow:
@@ -234,9 +177,9 @@ class TestCompletionDeletesJunctionRow:
     Here we directly exercise that DELETE to verify the junction table supports
     cleanup and downstream reads return ``[]``."""
 
-    def test_delete_from_junction_removes_child_from_enriched_list(self, repo, engine):
-        """Simulate completion: DELETE the junction row, then re-fetch parent.
-        The enriched children list must no longer include the completed child."""
+    def test_delete_from_junction_removes_child_from_list_child_ids(self, repo, engine):
+        """Simulate completion: DELETE the junction row, then re-read children.
+        The junction table no longer includes the completed child."""
         repo.create(
             instance_id="parent-6",
             agent_id="leader",
@@ -250,9 +193,8 @@ class TestCompletionDeletesJunctionRow:
         )
 
         # Before deletion: child visible
-        before = repo.get("parent-6")
-        assert before is not None
-        assert before.children == ["child-6"]
+        before = repo.list_child_ids("parent-6")
+        assert before == ["child-6"]
 
         # Simulate completion: this is the exact SQL the completion paths run
         # (daemon/services/child_reports.py:603-605, 1292-1294,
@@ -264,11 +206,10 @@ class TestCompletionDeletesJunctionRow:
             )
             session.commit()
 
-        # After deletion: child gone from enriched list
-        after = repo.get("parent-6")
-        assert after is not None
-        assert after.children == [], (
-            f"Expected children=[] after junction row deletion, got {after.children}"
+        # After deletion: child gone from list_child_ids
+        after = repo.list_child_ids("parent-6")
+        assert after == [], (
+            f"Expected children=[] after junction row deletion, got {after}"
         )
 
     def test_delete_one_child_keeps_others(self, repo, engine):
@@ -293,9 +234,7 @@ class TestCompletionDeletesJunctionRow:
             )
             session.commit()
 
-        fetched = repo.get("parent-7")
-        assert fetched is not None
-        assert fetched.children == ["child-7b"]
+        assert repo.list_child_ids("parent-7") == ["child-7b"]
 
     def test_double_delete_is_safe(self, repo, engine):
         """Idempotent DELETE: removing a junction row twice must not raise."""
@@ -321,9 +260,7 @@ class TestCompletionDeletesJunctionRow:
             session.execute(delete_sql, {"child_id": "child-8"})
             session.commit()
 
-        fetched = repo.get("parent-8")
-        assert fetched is not None
-        assert fetched.children == []
+        assert repo.list_child_ids("parent-8") == []
 
 
 class TestEndToEndSpawnThenComplete:
@@ -332,10 +269,10 @@ class TestEndToEndSpawnThenComplete:
     def test_full_cycle_uses_only_junction_table(self, repo, engine):
         """The end-to-end happy path:
         1. Spawn parent (no parent)
-        2. Spawn child → junction row created, JSON column untouched
-        3. _enrich_instance returns [child]
+        2. Spawn child → junction row created
+        3. list_child_ids() returns [child]
         4. Complete child → junction row deleted
-        5. _enrich_instance returns []
+        5. list_child_ids() returns []
         """
         # 1. Spawn parent
         repo.create(
@@ -352,18 +289,11 @@ class TestEndToEndSpawnThenComplete:
             parent_id="e2e-parent",
         )
 
-        # Junction row exists, JSON column untouched
+        # Junction row exists
         assert _hierarchy_child_ids(engine, "e2e-parent") == ["e2e-child"]
-        raw_parent = _raw_instance_row(engine, "e2e-parent")
-        assert raw_parent is not None
-        assert raw_parent.children == "[]", (
-            "JSON cache must not be mutated on spawn (C10)"
-        )
 
-        # 3. Enrichment sees the child
-        enriched = repo.get("e2e-parent")
-        assert enriched is not None
-        assert enriched.children == ["e2e-child"]
+        # 3. list_child_ids sees the child
+        assert repo.list_child_ids("e2e-parent") == ["e2e-child"]
 
         # 4. Simulate completion DELETE
         with Session(engine) as session:
@@ -373,7 +303,5 @@ class TestEndToEndSpawnThenComplete:
             )
             session.commit()
 
-        # 5. Enrichment no longer sees the child
-        after = repo.get("e2e-parent")
-        assert after is not None
-        assert after.children == []
+        # 5. list_child_ids no longer sees the child
+        assert repo.list_child_ids("e2e-parent") == []

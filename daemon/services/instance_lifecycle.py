@@ -637,11 +637,7 @@ class InstanceLifecycleService:
         # Cascade to children FIRST - terminate all child instances in parallel.
         # (Parallel because each child may itself unwind an in-flight LLM call;
         # serial cascade would compound to 5s*N worst case.)
-        # Phase 4: child IDs come from the ``instance_hierarchy`` junction
-        # table (the canonical working-set source), NOT the legacy
-        # ``meta.children`` JSON cache — that column was dropped. We
-        # query the junction table directly so this code path doesn't
-        # depend on the (now-removed) ``_enrich_instance`` overwrite.
+        # child IDs come from instance_hierarchy junction table.
         child_ids: list[str] = []
         if (
             hasattr(self._manager, '_instance_repository')
@@ -1360,8 +1356,7 @@ class InstanceLifecycleService:
         Returns:
             Instance metadata dictionary from the database, enriched
             with the working-set ``children`` list loaded from
-            ``instance_hierarchy`` (Phase 5 — the legacy denormalized
-            ``Instance.children`` column is no longer written to).
+            ``instance_hierarchy``.
 
         Raises:
             KeyError: If instance is not found.
@@ -1373,9 +1368,7 @@ class InstanceLifecycleService:
         if meta is None:
             raise KeyError(f"Instance not found: {instance_id}")
         info = meta.to_dict()
-        # Phase 5: load children from the canonical hierarchy junction
-        # table. The legacy ``Instance.children`` cache column is no
-        # longer written to — see ``InstanceRepository.list_child_ids``.
+        # children loaded from instance_hierarchy junction table
         info["children"] = instance_repository.list_child_ids(instance_id)
         return info
 

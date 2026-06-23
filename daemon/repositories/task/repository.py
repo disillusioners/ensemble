@@ -187,7 +187,7 @@ class TaskRepository:
         report task would be unable to claim and deliver the child
         result to the parent — a deadlock where the job waits for the
         child report and the child report waits for the job. We therefore
-        also check the instance's ``waiting_for > 0`` / ``WAITING_CHILDREN``
+        also check the instance's ``WAITING_CHILDREN``
         status and only treat the job as a blocker when the instance is
         NOT in that deferred state.
 
@@ -295,9 +295,7 @@ class TaskRepository:
                         -- carve-out, the Task can't claim (the job is
                         -- PROCESSING) and the job can't reach its
                         -- terminal transition (the Task never claimed).
-                        -- Phase 4: ``waiting_for`` column dropped; the
-                        -- ``i.status != waiting_children`` guard is the
-                        -- only FIFO carve-out left.
+                        -- FIFO carve-out: ``i.status != waiting_children``.
                         SELECT j.instance_id FROM job_queue_items j
                         LEFT JOIN instances i ON j.instance_id = i.instance_id
                         WHERE j.status = :status_processing
@@ -760,9 +758,7 @@ class TaskRepository:
         ``idx_instances_status``) and the ``job_queue_items.instance_id``
         index, so it stays cheap.
 
-        Phase 5: ``waiting_for`` column was dropped in Phase 4; the
-        ``i.status != waiting_children`` guard is the only FIFO carve-out
-        left (mirrors ``claim_pending_task``).
+        FIFO carve-out: ``i.status != waiting_children`` (mirrors ``claim_pending_task``).
 
         Mirrors the unified-dispatcher admission carve-out in
         :meth:`claim_pending_task`: a PROCESSING MESSAGE job is also NOT
@@ -800,10 +796,7 @@ class TaskRepository:
                             AND j_running.job_type = :job_type_message
                             AND j_running.instance_id = t_pending.instance_id
                             AND j_running.deleted_at IS NULL
-                            -- Phase 4/5: ``waiting_for`` column dropped.
-                            -- The ``i.status != waiting_children`` guard
-                            -- below is the only FIFO carve-out left
-                            -- (mirrors ``claim_pending_task``).
+                            -- FIFO carve-out (mirrors claim_pending_task).
                             AND (i.status IS NULL OR i.status != :status_waiting_children)
                             -- Unified-dispatcher admission carve-out
                             -- (mirror of claim_pending_task). A MESSAGE

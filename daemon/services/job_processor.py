@@ -278,7 +278,6 @@ class JobProcessor:
                 job_id,
                 status="in_progress",
                 progress=progress_text,
-                waiting_for=wf,
             )
         except Exception as e:
             logger.warning(
