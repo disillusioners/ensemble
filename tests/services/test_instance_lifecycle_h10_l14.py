@@ -692,8 +692,15 @@ async def test_l14_resume_cascade_batches_all_updates_into_one_transaction(
 async def test_l14_resume_from_child_sets_ancestor_waiting_for_to_one(
     engine, write_guard
 ):
-    """L14 fix carve-out: when resuming from a non-root node, only
-    the ancestors get waiting_for=1 (the resumed node itself gets 0)."""
+    """L14 fix carve-out: when resuming from a non-root node, the resumed
+    node itself gets waiting_for=0 (preserved).
+
+    Phase 3 update: ``waiting_for`` is rebuild-only cache (ADR-011). The
+    legacy ``waiting_for=1`` ancestor bump was removed with the
+    ``USE_LEGACY_WAITING_FOR_CASCADE`` flag — all nodes (including
+    ancestors) get ``waiting_for=0`` (preserved) on resume. The CM
+    callback owns the terminal transition when all children resolve.
+    """
     root = seed_instance(engine, status=InstanceStatus.PAUSED.value)
     parent = seed_instance(
         engine, status=InstanceStatus.PAUSED.value, parent_id=root
@@ -719,9 +726,9 @@ async def test_l14_resume_from_child_sets_ancestor_waiting_for_to_one(
 
     assert set(result["resumed_ids"]) == {root, parent, child}
 
-    # Ancestors get waiting_for=1; child gets waiting_for=0.
-    assert get_instance(engine, root).waiting_for == 1
-    assert get_instance(engine, parent).waiting_for == 1
+    # Phase 3: waiting_for is preserved (0 for all nodes). No ancestor bump.
+    assert get_instance(engine, root).waiting_for == 0
+    assert get_instance(engine, parent).waiting_for == 0
     assert get_instance(engine, child).waiting_for == 0
 
 
