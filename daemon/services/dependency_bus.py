@@ -494,6 +494,19 @@ class DependencyBus:
         lock = await self._get_lock(task_id)
         fired: list[FollowUp] = []
         async with lock:
+            # Read PENDING watchers from DB — source of truth.
+            # A cache read would be cheaper but would miss any
+            # watch() that landed from another process (future
+            # multi-process) or any cache eviction since start().
+            # Must come BEFORE the per-parent error tracking below:
+            # the error block iterates over ``pending_rows`` to
+            # compute the unique target ids that should be flipped
+            # to ``_parent_errored=True`` (Phase 5: "any error →
+            # error" conservative rule from the old CM).
+            pending_rows = await asyncio.to_thread(
+                self._repo.fetch_pending_for_source, task_id
+            )
+
             # Phase 5 (2026-06-23): record per-parent error signal
             # BEFORE the transition loop so a parent whose last
             # child errored is correctly finalized as ``"error"``.
@@ -516,14 +529,6 @@ class DependencyBus:
                 }
                 for tgt in errored_targets:
                     self._parent_errored[tgt] = True
-
-            # Read PENDING watchers from DB — source of truth.
-            # A cache read would be cheaper but would miss any
-            # watch() that landed from another process (future
-            # multi-process) or any cache eviction since start().
-            pending_rows = await asyncio.to_thread(
-                self._repo.fetch_pending_for_source, task_id
-            )
 
             if not pending_rows:
                 logger.debug(

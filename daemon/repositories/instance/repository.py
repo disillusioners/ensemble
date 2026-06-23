@@ -57,39 +57,43 @@ class SQLModelInstanceRepository:
     # --------------------------------------------------------
 
     def _load_children(self, db_session: SQLModelSession, instance_id: str) -> list[str]:
-        """Load child instance IDs from hierarchy table."""
+        """Load child instance IDs from the ``instance_hierarchy`` working set."""
         links = db_session.exec(
             select(InstanceHierarchy).where(InstanceHierarchy.parent_id == instance_id)
         ).all()
         return [link.child_id for link in links]
 
+    def list_child_ids(self, instance_id: str) -> list[str]:
+        """Return the child instance IDs of ``instance_id`` from the
+        ``instance_hierarchy`` working set.
+
+        Callers that need the permanent-record child list (including
+        completed descendants) should use :meth:`get_children`, which
+        walks ``instances.parent_id``.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            return self._load_children(db_session, instance_id)
+
     def _enrich_instance(self, db_session: SQLModelSession, instance: Instance | None) -> Instance | None:
-        """Load children onto instance."""
-        if instance is None:
-            return None
-        with db_session.no_autoflush:
-            instance.children = self._load_children(db_session, instance.instance_id)
+        """Hook for subclasses / tests to enrich a freshly-read instance.
+
+        Default implementation returns the instance unchanged. The
+        legacy ``Instance.children`` denormalized cache column is no
+        longer written to — the ``instance_hierarchy`` junction table is
+        the canonical source of child IDs. Callers that need the
+        working-set child list should call :meth:`_load_children`
+        directly with their own session.
+        """
         return instance
 
-    def _enrich_instances(self, db_session: SQLModelSession, instances: list[Instance]) -> list[Instance]:
-        """Load children for multiple instances.
+    def _enrich_instances(
+        self, db_session: SQLModelSession, instances: list[Instance]
+    ) -> list[Instance]:
+        """Hook for subclasses / tests to enrich freshly-read instances.
 
-        .. note::
-            ``inst.children`` is loaded from the ``instance_hierarchy`` working
-            set (entries are removed on child completion). The BFS traversal in
-            :meth:`list` (include_descendants=True), by contrast, uses
-            ``instances.parent_id`` — the permanent record that survives
-            completion. This asymmetry is **intentional**:
-
-            * ``children[]`` drives working-set operations (cascade
-              pause/resume) where completed children are no longer relevant.
-            * The frontend rebuilds the visible tree from the flat result list
-              using ``parent_id`` relationships, so completed descendants are
-              still surfaced even when they're absent from ``children[]``.
+        Default implementation returns the list unchanged. See
+        :meth:`_enrich_instance` for rationale.
         """
-        with db_session.no_autoflush:
-            for inst in instances:
-                inst.children = self._load_children(db_session, inst.instance_id)
         return instances
 
     # --------------------------------------------------------
@@ -533,18 +537,17 @@ class SQLModelInstanceRepository:
             instances = list(db_session.exec(stmt))
             return self._enrich_instances(db_session, instances)
 
-    def get_all_with_waiting_for(self) -> list[Instance]:
-        """Return all instances with a non-zero ``waiting_for`` counter.
+    def list_parents_with_active_children(self) -> list[str]:
+        """Return all ``parent_id`` values that currently have at least one
+        active child in the ``instance_hierarchy`` working set.
 
-        Phase 4: this is a REBUILD query for ``rebuild_from_db()`` —
-        it reconstructs the CorrelationManager's in-memory pending set
-        on daemon startup. ``waiting_for`` is the rebuild cache per
-        ADR-011, not a control-flow signal. Do NOT replace with a CM
-        call; the CM is empty at this point in the lifecycle.
+        A parent with at least one row in this table has at least one
+        outstanding child whose completion report is still expected
+        (entries are added on spawn and deleted when children complete).
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(Instance).where(Instance.waiting_for > 0)
-            return db_session.exec(stmt).all()
+            stmt = select(InstanceHierarchy.parent_id).distinct()
+            return list(db_session.exec(stmt))
 
     # --------------------------------------------------------
     # UPDATE
@@ -649,28 +652,6 @@ class SQLModelInstanceRepository:
             if instance is None:
                 return None
             return self._enrich_instance(db_session, instance)
-
-    def update_waiting_for(self, instance_id: str, waiting_for: int) -> Instance | None:
-        """Update instance waiting_for counter.
-
-        Thin pass-through to :meth:`update` for the ``waiting_for`` column.
-        Per ADR-011, ``waiting_for`` is the rebuild cache and is retained
-        for ``rebuild_from_db()``. Phase 3 removed the
-        ``USE_LEGACY_WAITING_FOR_CASCADE`` flag and the gated
-        ``waiting_for`` SQL writes — actual production writers no
-        longer call this method. The method is kept for generic update
-        convenience and for backward compatibility with tests. It will
-        be removed in Phase 4 along with the ``waiting_for`` column
-        itself.
-
-        Args:
-            instance_id: The instance ID to update.
-            waiting_for: New waiting_for value.
-
-        Returns:
-            Updated Instance or None if not found.
-        """
-        return self.update(instance_id, waiting_for=waiting_for)
 
     def update_title(self, instance_id: str, title: str) -> Instance | None:
         """Update instance title in instance_metadata.

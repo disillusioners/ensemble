@@ -1690,7 +1690,7 @@ Provide a concise summary:"""
                 # The root carve-out is intentional and aligned with Site 1B
                 # (ADR-012) two-condition check: root completion requires BOTH
                 # no pending children AND no own-queue messages.
-if pending_count > 0:
+                if pending_count > 0:
                     # Single pending_count guard is sufficient. Do NOT
                     # transition to COMPLETED — there is queued work that
                     # the worker must still process.
@@ -1718,21 +1718,6 @@ if pending_count > 0:
                             f"but no active MESSAGE job — skipping WAITING_CHILDREN "
                             f"write (stale/duplicate messages from task-claim race)"
                         )
-                        # Do NOT set status to WAITING_CHILDREN. Leave the
-                        # instance status as-is (current status preserved).
-                        return _ChildCompletionDbResult(
-                            outcome="root_skipped_terminal_job",
-                            instance_id=instance_id,
-                            agent_id=instance.agent_id,
-                            parent_id=None,
-                        )
-
-                    instance.status = InstanceStatus.WAITING_CHILDREN.value
-                    session.commit()
-                    logger.info(
-                        f"Instance {instance_id[:8]}... has {pending_count} pending "
-                        f"messages, status=WAITING_CHILDREN (deprecated)"
-                    )
                         # Do NOT set status to WAITING_CHILDREN. Leave the
                         # instance status as-is (current status preserved).
                         return _ChildCompletionDbResult(
