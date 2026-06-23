@@ -140,12 +140,14 @@ def pg_message_repo(pg_engine: Engine) -> SQLModelMessageQueueRepository:
 
 @pytest.fixture(autouse=True)
 def _reset_cm_singleton():
-    """Ensure each test starts and ends with the CM singleton cleared."""
-    set_correlation_manager(None)
-    try:
-        yield
-    finally:
-        set_correlation_manager(None)
+    """No-op for Phase 5: CorrelationManager removed (DependencyBus is sole authority).
+
+    Previously reset the ``set_correlation_manager(None)`` singleton before
+    and after each test. Phase 5 removed CM entirely, so this fixture is a
+    placeholder kept to avoid touching test bodies that still reference the
+    historical CM-cleanup pattern in their docstrings.
+    """
+    yield
 
 
 # =============================================================================

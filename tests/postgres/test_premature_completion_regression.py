@@ -55,17 +55,10 @@ from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
 import pytest
 
-pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests premature completion regression")
-
-# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
-# Tests in this module are skipped via ``pytestmark`` above.
-from daemon.services.job_feedback_observer import JobFeedbackObserver
-from daemon.write_pause_guard import WritePauseGuard
-
-logger = logging.getLogger(__name__)
-
-# Auto-apply the ``postgres`` marker to every test in this module.
-pytestmark = pytest.mark.postgres
+pytestmark = [
+    pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests premature completion regression"),
+    pytest.mark.postgres,
+]
 
 
 # =============================================================================
@@ -142,12 +135,14 @@ def pg_job_repo(pg_engine: Engine) -> JobRepository:
 
 @pytest.fixture(autouse=True)
 def _reset_cm_singleton():
-    """Ensure each test starts and ends with the CM singleton cleared."""
-    set_correlation_manager(None)
-    try:
-        yield
-    finally:
-        set_correlation_manager(None)
+    """No-op for Phase 5: CorrelationManager removed (DependencyBus is sole authority).
+
+    Previously reset the ``set_correlation_manager(None)`` singleton before
+    and after each test. Phase 5 removed CM entirely, so this fixture is a
+    placeholder kept to avoid touching test bodies that still reference the
+    historical CM-cleanup pattern in their docstrings.
+    """
+    yield
 
 
 # =============================================================================

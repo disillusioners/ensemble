@@ -104,11 +104,18 @@ def _insert_empty_metadata_instance(conn, instance_id: str) -> None:
     """Insert a fresh ``instances`` row whose ``metadata`` starts as ``'{}'``.
 
     The Instance model declares Python defaults for several columns
-    (``status``, ``children``, ``waiting_for``, ``version``, ``created_at``,
-    ``updated_at``) but SQLModel does not always synthesize a matching
-    ``server_default`` for those columns on PostgreSQL, so an INSERT
-    that omits them trips ``NotNullViolation``. We pass values
-    explicitly to avoid relying on the Python-side default_factory.
+    (``status``, ``version``, ``created_at``, ``updated_at``) but
+    SQLModel does not always synthesize a matching ``server_default``
+    for those columns on PostgreSQL, so an INSERT that omits them trips
+    ``NotNullViolation``. We pass values explicitly to avoid relying on
+    the Python-side default_factory.
+
+    Note: ``children`` and ``waiting_for`` columns were dropped from the
+    Instance model in Phase 5 cleanup (vestigial since the bus became
+    sole completion authority in Phase D). Phase 4 ``ALTER TABLE
+    DROP COLUMN`` removed them on PostgreSQL, so this INSERT no longer
+    references them — SQLite-only test path remains in the SQLModel
+    schema layer.
 
     ``metadata`` starts as ``'{}'::jsonb`` so that ``jsonb_set`` has a
     JSONB object to operate on (calling ``jsonb_set`` on a SQL NULL
@@ -120,12 +127,12 @@ def _insert_empty_metadata_instance(conn, instance_id: str) -> None:
             """
             INSERT INTO instances (
                 instance_id, agent_id, agent_dir,
-                status, children, waiting_for, version,
+                status, version,
                 created_at, updated_at,
                 metadata
             ) VALUES (
                 :instance_id, :agent_id, :agent_dir,
-                :status, :children, :waiting_for, :version,
+                :status, :version,
                 :created_at, :updated_at,
                 '{}'::jsonb
             )
@@ -136,8 +143,6 @@ def _insert_empty_metadata_instance(conn, instance_id: str) -> None:
             "agent_id": "concurrency-jsonb-test",
             "agent_dir": "/tmp/concurrency-jsonb-test",
             "status": InstanceStatus.IDLE.value,
-            "children": "[]",
-            "waiting_for": 0,
             "version": 1,
             "created_at": now_iso,
             "updated_at": now_iso,
