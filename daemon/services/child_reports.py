@@ -107,27 +107,6 @@ class ChildReportsService:
         """Access config through manager for test mockability."""
         return self._manager.config
 
-    def _is_dependency_bus_enabled(self) -> bool:
-        """Read the ``use_dependency_bus`` flag from the manager config.
-
-        Defensive ``getattr`` chain mirrors
-        ``JobProcessor._is_legacy_jobqueue_dispatch_enabled`` and the
-        sibling helper in ``daemon/tools/instance.py`` so test mocks
-        that bypass ``InstanceManager.__init__`` (e.g. ``MagicMock()``
-        without explicit ``config``) don't crash. The default is False
-        (bus disabled — flag slated for removal in Phase 8 cleanup),
-        matching the config field's default.
-
-        Returns:
-            True if the operator has enabled the DB-backed DependencyBus
-            completion-delivery path; False otherwise.
-        """
-        _config = getattr(self._manager, "config", None)
-        _job_system = getattr(_config, "job_system", None)
-        return bool(
-            getattr(_job_system, "use_dependency_bus", False)
-        )
-
     def _bus_count_pending_for_target_sync(
         self, target_instance_id: str
     ) -> int:
@@ -140,8 +119,8 @@ class ChildReportsService:
 
         **Caller contract**: only use this helper for **defense-in-
         depth checks** that have a separate safety net (the in-
-        session bus gate inside ``WriteGuardSession``, a parent
-        ``cm.is_complete`` check, etc.). The **authoritative bus
+        session bus gate inside ``WriteGuardSession``, a parent bus-pending
+        check, etc.). The **authoritative bus
         gate** at the completion decision point must use the inline
         COUNT query directly on the ``WriteGuardSession``'s session
         object (see ``_process_child_completion_db_sync``), so the
@@ -158,8 +137,7 @@ class ChildReportsService:
         Used by the sync completion gate in
         :meth:`_process_child_completion_db_sync` (which runs inside
         ``WriteGuardSession`` on a worker thread — an ``await`` is
-        impossible there) to consult the bus under
-        ``use_dependency_bus=ON``. The bus is the SOLE
+        impossible there) to consult the bus. The bus is the SOLE
         pending-children source — its DB-backed ``dependency_watchers``
         table is authoritative. Without this check, the root-instance
         completion gate falls through to COMPLETED prematurely while
@@ -184,20 +162,12 @@ class ChildReportsService:
         Returns:
             Non-negative integer count of PENDING watchers for
             the given target. Returns 0 when the bus singleton is
-            not wired, the flag is OFF, or the DB query fails.
+            not wired or the DB query fails.
         """
         from .dependency_bus import get_dependency_bus
 
         bus = get_dependency_bus()
         if bus is None:
-            return 0
-
-        # Mirror the W1-fix defensive flag check from the call
-        # sites in ``_emit_terminal_via_bus`` callers: the flag
-        # must be ON for the bus to be the source of truth. If the
-        # operator flipped the flag OFF mid-flight, treat the bus
-        # as inert (the CM path is the fallback).
-        if not self._is_dependency_bus_enabled():
             return 0
 
         try:
@@ -263,8 +233,7 @@ class ChildReportsService:
             watchers fired), but the FollowUps are NOT enqueued as
             messages — see ``_retrigger_parent_finalize`` below for
             the actual finalization path. Empty list when no watchers
-            existed or when the flag is OFF (this helper is a no-op in
-            the OFF case — the caller falls through to the CM path).
+            existed.
         """
         from .dependency_bus import (
             Outcome,
@@ -273,14 +242,13 @@ class ChildReportsService:
 
         bus = get_dependency_bus()
         if bus is None:
-            # Bus singleton missing despite flag being ON — treat as a
-            # wiring failure and return an empty list (the caller's CM
-            # path will still run because we never replace it; the CM
-            # is the safety net).
+            # Bus singleton missing — genuine wiring failure. Return
+            # empty list (no fallback exists; the bus is the sole
+            # authority).
             logger.warning(
-                "_emit_terminal_via_bus: bus singleton is None despite "
-                "flag=ON — returning empty FollowUp list "
-                "(caller should fall back to CM path)"
+                "_emit_terminal_via_bus: bus singleton is None — "
+                "wiring failure, returning empty FollowUp list "
+                "(no fallback)"
             )
             return []
 
@@ -423,11 +391,12 @@ class ChildReportsService:
     ) -> None:
         """Re-trigger job finalization for a parent after all bus watchers fired.
 
-        On the bus path (``use_dependency_bus=ON``), the CM callback never
-        re-fires because ``send_message`` skips ``cm.register_message_send``.
-        After the bus fires the last watcher, we must explicitly re-attempt
-        job finalization via the :class:`JobFeedbackObserver` so the job
-        transitions PROCESSING → COMPLETED and locks are released.
+        On the bus path, the bus completion callback never
+        re-fires because ``send_message`` no longer goes through CM
+        (Phase 5 removal). After the bus fires the last watcher, we
+        must explicitly re-attempt job finalization via the
+        :class:`JobFeedbackObserver` so the job transitions
+        PROCESSING → COMPLETED and locks are released.
 
         Safety properties:
           * **No deadlock**: ``_emit_terminal_via_bus`` runs in post-commit
@@ -1034,11 +1003,9 @@ Provide a concise summary:"""
         # returns ``[]`` on a missing task — so this guard is
         # only a fast-path skip.
         #
-        # The bus is the SOLE completion authority. The
-        # ``use_dependency_bus`` flag controls ``send_message``
-        # watcher registration, but at completion time we always
-        # route through the bus; the helper handles the no-watchers
-        # case as a no-op.
+        # The bus is the SOLE completion authority. At completion
+        # time we always route through the bus; the helper handles
+        # the no-watchers case as a no-op.
         if completed_message_id:
             # Look up the child task id from the message_id — the
             # bus is keyed on task id, not message_id. The lookup
@@ -1185,9 +1152,10 @@ Provide a concise summary:"""
                 # will run again to mark it COMPLETED.
                 #
                 # Phase 4: WAITING_CHILDREN is DEPRECATED as a control-flow
-                # signal — CM is the authoritative source of correlation
-                # state. The status set is RETAINED for graceful-degradation
-                # (CM is None) and for the FIFO carve-out SQL compatibility
+                # signal — the DependencyBus is the authoritative source
+                # of correlation state. The status set is RETAINED for
+                # graceful-degradation (bus singleton None) and for the
+                # FIFO carve-out SQL compatibility
                 # (daemon/repositories/task/repository.py). The
                 # ``transitioned_to_running`` return value remains ``True``
                 # because the parent is still alive (will process more
@@ -1217,7 +1185,7 @@ Provide a concise summary:"""
                 parent.status = InstanceStatus.WAITING_CHILDREN.value
                 logger.info(
                     f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                    f"pending messages, status=WAITING_CHILDREN (deprecated; CM is authoritative)"
+                    f"pending messages, status=WAITING_CHILDREN (deprecated; bus is authoritative)"
                 )
                 # Emit status_change SSE event for parent waiting_children
                 # (display only — status field is being phased out).
@@ -1588,108 +1556,105 @@ Provide a concise summary:"""
                 # the COUNT here, regardless of who wins the race.
                 #
                 # Defensive wiring check: only consult the bus when
-                # BOTH the flag is ON AND the bus singleton is
-                # wired. When the singleton is None (testing, missing
-                # init, config drift), the gate is dormant — same
-                # semantics as the original
+                # the bus singleton is wired. When the singleton is
+                # None (testing, missing init, config drift), the
+                # gate is dormant — same semantics as the original
                 # ``_bus_count_pending_for_target_sync`` helper
                 # before the C2 inline refactor. Without this guard,
-                # a test or config that leaves the flag ON without
-                # wiring the bus singleton would still execute the
-                # inline COUNT against an empty table — usually
-                # harmless (returns 0), but in degraded states
-                # (mock MagicMock truthiness, partial migrations) it
-                # could defer a completion that should proceed.
-                if self._is_dependency_bus_enabled():
-                    from .dependency_bus import get_dependency_bus as _get_bus
-                    if _get_bus() is not None:
-                        _bus_pending_stmt = (
-                            select(func.count())
-                            .select_from(DependencyWatcher)
-                            .where(DependencyWatcher.target_instance_id == instance_id)
-                            .where(
-                                DependencyWatcher.state
-                                == DependencyWatcherState.PENDING.value
-                            )
+                # a test or config that doesn't wire the bus
+                # singleton would still execute the inline COUNT
+                # against an empty table — usually harmless (returns
+                # 0), but in degraded states (mock MagicMock
+                # truthiness, partial migrations) it could defer a
+                # completion that should proceed.
+                from .dependency_bus import get_dependency_bus as _get_bus
+                if _get_bus() is not None:
+                    _bus_pending_stmt = (
+                        select(func.count())
+                        .select_from(DependencyWatcher)
+                        .where(DependencyWatcher.target_instance_id == instance_id)
+                        .where(
+                            DependencyWatcher.state
+                            == DependencyWatcherState.PENDING.value
                         )
-                        bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
-                        if bus_pending > 0:
-                            # F8 carve-out (2026-06-22): if there is
-                            # NO active MESSAGE job (PENDING/PROCESSING)
-                            # for this instance, the pending-children
-                            # signal is likely stale/duplicate from a
-                            # task-claim race. Writing WAITING_CHILDREN
-                            # here would permanently strand the
-                            # instance — no code path transitions out
-                            # of WAITING_CHILDREN other than a new
-                            # message arriving on a fresh MESSAGE job,
-                            # which is exactly what is missing. In
-                            # that case, return a
-                            # ``root_skipped_terminal_job`` result
-                            # (preserves status, signals
-                            # CompletionRegistry) instead of writing
-                            # the status. Mirrors the same guard in
-                            # the regular ``root_waiting_children``
-                            # path below — bus path must be
-                            # consistent with the non-bus path.
-                            #
-                            # Phase 5: the bus PENDING-watcher count
-                            # (``bus_pending > 0``) reflects parent→
-                            # child correlation, NOT the MESSAGE-job
-                            # lifecycle. The guard catches the case
-                            # where watchers exist but no MESSAGE
-                            # worker is in flight (stale/duplicate
-                            # from task-claim race). See the method
-                            # docstring for the full bus-vs-guard
-                            # separation analysis.
-                            if self._has_no_active_message_job(session, instance_id):
-                                logger.warning(
-                                    f"Instance {instance_id[:8]}... has "
-                                    f"{bus_pending} bus PENDING watchers "
-                                    f"(use_dependency_bus=ON) but no active "
-                                    f"MESSAGE job — skipping WAITING_CHILDREN "
-                                    f"write (stale/duplicate from task-claim "
-                                    f"race). Status preserved as "
-                                    f"{instance.status}."
-                                )
-                                return _ChildCompletionDbResult(
-                                    outcome="root_skipped_terminal_job",
-                                    instance_id=instance_id,
-                                    agent_id=instance.agent_id,
-                                    parent_id=None,
-                                )
-
-                            # Bug fix (2026-06-22): transition
-                            # ``instance.status`` to ``WAITING_CHILDREN``
-                            # so the frontend reflects the "leader is
-                            # waiting for children" state on the bus
-                            # path. Previously the status stayed at
-                            # whatever it was (typically ``running``)
-                            # so the UI showed ``running`` even though
-                            # no LLM call was in flight. The
-                            # F8 carve-out above protects against
-                            # stale/duplicate signals from a
-                            # task-claim race.
-                            instance.status = InstanceStatus.WAITING_CHILDREN.value
-                            instance.updated_at = datetime.now(timezone.utc).isoformat()
-                            instance.version = (instance.version or 1) + 1
-                            session.commit()
-                            logger.info(
-                                f"Instance {instance_id[:8]}... CM says "
-                                f"complete but bus has {bus_pending} "
-                                f"PENDING watchers "
-                                f"(use_dependency_bus=ON), "
-                                f"deferring completion, "
-                                f"status=WAITING_CHILDREN"
+                    )
+                    bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
+                    if bus_pending > 0:
+                        # F8 carve-out (2026-06-22): if there is
+                        # NO active MESSAGE job (PENDING/PROCESSING)
+                        # for this instance, the pending-children
+                        # signal is likely stale/duplicate from a
+                        # task-claim race. Writing WAITING_CHILDREN
+                        # here would permanently strand the
+                        # instance — no code path transitions out
+                        # of WAITING_CHILDREN other than a new
+                        # message arriving on a fresh MESSAGE job,
+                        # which is exactly what is missing. In
+                        # that case, return a
+                        # ``root_skipped_terminal_job`` result
+                        # (preserves status, signals
+                        # CompletionRegistry) instead of writing
+                        # the status. Mirrors the same guard in
+                        # the regular ``root_waiting_children``
+                        # path below — bus path must be
+                        # consistent with the non-bus path.
+                        #
+                        # Phase 5: the bus PENDING-watcher count
+                        # (``bus_pending > 0``) reflects parent→
+                        # child correlation, NOT the MESSAGE-job
+                        # lifecycle. The guard catches the case
+                        # where watchers exist but no MESSAGE
+                        # worker is in flight (stale/duplicate
+                        # from task-claim race). See the method
+                        # docstring for the full bus-vs-guard
+                        # separation analysis.
+                        if self._has_no_active_message_job(session, instance_id):
+                            logger.warning(
+                                f"Instance {instance_id[:8]}... has "
+                                f"{bus_pending} bus PENDING watchers "
+                                f"but no active "
+                                f"MESSAGE job — skipping WAITING_CHILDREN "
+                                f"write (stale/duplicate from task-claim "
+                                f"race). Status preserved as "
+                                f"{instance.status}."
                             )
-                            # SSE side effect is dispatched by the
-                            # async caller.
                             return _ChildCompletionDbResult(
-                                outcome="deferred_waiting_children",
+                                outcome="root_skipped_terminal_job",
                                 instance_id=instance_id,
                                 agent_id=instance.agent_id,
                                 parent_id=None,
                             )
+
+                        # Bug fix (2026-06-22): transition
+                        # ``instance.status`` to ``WAITING_CHILDREN``
+                        # so the frontend reflects the "leader is
+                        # waiting for children" state on the bus
+                        # path. Previously the status stayed at
+                        # whatever it was (typically ``running``)
+                        # so the UI showed ``running`` even though
+                        # no LLM call was in flight. The
+                        # F8 carve-out above protects against
+                        # stale/duplicate signals from a
+                        # task-claim race.
+                        instance.status = InstanceStatus.WAITING_CHILDREN.value
+                        instance.updated_at = datetime.now(timezone.utc).isoformat()
+                        instance.version = (instance.version or 1) + 1
+                        session.commit()
+                        logger.info(
+                            f"Instance {instance_id[:8]}... CM says "
+                            f"complete but bus has {bus_pending} "
+                            f"PENDING watchers, "
+                            f"deferring completion, "
+                            f"status=WAITING_CHILDREN"
+                        )
+                        # SSE side effect is dispatched by the
+                        # async caller.
+                        return _ChildCompletionDbResult(
+                            outcome="deferred_waiting_children",
+                            instance_id=instance_id,
+                            agent_id=instance.agent_id,
+                            parent_id=None,
+                        )
 
                 # Check pending messages before completing.
                 # Exclude the just-completed message by ID (mirrors
@@ -1727,11 +1692,11 @@ Provide a concise summary:"""
                 # there is no child correlation pending.
                 #
                 # Non-root parents (handled in ``_update_parent_on_child_complete``
-                # at line ~565) are gated by ``cm.is_complete()`` — when CM is
-                # active, they stay PROCESSING because the CM tracks their
-                # pending children. They never reach the SELECT COUNT branch
-                # for their own queue because the CM-active bypass returns early
-                # at line ~574.
+                # at line ~565) are gated by the bus pending-count check — they
+                # stay PROCESSING because the bus tracks their pending children.
+                # They never reach the SELECT COUNT branch
+                # for their own queue because the bus path keeps the parent in
+                # PROCESSING until the bus reports no pending children.
                 #
                 # The root carve-out is intentional and aligned with Site 1B
                 # (ADR-012) two-condition check: root completion requires BOTH
@@ -2059,7 +2024,7 @@ Provide a concise summary:"""
                             parent.status = InstanceStatus.WAITING_CHILDREN.value
                             logger.info(
                                 f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                                f"pending messages, status=WAITING_CHILDREN (deprecated; CM is authoritative)"
+                                f"pending messages, status=WAITING_CHILDREN (deprecated; bus is authoritative)"
                             )
                             # Flag SSE emission for the async caller (was at
                             # line 624-627 in the pre-refactor inline block).
@@ -2273,10 +2238,8 @@ Provide a concise summary:"""
             #
             # Phase 5: CM is removed. Bus is the SOLE completion
             # authority. We always route through the bus at completion
-            # time; the ``use_dependency_bus`` flag still controls
-            # ``send_message`` watcher registration, but the
-            # completion-state update always uses the bus (the helper
-            # handles the no-watchers case as a no-op).
+            # time; the helper handles the no-watchers case as a
+            # no-op.
             if completed_message_id:
                 # Look up the child task id from the message_id — the
                 # bus is keyed on task id, not message_id. The lookup

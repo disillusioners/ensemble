@@ -327,22 +327,6 @@ class JobSystemConfig(BaseSettings):
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
-    # The DependencyBus is unconditional — there is no legacy or rollback path.
-    # The ``use_dependency_bus`` field is retained only because it is slated for
-    # removal in Phase 8 cleanup; do not describe it as a kill-switch.
-
-    use_dependency_bus: bool = Field(
-        default=True,
-        description=(
-            "Controls DependencyBus activation. When ON (default), ``send_message`` "
-            "writes a ``dependency_watchers`` row (FollowUp) and terminal events "
-            "call ``bus.emit_terminal(task_id, outcome)``. The bus is the only "
-            "completion authority; setting this to OFF disables parent-waits-for-children "
-            "and is not a supported rollback path. Flag slated for removal in "
-            "Phase 8 cleanup."
-        ),
-    )
-
 
 class McpPoolConfig(BaseSettings):
     """MCP warm-up connection pool configuration."""

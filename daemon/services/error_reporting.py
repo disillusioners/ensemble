@@ -60,35 +60,6 @@ class _ErrorReportDbResult(NamedTuple):
     cascade_parent_parent_id: str | None
 
 
-def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
-    """Read the ``use_dependency_bus`` flag from the manager config.
-
-    Module-level helper (not a method) because the gated call site in
-    ``_send_error_report`` is a long function and the helper is also
-    used by other call sites that receive ``manager`` as an argument.
-    Mirrors the defensive ``getattr`` chain used in
-    ``JobProcessor._is_legacy_jobqueue_dispatch_enabled``,
-    ``ChildReportsService._is_dependency_bus_enabled``, and the sibling
-    helper in ``daemon/tools/instance.py`` so test mocks that bypass
-    ``InstanceManager.__init__`` (e.g. ``MagicMock()`` without explicit
-    ``config``) don't crash. Default is False (bus disabled — flag
-    slated for removal in Phase 8 cleanup), matching the config
-    field's default.
-
-    Args:
-        manager: The InstanceManager (or test mock).
-
-    Returns:
-        True if the operator has enabled the DB-backed DependencyBus
-        completion-delivery path; False otherwise.
-    """
-    _config = getattr(manager, "config", None)
-    _job_system = getattr(_config, "job_system", None)
-    return bool(
-        getattr(_job_system, "use_dependency_bus", False)
-    )
-
-
 class ErrorReportingService:
     """Service for handling and reporting errors to parent instances.
     
@@ -361,11 +332,11 @@ class ErrorReportingService:
                                 cascade_parent_parent_id=parent.parent_id,
                             )
 
-        # Session exited (CM-active path, or cascade didn't trigger).
-        # Return the captured child IDs so the async caller can fire
-        # the post-commit CompletionRegistry / child-error SSE. No
-        # cascade_status set — the CM callback or the next caller's
-        # processing owns any parent-side transition.
+        # Session exited (no active bus completion path, or cascade
+        # didn't trigger). Return the captured child IDs so the async
+        # caller can fire the post-commit CompletionRegistry / child-error
+        # SSE. No cascade_status set — the next caller's processing owns
+        # any parent-side transition.
         return _ErrorReportDbResult(
             skip=False,
             child_instance_id=error_instance_id,
@@ -519,145 +490,124 @@ class ErrorReportingService:
             # finalization path (see ``_emit_terminal_via_bus``
             # docstring).
             if message_id:
-                if _is_dependency_bus_enabled(self._manager):
-                    # DependencyBus path — the SOLE completion authority.
-                    _child_task_err = None
-                    _task_repo_err = getattr(self._manager, "_task_repo", None)
-                    if _task_repo_err is not None:
-                        _child_task_err = await asyncio.to_thread(
-                            _task_repo_err.get_by_message, message_id
-                        )
-                    # Import here to avoid module-level cycle with
-                    # dependency_bus importing from this module transitively.
-                    from .dependency_bus import (
-                        Outcome,
-                        get_dependency_bus,
+                # DependencyBus path — the SOLE completion authority.
+                _child_task_err = None
+                _task_repo_err = getattr(self._manager, "_task_repo", None)
+                if _task_repo_err is not None:
+                    _child_task_err = await asyncio.to_thread(
+                        _task_repo_err.get_by_message, message_id
                     )
-                    _bus = get_dependency_bus()
-                    if _bus is None:
-                        # Bus singleton missing under use_dependency_bus=ON is
-                        # an invalid state. Log loudly so operators see the
-                        # misconfiguration; there is no fallback path.
-                        logger.warning(
-                            "use_dependency_bus=ON but bus singleton is "
-                            "None — invalid state (bus must be initialized); "
-                            "no fallback available for child error finalization"
-                        )
-                    else:
-                        # Delegate the bus emission + FollowUp enqueue
-                        # + re-trigger loop to
-                        # ``child_reports._emit_terminal_via_bus`` so the
-                        # finalize re-trigger fires uniformly for BOTH
-                        # completion and error paths. Previously this
-                        # code called ``_bus.emit_terminal`` directly
-                        # and enqueued FollowUps, but never invoked
-                        # ``_retrigger_parent_finalize`` — meaning a
-                        # child error could leave the parent stuck in
-                        # PROCESSING forever (the inverse-regression
-                        # bug the re-trigger was added to prevent on
-                        # the completion path). See
-                        # ``child_reports._emit_terminal_via_bus``
-                        # docstring for the full rationale and the
-                        # ``_retriggered`` set guard that prevents
-                        # redundant observer work.
-                        _child_reports_svc = getattr(
-                            self._manager, "_child_reports_service", None
-                        )
-                        if _child_reports_svc is not None:
-                            try:
-                                await _child_reports_svc._emit_terminal_via_bus(
-                                    task_id=getattr(_child_task_err, "id", None),
-                                    status="error",
-                                    error=error,
-                                    summary=f"child errored: {error_type}",
-                                )
-                            except Exception as hook_err:
-                                logger.warning(
-                                    f"bus hook: _emit_terminal_via_bus "
-                                    f"(error) failed "
-                                    f"(parent={parent_id[:8]}..., "
-                                    f"child={instance_id[:8]}...): {hook_err}"
-                                )
-                        else:
-                            # Defensive fallback: ``child_reports``
-                            # service is not wired (unit tests with a
-                            # bare MagicMock manager, or partial init
-                            # during early daemon startup). Replicate
-                            # the bus emit so the FIRED transition
-                            # happens on the bus DB, but DO NOT
-                            # enqueue a FollowUp message — the bus
-                            # path is internal plumbing, not a
-                            # message source the LLM consumes. The
-                            # re-trigger finalization is also lost in
-                            # this branch (the helper lives on
-                            # ``ChildReportsService``), so the parent
-                            # may stay PROCESSING in this extremely
-                            # rare fallback path. In production this
-                            # branch should never trigger; the
-                            # ``_child_reports_service`` attribute is
-                            # set in
-                            # ``InstanceManager.__init__`` before the
-                            # error-reporting service is wired.
-                            logger.warning(
-                                f"bus hook (error): child_reports "
-                                f"service not wired; falling back to "
-                                f"direct _bus.emit_terminal (no "
-                                f"FollowUp enqueue, no re-trigger — "
-                                f"parent may be stuck in PROCESSING). "
-                                f"parent={parent_id[:8]}..., "
-                                f"child={instance_id[:8]}..."
-                            )
-                            try:
-                                _outcome = Outcome(
-                                    status="error",
-                                    error=error,
-                                    summary=f"child errored: {error_type}",
-                                )
-                                _fired = await _bus.emit_terminal(
-                                    task_id=str(
-                                        getattr(_child_task_err, "id", None) or ""
-                                    ),
-                                    outcome=_outcome,
-                                )
-                                # No FollowUp enqueue — the bus does
-                                # not deliver messages. The FollowUp
-                                # payload is logged for observability
-                                # but discarded.
-                                for _fu in _fired:
-                                    logger.debug(
-                                        f"bus error: FIRED watcher "
-                                        f"target={_fu.target_instance_id[:8]}..., "
-                                        f"outcome=error (no FollowUp "
-                                        f"enqueue — re-trigger lost in "
-                                        f"this fallback path)",
-                                        extra={"completion_delivery_path": "bus"},
-                                    )
-                            except Exception as hook_err:
-                                logger.warning(
-                                    f"bus hook: emit_terminal (error) failed "
-                                    f"(parent={parent_id[:8]}..., "
-                                    f"child={instance_id[:8]}...): {hook_err}"
-                                )
-                else:
-                    # ``use_dependency_bus=False`` is an invalid state.
-                    # The bus is the SOLE completion authority; with
-                    # the flag OFF, the daemon cannot fire the terminal
-                    # event to resolve the parent. Log the failure at
-                    # WARNING and continue — the inline cascade in the
-                    # sync helper above has already committed the DB
-                    # state, and the rest of the error-reporting path
-                    # (CompletionRegistry, SSE, error message enqueue)
-                    # proceeds normally. The parent may stay PROCESSING
-                    # in this OFF state — there is no fallback path.
+                # Import here to avoid module-level cycle with
+                # dependency_bus importing from this module transitively.
+                from .dependency_bus import (
+                    Outcome,
+                    get_dependency_bus,
+                )
+                _bus = get_dependency_bus()
+                if _bus is None:
+                    # Bus singleton missing is an invalid state. Log
+                    # loudly so operators see the misconfiguration;
+                    # there is no fallback path.
                     logger.warning(
-                        f"Bus-off (use_dependency_bus=False): cannot "
-                        f"resolve parent={parent_id[:8]}... for child "
-                        f"error on instance={instance_id[:8]}... — "
-                        f"the bus is the SOLE completion authority; "
-                        f"parent may stay in PROCESSING until manual "
-                        f"intervention. Enable ``use_dependency_bus: "
-                        f"true`` to restore automatic finalization."
+                        "bus singleton is None — invalid state "
+                        "(bus must be initialized); no fallback "
+                        "available for child error finalization"
                     )
+                else:
+                    # Delegate the bus emission + FollowUp enqueue
+                    # + re-trigger loop to
+                    # ``child_reports._emit_terminal_via_bus`` so the
+                    # finalize re-trigger fires uniformly for BOTH
+                    # completion and error paths. Previously this
+                    # code called ``_bus.emit_terminal`` directly
+                    # and enqueued FollowUps, but never invoked
+                    # ``_retrigger_parent_finalize`` — meaning a
+                    # child error could leave the parent stuck in
+                    # PROCESSING forever (the inverse-regression
+                    # bug the re-trigger was added to prevent on
+                    # the completion path). See
+                    # ``child_reports._emit_terminal_via_bus``
+                    # docstring for the full rationale and the
+                    # ``_retriggered`` set guard that prevents
+                    # redundant observer work.
+                    _child_reports_svc = getattr(
+                        self._manager, "_child_reports_service", None
+                    )
+                    if _child_reports_svc is not None:
+                        try:
+                            await _child_reports_svc._emit_terminal_via_bus(
+                                task_id=getattr(_child_task_err, "id", None),
+                                status="error",
+                                error=error,
+                                summary=f"child errored: {error_type}",
+                            )
+                        except Exception as hook_err:
+                            logger.warning(
+                                f"bus hook: _emit_terminal_via_bus "
+                                f"(error) failed "
+                                f"(parent={parent_id[:8]}..., "
+                                f"child={instance_id[:8]}...): {hook_err}"
+                            )
+                    else:
+                        # Defensive fallback: ``child_reports``
+                        # service is not wired (unit tests with a
+                        # bare MagicMock manager, or partial init
+                        # during early daemon startup). Replicate
+                        # the bus emit so the FIRED transition
+                        # happens on the bus DB, but DO NOT
+                        # enqueue a FollowUp message — the bus
+                        # path is internal plumbing, not a
+                        # message source the LLM consumes. The
+                        # re-trigger finalization is also lost in
+                        # this branch (the helper lives on
+                        # ``ChildReportsService``), so the parent
+                        # may stay PROCESSING in this extremely
+                        # rare fallback path. In production this
+                        # branch should never trigger; the
+                        # ``_child_reports_service`` attribute is
+                        # set in
+                        # ``InstanceManager.__init__`` before the
+                        # error-reporting service is wired.
+                        logger.warning(
+                            f"bus hook (error): child_reports "
+                            f"service not wired; falling back to "
+                            f"direct _bus.emit_terminal (no "
+                            f"FollowUp enqueue, no re-trigger — "
+                            f"parent may be stuck in PROCESSING). "
+                            f"parent={parent_id[:8]}..., "
+                            f"child={instance_id[:8]}..."
+                        )
+                        try:
+                            _outcome = Outcome(
+                                status="error",
+                                error=error,
+                                summary=f"child errored: {error_type}",
+                            )
+                            _fired = await _bus.emit_terminal(
+                                task_id=str(
+                                    getattr(_child_task_err, "id", None) or ""
+                                ),
+                                outcome=_outcome,
+                            )
+                            # No FollowUp enqueue — the bus does
+                            # not deliver messages. The FollowUp
+                            # payload is logged for observability
+                            # but discarded.
+                            for _fu in _fired:
+                                logger.debug(
+                                    f"bus error: FIRED watcher "
+                                    f"target={_fu.target_instance_id[:8]}..., "
+                                    f"outcome=error (no FollowUp "
+                                    f"enqueue — re-trigger lost in "
+                                    f"this fallback path)",
+                                    extra={"completion_delivery_path": "bus"},
+                                )
+                        except Exception as hook_err:
+                            logger.warning(
+                                f"bus hook: emit_terminal (error) failed "
+                                f"(parent={parent_id[:8]}..., "
+                                f"child={instance_id[:8]}...): {hook_err}"
+                            )
             else:
                 logger.debug(
                     f"bus hook: skipping resolve (error) for parent="

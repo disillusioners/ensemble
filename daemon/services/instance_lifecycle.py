@@ -35,34 +35,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
-    """Read the ``use_dependency_bus`` flag from the manager config.
-
-    Module-level helper (not a method) so the gated call sites in
-    :meth:`InstanceLifecycleService.pause_instance_cascade` and
-    :meth:`InstanceLifecycleService.terminate_instance` can read the
-    flag without depending on the lifecycle service being constructed
-    (mirrors the module-level helper in
-    ``daemon/services/error_reporting.py``). Defensive ``getattr``
-    chain so test mocks that bypass ``InstanceManager.__init__``
-    (e.g. ``MagicMock()`` without explicit ``config``) don't crash.
-    Default is False (bus disabled — flag slated for removal in
-    Phase 8 cleanup), matching the config field's default.
-
-    Args:
-        manager: The InstanceManager (or test mock).
-
-    Returns:
-        True if the operator has enabled the DB-backed DependencyBus
-        completion-delivery path; False otherwise.
-    """
-    _config = getattr(manager, "config", None)
-    _job_system = getattr(_config, "job_system", None)
-    return bool(
-        getattr(_job_system, "use_dependency_bus", False)
-    )
-
-
 async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str, op: str) -> None:
     """Cancel PENDING DependencyBus watchers targeting ``instance_id``.
 
@@ -70,24 +42,21 @@ async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str,
     and :meth:`InstanceLifecycleService.terminate_instance` after the
     DB status transition has committed. Cancels PENDING watchers so
     an in-flight child task does not deliver a FollowUp onto a
-    paused/terminated parent. No-op when the flag is OFF or the bus
-    singleton is missing (bus singleton missing is a hard error — the
-    bus is the only completion mechanism).
+    paused/terminated parent. No-op when the bus singleton is
+    missing (the bus is the only completion mechanism).
 
     Args:
-        manager: The InstanceManager facade (used to read the flag).
+        manager: The InstanceManager facade.
         instance_id: The parent instance ID whose watchers should be
             cancelled.
         op: One of ``"pause"`` / ``"terminate"`` — used in the log
             line for traceability.
     """
-    if not _is_dependency_bus_enabled(manager):
-        return
     bus = get_dependency_bus()
     if bus is None:
         logger.debug(
-            f"instance_lifecycle.{op}: use_dependency_bus=ON but bus "
-            f"singleton is None — skipping cancel_for_target "
+            f"instance_lifecycle.{op}: bus singleton is None — "
+            f"skipping cancel_for_target "
             f"(target={instance_id[:8]}...)"
         )
         return
@@ -895,12 +864,8 @@ class InstanceLifecycleService:
         #
         # Failure handling: a bus failure is logged at WARNING and
         # swallowed — termination must not fail on cleanup. The bus
-        # is flag-agnostic when wired; when ``use_dependency_bus=OFF``
-        # the singleton is None and we no-op (the inline cascade
-        # below is the graceful-degradation path for the OFF flag,
-        # but ``terminate_instance`` runs against the in-memory
-        # ``_pending`` cache of the CM which is gone — the daemon
-        # must run with the bus enabled per ADR-011).
+        # is the SOLE authority; a missing singleton is a wiring
+        # failure logged at debug.
         bus = get_dependency_bus()
         if bus is not None:
             try:
@@ -913,7 +878,7 @@ class InstanceLifecycleService:
         else:
             logger.debug(
                 f"Bus singleton None at terminate of "
-                f"{instance_id[:8]}... (use_dependency_bus=OFF?) — no-op"
+                f"{instance_id[:8]}... — no-op"
             )
 
         # 8. Publish lifecycle event for terminated instance.
@@ -938,9 +903,7 @@ class InstanceLifecycleService:
         # a FollowUp onto a dead parent — the bus's
         # ``cancel_for_target`` transitions the watcher rows to
         # CANCELLED so the child's terminal event no-ops on the
-        # cancel path. Flag-gated; no-op when
-        # ``use_dependency_bus=False`` (the bus cancel above is
-        # the authoritative cleanup in that case).
+        # cancel path.
         await _cancel_bus_watchers_for(
             self._manager, instance_id, "terminate_instance"
         )
@@ -1086,7 +1049,6 @@ class InstanceLifecycleService:
         # cancellation would over-count (the same FollowUp may target
         # multiple paused nodes — but in practice a FollowUp is
         # keyed to a single parent), so we cancel once for the root.
-        # The bus is flag-gated; no-op when ``use_dependency_bus=False``.
         await _cancel_bus_watchers_for(self._manager, root_id, "pause_instance_cascade")
 
         return result
@@ -1554,7 +1516,7 @@ class InstanceLifecycleService:
 
                 # PROCESSING → CANCELLED with the canonical transition.
                 # We issue the atomic UPDATE with a status guard so a
-                # concurrent finalizer (CM callback) that already moved
+                # concurrent finalizer (bus completion callback) that already moved
                 # the job to COMPLETED/FAILED sees rowcount=0 and we
                 # no-op. The JobItem.version_id_col additionally appends
                 # ``AND version = :expected`` on the ORM path; the Core

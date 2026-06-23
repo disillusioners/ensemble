@@ -217,24 +217,6 @@ class JobFeedbackObserver:
         self._queue: asyncio.Queue | None = None
         self._task: asyncio.Task | None = None
 
-    def _is_dependency_bus_enabled(self) -> bool:
-        """Read the ``use_dependency_bus`` flag from the JobSystemConfig.
-
-        Defensive ``getattr`` chain mirrors the sibling helper in
-        ``ChildReportsService._is_dependency_bus_enabled`` so test
-        mocks that bypass ``InstanceManager.__init__`` (e.g.
-        ``MagicMock()`` without explicit ``config``) don't crash.
-        The default is False (bus disabled — flag slated for removal
-        in Phase 8 cleanup), matching the config field's default.
-
-        Returns:
-            True if the operator has enabled the DB-backed
-            DependencyBus completion-delivery path; False otherwise.
-        """
-        return bool(
-            getattr(self._config, "use_dependency_bus", False)
-        )
-
     def _bus_count_pending_for_target_sync(
         self, target_instance_id: str
     ) -> int:
@@ -247,8 +229,8 @@ class JobFeedbackObserver:
 
         **Caller contract**: only use this helper for **defense-in-
         depth checks** that have a separate safety net (the in-
-        session bus gate inside ``WriteGuardSession``, a parent
-        ``cm.is_complete`` check, etc.). The **authoritative bus
+        session bus gate inside ``WriteGuardSession``, a parent bus-pending
+        check, etc.). The **authoritative bus
         gate** at the finalization decision point must use the
         inline COUNT query directly on the ``WriteGuardSession``'s
         session object (see ``_finalize_job_db_sync``), so the
@@ -265,19 +247,14 @@ class JobFeedbackObserver:
         Used by the sync job-finalization gate in
         :meth:`_finalize_job_db_sync` (which runs inside
         ``WriteGuardSession`` on a worker thread — an ``await`` is
-        impossible there) to consult the bus under
-        ``use_dependency_bus=ON``. When the bus flag is ON, the
-        CM's in-memory pending set is starved (send_message skips
-        ``cm.register_message_send``), so the CM-side gates
-        (``cm.get_pending_count`` / ``cm.is_complete``) return 0
-        / True for parents tracked via the bus — and the job would
-        be finalized prematurely while children tracked via the
-        bus are still running. The bus DB is the authoritative
-        source of pending-children truth on the bus path, and
-        this gate MUST consult it to prevent premature job
-        finalization.
+        impossible there) to consult the bus. The bus DB is the
+        authoritative source of pending-children truth, and this
+        sync helper lets the finalization gate check it without an
+        ``await``. The bus DB MUST be consulted to prevent
+        premature job finalization while children tracked via the
+        bus are still running.
 
-        Fallback semantics: bus singleton missing or flag OFF → returns 0.
+        Fallback semantics: bus singleton missing → returns 0.
         This treats the gate as a no-op when the bus is not wired, so the
         caller falls through to its own safe default rather than blocking
         on an unavailable authority.
@@ -294,21 +271,13 @@ class JobFeedbackObserver:
 
         Returns:
             Non-negative integer count of PENDING watchers for
-            the given target. Returns 0 when the bus singleton is
-            not wired, the flag is OFF, or the DB query fails.
+                the given target. Returns 0 when the bus singleton is
+                not wired or the DB query fails.
         """
         from daemon.services.dependency_bus import get_dependency_bus
 
         bus = get_dependency_bus()
         if bus is None:
-            return 0
-
-        # Mirror the W1-fix defensive flag check from the call
-        # sites in ``child_reports._emit_terminal_via_bus`` callers:
-        # the flag must be ON for the bus to be the source of
-        # truth. If the operator flipped the flag OFF mid-flight,
-        # treat the bus as inert (the CM path is the fallback).
-        if not self._is_dependency_bus_enabled():
             return 0
 
         try:
@@ -515,14 +484,14 @@ class JobFeedbackObserver:
     async def handle_correlation_complete(
         self, parent_id: str, terminal_status: str
     ) -> None:
-        """Called by CorrelationManager when ALL message responses are resolved.
+        """Called by the DependencyBus when ALL message responses are resolved.
 
         This is the SOLE terminal-transition path for a parent that has children
-        tracked by CM. The CM only invokes this callback when its per-parent
-        pending set reaches zero (inside its lock; the callback itself runs
-        AFTER the lock is released — W1 fix).
+        tracked by the bus. The bus only invokes this callback when its
+        per-parent pending set reaches zero (inside its lock; the callback
+        itself runs AFTER the lock is released — W1 fix).
 
-        Phase 2: the CM's pending count is authoritative and updated
+        Phase 2: the bus's pending count is authoritative and updated
         atomically under its per-parent lock, so there is no TOCTOU
         window between "is everything resolved?" and "transition the
         job to terminal" (Race #1 is eliminated).
@@ -531,12 +500,12 @@ class JobFeedbackObserver:
           * ``parent_id`` — the parent instance whose children have all responded.
           * ``terminal_status`` — ``"completed"`` (all children responded cleanly)
             or ``"error"`` (at least one child errored; conservative rule from
-            :class:`CorrelationManager._determine_terminal_status`).
+            the bus's terminal-status determination).
 
         **N4 constraint**: this method runs outside the per-parent lock. It MUST
-        NOT call any CorrelationManager method for the same ``parent_id`` —
-        re-entering CM would deadlock. All terminal logic below is self-contained
-        and touches the DB / job queue / lock repo only, never CM.
+        NOT trigger any duplicate finalization for the same ``parent_id`` —
+        re-entering would deadlock. All terminal logic below is self-contained
+        and touches the DB / job queue / lock repo only, never the bus.
 
         Args:
             parent_id: The parent instance ID whose correlations just completed.
@@ -545,7 +514,7 @@ class JobFeedbackObserver:
         job = await self._get_processing_job_for_instance(parent_id)
         if job is None:
             logger.info(
-                f"CM callback: no active PROCESSING job for instance "
+                f"Bus callback: no active PROCESSING job for instance "
                 f"{parent_id[:8]}..., skipping"
             )
             return
@@ -771,8 +740,8 @@ class JobFeedbackObserver:
         """Emit an ``in_progress`` watcher notification.
 
         Best-effort: failures are logged at WARNING and swallowed. The terminal
-        transition will still fire via CM callback (or the shared terminal path)
-        regardless of whether this notification succeeds.
+        transition will still fire via the bus completion callback (or the
+        shared terminal path) regardless of whether this notification succeeds.
 
         Args:
             job: The JobItem for the parent instance.
@@ -1611,8 +1580,8 @@ class JobFeedbackObserver:
         Returns ``skip=True`` for the following cases (caller returns
         silently without firing side effects):
           * Unknown ``terminal_status`` (caller already validated; defensive).
-          * CM ``get_pending_count > 0`` — new pending correlations appeared
-            during the callback (C1 abort). The CM will fire the callback
+          * Bus ``get_pending_count > 0`` — new pending correlations appeared
+            during the callback (C1 abort). The bus will fire the callback
             again when those resolve.
           * Job not found (deleted concurrently).
 
@@ -1657,10 +1626,9 @@ class JobFeedbackObserver:
         # Sync, inside the worker thread, IMMEDIATELY before the UPDATE.
         # No await between this read and the UPDATE below. The bus is the
         # SOLE completion authority; the bus gate
-        # (``_bus_count_pending_for_target_sync``) covers both
-        # ``use_dependency_bus=ON`` and OFF paths (the helper returns
+        # (``_bus_count_pending_for_target_sync``) returns
         # 0 when the bus singleton is None — bus singleton missing is a
-        # hard error). If the gate below is moved
+        # hard error. If the gate below is moved
         # or removed, this comment is the breadcrumb to restore the
         # TOCTOU re-check using ``bus.count_pending_for_target_sync``.
 
@@ -1690,7 +1658,7 @@ class JobFeedbackObserver:
             logger.info(
                 f"Observer: aborting terminal transition for "
                 f"{instance_id[:8]}... — bus has PENDING watchers "
-                f"(use_dependency_bus=ON, CM starved on bus path), "
+                f"(bus count returned 0), "
                 f"deferring finalization"
             )
             return _FinalizeJobResult(
@@ -1807,26 +1775,21 @@ class JobFeedbackObserver:
             # here, regardless of who wins the race.
             #
             # Defensive wiring check: only consult the bus when
-            # BOTH the flag is ON AND the bus singleton is
-            # wired. Mirrors the original
+            # the bus singleton is wired. Mirrors the original
             # ``_bus_count_pending_for_target_sync`` helper
             # semantics — when the singleton is None (testing,
             # missing init, config drift), the gate is dormant
             # so we don't defer a finalization that should
-            # proceed. Without this guard, a config that leaves
-            # the flag ON without wiring the bus singleton
-            # would still execute the inline COUNT against an
-            # empty table — usually harmless, but in degraded
-            # states (mock MagicMock truthiness, partial
-            # migrations) it could defer a finalization that
-            # should proceed.
+            # proceed. Without this guard, a config that doesn't
+            # wire the bus singleton would still execute the
+            # inline COUNT against an empty table — usually
+            # harmless, but in degraded states (mock MagicMock
+            # truthiness, partial migrations) it could defer a
+            # finalization that should proceed.
             from daemon.services.dependency_bus import (
                 get_dependency_bus as _get_bus_for_gate,
             )
-            if (
-                self._is_dependency_bus_enabled()
-                and _get_bus_for_gate() is not None
-            ):
+            if _get_bus_for_gate() is not None:
                 _bus_pending_stmt = (
                     select(func.count())
                     .select_from(DependencyWatcher)
@@ -1844,7 +1807,7 @@ class JobFeedbackObserver:
                         f"Observer: aborting terminal transition for "
                         f"{instance_id[:8]}... — CM says complete but "
                         f"bus has {_bus_pending} PENDING watchers "
-                        f"(use_dependency_bus=ON, in-session gate), "
+                        f"(in-session gate), "
                         f"deferring finalization"
                     )
                     return _FinalizeJobResult(

@@ -1517,11 +1517,10 @@ class InstanceManager:
         transition path).
 
         Why the manager needs this: ``ChildReportsService`` runs as part
-        of the dependency-bus path. When ``use_dependency_bus=ON`` and the
-        bus fires the last watcher for a parent, the CM callback never
-        re-fires (bus-path children skip ``cm.register_message_send``),
-        so the bus must explicitly re-trigger ``_finalize_job`` via the
-        observer. ``ChildReportsService`` reaches the observer through
+        of the dependency-bus path. When the bus fires the last watcher
+        for a parent, the bus must explicitly re-trigger
+        ``_finalize_job`` via the observer (there is no separate
+        callback mechanism that would do this automatically). ``ChildReportsService`` reaches the observer through
         ``getattr(self._manager, "_job_feedback_observer", None)`` — a
         defensive lookup that gracefully no-ops in unit tests where the
         observer is not wired.

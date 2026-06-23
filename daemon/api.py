@@ -354,10 +354,7 @@ async def lifespan(app: FastAPI):
     # JobFeedbackObserver is created and before JobProcessor.start() so
     # the bus is live when jobs flow. The bus is ALWAYS instantiated —
     # it is the SOLE completion authority (CM was removed in Phase 5).
-    # The ``use_dependency_bus`` flag is checked at the gated call sites
-    # in ``send_message``, ``child_reports``, and ``error_reporting`` and
-    # decides whether the bus path is taken. See
-    # ``daemon/services/dependency_bus.py`` for the bus API.
+    # See ``daemon/services/dependency_bus.py`` for the bus API.
     await init_dependency_bus(app, manager)
 
     # Bootstrap system default project (Phase 1 of system_default_project feature)
@@ -506,10 +503,7 @@ async def init_dependency_bus(app, manager) -> None:
     Runs after JobFeedbackObserver is created and before
     JobProcessor.start(), so the bus is live when jobs flow. The bus
     is ALWAYS instantiated — it is the SOLE completion authority
-    (CM was removed in Phase 5). The ``use_dependency_bus`` flag is
-    checked at the gated call sites (``send_message``,
-    ``child_reports``, ``error_reporting``) and decides whether the
-    bus path is taken.
+    (CM was removed in Phase 5).
 
     If the bus fails to initialize, log the error and leave the singleton
     ``None``. Call sites must treat ``None`` as a hard error (no fallback).

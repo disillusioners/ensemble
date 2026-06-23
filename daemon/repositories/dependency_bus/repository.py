@@ -201,7 +201,7 @@ class DependencyWatcherRepository:
         (``child_reports._process_child_completion_db_sync`` and
         ``job_feedback_observer._finalize_job_db_sync``) to decide
         whether a parent instance is still waiting on children under
-        the ``use_dependency_bus=ON`` path. The bus DB is the
+        the bus path. The bus DB is the
         authoritative source of pending-children truth — and these
         gates MUST consult it to avoid premature completion.
 

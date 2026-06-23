@@ -485,12 +485,7 @@ class TestH15C1Abort:
     async def test_cm_pending_aborts_terminal_transition(self, engine):
         """CM pending > 0 → no job/instance/lock changes, no side effects."""
         observer, mocks = make_observer(engine)
-        # Phase 5: C1 abort requires ``use_dependency_bus=True`` so
-        # ``_is_dependency_bus_enabled()`` returns True and the
-        # ``_bus_count_pending_for_target_sync`` helper actually
-        # consults our mock (otherwise the defensive flag returns 0
-        # and the abort path is never exercised).
-        observer._config = MagicMock(use_dependency_bus=True)
+        # 1 pending child on the bus → abort path: no transitions, no side effects.
         mocks["job_queue_service"].get_job_by_instance = AsyncMock(return_value=self.job)
         with patched_completion_registry():
             await observer.handle_correlation_complete(self.instance_id, "completed")

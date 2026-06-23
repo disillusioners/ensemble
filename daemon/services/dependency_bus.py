@@ -3,10 +3,8 @@
 This is the in-process service layer over the
 :class:`~daemon.repositories.dependency_bus.repository.DependencyWatcherRepository`.
 It is the SOLE completion authority for parent-waits-for-children.
-The ``use_dependency_bus`` runtime flag (slated for removal in Phase 8
-cleanup) is checked at the call sites in ``send_message`` and
-``task_processor`` — this class itself is flag-agnostic and always
-wired.
+This class is always wired and flag-agnostic. The call sites in
+``send_message`` and ``task_processor`` always consult it.
 
 Architecture
 ------------
@@ -46,15 +44,14 @@ to the terminal-event stream) does the actual FollowUp enqueueing.
 This split keeps the bus narrow (state machine only) and makes the
 caller's enqueueing policy independently testable.
 
-Flag contract
--------------
+Wiring contract
+---------------
 
-The ``USE_DEPENDENCY_BUS`` flag is checked at the call sites, NOT
-in this class. The class is always wired; the flag decides whether
-``send_message`` calls :meth:`watch` and whether the task processor
-calls :meth:`emit_terminal`. When the flag is OFF, the bus is
-inert (not called) — there is no fallback path; completion is
-simply unavailable until the flag is enabled.
+The class is always wired and is the SOLE completion authority
+for parent-waits-for-children. ``send_message`` always calls
+:meth:`watch` and the task processor always calls
+:meth:`emit_terminal`. There is no fallback path — completion
+flows through the bus or not at all.
 
 Multi-process limitation
 ------------------------

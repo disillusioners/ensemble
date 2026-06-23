@@ -260,30 +260,6 @@ def _is_null_workdir(value: str | None) -> bool:
     return str(value).strip().lower() in ("", "null", "none")
 
 
-def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
-    """Read the ``use_dependency_bus`` flag from the manager config.
-
-    Defensive ``getattr`` chain mirrors
-    ``JobProcessor._is_legacy_jobqueue_dispatch_enabled`` so test mocks
-    that bypass ``InstanceManager.__init__`` (e.g. ``MagicMock()``
-    without explicit ``config``) don't crash. The default is False
-    (bus disabled — flag slated for removal in Phase 8 cleanup),
-    matching the config field's default.
-
-    Args:
-        manager: The InstanceManager (or test mock).
-
-    Returns:
-        True if the operator has enabled the DB-backed DependencyBus
-        completion-delivery path; False otherwise.
-    """
-    _config = getattr(manager, "config", None)
-    _job_system = getattr(_config, "job_system", None)
-    return bool(
-        getattr(_job_system, "use_dependency_bus", False)
-    )
-
-
 async def _resolve_instance_id(
     manager: "InstanceManager",
     instance_id: str | None,
@@ -588,25 +564,19 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         message_id = result.message_id
 
         # Resolve the freshly-created child task id. The DependencyBus
-        # keys watchers on the child task id, so when the
-        # ``use_dependency_bus`` flag is ON we look up the task the
-        # ``enqueue_message`` call just wrote. The lookup is gated on
-        # the flag so the default OFF path adds zero DB cost.
-        use_dep_bus = _is_dependency_bus_enabled(manager)
+        # keys watchers on the child task id, so we look up the task
+        # the ``enqueue_message`` call just wrote.
         child_task = None
-        if use_dep_bus:
-            _task_repo = getattr(manager, "_task_repo", None)
-            if _task_repo is not None:
-                child_task = await asyncio.to_thread(
-                    _task_repo.get_by_message, message_id
-                )
-            else:
-                logger.warning(
-                    "use_dependency_bus=ON but manager._task_repo is "
-                    "missing — cannot resolve child task id; bus "
-                    "watcher registration skipped (no fallback)"
-                )
-                use_dep_bus = False
+        _task_repo = getattr(manager, "_task_repo", None)
+        if _task_repo is not None:
+            child_task = await asyncio.to_thread(
+                _task_repo.get_by_message, message_id
+            )
+        else:
+            logger.warning(
+                "manager._task_repo is missing — cannot resolve "
+                "child task id; bus watcher registration skipped"
+            )
 
         # Register watcher when sender is the parent of the target instance.
         from sqlmodel import Session
@@ -630,7 +600,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 # a PENDING row in ``dependency_watchers`` and fires the
                 # follow-up on terminal event via ``emit_terminal`` (called
                 # from ``child_reports`` / ``error_reporting``).
-                if use_dep_bus and child_task is not None:
+                if child_task is not None:
                     # ─── Bus path: register a PENDING watcher ────────────
                     from daemon.services.dependency_bus import (
                         FollowUp,
@@ -638,14 +608,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     )
                     _bus = get_dependency_bus()
                     if _bus is None:
-                        # Bus singleton missing despite the flag being ON —
-                        # this is a wiring failure (the bus is mandatory).
-                        # We fall through to the error branch below rather
-                        # than silently dropping the correlation, so the
-                        # caller can surface the failure to the user.
+                        # Bus singleton missing is a wiring failure
+                        # (the bus is mandatory).
                         logger.warning(
-                            "use_dependency_bus=ON but bus singleton is "
-                            "None — bus wiring failure (no fallback)"
+                            "Bus singleton is None — bus wiring "
+                            "failure (no fallback)"
                         )
                     else:
                         try:
@@ -689,31 +656,6 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                                 f"ERROR: Failed to register message "
                                 f"correlation (dependency_bus): {hook_err}"
                             )
-                else:
-                    # The bus is mandatory for parent→child correlation
-                    # — ``use_dependency_bus=OFF`` is an invalid state
-                    # per ADR-011, and there is no fallback authority.
-                    # Surface the error to the caller (the agent) so it
-                    # can decide whether to retry with the bus enabled.
-                    logger.error(
-                        f"send_message: use_dependency_bus=OFF but "
-                        f"the bus is the SOLE completion authority "
-                        f"after Phase 5 CM removal — cannot register "
-                        f"correlation for parent="
-                        f"{current_instance_id[:8]}, "
-                        f"child={instance_id[:8]}. "
-                        f"Enable ``use_dependency_bus: true`` in "
-                        f"config."
-                    )
-                    return (
-                        f"ERROR: send_message requires "
-                        f"use_dependency_bus=ON after Phase 5 CM "
-                        f"removal (CorrelationManager class no "
-                        f"longer exists). Enable "
-                        f"``use_dependency_bus: true`` in config "
-                        f"to restore the bus-based correlation "
-                        f"registration."
-                    )
 
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     

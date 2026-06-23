@@ -496,7 +496,7 @@ def _get_child_statuses(child_ids: list[str]) -> dict[str, str]:
     are terminal when the parent reaches a terminal status. This is
     **architecture-agnostic** — it inspects child instance status
     directly rather than relying on the ``waiting_for`` column, which is
-    vestigial under ``USE_DEPENDENCY_BUS=ON`` (always reads 0 on the
+    vestigial (always reads 0 on the
     DependencyBus code path; tracking is done via ``dependency_watchers``
     instead).
 
@@ -534,7 +534,7 @@ def _wait_for_leader_completion_safe(
 
     This check is **architecture-agnostic**: it directly inspects child
     instance status rather than relying on the ``waiting_for`` column
-    (which is vestigial under DependencyBus / ``USE_DEPENDENCY_BUS=ON``
+    (which is vestigial under DependencyBus
     and always reads 0 on that code path). This means the check works
     correctly under BOTH the legacy CorrelationManager path and the
     DependencyBus path.
@@ -870,7 +870,7 @@ def test_parent_child_workflow_happy_path():
         # at the moment the leader becomes terminal, the child must also
         # be terminal. We check child instance status directly rather
         # than relying on the ``waiting_for`` column (which is vestigial
-        # under DependencyBus / ``USE_DEPENDENCY_BUS=ON``).
+        # under DependencyBus).
         finished, final_status, premature = _wait_for_leader_completion_safe(
             leader_id, [child_id], timeout=COMPLETION_TIMEOUT
         )
@@ -1328,7 +1328,7 @@ def test_wave_spawn_with_defer_queue():
        terminal status while ANY child is still non-terminal. Child
        instance status is checked directly (architecture-agnostic —
        does not rely on the ``waiting_for`` column, which is vestigial
-       under DependencyBus / ``USE_DEPENDENCY_BUS=ON`` and always
+       under DependencyBus and always
        reads 0 on that code path). A full status timeline is captured
        for post-mortem verification.
 
@@ -1473,7 +1473,7 @@ def test_wave_spawn_with_defer_queue():
         # and works regardless of whether ``waiting_for`` (legacy CM
         # path) or ``dependency_watchers`` (DependencyBus path) is the
         # tracking mechanism. The ``waiting_for`` column is vestigial
-        # under ``USE_DEPENDENCY_BUS=ON`` (always 0), so relying on it
+        # under DependencyBus (always 0), so relying on it
         # would never detect a premature completion.
         #
         # We poll every 2s and capture a full status timeline for
