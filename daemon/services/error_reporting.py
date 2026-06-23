@@ -135,13 +135,10 @@ class ErrorReportingService:
 
           a) Set child instance status to ERROR + bookkeeping.
           b) Fail the associated message (if ``message_id`` is provided).
-          c) Decrement parent's ``waiting_for`` counter atomically.
-          d) Parent bookkeeping: ``last_activity_at``, ``version`` bump.
-          e) Update parent's ``children[]`` cache (remove the failed child).
-          f) Delete from ``instance_hierarchy``.
-          g) Inline cascade (CM-disabled / graceful-degradation path only):
-             check ``all_children_done`` → if so, do the legacy
-             ``SELECT COUNT(*)`` → either transition parent to COMPLETED
+          c) Parent bookkeeping: ``last_activity_at``, ``version`` bump.
+          d) Delete from ``instance_hierarchy``.
+          e) Inline cascade (A9: hard error when bus is None): bus is
+             the SOLE completion authority.
              or WAITING_CHILDREN, then commit.
 
         When the CM is active, the inline cascade is SKIPPED (the CM
@@ -181,7 +178,6 @@ class ErrorReportingService:
             parent status transition info.
         """
         from sqlalchemy import func, select
-        from .correlation_manager import get_correlation_manager
 
         with WriteGuardSession(
             Session(self._manager.engine), self._manager.write_guard
@@ -216,20 +212,11 @@ class ErrorReportingService:
                     message.status = MessageStatus.FAILED.value
                     message.completed_at = datetime.now(timezone.utc)
 
-            # d) Read the rebuild-cache snapshot for logging and the
-            # cascade check below. ``waiting_for`` is NOT mutated by the
-            # error path — the CorrelationManager is the SOLE completion
-            # authority and the DB column is rebuild cache (ADR-011).
-            # The legacy ``UPDATE ... waiting_for = ...`` decrement was
-            # removed with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in
-            # Phase 3.
+            # d) Capture child instance_id; the completion cascade below
+            # uses ``bus.count_pending_for_target_sync`` as the SOLE
+            # completion authority (A9: hard error when bus is None).
             parent = session.get(Instance, parent_id)
             if parent:
-                new_waiting = int(getattr(parent, "waiting_for", 0) or 0)
-                logger.info(
-                    f"error path: rebuild cache snapshot -> {new_waiting} "
-                    f"(parent={parent_id[:8]}..., child={instance_id[:8]}...)"
-                )
 
                 # NOTE: The CM hook (``await notify_corr_resolve``) that
                 # used to live here has been moved out of this sync helper
@@ -251,11 +238,8 @@ class ErrorReportingService:
 
                 # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
                 # The ``instance_hierarchy`` junction table is the canonical
-                # source of parent-child relationships — _enrich_instance() in
-                # daemon/repositories/instance/repository.py loads children
-                # from it on every read. Writes to the JSON cache were doubly
-                # broken (RMW races + overridden on read) and persistently
-                # useless (no code ever reads the corrupted value). See C10.
+                # source of parent-child relationships. See Phase 4 migration
+                # 20260621_000002.
 
                 # f) Delete from instance_hierarchy
                 session.execute(
@@ -263,64 +247,52 @@ class ErrorReportingService:
                     {"child_id": instance_id},
                 )
 
-                # g) Cascade: check if parent can complete after all children done/error
-                # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
-                # regardless of current status. Mirrors the fix in _update_parent_on_child_complete.
-                # Phase 3 (Cascade Unification): the `!= ERROR` guard is added here
-                # to unify the divergent guard with Site 1A. Previously Site 2 only
-                # checked `!= COMPLETED`, which would let a parent in ERROR state be
-                # overwritten to COMPLETED when its last child errored. The unified
-                # guard preserves ERROR (more useful for diagnostics — W1 fix).
-                #
-                # Phase 4: the ``parent.waiting_for == 0`` READ is
-                # replaced by ``cm.is_complete(parent_id)`` when the
-                # CorrelationManager is wired up. The DB column
-                # ``waiting_for`` is retained as the rebuild cache
-                # (ADR-011) and will be dropped in Phase 4 once the
-                # column is removed from the schema.
-                #
-                # A9 hard error: the legacy ``SELECT waiting_for``
-                # fallback (Race #3) is the exact bug we are fixing —
-                # it MUST NOT be reachable when CM is None. Mirrors A8
-                # in ``child_reports.py``.
-                cm = get_correlation_manager()
-                if cm is not None:
-                    all_children_done = cm.is_complete(parent.instance_id)
+                # g) Cascade: check if parent can complete after all children done/error.
+                # A9: bus is the SOLE completion authority; bus=None is hard error.
+                from .dependency_bus import get_dependency_bus
+                bus = get_dependency_bus()
+                if bus is not None:
+                    # Bus is wired — it is the SOLE completion authority.
+                    all_children_done = (
+                        bus.count_pending_for_target_sync(
+                            parent.instance_id
+                        )
+                        == 0
+                    )
                 else:
-                    # ─── A9: HARD ERROR (not graceful degradation) ───
-                    # CM is None is an INVALID state. CM must be
-                    # initialized for the new architecture to work; we
-                    # raise rather than silently degrade into the
-                    # TOCTOU fallback.
                     raise RuntimeError(
-                        "CorrelationManager is None — invalid state. "
-                        "The CM must be initialized (see ADR-011)."
+                        "DependencyBus is None — invalid state. "
+                        "The bus must be initialized (see ADR-011)."
                     )
                 if (
                     all_children_done
                     and parent.status != InstanceStatus.COMPLETED.value
                     and parent.status != InstanceStatus.ERROR.value
                 ):
-                    # Phase 3 (Cascade Unification): when CM is active, the
-                    # inline cascade + SELECT COUNT(*) + inline status
-                    # transition + inline lifecycle event publication are
-                    # all SKIPPED. The CM's resolve_response (called via
-                    # the authoritative hook above) already removed the entry
-                    # from its in-memory pending set, and if that was the
-                    # last correlation the CM callback fires synchronously
-                    # — which transitions the parent JOB to terminal via
+                    # Phase 3 (Cascade Unification) — preserved through
+                    # Phase 5 (CM removal): when the completion authority
+                    # is wired, the inline cascade + SELECT COUNT(*)
+                    # fallback + inline status transition are all
+                    # SKIPPED. The DependencyBus (Phase D, the SOLE
+                    # completion authority after CM removal in Phase 5)
+                    # fires ``_retrigger_parent_finalize`` from the
+                    # async caller in ``_send_error_report``, which
+                    # transitions the parent JOB to terminal via
                     # ``_finalize_job``. No DB query, no TOCTOU window
                     # (Race #3 eliminated).
                     #
-                    # ``cm`` is already in scope from the
-                    # ``get_correlation_manager()`` call at the top of
-                    # this `if` block (Phase 4 dedup).
-                    if cm is not None:
-                        # CM is active — CM callback handles completion.
+                    # ``bus`` is already in scope from the
+                    # ``get_dependency_bus()`` call at the top of
+                    # this `if` block (Phase 5 dedup). The
+                    # ``all_children_done`` check above guarantees
+                    # the bus will succeed when its emit fires from
+                    # the async caller.
+                    if bus is not None:
+                        # Bus is wired — bus callback owns completion.
                         logger.info(
-                            f"CM-active: skipping inline cascade for parent "
+                            f"Bus-active: skipping inline cascade for parent "
                             f"{parent.instance_id[:8]}... (error path) — "
-                            f"CM callback owns completion"
+                            f"bus callback owns completion"
                         )
                     else:
                         # Graceful degradation: keep the original inline
@@ -674,23 +646,29 @@ class ErrorReportingService:
                                     f"child={instance_id[:8]}...): {hook_err}"
                                 )
                 else:
-                    try:
-                        from .correlation_manager import notify_corr_resolve
-                        await notify_corr_resolve(
-                            parent_id=parent_id,
-                            child_id=instance_id,
-                            message_id=message_id,
-                            status="error",
-                        )
-                    except Exception as hook_err:
-                        # Defensive outer guard — the helper already
-                        # swallows CM errors, but keep this so a failure in
-                        # the import path or argument binding can never break
-                        # the error-reporting path.
-                        logger.warning(
-                            f"CM hook: resolve (error) path failed "
-                            f"(parent={parent_id[:8]}..., child={instance_id[:8]}...): {hook_err}"
-                        )
+                    # Phase 5 (2026-06-23): the legacy CM path is
+                    # GONE — the CorrelationManager class was removed.
+                    # The bus is the SOLE completion authority; when
+                    # ``use_dependency_bus=OFF``, the daemon is in an
+                    # invalid state per ADR-011 (A9 hard error). Log
+                    # the failure at WARNING and continue — the
+                    # inline cascade in the sync helper above has
+                    # already committed the DB state, and the rest
+                    # of the error-reporting path (CompletionRegistry,
+                    # SSE, error message enqueue) proceeds normally.
+                    # The parent may stay PROCESSING in this OFF
+                    # state — that is the documented trade-off for
+                    # disabling the bus.
+                    logger.warning(
+                        f"Bus-off (use_dependency_bus=False): cannot "
+                        f"resolve parent={parent_id[:8]}... for child "
+                        f"error on instance={instance_id[:8]}... — "
+                        f"the bus is the SOLE completion authority "
+                        f"after Phase 5 CM removal; parent may stay "
+                        f"in PROCESSING until manual intervention. "
+                        f"Enable ``use_dependency_bus: true`` to "
+                        f"restore automatic finalization."
+                    )
             else:
                 logger.debug(
                     f"CM hook: skipping resolve (error) for parent="

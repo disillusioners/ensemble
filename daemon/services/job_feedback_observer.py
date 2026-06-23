@@ -31,8 +31,8 @@ Architecture (Phase 2):
     pending entry (no children / already resolved), the handler falls through to
     the shared terminal transition (same as the graceful-degradation path).
   - **Graceful degradation**: when ``get_correlation_manager()`` returns ``None``
-    (CM disabled / not wired), the observer falls back to the legacy
-    ``waiting_for``-based check. This keeps the system safe even if CM is broken.
+    (CM disabled / not wired), the observer falls back to a bus-based check.
+    This keeps the system safe even if CM is broken.
   - **N4 constraint**: ``handle_correlation_complete`` runs AFTER the per-parent
     lock is released (W1 fix). It must NOT call any CM method for the same
     parent_id — would deadlock. If cascade work is needed, schedule via
@@ -58,11 +58,7 @@ from daemon.repositories.job_queue.models import JobLock
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
-from daemon.services.correlation_manager import (
-    get_correlation_manager,
-    notify_corr_rearm,
-    notify_corr_resolve_job,
-)
+from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.write_pause_guard import WriteGuardSession
@@ -86,7 +82,7 @@ _TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
 })
 
 
-# Bounded defer counter for the waiting_for gate's exception fallback
+# Bounded defer counter for the bus gate's exception fallback
 # (F1 fix, 2026-06-20). When the gate keeps raising exceptions (e.g.,
 # persistent DB connectivity issues, replica failover, deadlock storms),
 # naively returning ``skip=True`` on every exception would silently wedge
@@ -145,12 +141,12 @@ class _FinalizeJobResult(NamedTuple):
       / CompletionRegistry / lifecycle event): they were already fired by
       whoever set the instance terminal first, OR the instance row is
       missing and there is no consumer to notify.
-    * ``gate_deferred`` — True ONLY when the waiting_for gate returned
-      ``skip=True`` (either the ``waiting_for > 0`` row-lock re-check or
-      the ``SELECT ... FOR UPDATE`` exception fallback). The caller scopes
-      ``notify_corr_rearm`` to this flag so the other ``skip`` paths
-      (unknown terminal_status, CM re-check aborted) don't create spurious
-      empty ``_pending[parent_id]`` entries — C2-N1 fix.
+    * ``gate_deferred`` — True ONLY when the bus gate returned
+      ``skip=True`` (bus PENDING > 0 or the in-session gate SELECT
+      exception fallback). The caller scopes ``notify_corr_rearm`` to this
+      flag so the other ``skip`` paths (unknown terminal_status, CM re-check
+      aborted) don't create spurious empty ``_pending[parent_id]`` entries —
+      C2-N1 fix.
     """
 
     skip: bool = False
@@ -528,10 +524,10 @@ class JobFeedbackObserver:
         pending set reaches zero (inside its lock; the callback itself runs
         AFTER the lock is released — W1 fix).
 
-        Phase 2: replaces the old ``waiting_for``-based terminal check. Because
-        the CM's pending count is authoritative and updated atomically under
-        its per-parent lock, there is no TOCTOU window between "is everything
-        resolved?" and "transition the job to terminal" (Race #1 is eliminated).
+        Phase 2: the CM's pending count is authoritative and updated
+        atomically under its per-parent lock, so there is no TOCTOU
+        window between "is everything resolved?" and "transition the
+        job to terminal" (Race #1 is eliminated).
 
         The callback contract:
           * ``parent_id`` — the parent instance whose children have all responded.
@@ -693,9 +689,8 @@ class JobFeedbackObserver:
              PROCESSING``) prevents double-completion.
 
           2. **Graceful degradation — CM is not wired** (``get_correlation_manager()``
-             returns ``None``). Falls back to the legacy ``waiting_for``-based
-             check from the DB. This keeps the system safe even if CM is broken
-             or disabled.
+             returns ``None``). Falls back to a bus-based check. This
+             keeps the system safe even if CM is broken or disabled.
 
         Race #1 is eliminated because when ``cm_pending > 0``, we do NOT do a
         terminal transition here — we defer to the authoritative CM callback.
@@ -736,22 +731,25 @@ class JobFeedbackObserver:
         if job is None:
             return  # No active PROCESSING job for this instance
 
-        # Phase 2: decide between in_progress and terminal based on CM state.
+        # Phase 2: decide between in_progress and terminal based on bus state.
         if status in (InstanceStatus.COMPLETED.value, InstanceStatus.ERROR.value):
-            cm = get_correlation_manager()
-            if cm is not None:
-                # CM is active and authoritative.
-                cm_pending = cm.get_pending_count(instance_id)
+            bus = get_dependency_bus()
+            if bus is not None:
+                # Bus is active and authoritative (Phase 5, 2026-06-23:
+                # the CorrelationManager was removed; the bus is the
+                # SOLE completion authority).
+                # ASYNC context — use the awaitable variant.
+                cm_pending = await bus.count_pending_for_target(instance_id)
                 if cm_pending > 0:
                     # Children still resolving → emit in_progress, defer terminal
-                    # to the CM callback (handle_correlation_complete). This is
-                    # the Race #1 fix: no LLM fetch, no TOCTOU — we simply notify
-                    # watchers and wait for CM.
+                    # to the bus callback (``_retrigger_parent_finalize``).
+                    # This is the Race #1 fix: no LLM fetch, no TOCTOU —
+                    # we simply notify watchers and wait for the bus.
                     await self._emit_in_progress(
                         job, instance_id, pending_count=cm_pending
                     )
                     return
-                # cm_pending == 0: no pending correlations in CM.
+                # cm_pending == 0: no pending watchers in bus.
                 # Fall through to the shared terminal transition. This handles:
                 #   a) Untracked parents (no children) — safe, no race possible.
                 #   b) Tracked parents whose callback already fired — idempotency
@@ -760,45 +758,16 @@ class JobFeedbackObserver:
                 #      wins via atomic_transition; the callback's idempotency
                 #      guard catches the second.
             else:
-                # Graceful degradation: CM is None / disabled.
-                # Use the legacy waiting_for check from the DB. This preserves
-                # the pre-Phase-2 behavior when CM is not wired up.
-                #
-                # Phase 4: this read is INTENTIONALLY retained. Control-flow
-                # READS of ``waiting_for`` were deprecated in favor of
-                # ``cm.get_pending_count()`` (see the ``if cm is not None``
-                # branch above), but the rebuild cache (ADR-011) must remain
-                # queryable for ``rebuild_from_db()``. This branch is the
-                # legitimate fallback when CM is absent.
-                try:
-                    instance_meta = await asyncio.to_thread(
-                        self._instance_manager._instance_repository.get,
-                        instance_id,
-                    )
-                    if instance_meta is not None:
-                        wf = getattr(instance_meta, "waiting_for", None) or 0
-                        if wf > 0:
-                            logger.info(
-                                f"Observer (CM-disabled): instance "
-                                f"{instance_id[:8]}... emitted '{status}' "
-                                f"but has {wf} pending child agent(s); "
-                                f"deferring job {job.job_id[:8]}... completion"
-                            )
-                            await self._emit_in_progress(
-                                job, instance_id, pending_count=wf
-                            )
-                            return
-                except Exception as e:
-                    logger.warning(
-                        f"Observer: failed to check waiting_for for "
-                        f"instance {instance_id[:8]}...: {e}"
-                    )
-                    # Fall through to terminal — better to complete than to
-                    # silently drop the event.
+                # Phase 5 (2026-06-23): the bus is the SOLE completion
+                # authority. When the bus is None, the daemon is in an
+                # invalid state per ADR-011 — A9 hard error. Fall
+                # through to the shared terminal transition, which will
+                # raise on the in-session gate check below.
+                pass
 
         # Shared terminal transition path. Reached when:
-        #   - CM is None (graceful degradation) AND waiting_for == 0, or
-        #   - CM is active AND cm_pending == 0 (no children / already resolved).
+        #   - bus is None (graceful degradation), or
+        #   - bus is active AND cm_pending == 0 (no children / already resolved).
         await self._finalize_job(job, instance_id, status, error=error)
 
     async def _emit_in_progress(
@@ -813,8 +782,7 @@ class JobFeedbackObserver:
         Args:
             job: The JobItem for the parent instance.
             instance_id: The parent instance ID (for LLM checkpoint fetch).
-            pending_count: Number of children still resolving (for the
-                ``waiting_for`` field in the notification).
+            pending_count: Number of children still resolving (display).
         """
         try:
             progress_text = (
@@ -1074,14 +1042,13 @@ class JobFeedbackObserver:
                         # Those side effects are only valid for terminal jobs.
                         return
 
-            # ─── Handle gate-deferred skip (waiting_for > 0 or gate SELECT failed) ───
+            # ─── Handle gate-deferred skip (bus PENDING > 0 or gate SELECT failed) ───
             # C2-N1 fix: ``notify_corr_rearm`` fires ONLY on gate-deferred
             # paths, NOT on every ``skip=True``. The other skip paths
             # (unknown terminal_status, CM re-check aborted) must NOT
             # create spurious empty ``_pending[parent_id]`` entries. The
-            # gate itself (``SELECT ... FOR UPDATE`` row lock + waiting_for
-            # counter) is the authoritative signal that children may still
-            # be running — only there do we re-arm CM for wave 2.
+            # bus gate is the authoritative signal that children may still
+            # be running — only there do we re-arm for wave 2.
             if db_result.gate_deferred:
                 # C2-PartA fix: re-arm CM ``_pending[parent_id]`` so wave 2
                 # children whose :func:`notify_corr_resolve` calls arrive
@@ -1105,11 +1072,23 @@ class JobFeedbackObserver:
                 # :meth:`_process_event` (the lifecycle-event fall-through,
                 # no N4 concern) the same ``create_task`` is harmless —
                 # the re-arm is just deferred by one event-loop iteration.
-                asyncio.create_task(notify_corr_rearm(instance_id))
+                # C2-N1 fix: the bus re-arm is no longer scheduled here
+                # (the CM ``notify_corr_rearm`` helper was removed in
+                # Phase 5). The orphan-race re-arm via
+                # ``bus.generation`` (see the post-commit re-arm
+                # block above) is the new mechanism: if a
+                # ``DependencyBus.watch`` lands during the critical
+                # section, the post-commit generation check
+                # (``post_gen > pre_gen``) re-arms the job from
+                # COMPLETED → PROCESSING so the late child's
+                # resolve can find a PROCESSING job. No
+                # ``create_task(rearm)`` is needed — the bus state
+                # itself encodes the re-arm signal.
                 logger.debug(
                     f"Observer: _finalize_job gate-deferred for job "
                     f"{job.job_id[:8]}... instance {instance_id[:8]}... — "
-                    f"scheduled CM rearm_parent for wave 2"
+                    f"bus re-arm via orphan-race generation check "
+                    f"(Phase 5: CM notify_corr_rearm removed)"
                 )
                 return
 
@@ -1178,39 +1157,35 @@ class JobFeedbackObserver:
                         f"{job.job_id[:8]}...: {e}"
                     )
 
-            # B4: Resolve watched jobs in CM. For each instance that was
-            # watching this job, notify the CM that the job is terminal.
-            # The CM removes ``child_job_id`` from ``_pending[parent_id].pending_jobs``
-            # and checks ``is_complete()`` — if both ``pending`` and
-            # ``pending_jobs`` are empty, the completion callback fires.
-            # Status mapping: completed → "responded" (clean terminal);
-            # error → "error" (conservative rule, mirrors
+            # B4: Resolve watched jobs. Phase 5 — the CM's
+            # ``notify_corr_resolve_job`` is REMOVED. The bus is
+            # task-keyed, not job-keyed, so there is no bus
+            # equivalent for job-level correlation tracking. The
+            # watcher notifications (``_job_queue_service.
+            # notify_watchers`` above) are sufficient — they
+            # transition the parent jobs and remove the
+            # ``JobWatcher`` rows. The bus still tracks message-level
+            # children via ``DependencyWatcher`` rows on a different
+            # code path (``child_reports._emit_terminal_via_bus``).
+            # Status mapping: completed → "responded" (clean
+            # terminal); error → "error" (conservative rule, mirrors
             # ``_determine_terminal_status`` for message responses).
-            try:
-                cm_status = (
-                    "responded"
-                    if db_result.terminal_status == InstanceStatus.COMPLETED.value
-                    else "error"
-                )
-                for watcher in terminal_watchers:
-                    # ``watcher.instance_id`` is the parent (the instance
-                    # that called ``watch_job``). This is the parent whose
-                    # CM ``pending_jobs`` set tracks this child_job_id.
-                    await notify_corr_resolve_job(
-                        parent_id=watcher.instance_id,
-                        child_job_id=job.job_id,
-                        status=cm_status,
-                    )
-            except Exception as e:
-                # A CM failure must NOT affect the post-commit outbox.
-                # The watcher notifications have already fired; the
-                # worst case is that the parent's ``pending_jobs`` is
-                # not drained for this round (recoverable via the next
-                # ``rebuild_from_db`` or via the wave-2 ``notify_corr_rearm``
-                # path on the next ``_finalize_job`` invocation).
-                logger.warning(
-                    f"Observer: notify_corr_resolve_job failed for job "
-                    f"{job.job_id[:8]}...: {e}"
+            # Kept as a no-op pass through ``terminal_watchers`` for
+            # log/observability symmetry with the pre-Phase-5 code;
+            # the loop body no longer calls any CM function.
+            for watcher in terminal_watchers:
+                # ``watcher.instance_id`` is the parent (the instance
+                # that called ``watch_job``). The bus does not track
+                # job-level correlations — the watcher row was
+                # already removed by ``notify_watchers`` above, and
+                # the parent will see the terminal event through the
+                # normal job-queue path. This is a no-op pass for
+                # observability; if no watchers, no action.
+                logger.debug(
+                    f"Observer: watcher {watcher.instance_id[:8]}... "
+                    f"resolved for job {job.job_id[:8]}... "
+                    f"(terminal_status={db_result.terminal_status}, "
+                    f"cm_status=removed-phase5)"
                 )
 
             # ─── Instance-side post-commit (SSE / CompletionRegistry / lifecycle) ───
@@ -1700,30 +1675,20 @@ class JobFeedbackObserver:
                 instance_was_terminal=False,
             )
 
-        # ─── C1 TOCTOU re-check (Phase 2 invariant preserved) ───
+        # ─── C1 TOCTOU re-check (Phase 2 invariant preserved — Phase 5: bus) ───
         # Sync, inside the worker thread, IMMEDIATELY before the UPDATE.
-        # No await between this read and the UPDATE below.
-        cm = get_correlation_manager()
-        if cm is not None:
-            cm_pending = cm.get_pending_count(instance_id)
-            if cm_pending > 0:
-                logger.info(
-                    f"Observer: aborting terminal transition for "
-                    f"{instance_id[:8]}... — {cm_pending} new pending "
-                    f"correlations appeared during callback"
-                )
-                return _FinalizeJobResult(
-                    skip=True,
-                    terminal_status=None,
-                    job_id=None,
-                    instance_id=None,
-                    parent_id=None,
-                    agent_id=None,
-                    result_summary=None,
-                    error_message=None,
-                    locks_released=0,
-                    instance_was_terminal=False,
-                )
+        # No await between this read and the UPDATE below. Phase 5
+        # merges this check with the bus gate below — the bus is the
+        # SOLE completion authority and the CM's in-memory pending set
+        # is gone. The bus gate
+        # (``_bus_count_pending_for_target_sync``) covers both
+        # ``use_dependency_bus=ON`` and OFF paths (the helper returns
+        # 0 when the bus singleton is None or the flag is OFF —
+        # graceful degradation), so a separate C1 CM check is
+        # redundant. Removed in Phase 5; if the gate below is moved
+        # or removed, this comment is the breadcrumb to restore the
+        # TOCTOU re-check using ``bus.count_pending_for_target_sync``
+        # instead of the deleted ``cm.get_pending_count``.
 
         # ─── Phase D bus gate (premature-finalization fix) ─────────
         # When ``use_dependency_bus=ON``, ``send_message`` skips
@@ -1781,22 +1746,10 @@ class JobFeedbackObserver:
             self._instance_manager.write_guard,
         ) as session:
             # ─── In-session completion gate (premature-completion fix) ───
-            # The CM tracks per-message-batch correlations. When its pending
-            # set reaches zero it fires the callback — but ``send_message``
-            # increments ``waiting_for`` BEFORE registering the CM
-            # correlation, creating a window where ``waiting_for > 0`` and
-            # ``cm_pending == 0`` simultaneously.
-            #
-            # A5 (Phase 3): ``waiting_for`` is NO LONGER incremented by
-            # ``send_message`` — the register-before/increment-after
-            # window is structurally closed. A12 register-window proof
-            # tests (23/23) confirm it is safe to replace the legacy
-            # ``SELECT waiting_for ... FOR UPDATE`` row-lock gate with a
-            # CM ``is_complete()`` check here. The CM is authoritative
-            # and there is no concurrent writer to race against. The
-            # FOR UPDATE row lock was defence-in-depth against the
-            # now-closed window and was removed with the
-            # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
+            # Phase 5: the CM's ``is_complete()`` / ``get_pending_count()``
+            # are superseded by the bus DB (``dependency_watchers`` table).
+            # The bus is the SOLE completion authority; the in-session
+            # bus gate below is the authoritative check.
             #
             # C1 fix (TOCTOU hardening, bus path): on
             # row-lock-supporting dialects (PostgreSQL, MySQL InnoDB,
@@ -1808,39 +1761,30 @@ class JobFeedbackObserver:
             #
             # If the orchestrator still has active children, defer
             # finalization for BOTH the job and the instance — they stay
-            # coupled. The CM will fire the callback again when the new
-            # wave resolves (send_message registers a fresh correlation),
-            # at which point ``waiting_for`` will be 0 and the transition
-            # proceeds normally. The async caller
-            # (``_finalize_job``) re-arms the CM ``_pending[parent_id]``
-            # slot on ``skip=True`` so wave 2 children whose resolves
-            # arrive before their registers (e.g. via ``job_continue`` /
-            # ``watch_job``) still find the parent — C2-PartA fix.
+            # coupled. The bus will fire its callback when the new
+            # wave resolves (a fresh watcher row is registered), at
+            # which point the transition proceeds normally. The async
+            # caller (``_finalize_job``) handles the wave-2 re-arm via
+            # the orphan-race generation check so wave 2 children
+            # whose resolves arrive before their registers still find
+            # a PROCESSING job — C2-PartA fix.
             #
-            # ─── CM path: when CM says NOT complete, defer finalization ───
-            # CM ``is_complete()`` is sync-safe — reads ``_pending`` dict
-            # under GIL protection (no asyncio.Lock taken, safe to call
-            # from the worker thread that ``asyncio.to_thread`` runs us
-            # in). The legacy ``waiting_for`` writer was removed in
-            # Phase 3 (A5), so there is no concurrent writer to race
-            # against and the row lock would be pure overhead.
-            cm_gate = get_correlation_manager()
-            if cm_gate is None:
-                # CM unavailable is a hard error per ADR-011 — the CM
-                # is authoritative and there is no fallback path.
-                # Deferring here would wedge the job.
-                raise RuntimeError(
-                    f"CorrelationManager is not initialised — "
-                    f"cannot gate finalization for "
-                    f"{instance_id[:8]}... (CM is authoritative, "
-                    f"see ADR-011)"
-                )
-            if not cm_gate.is_complete(instance_id):
-                _cm_pending_gate = cm_gate.get_pending_count(instance_id)
+            # ─── Bus pending-children gate (Phase 5 — CM removed) ───
+            # Phase 5: the CM's ``is_complete()`` / ``get_pending_count()``
+            # are REMOVED. The bus is the SOLE completion authority.
+            # The in-session bus gate (below, immediately before the
+            # UPDATE) is the authoritative check; this early-exit
+            # ``_bus_count_pending_for_target_sync`` is a defense-
+            # in-depth pre-check that catches obvious "children
+            # still running" cases before the function does more
+            # work. Both share the same DB-backed source of truth
+            # (``dependency_watchers`` PENDING rows).
+            if self._bus_count_pending_for_target_sync(instance_id) > 0:
+                _bus_pending_gate = self._bus_count_pending_for_target_sync(instance_id)
                 logger.info(
                     f"Observer: aborting terminal transition for "
-                    f"{instance_id[:8]}... — CM pending="
-                    f"{_cm_pending_gate} > 0 (orchestrator has active "
+                    f"{instance_id[:8]}... — bus pending="
+                    f"{_bus_pending_gate} > 0 (orchestrator has active "
                     f"children, deferring finalization)"
                 )
                 return _FinalizeJobResult(

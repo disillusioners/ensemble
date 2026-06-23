@@ -59,7 +59,7 @@ from .sources import SourceRegistry, ResponseDispatcher, SourceCleanup
 from .services.live_event_hub import LiveEventHub
 from .services.event_bus import EventBus
 from .services.job_queue_service import DemandState
-from .services.correlation_manager import get_correlation_manager
+from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
 from .services.child_reports import ChildReportsService
@@ -565,6 +565,12 @@ class InstanceManager:
         # startup.
         if self._ensemble_config is not None and self._ensemble_config.is_postgres:
             self._ensure_postgres_columns()
+            # Phase 4: drop the legacy completion-state columns on
+            # PostgreSQL. The SQLite migration runner NO-OPs on
+            # PostgreSQL (runner.py lines 446-448), so the equivalent
+            # ALTER TABLE ... DROP COLUMN IF EXISTS statements are
+            # executed here. Idempotent via IF EXISTS.
+            self._ensure_postgres_drop_legacy_columns()
 
         # ── Database Tool Category (Phase 2) ──────────────────────────────
         # ConnectionPoolManager is a shared singleton at the manager level (C3)
@@ -1830,26 +1836,31 @@ class InstanceManager:
                 conn.execute(text(stmt))
 
     def _ensure_postgres_drop_legacy_columns(self) -> None:
-        """NO-OP safety hook for the D10 column-drop migration.
+        """Drop the legacy completion-state columns on PostgreSQL.
 
-        The migration ``20260621_000002_drop_legacy_completion_columns.sql``
-        drops ``Instance.waiting_for``, ``Instance.children``, and the
-        ``instance_hierarchy`` table. This is IRREVERSIBLE and DATA-DESTRUCTIVE.
+        The SQLite migration ``20260621_000002_drop_legacy_completion_columns.sql``
+        drops the same columns. On PostgreSQL the migration runner is
+        a NO-OP (runner.py lines 446-448), so the equivalent
+        ``ALTER TABLE ... DROP COLUMN IF EXISTS`` statements run here
+        at startup. ``IF EXISTS`` keeps the call idempotent.
 
-        Per the reviewer's §7.2 recommendation, this migration is NOT
-        auto-applied. It exists as a file so operators can run it manually
-        AFTER verifying 2+ weeks of clean Dependency Bus operation in
-        production. Running this migration DESTROYS the CM rollback path
-        (``USE_DEPENDENCY_BUS=false`` will have no ``waiting_for`` data).
-
-        This method logs a WARNING if the columns are still present (reminder
-        that the migration is pending) and does nothing else.
+        Does NOT touch ``instance_hierarchy`` — that table is still live.
         """
-        # Intentionally a no-op. The migration must be applied manually.
+        from sqlalchemy import text
+
+        statements = [
+            # Phase 4: the legacy ``waiting_for`` counter column was dropped.
+            "ALTER TABLE instances DROP COLUMN IF EXISTS waiting_for",
+            # Phase 4: the legacy denormalized ``children`` JSON cache
+            # column was dropped. ``instance_hierarchy`` is the canonical
+            # source of child IDs.
+            "ALTER TABLE instances DROP COLUMN IF EXISTS children",
+        ]
+        with self._engine.begin() as conn:
+            for stmt in statements:
+                conn.execute(text(stmt))
         logger.debug(
-            "D10 column-drop migration is pending manual application "
-            "(20260621_000002_drop_legacy_completion_columns.sql). "
-            "Do NOT auto-apply -- it is IRREVERSIBLE."
+            "Phase 4 column drop: ``waiting_for`` and ``children`` removed (or absent) on PostgreSQL"
         )
 
     def setup_worker_pool(
@@ -2295,65 +2306,55 @@ class InstanceManager:
 
     async def _update_parent_on_child_complete(self, session, instance) -> tuple[bool, str | None, str | None]:
         """Update parent state when child completes.
-        
+
         Handles:
-        - Decrement parent's waiting_for counter
-        - Update parent's children cache (FIX: W6)
         - Delete from instance_hierarchy table
-        - Cascade: transition parent based on waiting_for and status
-        
+        - Cascade: transition parent when child reports come in
+
         Args:
             session: Database session.
             instance: The child Instance object.
-            
+
         Returns:
-            Tuple of (transitioned_to_running, completed_parent_id, completed_parent_parent_id):
-            - transitioned_to_running: True if parent transitioned to RUNNING (has more work)
-            - completed_parent_id: Instance ID if parent completed (for event publishing), None otherwise
-            - completed_parent_parent_id: Parent's parent_id if parent completed, None otherwise
+            Tuple of (transitioned_to_running, completed_parent_id, completed_parent_parent_id).
         """
         return await self._child_reports_service._update_parent_on_child_complete(session, instance)
-        
+
     async def _create_completion_events(
         self,
         session,
         instance_id: str,
         parent_id: str,
         report_message_id: str,
-        waiting_for_remaining: int,
+        pending_for_parent: int,
     ) -> tuple[Event, Event]:
         """Create completion events for child and parent.
-        
-        Creates:
-        - INSTANCE_COMPLETED event for the child
-        - CHILD_COMPLETED event for the parent
-        
+
         Args:
             session: Database session.
             instance_id: The child instance ID.
             parent_id: The parent instance ID.
             report_message_id: The report message ID for the parent event.
-            waiting_for_remaining: The remaining waiting_for count after decrement.
-            
+            pending_for_parent: PENDING-watcher count for the parent
+                (from the DependencyBus).
+
         Returns:
             Tuple of (completion_event, parent_event).
         """
         return await self._child_reports_service._create_completion_events(
-            session, instance_id, parent_id, report_message_id, waiting_for_remaining
+            session, instance_id, parent_id, report_message_id, pending_for_parent
         )
 
     async def _process_child_completion_and_notify_parent(self, instance_id: str, completed_message_id: str) -> None:
         """Check if child instance is done and send completion report to parent.
-        
+
         CRITICAL FIX C3: Content is fetched BEFORE the transaction to avoid
         leaving the instance in COMPLETED state without a report if the fetch fails.
-        
+
         This method handles:
         - Idempotency per-message (won't send duplicate reports for same message)
-        - Parent's waiting_for counter decrement
-        - Parent's children[] cache update (FIX: W6)
-        - Cascade: if parent's waiting_for reaches 0, transition parent to RUNNING
-        
+        - Cascade: if parent has no more pending children, transition parent to RUNNING
+
         Args:
             instance_id: The child instance that completed.
             completed_message_id: The message ID that just completed (for idempotency).
@@ -2868,22 +2869,23 @@ class InstanceManager:
                     logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
 
                 # 3. Check whether the instance is still waiting for children.
-                # Phase 4: control-flow decision consults the
-                # CorrelationManager (authoritative in-memory pending set).
+                # Phase 5 (2026-06-23): control-flow decision consults
+                # the DependencyBus (authoritative DB-backed pending
+                # watchers) — the CorrelationManager was removed.
                 # ``WAITING_CHILDREN`` is removed — instances stay
-                # ``PROCESSING`` while children resolve, and the CM
+                # ``PROCESSING`` while children resolve, and the bus
                 # tracks correlation state.
                 #
                 # A9 hard error: the legacy ``SELECT waiting_for``
                 # fallback (TOCTOU) is the exact bug we are fixing —
-                # it MUST NOT be reachable when CM is None. Mirrors A8
-                # in ``child_reports.py``. The CM lookup + gate
-                # enforcement are OUTSIDE the try/except so the
+                # it MUST NOT be reachable when the bus is None.
+                # Mirrors A8 in ``child_reports.py``. The bus lookup +
+                # gate enforcement are OUTSIDE the try/except so the
                 # hard-error RuntimeError (gate violation) propagates
                 # UP and is not swallowed by the DB-error fallback
                 # below. The try/except scopes ONLY the DB instance
                 # fetch.
-                cm = get_correlation_manager()
+                bus = get_dependency_bus()
                 skip_complete = False
                 try:
                     instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
@@ -2893,16 +2895,17 @@ class InstanceManager:
                     skip_complete = True  # Safe: don't complete if we can't verify
 
                 if not skip_complete and instance is not None:
-                    if cm is not None:
-                        pending = cm.get_pending_count(instance_id)
+                    if bus is not None:
+                        # Async context — use the awaitable variant
+                        pending = await bus.count_pending_for_target(instance_id)
                     else:
                         # ─── A9: HARD ERROR (not graceful degradation) ───
-                        # CM is None is an INVALID state in the resume
+                        # Bus is None is an INVALID state in the resume
                         # path too. Mirrors A8 in ``child_reports.py``.
                         # The ``SELECT waiting_for`` fallback (TOCTOU)
                         # is the exact bug we are fixing — it MUST NOT
-                        # be reachable. CM must be initialized for the
-                        # new architecture to work; we raise rather
+                        # be reachable. The bus must be initialized for
+                        # the new architecture to work; we raise rather
                         # than silently degrade. This is a FATAL
                         # misconfiguration — the daemon's completion
                         # architecture is in an invalid state and the
@@ -2910,8 +2913,8 @@ class InstanceManager:
                         # The caller will see this as an unhandled
                         # exception.
                         raise RuntimeError(
-                            "CorrelationManager is None — invalid state. "
-                            "The CM must be initialized (see ADR-011)."
+                            "DependencyBus is None — invalid state. "
+                            "The bus must be initialized (see ADR-011)."
                         )
                     if pending > 0:
                         skip_complete = True

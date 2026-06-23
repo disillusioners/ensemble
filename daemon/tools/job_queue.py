@@ -10,7 +10,6 @@ from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
-from daemon.services.correlation_manager import notify_corr_register_job
 from daemon.services.project_normalizer import normalize_project_id
 
 if TYPE_CHECKING:
@@ -640,12 +639,21 @@ def create_job_tools(
 
             # Register watch
             watcher_repo.add_watch(job_id, current_instance_id, events)
-            # B3: Register the watched job with the CorrelationManager so the
-            # parent instance won't complete until this job resolves.
-            await notify_corr_register_job(
-                parent_id=current_instance_id,
-                child_job_id=job_id,
-            )
+            # Phase 5 (2026-06-23): the CorrelationManager
+            # ``register_job_send`` helper is REMOVED. The DependencyBus
+            # is keyed on ``source_task_id`` (Task.id, integer) but
+            # ``watch_job`` watches a ``job_id`` (JobItem.job_id, string)
+            # — these are different concepts with no direct mapping.
+            # The bus-based re-trigger path is therefore not applicable
+            # here. The JobWatcher + ``notify_watchers`` path above
+            # already delivers the terminal-event notification to the
+            # watching instance; no additional correlation tracking is
+            # needed. The parent's job continues independently of the
+            # watched job's lifecycle (this was the documented behavior
+            # even under CM — the parent's job was only blocked if CM
+            # saw the watched job's resolution as a child-response
+            # correlation, which was a separate code path in
+            # ``child_reports._process_child_completion_and_notify_parent``).
             return f"Watch registered for job {job_id[:8]}... Will notify on terminal state changes."
         except Exception as e:
             return f"Error watching job: {str(e)}"

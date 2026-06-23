@@ -304,6 +304,24 @@ class DependencyBus:
         # to avoid unbounded growth across terminate/revive cycles.
         self.generation: dict[str, int] = {}
 
+        # Per-parent error flag (Phase 5, 2026-06-23).
+        # Tracks whether ANY child of this parent emitted a
+        # terminal event with ``status="error"``. Set by
+        # :meth:`emit_terminal` on error outcomes, read by
+        # :meth:`ChildReportsService._retrigger_parent_finalize`
+        # to determine the parent's terminal_status (the
+        # conservative rule: any child error → parent "error").
+        #
+        # Lives on the bus because the bus is the SOLE completion
+        # authority after CM removal — the per-parent error signal
+        # must be co-located with the per-parent lock and
+        # generation counter (all three are per-parent bus state
+        # that the observer reads during finalization).
+        #
+        # Cleared alongside the per-parent locks in :meth:`stop`
+        # to avoid unbounded growth across terminate/revive cycles.
+        self._parent_errored: dict[str, bool] = {}
+
         # Lifecycle flag. Set True by :meth:`start`, False by
         # :meth:`stop`. Public methods are tolerant of being called
         # outside the started/stopped window (e.g. :meth:`watch`
@@ -476,6 +494,29 @@ class DependencyBus:
         lock = await self._get_lock(task_id)
         fired: list[FollowUp] = []
         async with lock:
+            # Phase 5 (2026-06-23): record per-parent error signal
+            # BEFORE the transition loop so a parent whose last
+            # child errored is correctly finalized as ``"error"``.
+            # ``_parent_errored[target_id]`` is sticky across
+            # multiple children (any error flips it to True) and
+            # is read by
+            # ``ChildReportsService._retrigger_parent_finalize``
+            # when ``count_pending_for_target_sync() == 0`` for
+            # that target. Mirrors the old CM
+            # ``_determine_terminal_status`` "any error → error"
+            # rule that was lost when CM was removed in Phase 5.
+            if outcome.status == "error":
+                # Collect the unique target ids of the watchers
+                # we're about to fire, then mark each as errored.
+                # Using a set avoids redundant dict writes when
+                # multiple watchers share the same parent.
+                errored_targets = {
+                    FollowUp.from_payload(r.follow_up_payload).target_instance_id
+                    for r in pending_rows
+                }
+                for tgt in errored_targets:
+                    self._parent_errored[tgt] = True
+
             # Read PENDING watchers from DB — source of truth.
             # A cache read would be cheaper but would miss any
             # watch() that landed from another process (future
@@ -783,6 +824,10 @@ class DependencyBus:
         # re-created lazily on the next watch after restart.
         self._parent_locks.clear()
         self.generation.clear()
+        # Phase 5 (2026-06-23): clear the per-parent error flag
+        # dict alongside the per-parent locks — same rationale
+        # (avoid unbounded growth across terminate/revive cycles).
+        self._parent_errored.clear()
         logger.info(
             f"bus stop: cleared {cache_size} cached watchers",
             extra={"completion_delivery_path": "bus"},
@@ -901,6 +946,54 @@ class DependencyBus:
                 bump.
         """
         self.generation[parent_id] = self.generation.get(parent_id, 0) + 1
+
+    def had_parent_error(self, parent_id: str) -> bool:
+        """Return whether ANY child of ``parent_id`` errored (Phase 5).
+
+        The per-parent error flag is set by :meth:`emit_terminal`
+        when a child task emits a terminal event with
+        ``status="error"`` and any of its fired FollowUps target
+        ``parent_id``. It is sticky — once True, the parent
+        finalizes as ``"error"`` regardless of how many subsequent
+        children complete normally.
+
+        Mirrors :class:`CorrelationManager._determine_terminal_status`'s
+        "any child error → parent error" conservative rule that
+        was lost when CM was removed in Phase 5.
+
+        The flag is a plain dict read (atomic in CPython) and is
+        safe to call from any context (event loop, worker thread,
+        sync gate). No lock is needed — the only writer is the
+        :meth:`emit_terminal` transition loop, which is
+        serialized per-task by the per-task lock above.
+
+        Args:
+            parent_id: The parent instance ID to check.
+
+        Returns:
+            True if at least one child of this parent emitted an
+            error terminal event; False otherwise (no error
+            recorded, or the parent has no recorded state).
+        """
+        return self._parent_errored.get(parent_id, False)
+
+    def clear_parent_error(self, parent_id: str) -> None:
+        """Clear the per-parent error flag (Phase 5).
+
+        Called after a parent has been finalized so the flag does
+        not leak into a future revive / re-spawn of the same
+        instance id. Without this, a terminated-then-revived
+        instance would inherit a sticky ``"error"`` flag from its
+        previous incarnation and incorrectly finalize any future
+        wave as ``"error"``.
+
+        Idempotent: clearing a non-existent flag is a no-op.
+
+        Args:
+            parent_id: The parent instance ID whose flag to
+                clear.
+        """
+        self._parent_errored.pop(parent_id, None)
 
     def _now_iso(self) -> str:
         """Return current UTC time as ISO-8601 string.

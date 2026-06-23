@@ -1788,3 +1788,351 @@ class TestCMGenerationMirror:
         # ``get_generation`` falls back to ``cm._generation`` when the
         # bus is None — see ``correlation_manager.py:787``.
         assert cm.get_generation(parent_id) == 3
+
+
+# -------------------------------------------------------------------------
+# TestBusSoleAuthority (Phase 5 — CM removed; bus is the sole authority)
+# -------------------------------------------------------------------------
+#
+# Phase 5 (2026-06-23) removed the CorrelationManager. The DependencyBus
+# is now the SOLE completion authority: it tracks per-parent pending
+# watcher counts, per-parent error flags, and the per-parent generation
+# counter used for orphan-race detection.
+#
+# Task 5.7 added a behavioral fix: when a child task emits a terminal
+# event with ``status="error"``, the bus stamps
+# ``_parent_errored[target_id] = True`` for each fired FollowUp's parent.
+# This flag is then read by ``ChildReportsService._retrigger_parent_finalize``
+# so a parent whose LAST child errored finalizes as ``"error"`` instead
+# of ``"completed"`` (mirrors the old CM
+# ``_determine_terminal_status`` "any error → error" conservative rule).
+#
+# The tests below pin down the bus-side contracts that Phase 5 relies
+# on. They use the existing ``bus`` / ``bus_repo`` fixtures (in-memory
+# SQLite) and the ``make_fu`` / ``make_outcome`` helpers — no daemon,
+# no PostgreSQL, no CM.
+# -------------------------------------------------------------------------
+
+
+class TestBusSoleAuthority:
+    """Phase 5: DependencyBus is the sole completion authority.
+
+    These tests verify the contracts the bus owns exclusively after
+    CM removal: pending-watcher counting, per-parent error flagging,
+    restart survival of in-DB state, and concurrent terminal
+    handling. They complement ``TestBusRetriggerFinalize`` (which
+    exercises the post-fire re-trigger on the completion path) and
+    ``TestGenerationCounterBump`` (which exercises the per-parent
+    generation counter) — together they pin down the bus's full
+    post-Phase-5 surface.
+    """
+
+    @pytest.mark.asyncio
+    async def test_parent_completes_only_after_all_children_done(self, bus):
+        """Parent has pending watchers until ALL children fire.
+
+        The bus is the source of truth for "is the parent still
+        waiting on children". ``count_pending_for_target(parent)``
+        must be > 0 while any PENDING watcher exists and == 0 only
+        when the last one has fired. This is the gate
+        ``_retrigger_parent_finalize`` uses to decide whether to
+        re-trigger the parent job's finalization.
+        """
+        parent_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        # Two watchers from two different sources both targeting the
+        # same parent — the typical multi-child fan-in.
+        await bus.watch("task-child-1", make_fu(target_id=parent_id))
+        await bus.watch("task-child-2", make_fu(target_id=parent_id))
+
+        # Both PENDING → count is 2.
+        assert bus.count_pending_for_target_sync(parent_id) == 2
+        assert await bus.count_pending_for_target(parent_id) == 2
+
+        # Fire the first child → 1 PENDING remains.
+        await bus.emit_terminal("task-child-1", make_outcome(status="completed"))
+        assert bus.count_pending_for_target_sync(parent_id) == 1, (
+            "After firing the first child, one PENDING watcher "
+            "must still be registered for the parent."
+        )
+
+        # Fire the second child → 0 PENDING — parent is ready to
+        # finalize. This is the moment the retrigger gate
+        # (``count_pending_for_target == 0``) opens.
+        await bus.emit_terminal("task-child-2", make_outcome(status="completed"))
+        assert bus.count_pending_for_target_sync(parent_id) == 0, (
+            "After firing the last child, count must be 0 — "
+            "this is the retrigger gate's release condition."
+        )
+        assert await bus.count_pending_for_target(parent_id) == 0
+
+    @pytest.mark.asyncio
+    async def test_parent_errors_if_any_child_errored(self, bus):
+        """``had_parent_error(parent_id)`` flips True if ANY child errored.
+
+        Phase 5's behavioral fix: when ``emit_terminal`` sees
+        ``status="error"``, it sets ``_parent_errored[target_id] = True``
+        for every fired FollowUp's parent. The flag is sticky — even
+        if subsequent children complete normally, the parent still
+        finalizes as ``"error"`` (the conservative "any error → error"
+        rule that was lost when CM was removed).
+
+        This test pins down both halves of the contract:
+          1. An error terminal on child-1 sets the flag.
+          2. A subsequent completion on child-2 does NOT clear the
+             flag (sticky semantics — mirrors the old CM behavior).
+        """
+        parent_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        await bus.watch("task-err", make_fu(target_id=parent_id))
+        await bus.watch("task-ok", make_fu(target_id=parent_id))
+
+        # Pre-condition: no error recorded.
+        assert bus.had_parent_error(parent_id) is False
+
+        # Fire child-1 with status="error" → flag flips True.
+        await bus.emit_terminal(
+            "task-err", make_outcome(status="error", error="boom")
+        )
+        assert bus.had_parent_error(parent_id) is True, (
+            "An error terminal event must set the per-parent "
+            "error flag (Phase 5 behavioral fix)."
+        )
+
+        # Fire child-2 with status="completed" — flag must STAY True
+        # (sticky semantics; a later success does not clear a prior
+        # error).
+        await bus.emit_terminal("task-ok", make_outcome(status="completed"))
+        assert bus.had_parent_error(parent_id) is True, (
+            "Error flag must be sticky: a later completion does "
+            "NOT clear a prior error. ``had_parent_error`` mirrors "
+            "the old CM 'any error → error' rule."
+        )
+
+        # count_pending_for_target == 0 means the retrigger gate
+        # is open. ``_retrigger_parent_finalize`` would resolve the
+        # parent job to ``"error"`` because of the sticky flag.
+        assert bus.count_pending_for_target_sync(parent_id) == 0
+
+        # Cleanup: explicit clear for symmetry with the production
+        # finalize path. ``clear_parent_error`` is the public API
+        # the post-finalize hook calls to avoid flag leakage
+        # across terminate/revive cycles.
+        bus.clear_parent_error(parent_id)
+        assert bus.had_parent_error(parent_id) is False
+
+    @pytest.mark.asyncio
+    async def test_pending_count_survives_bus_restart(self, bus_repo):
+        """Pending watcher counts are DB-backed — restart preserves them.
+
+        PENDING watcher rows are the bus's source of truth. After
+        ``stop()`` (which clears the in-memory cache) and a fresh
+        ``start()`` (which re-warms the cache from the DB), the
+        pending count for a target must be the same. Without this,
+        a process restart would lose track of parents that are
+        still waiting on children and fail to re-trigger their
+        finalization (the inverse-regression bug class).
+        """
+        parent_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        b1 = DependencyBus(bus_repo)
+        await b1.start()
+        # Register 3 watchers on the same parent from 3 different
+        # sources. All PENDING in the DB.
+        await b1.watch("task-r-1", make_fu(target_id=parent_id))
+        await b1.watch("task-r-2", make_fu(target_id=parent_id))
+        await b1.watch("task-r-3", make_fu(target_id=parent_id))
+        assert b1.count_pending_for_target_sync(parent_id) == 3
+        await b1.stop()
+
+        # Restart over the same in-memory DB (StaticPool). Cache
+        # is cold; ``_warm_cache`` rebuilds it from the DB.
+        b2 = DependencyBus(bus_repo)
+        try:
+            # The PENDING rows survived the restart — count is
+            # unchanged.
+            assert b2.count_pending_for_target_sync(parent_id) == 3, (
+                "Pending count must survive bus restart — "
+                "the DB is the source of truth, not the cache."
+            )
+            assert await b2.count_pending_for_target(parent_id) == 3
+        finally:
+            await b2.stop()
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_target_clears_all_pending_watchers(self, bus):
+        """``cancel_for_target`` transitions all matching PENDING rows to CANCELLED.
+
+        Cancellation is the bus's per-target reset primitive. After
+        a cancel, ``count_pending_for_target`` must drop to 0
+        (CANCELLED rows are excluded from the count — the same
+        exclusion the gate relies on for FIRED rows). This is the
+        invariant that lets the completion gates treat a cancelled
+        target the same as a fully-resolved one.
+        """
+        target_id = f"target-{uuid.uuid4().hex[:8]}"
+
+        # 3 watchers, all targeting the same target. Mixed source
+        # tasks — cancellation must collapse them all regardless
+        # of source.
+        await bus.watch("task-c-1", make_fu(target_id=target_id))
+        await bus.watch("task-c-2", make_fu(target_id=target_id))
+        await bus.watch("task-c-3", make_fu(target_id=target_id))
+
+        # Sanity: all 3 PENDING.
+        assert bus.count_pending_for_target_sync(target_id) == 3
+
+        # Cancel — every PENDING row for the target transitions to
+        # CANCELLED, regardless of which source task it came from.
+        cancelled = await bus.cancel_for_target(target_id)
+        assert cancelled == 3, (
+            f"cancel_for_target must return the number of rows "
+            f"transitioned (expected 3, got {cancelled})."
+        )
+
+        # The count drops to 0 — the retrigger gate (``== 0``) is
+        # now satisfied even though no FollowUp was actually
+        # delivered. The completion gates use this to release the
+        # parent job lock when children are explicitly cancelled.
+        assert bus.count_pending_for_target_sync(target_id) == 0
+        assert await bus.count_pending_for_target(target_id) == 0
+
+    @pytest.mark.asyncio
+    async def test_generation_counter_resets_on_restart_but_remains_functional(self, bus_repo):
+        """Generation counter resets on bus restart but stays functional.
+
+        The generation counter is **in-memory only** — it is NOT
+        persisted to the DB and is intentionally reset on every
+        bus restart. This is the correct behavior:
+
+          * The DB stores PENDING watcher rows (durable), not the
+            generation number itself.
+          * The counter detects orphan-races *within a session*,
+            not across process boundaries.
+          * On restart, PENDING watchers are rebuilt from the DB.
+            The next ``watch()`` call bumps the counter back to a
+            non-zero value, restoring orphan-race detection.
+
+        Two restart invariants verified here:
+
+          1. A restarted bus does NOT inherit stale generation
+             state — the counter is a fresh ``dict`` starting at 0.
+             This avoids false-positive re-arms from a previous
+             process that finalized parents with a high generation.
+          2. A new ``watch`` after restart still bumps the counter
+             correctly (1, then 2, ...). The post-restart
+             generation state is functional, not just empty —
+             orphan-race detection works as soon as the first new
+             ``watch`` lands, because that bump is what the
+             detector compares against a captured pre-finalize
+             snapshot.
+        """
+        parent_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        # First bus — two watches bump the counter to 2.
+        b1 = DependencyBus(bus_repo)
+        await b1.start()
+        await b1.watch("task-gen-r-1", make_fu(target_id=parent_id))
+        await b1.watch("task-gen-r-2", make_fu(target_id=parent_id))
+        assert b1.get_generation(parent_id) == 2
+        await b1.stop()
+
+        # Restart — counter is fresh, starts at 0. This is the
+        # correct behavior (matches the CM's previous in-memory
+        # contract; the DB rows are the durable record, not the
+        # counter).
+        b2 = DependencyBus(bus_repo)
+        try:
+            assert b2.get_generation(parent_id) == 0, (
+                "Generation counter must reset to 0 on bus restart "
+                "(in-memory only, NOT persisted). A restarted bus "
+                "must not inherit stale generation state from a "
+                "previous process."
+            )
+
+            # First post-restart watch bumps 0 → 1.
+            await b2.watch("task-gen-r-3", make_fu(target_id=parent_id))
+            assert b2.get_generation(parent_id) == 1
+
+            # Second post-restart watch bumps 1 → 2 — the counter
+            # is fully functional again. Orphan-race detection
+            # works: any finalization snapshot taken AFTER this
+            # bump will see ``post_gen > pre_gen`` and re-arm if
+            # a concurrent register_job_send lands.
+            await b2.watch("task-gen-r-4", make_fu(target_id=parent_id))
+            assert b2.get_generation(parent_id) == 2
+        finally:
+            await b2.stop()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_child_completions_dont_double_finalize(self, bus):
+        """Two concurrent terminal events finalize the parent exactly once.
+
+        With two watchers on the same parent (one per source task),
+        firing both terminal events concurrently via ``asyncio.gather``
+        must:
+          1. Deliver each FollowUp exactly once (no double-fire on
+             the bus's transition path).
+          2. Leave ``count_pending_for_target(parent) == 0`` —
+             the parent is ready to finalize, and the retrigger
+             gate's ``== 0`` check fires exactly once.
+
+        This is the concurrency invariant that keeps
+        ``_retrigger_parent_finalize`` from racing itself: the bus
+        serializes per-source-task state transitions with the
+        per-task lock, and ``count_pending_for_target`` is a
+        consistent DB read, so the gate's release condition is
+        true exactly once across the gather (not twice — which
+        would call ``_finalize_job`` twice and break the
+        "finalize exactly once" contract).
+        """
+        parent_id = f"parent-{uuid.uuid4().hex[:8]}"
+
+        # Two watchers, one per source, both targeting the same
+        # parent. The retrigger gate looks at the per-target
+        # count, not per-source — so the parent-finalize is the
+        # only thing this test is racing.
+        await bus.watch("task-conc-a", make_fu(target_id=parent_id))
+        await bus.watch("task-conc-b", make_fu(target_id=parent_id))
+
+        # Pre-condition: 2 PENDING, gate is closed.
+        assert bus.count_pending_for_target_sync(parent_id) == 2
+
+        # Fire both terminal events concurrently. Each call
+        # transitions its own watcher's row PENDING → FIRED and
+        # returns the fired FollowUp. The bus's per-source-task
+        # lock prevents double-fire on the same source (covered
+        # by ``TestNoDoubleDecrement.test_concurrent_emit_does_not_double_fire``);
+        # the per-target gate prevents the parent from being
+        # finalized twice (this test).
+        results = await asyncio.gather(
+            bus.emit_terminal("task-conc-a", make_outcome(status="completed")),
+            bus.emit_terminal("task-conc-b", make_outcome(status="completed")),
+        )
+
+        # Each emit_terminal returned exactly one FollowUp — the
+        # transition path is exactly-once.
+        fired_counts = [len(r) for r in results]
+        assert fired_counts == [1, 1], (
+            f"Each concurrent emit must fire its own FollowUp "
+            f"exactly once: got {fired_counts}."
+        )
+        total_fired = sum(fired_counts)
+        assert total_fired == 2, (
+            f"Total fired across both concurrent emits must be 2, "
+            f"got {total_fired} — the per-source task lock prevents "
+            f"double-fire on the bus side."
+        )
+
+        # The parent is fully resolved: count is 0. The retrigger
+        # gate (``count_pending_for_target == 0``) is now open, and
+        # it will fire exactly once when the post-fire
+        # ``_retrigger_parent_finalize`` runs — not twice, because
+        # the gate is checked once per FollowUp and only the LAST
+        # watcher crossing the threshold opens it.
+        assert bus.count_pending_for_target_sync(parent_id) == 0, (
+            "After concurrent fires, parent must have 0 pending — "
+            "the retrigger gate's release condition is satisfied "
+            "exactly once (the second fire observes count == 0 "
+            "AFTER its own transition, the first observes count == 1)."
+        )

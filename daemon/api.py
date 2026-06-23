@@ -113,10 +113,6 @@ async def lifespan(app: FastAPI):
     from daemon.services.job_lock_manager import JobLockManager
     from daemon.services.job_processor import JobProcessor
     from daemon.services.job_feedback_observer import JobFeedbackObserver
-    from daemon.services.correlation_manager import (
-        init_correlation_manager,
-        shutdown_correlation_manager,
-    )
     from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
     from daemon.services.dead_letter_service import DeadLetterService
     from daemon.services.job_recovery_service import JobRecoveryService
@@ -354,29 +350,16 @@ async def lifespan(app: FastAPI):
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")
 
-    # Initialize and start CorrelationManager.
-    # Phase 2: wire JobFeedbackObserver.handle_correlation_complete as the
-    # CM completion_callback. This is the authoritative terminal-transition
-    # path for parents with pending children — eliminates Race #1 (the
-    # TOCTOU window in the old waiting_for check). See
-    # .agents/shared/planning/correlation-manager/phase2-observer-switch.md.
-    # Must run AFTER JobFeedbackObserver is created (so the method exists)
-    # and BEFORE JobProcessor.start() so the CM is live when jobs flow.
-    await init_correlation_manager(
-        app,
-        manager,
-        completion_callback=job_feedback_observer.handle_correlation_complete,
-    )
-
-    # Initialize and start the DependencyBus (Phase D).
-    # Mirrors ``init_correlation_manager`` placement — between CM init and
-    # JobProcessor.start() so the bus is live when jobs flow. The bus is
-    # ALWAYS instantiated (cheap, no maintenance cost when OFF); the
-    # ``use_dependency_bus`` flag is checked at the gated call sites in
-    # ``send_message``, ``child_reports``, and ``error_reporting`` and
-    # decides whether the bus path is taken. See
-    # ``daemon/services/dependency_bus.py`` for the bus API and
-    # ``docs/configuration/completion-flags.md`` for the flag semantics.
+    # Initialize and start the DependencyBus (Phase D — bus is the SOLE
+    # completion authority as of Phase 5; CM is removed). Runs after
+    # JobFeedbackObserver is created and before JobProcessor.start() so
+    # the bus is live when jobs flow. The bus is ALWAYS instantiated
+    # (cheap, no maintenance cost when OFF); the ``use_dependency_bus``
+    # flag is checked at the gated call sites in ``send_message``,
+    # ``child_reports``, and ``error_reporting`` and decides whether
+    # the bus path is taken. See ``daemon/services/dependency_bus.py``
+    # for the bus API and ``docs/configuration/completion-flags.md``
+    # for the flag semantics.
     await init_dependency_bus(app, manager)
 
     # Bootstrap system default project (Phase 1 of system_default_project feature)
@@ -406,8 +389,9 @@ async def lifespan(app: FastAPI):
     # C7: Wire JobFeedbackObserver into JobProcessor so MESSAGE-type jobs
     # route through the observer → Task → WorkerPool path. Both the observer
     # and the processor are already constructed; the observer is already
-    # started (line 354) and the CM completion callback is wired (line
-    # 368).
+    # started (line 354) and the bus completion callback (via
+    # ``_emit_terminal_via_bus`` → ``_retrigger_parent_finalize``) is
+    # wired (Phase 5 — CM removed; bus is the SOLE completion authority).
     job_processor.setup_job_feedback_observer(job_feedback_observer)
     logger.info("JobFeedbackObserver wired into JobProcessor (dispatch_path=jobqueue_local)")
 
@@ -415,9 +399,9 @@ async def lifespan(app: FastAPI):
     # InstanceManager facade so ``ChildReportsService`` can re-trigger
     # ``_finalize_job`` after the bus fires the last watcher for a
     # parent. Without this wiring the bus path would starve the
-    # terminal-transition callback (CM is bypassed, observer is never
-    # reached) — see fix/bus-retrigger-finalize-job for the full
-    # inverse-regression analysis.
+    # terminal-transition callback — see
+    # fix/bus-retrigger-finalize-job for the full inverse-regression
+    # analysis.
     manager.set_job_feedback_observer(job_feedback_observer)
     logger.info("JobFeedbackObserver wired into InstanceManager (bus_retrigger=ON)")
     
@@ -498,11 +482,6 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, '_job_feedback_observer'):
         await app.state._job_feedback_observer.stop()
 
-    # Stop CorrelationManager (shadow observer). Must stop BEFORE
-    # manager.shutdown() — manager.shutdown() tears down the EventBus, and
-    # CM holds a subscription on it.
-    await shutdown_correlation_manager(app)
-
     # Stop the DependencyBus. The bus is flag-agnostic (always wired),
     # so this stops it whenever it was started. Safe to call when the
     # bus was never started (the helper is a no-op in that case).
@@ -527,20 +506,20 @@ async def lifespan(app: FastAPI):
 async def init_dependency_bus(app, manager) -> None:
     """Initialize and start the DependencyBus (Phase D).
 
-    Mirrors the placement of :func:`init_correlation_manager`: runs after
-    JobFeedbackObserver is created and before JobProcessor.start(), so the
-    bus is live when jobs flow. The bus is ALWAYS instantiated — the
-    ``use_dependency_bus`` flag is checked at the gated call sites
-    (``send_message``, ``child_reports``, ``error_reporting``) and
-    decides whether the bus path is taken. When the flag is OFF, the
-    bus is wired but inert (no call sites invoke it); the CM remains
-    authoritative for completion.
+    Runs after JobFeedbackObserver is created and before
+    JobProcessor.start(), so the bus is live when jobs flow. The bus
+    is ALWAYS instantiated — the ``use_dependency_bus`` flag is
+    checked at the gated call sites (``send_message``,
+    ``child_reports``, ``error_reporting``) and decides whether the
+    bus path is taken. As of Phase 5 the bus is the SOLE completion
+    authority (CM is removed); the flag's effect at completion time
+    is limited to ``send_message`` watcher registration.
 
     Failure handling: a startup failure is logged at WARNING and the
-    daemon continues without the bus (graceful degradation — same
-    pattern as the CorrelationManager init). The ``set_dependency_bus``
-    call ensures the module singleton is reset to ``None`` on failure
-    so the call sites correctly fall through to the legacy CM path.
+    daemon continues without the bus (graceful degradation). The
+    ``set_dependency_bus`` call ensures the module singleton is reset
+    to ``None`` on failure so the call sites correctly fall through
+    to the legacy fallback.
 
     Args:
         app: The FastAPI app (used to stash the instance on ``app.state``

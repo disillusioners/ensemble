@@ -46,8 +46,8 @@ class _ChildCompletionDbResult(NamedTuple):
 
     Outcomes:
         ``"instance_not_found"`` — no instance row, nothing to do.
-        ``"deferred_waiting_children"`` — root has pending children (CM or
-            ``waiting_for``), SSE ``waiting_children`` only, no commit.
+        ``"deferred_waiting_children"`` — root has pending children (bus),
+            SSE ``waiting_children`` only, no commit.
         ``"root_waiting_children"`` — root carve-out: own-queue pending,
             commit + SSE ``waiting_children``.
         ``"root_completed"`` — root completed cleanly, commit + SSE
@@ -84,9 +84,8 @@ class ChildReportsService:
 
     Handles:
     - Idempotency per-message (won't send duplicate reports for same message)
-    - Parent's waiting_for counter decrement
     - Parent's children[] cache update (FIX: W6)
-    - Cascade: if parent's waiting_for reaches 0, transition parent to RUNNING
+    - Cascade: bus authoritative for parent completion
     """
 
     def __init__(
@@ -355,8 +354,24 @@ class ChildReportsService:
                 # error path inside the helper cannot abort the
                 # iteration and skip re-triggering the remaining
                 # targets.
+                #
+                # Phase 5 (2026-06-23): thread the outcome's
+                # ``status`` and ``error`` into the re-trigger
+                # helper so a parent whose last child errored
+                # finalizes as ``"error"`` instead of the
+                # hardcoded ``"completed"`` the pre-Phase-5
+                # helper used. The helper also consults
+                # ``bus.had_parent_error(target_id)`` for the
+                # sticky cross-child case (a parent whose first
+                # child errored and subsequent children completed
+                # normally must still finalize as ``"error"`` —
+                # the conservative "any error → error" rule).
                 try:
-                    await self._retrigger_parent_finalize(target_id)
+                    await self._retrigger_parent_finalize(
+                        target_id,
+                        terminal_status=status,
+                        error=error,
+                    )
                 except Exception as retrigger_err:
                     logger.warning(
                         f"Bus re-trigger: unexpected error for "
@@ -404,7 +419,12 @@ class ChildReportsService:
 
         return fired
 
-    async def _retrigger_parent_finalize(self, instance_id: str) -> None:
+    async def _retrigger_parent_finalize(
+        self,
+        instance_id: str,
+        terminal_status: str | None = None,
+        error: str | None = None,
+    ) -> None:
         """Re-trigger job finalization for a parent after all bus watchers fired.
 
         On the bus path (``use_dependency_bus=ON``), the CM callback never
@@ -428,10 +448,29 @@ class ChildReportsService:
             observer is logged at DEBUG, not WARN, because it is the
             expected state for tests.
 
+        Phase 5 (2026-06-23): ``terminal_status`` threads the child
+        outcome's status from :meth:`_emit_terminal_via_bus` so a
+        parent whose last child errored finalizes as ``"error"``
+        instead of the pre-Phase-5 hardcoded ``"completed"``. The
+        helper also consults :meth:`DependencyBus.had_parent_error`
+        for the sticky cross-child case — a parent whose first
+        child errored but subsequent children completed normally
+        must still finalize as ``"error"`` (the conservative "any
+        error → error" rule that was lost when CM was removed).
+
         Args:
             instance_id: The parent instance whose job may need to be
                 finalized. Resolved to its PROCESSING ``JobItem`` via
                 ``JobFeedbackObserver._get_processing_job_for_instance``.
+            terminal_status: The child outcome's status (``"completed"``
+                or ``"error"``). ``None`` defaults to ``"completed"``
+                for backward compatibility with the pre-Phase-5
+                call site in ``daemon/api.py`` crash-recovery path
+                (which has no per-child status context).
+            error: The child outcome's error message (only set when
+                ``terminal_status == "error"``). Forwarded to
+                ``_finalize_job`` so the parent's job is marked
+                FAILED with a meaningful error message.
         """
         observer = getattr(self._manager, "_job_feedback_observer", None)
         if observer is None:
@@ -444,6 +483,35 @@ class ChildReportsService:
                 f"{instance_id[:8]}... (skipping — not wired in test?)"
             )
             return
+
+        # Phase 5 (2026-06-23): determine the final terminal_status
+        # using the conservative "any error → error" rule. We
+        # consult the bus's per-parent error flag (sticky across
+        # all children) AND the terminal_status passed by the caller
+        # (the immediate child's outcome). Either path can flip the
+        # final status to "error"; the completion path wins for
+        # ``"completed"`` only when no error has been recorded for
+        # this parent on the bus.
+        from .dependency_bus import get_dependency_bus
+
+        bus = get_dependency_bus()
+        had_error = (
+            bus.had_parent_error(instance_id) if bus is not None else False
+        )
+        # Conservative rule: any child error → parent "error".
+        # ``terminal_status`` defaults to "completed" when the caller
+        # has no per-child status context (e.g. the api.py
+        # crash-recovery path that re-triggers finalization on a
+        # watched target whose last watcher fired before a crash).
+        if had_error:
+            resolved_status = InstanceStatus.ERROR.value
+        elif terminal_status in (
+            InstanceStatus.COMPLETED.value,
+            InstanceStatus.ERROR.value,
+        ):
+            resolved_status = terminal_status
+        else:
+            resolved_status = InstanceStatus.COMPLETED.value
 
         # Find the PROCESSING job for this instance. Uses the same
         # helper as ``handle_correlation_complete`` (job_feedback_observer
@@ -479,23 +547,34 @@ class ChildReportsService:
 
         logger.info(
             f"Bus re-trigger: calling _finalize_job for {instance_id[:8]}... "
-            f"(job={job.job_id[:8]}...)"
+            f"(job={job.job_id[:8]}..., terminal_status={resolved_status}, "
+            f"had_error={had_error})"
         )
         try:
-            # _finalize_job re-checks ALL gates (bus=0, CM empty,
-            # waiting_for=0) before transitioning. On the bus path the
-            # bus gate passes (0 PENDING), the CM gate passes (empty
-            # slot, is_complete=True — bus-path children never
-            # registered), and waiting_for passes (either decremented
-            # to 0 by ``_update_parent_on_child_complete`` or already 0
-            # when the bus flag is ON). Result: PROCESSING → COMPLETED,
+            # _finalize_job re-checks ALL bus gates before transitioning.
+            # On the bus path the bus gate passes (0 PENDING) and the
+            # transition proceeds. Result: PROCESSING → COMPLETED,
             # instance → COMPLETED, locks released.
+            #
+            # Phase 5 (2026-06-23): pass ``resolved_status`` (not the
+            # hardcoded ``COMPLETED``) so a parent whose child errored
+            # finalizes as ``"error"``. The ``error`` argument is the
+            # forwarded child error message (only meaningful when
+            # ``resolved_status == "error"``).
             await observer._finalize_job(
                 job,
                 instance_id,
-                InstanceStatus.COMPLETED.value,
-                error=None,
+                resolved_status,
+                error=error,
             )
+            # Clear the per-parent error flag on the bus so a future
+            # revive / re-spawn of the same instance id does NOT
+            # inherit the sticky error signal. Without this, a
+            # terminated-then-revived instance would incorrectly
+            # finalize any future wave as ``"error"`` (the flag
+            # was set during the previous incarnation).
+            if bus is not None and had_error:
+                bus.clear_parent_error(instance_id)
         except Exception as e:
             # Defensive guard: a single re-trigger failure must not
             # crash the bus finalization path. The bus no longer
@@ -864,18 +943,17 @@ Provide a concise summary:"""
 
     async def _update_parent_on_child_complete(self, session, instance, completed_message_id: str | None = None) -> tuple[bool, str | None, str | None]:
         """Update parent state when child completes.
-        
+
         Handles:
-        - Decrement parent's waiting_for counter
         - Update parent's children cache (FIX: W6)
         - Delete from instance_hierarchy table
-        - Cascade: transition parent based on waiting_for and status
-        
+        - Cascade: bus authoritative for parent completion
+
         Args:
             session: Database session.
             instance: The child Instance object.
-            completed_message_id: The message ID that just completed (for CM hook).
-            
+            completed_message_id: The message ID that just completed (for bus hook).
+
         Returns:
             Tuple of (transitioned_to_running, completed_parent_id, completed_parent_parent_id):
             - transitioned_to_running: True if parent transitioned to RUNNING (has more work)
@@ -886,99 +964,63 @@ Provide a concise summary:"""
         if not parent:
             return False, None, None
 
-        # Phase D (DependencyBus): the bus is the SOLE completion authority.
-        # the CM is the single source of truth for parent completion. This
-        # ``notify_corr_resolve`` call decrements the CM's per-parent pending
-        # set; if that drops to zero, the CM synchronously fires
-        # ``handle_correlation_complete`` (registered as
-        # ``completion_callback``), which transitions the parent JOB to
-        # terminal and (Phase 3) the parent INSTANCE to terminal. The
-        # CM's in-memory pending set is authoritative — there is no
-        # ``SELECT COUNT(*)`` fallback, no TOCTOU window (Race #1 / #3
-        # eliminated).
+        # Phase 5: the bus is the SOLE completion authority. CM is
+        # removed. The hook below (``_emit_terminal_via_bus``) asks
+        # the bus to atomically transition PENDING watchers for the
+        # child task id to FIRED, then directly re-triggers
+        # ``_finalize_job`` on any parent whose watchers are all
+        # FIRED. The bus DB is authoritative — there is no
+        # ``SELECT COUNT(*)`` fallback, no TOCTOU window (Race #1 /
+        # #3 eliminated).
         #
-        # MUST NOT affect control flow — wrapped in try/except inside
-        # ``notify_corr_resolve``. The inline cascade below this hook is
-        # only reached when ``get_correlation_manager()`` returns ``None``
-        # (graceful degradation / CM disabled).
+        # MUST NOT affect control flow — the bus helper is fail-safe
+        # (returns ``[]`` on bus=None or missing task) so a wiring
+        # failure cannot break the child-completion path. The inline
+        # cascade below this hook is only reached when the bus is
+        # None (graceful degradation / bus disabled) — see the A8
+        # hard error.
         #
         # Calling context: this method is called from
         # _process_child_completion_and_notify_parent, which is invoked
         # by MessageJobHandler.process via TaskProcessor.run_task using
         # MainLoopBridge.run_async — so we are on the main asyncio event
-        # loop. The CM's per-parent lock is bound to the main loop (N3
-        # constraint); a direct await is safe here.
+        # loop. A direct await is safe here.
         #
-        # Skip the hook when message_id is missing/empty: the CM keys
-        # correlations on (child_id, message_id) and cannot resolve a
-        # None/empty message_id against any registered entry. Calling
-        # with message_id="" would silently no-op and the pending entry
-        # would stay forever.
+        # Skip the hook when message_id is missing/empty: the bus keys
+        # correlations on the child task id (looked up from
+        # message_id) and cannot fire watchers with a None/empty
+        # message_id. ``_emit_terminal_via_bus`` itself logs and
+        # returns ``[]`` on a missing task — so this guard is
+        # only a fast-path skip.
         #
-        # Phase D (DependencyBus): when ``use_dependency_bus=ON``, the
-        # CM ``notify_corr_resolve`` call is SKIPPED and replaced by
-        # ``bus.emit_terminal(...)`` keyed on the child task id. The
-        # two authorities are mutually exclusive — never called in
-        # parallel — to prevent double-fire (Phase A lesson: the
-        # double-decrement bug class).
+        # Phase 5: bus is the SOLE completion authority. CM is
+        # removed. The ``use_dependency_bus`` flag still controls
+        # ``send_message`` watcher registration (Phase D), but at
+        # completion time we always route through the bus; the
+        # helper handles the no-watchers case as a no-op.
         if completed_message_id:
-            # W1 fix (2026-06-21): check the flag AND the bus singleton.
-            # When the flag is ON but the bus singleton is None (wiring
-            # failure, lazy init race, or unit-test mock), falling
-            # through to the CM path is the safe default — the bus path
-            # would otherwise silently drop the FollowUp because
-            # ``_emit_terminal_via_bus`` returns ``[]`` on bus=None.
-            # Checking both at the call site makes the CM the
-            # graceful-degradation fallback, matching the project's
-            # pattern for ``get_correlation_manager() is not None``
-            # guards elsewhere.
-            from .dependency_bus import get_dependency_bus
-            use_bus_path = (
-                self._is_dependency_bus_enabled()
-                and get_dependency_bus() is not None
-            )
-            if use_bus_path:
-                # ─── Phase D: DependencyBus path (replaces CM) ───────
-                # Look up the child task id from the message_id — the
-                # bus is keyed on task id, not message_id. The lookup
-                # runs on a worker thread (sync DB call) so it doesn't
-                # block the event loop. When the task row is missing
-                # (e.g. cleared by a stale-task sweep before this
-                # completion was reported), ``_emit_terminal_via_bus``
-                # logs and returns an empty list — no FollowUps to
-                # enqueue, no harm done.
-                _child_task = None
-                _task_repo = getattr(self._manager, "_task_repo", None)
-                if _task_repo is not None:
-                    _child_task = await asyncio.to_thread(
-                        _task_repo.get_by_message, completed_message_id
-                    )
-                await self._emit_terminal_via_bus(
-                    task_id=getattr(_child_task, "id", None),
-                    status="completed",
-                    summary="child completed",
+            # Look up the child task id from the message_id — the
+            # bus is keyed on task id, not message_id. The lookup
+            # runs on a worker thread (sync DB call) so it doesn't
+            # block the event loop. When the task row is missing
+            # (e.g. cleared by a stale-task sweep before this
+            # completion was reported), ``_emit_terminal_via_bus``
+            # logs and returns an empty list — no FollowUps to
+            # enqueue, no harm done.
+            _child_task = None
+            _task_repo = getattr(self._manager, "_task_repo", None)
+            if _task_repo is not None:
+                _child_task = await asyncio.to_thread(
+                    _task_repo.get_by_message, completed_message_id
                 )
-            else:
-                try:
-                    from .correlation_manager import notify_corr_resolve
-                    await notify_corr_resolve(
-                        parent_id=instance.parent_id,
-                        child_id=instance.instance_id,
-                        message_id=completed_message_id,
-                        status="responded",
-                    )
-                except Exception as hook_err:
-                    # Defensive outer guard — the helper already swallows CM
-                    # errors, but keep this so a failure in the import path or
-                    # argument binding can never break the child-completion path.
-                    logger.warning(
-                        f"CM hook: resolve path failed "
-                        f"(parent={instance.parent_id[:8] if instance.parent_id else '?'}..., "
-                        f"child={instance.instance_id[:8]}...): {hook_err}"
-                    )
+            await self._emit_terminal_via_bus(
+                task_id=getattr(_child_task, "id", None),
+                status="completed",
+                summary="child completed",
+            )
         else:
             logger.debug(
-                f"CM hook: skipping resolve for parent="
+                f"Bus hook: skipping terminal emit for parent="
                 f"{instance.parent_id[:8] if instance.parent_id else '?'}..., "
                 f"child={instance.instance_id[:8]}... "
                 f"(no message_id — child completed without a tracked send)"
@@ -1002,30 +1044,33 @@ Provide a concise summary:"""
             {"child_id": instance.instance_id}
         )
         
-        # Cascade check: if waiting_for is 0, check if parent can complete
-        # FIX: Removed status restriction - cascade should run whenever waiting_for == 0,
+        # Cascade check: if bus says complete, check if parent can complete
+        # FIX: Removed status restriction - cascade should run whenever all children done,
         # regardless of current status (e.g., RUNNING from previous cascade). This ensures
         # parent waits for ALL children before completing, not just the first batch.
         # W1 FIX: Also preserve ERROR status during cascade — a parent whose last child
         # completed successfully should still report as ERROR (it errored first, and that
         # state is more useful for diagnostics than overwriting it with COMPLETED).
         #
-        # Phase 4: the ``parent.waiting_for == 0`` control-flow READ is
-        # replaced by ``cm.is_complete(parent_id)``. ``waiting_for`` is
-        # retained as the rebuild cache (ADR-011) and will be removed in
-        # Phase 4 once the column is dropped from the schema.
-        from .correlation_manager import get_correlation_manager
-        cm = get_correlation_manager()
-        if cm is not None:
-            # CM is wired up — it is the SOLE completion authority. The
-            # pending count is read from CM's in-memory set (no DB query,
-            # no TOCTOU window — Race #1 / #3 eliminated).
-            is_parent_complete = cm.is_complete(parent.instance_id)
+        # Phase 4: column dropped (see commit).
+        from .dependency_bus import get_dependency_bus
+        bus = get_dependency_bus()
+        if bus is not None:
+            # Bus is wired up — it is the SOLE completion authority. The
+            # pending count is read from the bus's DB (PENDING watchers
+            # — no in-memory CM set, no TOCTOU window — Race #1 / #3
+            # eliminated). The ``_sync`` variant runs the COUNT(*)
+            # directly on the helper's session, so the bus state and
+            # the in-memory decision share a consistent read at this
+            # call site (the bus helper also fails-closed on DB
+            # errors, but the bus singleton being non-None means the
+            # DB is reachable).
+            is_parent_complete = bus.count_pending_for_target_sync(parent.instance_id) == 0
         else:
             # ─── A8: HARD ERROR (not graceful degradation) ─────────────
-            # CM is None is an INVALID state. The ``SELECT COUNT(*)``
+            # Bus is None is an INVALID state. The ``SELECT COUNT(*)``
             # fallback (Race #3) is the exact bug we are fixing — it MUST
-            # NOT be reachable. CM must be initialized for the new
+            # NOT be reachable. The bus must be initialized for the new
             # architecture to work; we raise rather than silently degrade
             # into the TOCTOU fallback. See
             # ``docs/configuration/completion-flags.md`` §"Required
@@ -1035,12 +1080,13 @@ Provide a concise summary:"""
             # W3 fail-safe (``except Exception``) in
             # ``_finalize_job`` and results in a per-job FAILED transition.
             # It is NOT a process-level crash — the daemon stays alive and
-            # only the affected job fails. For production, CM must be
+            # only the affected job fails. For production, the bus must be
             # initialized before any traffic (the startup invariant
-            # enforced in ``daemon/main.py`` via ``cm.start()``).
+            # enforced in ``daemon/main.py`` via
+            # ``init_dependency_bus``).
             raise RuntimeError(
-                f"CorrelationManager is not initialized for parent="
-                f"{parent.instance_id[:8]}...; CM must be initialized. "
+                f"DependencyBus is not initialized for parent="
+                f"{parent.instance_id[:8]}...; bus must be initialized. "
                 f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
                 f"(Race #3) is disabled by design."
             )
@@ -1049,28 +1095,27 @@ Provide a concise summary:"""
             and parent.status != InstanceStatus.COMPLETED.value
             and parent.status != InstanceStatus.ERROR.value
         ):
-            # Phase 3 (Cascade Unification): when CM is active, the inline
-            # cascade + SELECT COUNT(*) + inline status transition are
-            # SKIPPED. The CM's resolve_response (called via the shadow
-            # hook above) already removed the entry from its in-memory
-            # pending set, and if that was the last correlation the CM
-            # callback ``handle_correlation_complete`` is fired
-            # synchronously — which transitions the parent JOB to terminal
-            # via ``_finalize_job``. The CM's in-memory set is the source
-            # of truth (no DB query, no TOCTOU window — Race #3 eliminated).
+            # Phase 3 (Cascade Unification): when the bus is active,
+            # the inline cascade + SELECT COUNT(*) + inline status
+            # transition are SKIPPED. The bus's ``emit_terminal`` (called
+            # via the hook above) already atomically transitioned matching
+            # PENDING watchers to FIRED, and if that was the last
+            # watcher the bus re-triggers
+            # ``_finalize_job`` directly. The bus DB is the source
+            # of truth (no TOCTOU window — Race #3 eliminated).
             #
-            # When CM is None (graceful degradation), keep the existing
+            # When bus is None (graceful degradation), keep the existing
             # logic with the SELECT COUNT(*) fallback. This path is also
-            # the one exercised by every test that does not wire a CM
+            # the one exercised by every test that does not wire a bus
             # fixture (e.g. tests/job_queue/test_in_progress_guard.py).
-            if cm is not None:
-                # CM is active — CM callback handles completion.
+            if bus is not None:
+                # Bus is active — bus callback handles completion.
                 # No count_pending query, no inline status transition,
                 # no inline lifecycle event (the caller at line ~914-931
                 # is also skipped because we return completed_parent_id=None).
                 logger.info(
-                    f"CM-active: skipping inline cascade for parent "
-                    f"{parent.instance_id[:8]}... — CM callback owns completion"
+                    f"Bus-active: skipping inline cascade for parent "
+                    f"{parent.instance_id[:8]}... — bus callback owns completion"
                 )
                 return False, None, None
 
@@ -1150,21 +1195,18 @@ Provide a concise summary:"""
         instance_id: str,
         parent_id: str,
         report_message_id: str,
-        waiting_for_remaining: int,
+        pending_for_parent: int,
     ) -> tuple[Event, Event]:
         """Create completion events for child and parent.
-        
-        Creates:
-        - INSTANCE_COMPLETED event for the child
-        - CHILD_COMPLETED event for the parent
-        
+
         Args:
             session: Database session.
             instance_id: The child instance ID.
             parent_id: The parent instance ID.
             report_message_id: The report message ID for the parent event.
-            waiting_for_remaining: The remaining waiting_for count after decrement.
-            
+            pending_for_parent: PENDING-watcher count for the parent
+                (from the DependencyBus).
+
         Returns:
             Tuple of (completion_event, parent_event).
         """
@@ -1179,7 +1221,7 @@ Provide a concise summary:"""
             created_at=datetime.now(timezone.utc),
         )
         session.add(completion_event)
-        
+
         # Also create event for parent about child completion
         parent_event = Event(
             instance_id=parent_id,
@@ -1187,12 +1229,12 @@ Provide a concise summary:"""
             kind=EventKind.CHILD_COMPLETED.value,
             data=json.dumps({
                 "child_instance_id": instance_id,
-                "waiting_for_remaining": waiting_for_remaining,
+                "pending_for_parent": pending_for_parent,
             }),
             created_at=datetime.now(timezone.utc),
         )
         session.add(parent_event)
-        
+
         return completion_event, parent_event
 
     async def _get_last_assistant_message(self, instance_id: str, agent_id: str) -> str | None:
@@ -1305,9 +1347,7 @@ Provide a concise summary:"""
         #     lock — no interaction.
         #
         # When the bus is None (legacy path / not initialized), no
-        # lock is acquired — the legacy ``waiting_for`` cascade is the
-        # only authority and there is no concurrent writer to race
-        # against the in-memory pending set.
+        # lock is acquired — no concurrent writer to race against.
         from .dependency_bus import get_dependency_bus
         bus = get_dependency_bus()
         if bus is not None:
@@ -1383,34 +1423,40 @@ Provide a concise summary:"""
                     parent_id=None,
                 )
             
-            logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, waiting_for={instance.waiting_for}, status={instance.status}")
+            logger.info(f"Instance {instance_id[:8]}... parent_id={instance.parent_id}, status={instance.status}")
             
             # Not a child? Instance completed (no parent to send report to)
             # Check if we have active children - if so, wait for them before completing.
             #
-            # Phase 4: the ``waiting_for > 0`` READ for the deferral decision
-            # is replaced by ``cm.get_pending_count()`` when the
-            # CorrelationManager is wired up. ``waiting_for`` is retained as
-            # the rebuild cache (ADR-011) and as the graceful-degradation
-            # fallback.
+            # Phase 5: bus is the SOLE completion authority.
             if instance.parent_id is None:
-                from .correlation_manager import get_correlation_manager
-                cm = get_correlation_manager()
-                if cm is not None:
-                    pending_children = cm.get_pending_count(instance_id)
+                from .dependency_bus import get_dependency_bus
+                bus = get_dependency_bus()
+                if bus is not None:
+                    # Phase 5: bus is the SOLE completion authority. The
+                    # ``_sync`` variant runs the COUNT(*) directly on
+                    # the helper's session (no event-loop hop, safe to
+                    # call from this worker-thread sync function).
+                    pending_children = bus.count_pending_for_target_sync(instance_id)
                 else:
-                    # Legacy fallback — ``waiting_for`` column.
-                    pending_children = getattr(instance, "waiting_for", None) or 0
+                    # ─── A8: HARD ERROR (not graceful degradation) ─────────
+                    # Bus is None is an INVALID state. Mirrors the
+                    # A8 hard error at site 2.
+                    raise RuntimeError(
+                        f"DependencyBus is not initialized for instance="
+                        f"{instance_id[:8]}...; bus must be initialized "
+                        f"(Phase 5)."
+                    )
                 if pending_children > 0:
                     # Has children still running — defer completion.
                     # Phase 4: do NOT transition status to WAITING_CHILDREN;
-                    # the CM is the authoritative source of pending children
-                    # and instances stay PROCESSING while children run.
-                    # The ``waiting_children`` SSE event is kept for watcher
-                    # compatibility (display only).
+                    # the bus is the authoritative source of pending
+                    # children and instances stay PROCESSING while
+                    # children run. The ``waiting_children`` SSE event
+                    # is kept for watcher compatibility (display only).
                     logger.info(
                         f"Instance {instance_id[:8]}... completed message but waiting for "
-                        f"{pending_children} children (CM={cm is not None}), deferring completion"
+                        f"{pending_children} children (bus={bus is not None}), deferring completion"
                     )
                     # SSE side effect is dispatched by the async caller.
                     return _ChildCompletionDbResult(
@@ -1420,39 +1466,31 @@ Provide a concise summary:"""
                         parent_id=None,
                     )
 
-                # Phase 3 (Cascade Unification — Fix A2): root completion
-                # is NOT a child response, so we MUST NOT call
-                # ``cm.resolve_response`` here (a self-referential
-                # ``(instance_id, message_id)`` key would never match any
-                # registered correlation and would silently no-op).
-                # Instead, we use ``cm.is_complete`` as a read-only check
-                # (Condition 1): are all child responses received?
-                # The CM's in-memory pending set is the authoritative
-                # source — if CM says children are still pending but
-                # ``waiting_for`` happened to read 0 (e.g. a
-                # register/resolve interleaving with our session
-                # snapshot), trust CM. When CM is None (graceful
-                # degradation), skip Condition 1 and fall through to
-                # Condition 2 (the existing pending_count query).
+                # Phase 5 (Cascade Unification — Fix A2): root completion
+                # is NOT a child response, so we MUST NOT call any
+                # ``resolve_response`` hook here (a self-referential
+                # key would never match any registered watcher and
+                # would silently no-op). Instead, we use
+                # ``bus.count_pending_for_target_sync(...) == 0`` as
+                # a read-only check (Condition 1): are all child
+                # responses received?
+                # The bus DB is the authoritative source.
                 #
-                # Note: ``cm`` is reused from the earlier lookup above
+                # Note: ``bus`` is reused from the earlier lookup above
                 # (it remains in scope after the ``return`` guard at
                 # the end of the previous block).
-                if cm is not None:
-                    all_children_done = cm.is_complete(instance_id)
+                if bus is not None:
+                    all_children_done = bus.count_pending_for_target_sync(instance_id) == 0
                     if not all_children_done:
-                        # CM still has pending correlations for this
-                        # root. Trust CM (more accurate than the DB
-                        # ``waiting_for`` snapshot — Race #3 adjacent
-                        # window).
+                        # Bus still has pending watchers for this root.
                         #
                         # Phase 4: do NOT set status to WAITING_CHILDREN
                         # — instances stay PROCESSING while children run.
                         # The ``waiting_children`` SSE event is kept below
                         # for watcher compatibility (display only).
                         logger.info(
-                            f"Instance {instance_id[:8]}... waiting_for=0 but CM has "
-                            f"unresolved child responses, status=PROCESSING (CM tracks pending)"
+                            f"Instance {instance_id[:8]}... bus has "
+                            f"unresolved child responses, status=PROCESSING (bus tracks pending)"
                         )
                         # SSE side effect is dispatched by the async caller.
                         return _ChildCompletionDbResult(
@@ -1607,9 +1645,7 @@ Provide a concise summary:"""
                                 parent_id=None,
                             )
 
-                # waiting_for == 0, but check for pending messages before completing.
-                # This handles the case where child completion reports are still queued
-                # but waiting_for was already decremented by a previous cascade.
+                # Check pending messages before completing.
                 # Exclude the just-completed message by ID (mirrors
                 # _should_send_completion_report at line 270-279) to avoid the
                 # double-count hazard when message_queue.complete() has not
@@ -1618,13 +1654,10 @@ Provide a concise summary:"""
                 # Phase 3: this ``SELECT COUNT(*)`` is RETAINED. It checks
                 # a different concern (root's OWN queue pending work —
                 # messages from external sources like HTTP, scheduler),
-                # not child-response correlation. The CM set does not
-                # track these. Per ADR-012 and the plan, this is NOT
-                # subject to Race #3.
+                # not child-response correlation. Per ADR-012 and the plan,
+                # this is NOT subject to Race #3.
                 #
-                # Phase 4: the ``WAITING_CHILDREN`` set here is DEPRECATED
-                # and retained only for graceful degradation. CM is the
-                # authoritative source of correlation state. Display/log.
+                # Phase 4: WAITING_CHILDREN is DEPRECATED — display/log only.
                 pending_count = session.exec(
                     select(func.count())
                     .select_from(MessageQueue)
@@ -1657,18 +1690,14 @@ Provide a concise summary:"""
                 # The root carve-out is intentional and aligned with Site 1B
                 # (ADR-012) two-condition check: root completion requires BOTH
                 # no pending children AND no own-queue messages.
-                if pending_count > 0:
-                    # By this point waiting_for is guaranteed 0 (the early
-                    # return above handled all waiting_for > 0 cases), so the
-                    # single pending_count guard is sufficient. Do NOT
+if pending_count > 0:
+                    # Single pending_count guard is sufficient. Do NOT
                     # transition to COMPLETED — there is queued work that
                     # the worker must still process.
                     #
-                    # Display/log: ``waiting_for=0`` is a snapshot read
-                    # of the rebuild cache. CM is authoritative. The
-                    # WAITING_CHILDREN status set is retained for
-                    # graceful-degradation watchers and FIFO carve-out
-                    # SQL compatibility.
+                    # Phase 4: WAITING_CHILDREN status set is retained
+                    # for graceful-degradation watchers and FIFO
+                    # carve-out SQL compatibility (display only).
 
                     # Defense-in-depth: if there is NO active MESSAGE job
                     # (PENDING/PROCESSING) for this instance, the
@@ -1681,8 +1710,8 @@ Provide a concise summary:"""
                     # NOTE: MESSAGE jobs are NOT 1:1-per-instance — each
                     # user message creates a new job. We check for ACTIVE
                     # jobs, not terminal jobs, to avoid false positives
-                    # when a completed old job coexists with an active
-                    # new job.
+                    # when a completed old job coexists with an active new
+                    # job.
                     if self._has_no_active_message_job(session, instance_id):
                         logger.warning(
                             f"Instance {instance_id[:8]}... has pending_count={pending_count} "
@@ -1701,8 +1730,23 @@ Provide a concise summary:"""
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     session.commit()
                     logger.info(
-                        f"Instance {instance_id[:8]}... waiting_for=0 (rebuild-cache snapshot) "
-                        f"but has {pending_count} pending messages, status=WAITING_CHILDREN (deprecated)"
+                        f"Instance {instance_id[:8]}... has {pending_count} pending "
+                        f"messages, status=WAITING_CHILDREN (deprecated)"
+                    )
+                        # Do NOT set status to WAITING_CHILDREN. Leave the
+                        # instance status as-is (current status preserved).
+                        return _ChildCompletionDbResult(
+                            outcome="root_skipped_terminal_job",
+                            instance_id=instance_id,
+                            agent_id=instance.agent_id,
+                            parent_id=None,
+                        )
+
+                    instance.status = InstanceStatus.WAITING_CHILDREN.value
+                    session.commit()
+                    logger.info(
+                        f"Instance {instance_id[:8]}... has {pending_count} pending "
+                        f"messages, status=WAITING_CHILDREN (deprecated)"
                     )
                     # SSE side effect is dispatched by the async caller.
                     return _ChildCompletionDbResult(
@@ -1859,9 +1903,7 @@ Provide a concise summary:"""
             session.add(report_task)
             
             # --- Inline: _update_parent_on_child_complete (no await needed) ---
-            # CorrelationManager (or DependencyBus) is the SOLE completion
-            # authority — ``waiting_for`` is the rebuild cache only (ADR-011)
-            # and must NOT be mutated here. See the bus/CM hook below.
+            # The bus is the SOLE completion authority.
             parent = session.get(Instance, instance.parent_id)
             parent.last_activity_at = datetime.now(timezone.utc)
             parent.version = (parent.version or 1) + 1
@@ -1880,34 +1922,33 @@ Provide a concise summary:"""
                 {"child_id": instance.instance_id}
             )
 
-            # Cascade check — CorrelationManager is the SOLE completion
-            # authority. The legacy ``waiting_for == 0`` READ was removed
-            # with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
-            from .correlation_manager import get_correlation_manager as get_cm_for_cascade
-            cm = get_cm_for_cascade()
-            if cm is not None:
-                is_parent_complete = cm.is_complete(parent.instance_id)
+            # Cascade check — DependencyBus is the SOLE completion
+            # authority (Phase 5). The inlined copy here exists because
+            # ``_process_child_completion_db_sync`` runs on a worker
+            # thread via ``asyncio.to_thread`` and cannot ``await`` the
+            # async helper. Both call sites enforce the same A8
+            # invariant.
+            from .dependency_bus import get_dependency_bus
+            bus = get_dependency_bus()
+            if bus is not None:
+                is_parent_complete = bus.count_pending_for_target_sync(parent.instance_id) == 0
             else:
                 # ─── A8: HARD ERROR (not graceful degradation) ─────────────
-                # CM is None is an INVALID state. The ``SELECT COUNT(*)``
+                # Bus is None is an INVALID state. The ``SELECT COUNT(*)``
                 # fallback (Race #3) is the exact bug we are fixing — it
                 # MUST NOT be reachable. Mirrors the hard error at the
-                # ``_update_parent_on_child_complete`` call site — the
-                # inlined copy here exists because
-                # ``_process_child_completion_db_sync`` runs on a worker
-                # thread via ``asyncio.to_thread`` and cannot ``await`` the
-                # async helper. Both call sites must enforce the same A8
-                # invariant.
+                # ``_update_parent_on_child_complete`` call site.
                 #
                 # Honest propagation note: this RuntimeError is caught by
                 # the W3 fail-safe (``except Exception``) in
                 # ``_finalize_job`` and results in a per-job FAILED
                 # transition. It is NOT a process-level crash. For
-                # production, CM must be initialized before any traffic.
+                # production, the bus must be initialized before any
+                # traffic.
                 raise RuntimeError(
-                    f"CorrelationManager is not initialized for parent="
+                    f"DependencyBus is not initialized for parent="
                     f"{instance.parent_id[:8] if instance.parent_id else '?'}...; "
-                    f"CM must be initialized. "
+                    f"bus must be initialized. "
                     f"This is a hard error — the SELECT COUNT(*) TOCTOU fallback "
                     f"(Race #3) is disabled by design."
                 )
@@ -1922,12 +1963,12 @@ Provide a concise summary:"""
                 and parent.status != InstanceStatus.COMPLETED.value
                 and parent.status != InstanceStatus.ERROR.value
             ):
-                if cm is not None:
-                    # CM is active — CM callback handles completion.
+                if bus is not None:
+                    # Bus is active — bus callback handles completion.
                     # No count_pending query, no inline status transition.
                     logger.info(
-                        f"CM-active: skipping inline cascade for parent "
-                        f"{parent.instance_id[:8]}... — CM callback owns completion"
+                        f"Bus-active: skipping inline cascade for parent "
+                        f"{parent.instance_id[:8]}... — bus callback owns completion"
                     )
                 else:
                     # Check if parent has any pending messages (legacy path)
@@ -1959,7 +2000,6 @@ Provide a concise summary:"""
                         # WAITING_CHILDREN write to avoid permanently
                         # stranding the parent. The child-completion
                         # work above (report message, task,
-                        # waiting_for decrement, children cache,
                         # hierarchy delete) is still real and we let
                         # the function proceed to commit + emit
                         # events — just leave the parent status as-is.
@@ -1981,17 +2021,10 @@ Provide a concise summary:"""
                             waiting_children_parent_agent_id = parent.agent_id
             
             # --- Inline: _create_completion_events (no await needed) ---
-            # Phase 4: derive from the CorrelationManager when available
-            # (in-memory pending set — authoritative for runtime). Falls
-            # back to the ``waiting_for`` DB column (rebuild cache) when
-            # CM is None / disabled (graceful degradation).
-            if instance.parent_id is not None and cm is not None:
-                waiting_for_remaining = max(0, int(cm.get_pending_count(instance.parent_id) or 0))
-            else:
-                # Legacy fallback — read from the DB column.
-                waiting_for_remaining = max(0, (instance.parent_id and session.get(Instance, instance.parent_id).waiting_for) or 0)
-            
-            # Create completion event for child
+            # Source of ``pending_for_parent``: DependencyBus (SOLE completion
+            # authority). When bus is None the error-reporting path raises
+            # A9 hard error above, so we only ever reach here with a bus.
+            pending_for_parent = max(0, int(bus.count_pending_for_target_sync(instance.parent_id) or 0))
             completion_event = Event(
                 instance_id=instance_id,
                 kind=EventKind.INSTANCE_COMPLETED.value,
@@ -2010,7 +2043,7 @@ Provide a concise summary:"""
                 kind=EventKind.CHILD_COMPLETED.value,
                 data=json.dumps({
                     "child_instance_id": instance_id,
-                    "waiting_for_remaining": waiting_for_remaining,
+                    "pending_for_parent": pending_for_parent,
                 }),
                 created_at=datetime.now(timezone.utc),
             )
@@ -2182,57 +2215,41 @@ Provide a concise summary:"""
             self._trigger_title_generation(instance_id, completed_message_id)
             return
 
-        # Regular child completed: commit + CM hook + SSE + CompletionRegistry + lifecycle + title
+        # Regular child completed: commit + bus hook + SSE + CompletionRegistry + lifecycle + title
         if outcome == "regular_child_completed":
-            # CM resolve hook: fires AFTER the commit so the DB state is
-            # consistent before the CM's callback runs its own transaction.
+            # Bus terminal hook: fires AFTER the commit so the DB state
+            # is consistent before the bus's ``emit_terminal`` runs its
+            # own transaction. Mirrors the inline branch above
+            # (``_update_parent_on_child_complete``) — both call sites
+            # converge on ``_emit_terminal_via_bus`` to keep the bus
+            # wiring in one place.
             #
-            # Phase D (DependencyBus): when ``use_dependency_bus=ON``, the
-            # CM hook is SKIPPED and replaced by ``bus.emit_terminal``,
-            # exactly as in the inline branch above
-            # (``_update_parent_on_child_complete``). The bus path here
-            # handles the post-commit side-effect variant — both call
-            # sites converge on ``_emit_terminal_via_bus`` to keep the
-            # bus wiring in one place.
+            # Phase 5: CM is removed. Bus is the SOLE completion
+            # authority. We always route through the bus at completion
+            # time; the ``use_dependency_bus`` flag still controls
+            # ``send_message`` watcher registration, but the
+            # completion-state update always uses the bus (the helper
+            # handles the no-watchers case as a no-op).
             if completed_message_id:
-                # W1 fix (2026-06-21): same guard as the inline branch
-                # above — flag AND bus singleton. Mirrors the comment
-                # block at line ~725; the rationale (bus=None →
-                # FollowUp silently dropped) is identical. See that
-                # site for the full explanation.
-                from .dependency_bus import get_dependency_bus
-                use_bus_path = (
-                    self._is_dependency_bus_enabled()
-                    and get_dependency_bus() is not None
-                )
-                if use_bus_path:
-                    # ─── Phase D: DependencyBus path (replaces CM) ───
-                    _child_task_post = None
-                    _task_repo_post = getattr(self._manager, "_task_repo", None)
-                    if _task_repo_post is not None:
-                        _child_task_post = await asyncio.to_thread(
-                            _task_repo_post.get_by_message, completed_message_id
-                        )
-                    await self._emit_terminal_via_bus(
-                        task_id=getattr(_child_task_post, "id", None),
-                        status="completed",
-                        summary="regular child completed",
+                # Look up the child task id from the message_id — the
+                # bus is keyed on task id, not message_id. The lookup
+                # runs on a worker thread (sync DB call) so it doesn't
+                # block the event loop. When the task row is missing
+                # (e.g. cleared by a stale-task sweep before this
+                # completion was reported), ``_emit_terminal_via_bus``
+                # logs and returns an empty list — no FollowUps to
+                # enqueue, no harm done.
+                _child_task_post = None
+                _task_repo_post = getattr(self._manager, "_task_repo", None)
+                if _task_repo_post is not None:
+                    _child_task_post = await asyncio.to_thread(
+                        _task_repo_post.get_by_message, completed_message_id
                     )
-                else:
-                    try:
-                        from .correlation_manager import notify_corr_resolve
-                        await notify_corr_resolve(
-                            parent_id=parent_id,
-                            child_id=instance_id,
-                            message_id=completed_message_id,
-                            status="responded",
-                        )
-                    except Exception as hook_err:
-                        logger.warning(
-                            f"CM hook: resolve path failed "
-                            f"(parent={parent_id[:8] if parent_id else '?'}..., "
-                            f"child={instance_id[:8]}...): {hook_err}"
-                        )
+                await self._emit_terminal_via_bus(
+                    task_id=getattr(_child_task_post, "id", None),
+                    status="completed",
+                    summary="regular child completed",
+                )
 
             # CompletionRegistry
             from .completion_registry import get_completion_registry

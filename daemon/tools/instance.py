@@ -619,7 +619,6 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         from sqlmodel import Session
         from ..repositories.instance.models import Instance
         from ..write_pause_guard import WriteGuardSession
-        from ..services.correlation_manager import get_correlation_manager
         with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
             target_instance = session.get(Instance, instance_id)
             if target_instance and target_instance.parent_id == current_instance_id:
@@ -711,24 +710,31 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                                 f"correlation (dependency_bus): {hook_err}"
                             )
                 else:
-                    cm = get_correlation_manager()
-                    if cm is not None:
-                        try:
-                            await cm.register_message_send(
-                                parent_id=current_instance_id,
-                                child_id=instance_id,
-                                message_id=message_id,
-                            )
-                        except Exception as hook_err:
-                            logger.warning(
-                                f"CM hook: register failed "
-                                f"(parent={current_instance_id[:8]}, "
-                                f"child={instance_id[:8]}): {hook_err}"
-                            )
-                            return (
-                                f"ERROR: Failed to register message correlation: "
-                                f"{hook_err}"
-                            )
+                    # Phase 5 (2026-06-23): the CorrelationManager class
+                    # was REMOVED. The bus is the SOLE completion
+                    # authority — ``use_dependency_bus=OFF`` is an
+                    # invalid state per ADR-011. Surface the error to
+                    # the caller (the agent) so it can decide whether
+                    # to retry with the bus enabled.
+                    logger.error(
+                        f"send_message: use_dependency_bus=OFF but "
+                        f"the bus is the SOLE completion authority "
+                        f"after Phase 5 CM removal — cannot register "
+                        f"correlation for parent="
+                        f"{current_instance_id[:8]}, "
+                        f"child={instance_id[:8]}. "
+                        f"Enable ``use_dependency_bus: true`` in "
+                        f"config."
+                    )
+                    return (
+                        f"ERROR: send_message requires "
+                        f"use_dependency_bus=ON after Phase 5 CM "
+                        f"removal (CorrelationManager class no "
+                        f"longer exists). Enable "
+                        f"``use_dependency_bus: true`` in config "
+                        f"to restore the bus-based correlation "
+                        f"registration."
+                    )
 
         return f"Message queued and sent to {instance_id}. Please wait — the system will deliver the completion report when ready."
     

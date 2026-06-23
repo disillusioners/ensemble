@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from daemon.manager import InstanceManager
 
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.services.correlation_manager import get_correlation_manager
+from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_queue_service import (
     DemandState,
     JobQueueService,
@@ -92,7 +92,7 @@ class JobProcessor:
         # execution path for message work (Phase C / Phase D).
         self._job_feedback_observer: "JobFeedbackObserver" | None = None
         # Throttle/dedup state for in_progress notifications.
-        # Keyed by job_id. ``_last_in_progress`` records (timestamp, waiting_for) of
+        # Keyed by job_id. ``_last_in_progress`` records (timestamp, pending_count) of
         # the most recent in_progress emit so we can skip re-emit when nothing has
         # changed. ``_in_progress_since`` records the FIRST time we saw this job in
         # the guard, so the escape-hatch timer (``_child_timeout_seconds``) measures
@@ -165,16 +165,16 @@ class JobProcessor:
         child agent reports outstanding, emit an ``in_progress`` notification
         instead of completing the job.
 
-        Phase 4: the control-flow decision now consults the
-        ``CorrelationManager`` (in-memory pending set) when available. The
-        ``waiting_for`` DB column is retained as the rebuild cache and as the
-        fallback when CM is None / disabled.
+        Phase 4 / Phase 5 (2026-06-23): the control-flow
+        decision consults the DependencyBus (DB-backed pending
+        watchers) — the SOLE completion authority after the
+        CorrelationManager was removed in Phase 5.
 
-        A9 hard error: the legacy ``SELECT waiting_for`` fallback
-        is the exact bug we are fixing (TOCTOU) and MUST NOT be
-        reachable. The CM is the SOLE completion authority — when
-        CM is None, this is an invalid state and raises
-        ``RuntimeError``. Mirrors A8 in ``child_reports.py``.
+        A9 hard error: the legacy SELECT fallback is the exact bug
+        we are fixing (TOCTOU) and MUST NOT be reachable. The bus is
+        the SOLE completion authority — when the bus is None, this
+        is an invalid state and raises ``RuntimeError``. Mirrors A8
+        in ``child_reports.py``.
 
         Adds two safety nets that the original 6 inline blocks did not have:
         * **Throttle/dedup** — within a 300s window we skip re-emitting when
@@ -185,8 +185,7 @@ class JobProcessor:
           FAILED so a stuck child never permanently blocks the job.
 
         Args:
-            instance_meta: The Instance metadata (must expose ``waiting_for``
-                as a fallback for the legacy code path).
+            instance_meta: The Instance metadata.
             proc_job: The JobItem (must expose ``job_id``).
             job_type_label: Human label for logs, e.g. ``"MESSAGE"`` or ``"TASK"``.
             status_display: Human-readable instance status for the log line
@@ -197,24 +196,26 @@ class JobProcessor:
             processing). ``False`` if normal processing should proceed.
         """
         # Phase 4: prefer the CM's in-memory pending count when available.
-        # The ``waiting_for`` DB column is retained as the rebuild cache
-        # (ADR-011) but is NOT read for control flow — CM is the SOLE
-        # completion authority.
+        # Phase 5 (2026-06-23): the CM ``get_pending_count`` is replaced
+        # by ``bus.count_pending_for_target`` on the DependencyBus
+        # (the SOLE completion authority after CM removal). The
+        # ``_maybe_emit_in_progress_guard`` is async, so we use the
+        # async ``count_pending_for_target`` variant.
         assert hasattr(instance_meta, "instance_id"), "instance_meta must be an InstanceModel"
         instance_id = instance_meta.instance_id
-        cm = get_correlation_manager()
-        if cm is not None:
-            wf = int(cm.get_pending_count(instance_id) or 0)
+        bus = get_dependency_bus()
+        if bus is not None:
+            wf = int(await bus.count_pending_for_target(instance_id) or 0)
         else:
             # ─── A9: HARD ERROR (not graceful degradation) ───
-            # CM is None is an INVALID state. The ``SELECT waiting_for``
+            # Bus is None is an INVALID state. The legacy SELECT
             # fallback (TOCTOU) is the exact bug we are fixing — it
-            # MUST NOT be reachable. CM must be initialized for the new
-            # architecture to work; we raise rather than silently
-            # degrade into the TOCTOU fallback. See ADR-011.
+            # MUST NOT be reachable. The bus must be initialized for
+            # the new architecture to work; we raise rather than
+            # silently degrade into the TOCTOU fallback. See ADR-011.
             raise RuntimeError(
-                "CorrelationManager is None — invalid state. "
-                "The CM must be initialized (see ADR-011)."
+                "DependencyBus is None — invalid state. "
+                "The bus must be initialized (see ADR-011)."
             )
         if wf <= 0:
             return False
@@ -256,7 +257,7 @@ class JobProcessor:
             # First time we see this job_id in the guard — start the clock.
             self._in_progress_since[job_id] = now
 
-        # --- Throttle/dedup: skip re-emit within 300s if waiting_for unchanged ---
+        # --- Throttle/dedup: skip re-emit within 300s if pending_count unchanged ---
         last = self._last_in_progress.get(job_id)
         if last is not None:
             last_ts, last_wf = last

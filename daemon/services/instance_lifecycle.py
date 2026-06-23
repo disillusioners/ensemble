@@ -19,7 +19,6 @@ from ..registry import get_registry
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
-from .correlation_manager import get_correlation_manager
 from .dependency_bus import get_dependency_bus
 from .event_publisher import EventPublisherService
 from .job_queue_service import DemandState, TERMINAL_CANCEL_STATUSES, TERMINAL_STATUSES
@@ -142,7 +141,7 @@ class _TerminateResult(NamedTuple):
         backing message row no longer exists.
 
     The H10 fix consolidates the 10+ transaction writes into a single
-    ``WriteGuardSession`` (status / waiting_for / job cancel /
+    ``WriteGuardSession`` (status / job cancel /
     MessageQueue delete) so a crash mid-cascade cannot orphan jobs or
     leave zombie state.
     """
@@ -188,7 +187,6 @@ class _CascadeUpdateResult(NamedTuple):
     updated_ids: list[str]        # IDs that were updated (skipped excluded)
     skipped_ids: list[str]        # IDs that were already in target status
     agent_ids_by_instance: dict[str, str | None]
-    waiting_for_by_instance: dict[str, int]
 
 # UUID validation pattern (compiled once at module level)
 _UUID_PATTERN = re.compile(r'^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$', re.IGNORECASE)
@@ -541,18 +539,10 @@ class InstanceLifecycleService:
                 f"during spawn of {instance_id[:8]}..."
             )
 
-        # NOTE: We no longer mutate ``parent.children`` (JSON cache) here.
         # The ``instance_hierarchy`` junction table is the canonical
-        # source of parent-child relationships — _enrich_instance() in
-        # daemon/repositories/instance/repository.py loads children
-        # from it on every read. Writes to the JSON cache were doubly
-        # broken (RMW races + overridden on read) and persistently
-        # useless (no code ever reads the corrupted value). See C10.
-        #
-        # The junction table row is inserted by ``_spawn_instance_db_sync``
-        # above. waiting_for is also NOT incremented here — only
-        # send_message to a child increments it (that's what makes the
-        # count accurate: it tracks pending work, not just child existence).
+        # source of parent-child relationships. A row was inserted by
+        # ``_spawn_instance_db_sync`` above. Phase 4: column dropped (see commit).
+        # Parent-waits-for-children is now tracked via the Dependency Bus.
 
         # Store in instances dict
         self._manager.instances[instance_id] = (graph, resolved_agent_dir)
@@ -605,7 +595,7 @@ class InstanceLifecycleService:
         3. Releases project lock if this instance holds one (via JobQueueService)
         4. Cleans up instance state and resources
 
-        H10 fix: the DB write portion (status + waiting_for + job cancel +
+        H10 fix: the DB write portion (status + job cancel +
         message_queue delete + job_locks release + instance_hierarchy cleanup)
         runs inside a SINGLE ``WriteGuardSession`` transaction via
         ``_terminate_instance_db_sync``, called through ``asyncio.to_thread``
@@ -647,7 +637,23 @@ class InstanceLifecycleService:
         # Cascade to children FIRST - terminate all child instances in parallel.
         # (Parallel because each child may itself unwind an in-flight LLM call;
         # serial cascade would compound to 5s*N worst case.)
-        child_ids: list[str] = list(meta.children) if meta and meta.children else []
+        # Phase 4: child IDs come from the ``instance_hierarchy`` junction
+        # table (the canonical working-set source), NOT the legacy
+        # ``meta.children`` JSON cache — that column was dropped. We
+        # query the junction table directly so this code path doesn't
+        # depend on the (now-removed) ``_enrich_instance`` overwrite.
+        child_ids: list[str] = []
+        if (
+            hasattr(self._manager, '_instance_repository')
+            and self._manager._instance_repository is not None
+        ):
+            with Session(self._manager.engine) as session:
+                rows = session.exec(
+                    select(InstanceHierarchy.child_id).where(
+                        InstanceHierarchy.parent_id == instance_id
+                    )
+                ).all()
+                child_ids = list(rows)
         if child_ids:
             results = await asyncio.gather(
                 *(self.terminate_instance(cid) for cid in child_ids),
@@ -883,22 +889,36 @@ class InstanceLifecycleService:
                     f"({type(e).__name__}: {e})"
                 )
 
-        # 7.8. Clear CorrelationManager state for the terminated instance.
-        # Without this, a terminated-and-revived instance would inherit its
-        # previous _pending[parent_id] entry — is_complete() would never
-        # return True again until daemon restart, wedging the parent
-        # permanently. CM cleanup is defensive: a CM failure must NOT fail
-        # termination (legacy waiting_for cascade is the graceful-degradation
-        # fallback).
-        cm = get_correlation_manager()
-        if cm is not None:
+        # 7.8. Cancel PENDING DependencyBus watchers targeting the
+        # terminated instance. The bus replaces the CorrelationManager
+        # as the SOLE completion authority (Phase 5, 2026-06-23): its
+        # ``cancel_for_target`` transitions the watcher rows to
+        # CANCELLED so the child's terminal event no-ops on the
+        # cancel path. Without this, an in-flight child task would
+        # deliver a FollowUp onto a dead parent.
+        #
+        # Failure handling: a bus failure is logged at WARNING and
+        # swallowed — termination must not fail on cleanup. The bus
+        # is flag-agnostic when wired; when ``use_dependency_bus=OFF``
+        # the singleton is None and we no-op (the inline cascade
+        # below is the graceful-degradation path for the OFF flag,
+        # but ``terminate_instance`` runs against the in-memory
+        # ``_pending`` cache of the CM which is gone — the daemon
+        # must run with the bus enabled per ADR-011).
+        bus = get_dependency_bus()
+        if bus is not None:
             try:
-                await cm.clear_for_instance(instance_id)
+                await bus.cancel_for_target(instance_id)
             except Exception as e:
                 logger.warning(
-                    f"Failed to clear CM state for terminated instance "
+                    f"Failed to cancel bus watchers for terminated instance "
                     f"{instance_id[:8]}...: {e}"
                 )
+        else:
+            logger.debug(
+                f"Bus singleton None at terminate of "
+                f"{instance_id[:8]}... (use_dependency_bus=OFF?) — no-op"
+            )
 
         # 8. Publish lifecycle event for terminated instance.
         if self._events_service:
@@ -923,8 +943,8 @@ class InstanceLifecycleService:
         # ``cancel_for_target`` transitions the watcher rows to
         # CANCELLED so the child's terminal event no-ops on the
         # cancel path. Flag-gated; no-op when
-        # ``use_dependency_bus=False`` (the CM ``clear_for_instance``
-        # call above is the authoritative cleanup in that case).
+        # ``use_dependency_bus=False`` (the bus cancel above is
+        # the authoritative cleanup in that case).
         await _cancel_bus_watchers_for(
             self._manager, instance_id, "terminate_instance"
         )
@@ -1017,16 +1037,9 @@ class InstanceLifecycleService:
                     graph_task.cancel()
                     logger.info(f"Cancelled graph task for instance {node_id[:8]}...")
 
-                # 3. CM-authoritative path: preserve the existing
-                # ``waiting_for`` counter (rebuild-only cache per ADR-011).
-                # The ``USE_LEGACY_WAITING_FOR_CASCADE=ON`` carve-out that
-                # reset ``waiting_for=0`` here was removed in Phase 3.
-                waiting_for_value = meta.waiting_for or 0
-
-                # L14: capture data for the batched UPDATE; the actual
-                # write happens once in the sync helper below.
+# 3. Capture agent_id for the post-commit SSE emit.
                 paused_instances_data.append(
-                    (node_id, meta.agent_id, waiting_for_value)
+                    (node_id, meta.agent_id)
                 )
 
                 logger.info(f"Pausing instance {node_id[:8]}...")
@@ -1092,7 +1105,7 @@ class InstanceLifecycleService:
         L14 fix: per-tree-node ``repo.update(...)`` calls are batched
         into a SINGLE ``UPDATE ... WHERE instance_id IN (...)`` statement
         via ``_resume_cascade_db_sync`` (followed by a small ancestor-
-        only UPDATE for the ``waiting_for=1`` carve-out). Pre-fix the
+        only UPDATE for the carve-out). Pre-fix the
         cascade loop issued one UPDATE per node; L14 collapses them
         so a crash either resumes the entire tree or none of it.
 
@@ -1118,7 +1131,7 @@ class InstanceLifecycleService:
             logger.warning(f"No tree found for instance {instance_id[:8]}...")
             return {"resumed_ids": [], "skipped_ids": [instance_id], "target_id": instance_id}
 
-        # 3. Get ancestors of the SELECTED instance (for waiting_for logic)
+        # 3. Get ancestors of the SELECTED instance (for the resume carve-out)
         ancestor_ids = set(repo.get_ancestor_ids(instance_id))
         is_root_resume = (instance_id == root_id)
 
@@ -1152,10 +1165,10 @@ class InstanceLifecycleService:
 
         # Single batched UPDATE — L14 transaction-boundary fix.
         # The helper issues one UPDATE that flips status + clears
-        # paused_at for all eligible nodes. The legacy ``waiting_for=0``
-        # reset and the ``waiting_for=1`` ancestor carve-out were
-        # removed with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in
-        # Phase 3 — ``waiting_for`` is now rebuild-only cache (ADR-011).
+        # paused_at for all eligible nodes. Phase 4: the
+        # Phase 4: column dropped; this UPDATE no
+        # longer touches any completion counter. Parent-waits-for-
+        # children is owned by the CorrelationManager / Dependency Bus.
         if resumable_ids:
             db_result = await asyncio.to_thread(
                 self._resume_cascade_db_sync,
@@ -1165,10 +1178,8 @@ class InstanceLifecycleService:
                 ancestor_ids=ancestor_ids,
                 is_root_resume=is_root_resume,
             )
-            waiting_for_by_instance = db_result.waiting_for_by_instance
             resumed_ids = db_result.updated_ids
         else:
-            waiting_for_by_instance = {}
             resumed_ids = []
 
         # Post-commit side effects: SSE status_change per resumed node.
@@ -1184,8 +1195,7 @@ class InstanceLifecycleService:
                     f"resume_instance_cascade: status_change SSE emit failed "
                     f"for {node_id[:8]}...: {e}"
                 )
-            wf = waiting_for_by_instance.get(node_id, 0)
-            logger.info(f"Resumed instance {node_id[:8]}... (waiting_for={wf})")
+            logger.info(f"Resumed instance {node_id[:8]}...")
 
         return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids, "target_id": instance_id}
 
@@ -1403,7 +1413,7 @@ class InstanceLifecycleService:
           1. Re-read the instance row (authoritative re-entrancy guard;
              the async caller already short-circuited on a fast-path read
              but a concurrent writer could have raced us).
-          2. UPDATE ``instances`` SET status='terminated', waiting_for=0,
+          2. UPDATE ``instances`` SET status='terminated',
              version+=1, updated_at=now. Single-statement atomic — a
              crash mid-UPDATE rolls back via ``WriteGuardSession.__exit__``.
           3. SELECT ``job_queue_items`` WHERE instance_id = :id AND
@@ -1495,15 +1505,13 @@ class InstanceLifecycleService:
             parent_id = instance.parent_id
             agent_id = instance.agent_id
 
-            # ── Step 1: atomic instance UPDATE (status + waiting_for) ──
-            # Single-statement update keeps the (status, waiting_for)
-            # pair atomic — pre-fix this was a 2-write sequence that
-            # could leave (status=terminated, waiting_for=N>0) on crash.
+            # ── Step 1: atomic instance UPDATE (status only) ──
+            # Phase 4: column dropped (see commit).
+            # Single-statement update keeps the status transition atomic.
             session.execute(
                 text(
                     "UPDATE instances "
                     "SET status = 'terminated', "
-                    "    waiting_for = 0, "
                     "    updated_at = :now, "
                     "    version = COALESCE(version, 1) + 1 "
                     "WHERE instance_id = :iid"
@@ -1760,10 +1768,8 @@ class InstanceLifecycleService:
                 agent_dir=resolved_agent_dir,
                 agent_name=agent_name,
                 parent_id=parent_id,
-                status=InstanceStatus.IDLE.value,
+status=InstanceStatus.IDLE.value,
                 instance_metadata=effective_metadata,
-                children="[]",
-                waiting_for=0,
                 version=1,
                 created_at=now_iso,
                 updated_at=now_iso,
@@ -1807,7 +1813,7 @@ class InstanceLifecycleService:
         *,
         tree_ids: list[str],
         paused_at_iso: str,
-        paused_instances_data: list[tuple[str, str | None, int]],
+        paused_instances_data: list[tuple[str, str | None]],
     ) -> _CascadeUpdateResult:
         """Sync DB half of ``pause_instance_cascade`` (L14 fix).
 
@@ -1821,11 +1827,8 @@ class InstanceLifecycleService:
         L14 collapses the N updates into a single ``UPDATE`` so a crash
         either pauses the entire tree or none of it.
 
-        ``waiting_for`` is NOT mutated by this helper — it is rebuild-
-        only cache (ADR-011) and the CorrelationManager is the SOLE
-        completion authority (the legacy ``waiting_for=0`` reset was
-        removed with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in
-        Phase 3).
+        is rebuild-only cache (ADR-011) and the CorrelationManager is the SOLE
+        completion authority.
 
         Args:
             engine: The shared SQLAlchemy engine.
@@ -1833,30 +1836,25 @@ class InstanceLifecycleService:
             tree_ids: All node IDs in the tree (from
                 ``repo.get_tree_ids(root_id)``).
             paused_at_iso: ISO-8601 timestamp for the paused_at column.
-            paused_instances_data: List of ``(instance_id, agent_id,
-                waiting_for)`` tuples for nodes that should be paused.
-                The caller pre-filters out already-paused nodes (skip
-                behavior).
+            paused_instances_data: List of ``(instance_id, agent_id)`` tuples
+                for nodes that should be paused. The caller pre-filters
+                out already-paused nodes (skip behavior).
 
         Returns:
             ``_CascadeUpdateResult`` with the list of updated IDs and
-            their captured ``agent_id`` / ``waiting_for`` so the async
-            caller can fire ``stream_status_change`` SSE per node.
+            their captured ``agent_id`` so the async caller can fire
+            ``stream_status_change`` SSE per node.
         """
         if not paused_instances_data:
             return _CascadeUpdateResult(
                 updated_ids=[],
                 skipped_ids=[],
                 agent_ids_by_instance={},
-                waiting_for_by_instance={},
             )
 
-        updated_ids = [iid for iid, _agent, _wf in paused_instances_data]
+        updated_ids = [iid for iid, _agent in paused_instances_data]
         agent_ids_by_instance = {
-            iid: agent for iid, agent, _wf in paused_instances_data
-        }
-        waiting_for_by_instance = {
-            iid: wf for iid, _agent, wf in paused_instances_data
+            iid: agent for iid, agent in paused_instances_data
         }
 
         with WriteGuardSession(Session(engine), write_guard) as session:
@@ -1871,11 +1869,9 @@ class InstanceLifecycleService:
             # non-terminal, non-paused states are eligible for pause
             # — pausing a terminal row would lose the terminal write.
             #
-            # Note: ``waiting_for`` is intentionally NOT in the SET
-            # clause — the legacy ``waiting_for=0`` reset was removed
-            # with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in
-            # Phase 3. The CM-authoritative path preserves the
-            # existing counter.
+            # Note: column is intentionally NOT in the SET
+            # clause — the legacy reset was removed with the
+            # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
             session.execute(
                 text(
                     "UPDATE instances "
@@ -1907,7 +1903,6 @@ class InstanceLifecycleService:
             updated_ids=updated_ids,
             skipped_ids=skipped_ids,
             agent_ids_by_instance=agent_ids_by_instance,
-            waiting_for_by_instance=waiting_for_by_instance,
         )
 
     def _resume_cascade_db_sync(
@@ -1930,16 +1925,11 @@ class InstanceLifecycleService:
           * ``status='running'``
           * ``paused_at=NULL`` (clears the paused timestamp)
 
-        ``waiting_for`` is NOT mutated — it is rebuild-only cache
-        (ADR-011) and the CorrelationManager is the SOLE completion
-        authority. The legacy ``waiting_for=0`` reset + the
-        ``waiting_for=1`` ancestor bump were removed with the
-        ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
+        Phase 4: column dropped; nothing else
+        is mutated here. Parent-waits-for-children is owned by the
+        CorrelationManager / Dependency Bus (see ADR-011).
 
-        Returns ``_CascadeUpdateResult`` with the updated IDs and a
-        placeholder ``waiting_for_by_instance`` map (all zeros — the
-        caller logs the actual value it captured before the helper
-        ran).
+        Returns ``_CascadeUpdateResult`` with the updated IDs.
         """
         # The caller pre-filters out nodes that are not in PAUSED status
         # (skip behavior). The set we get here is the union of nodes
@@ -1949,7 +1939,6 @@ class InstanceLifecycleService:
                 updated_ids=[],
                 skipped_ids=[],
                 agent_ids_by_instance={},
-                waiting_for_by_instance={},
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1960,11 +1949,11 @@ class InstanceLifecycleService:
             # already flipped the status is a no-op on that row
             # (rowcount drops).
             #
-            # Note: ``waiting_for`` is intentionally NOT in the SET
-            # clause — the legacy ``waiting_for=0`` reset and the
-            # ``waiting_for=1`` ancestor bump were removed with the
-            # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3. The
-            # CM-authoritative path preserves the existing values.
+            # Note: column is intentionally NOT in the SET
+            # clause — the legacy reset and the ancestor bump were
+            # removed with the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag
+            # in Phase 3. The CM-authoritative path preserves the
+            # existing values.
             session.execute(
                 text(
                     "UPDATE instances "
@@ -1985,16 +1974,8 @@ class InstanceLifecycleService:
             )
             session.commit()
 
-        # Capture per-node waiting_for for the SSE emit on the event
-        # loop. ``waiting_for`` is rebuild-only cache (ADR-011) — the
-        # helper did not touch it, so we emit 0 as a neutral
-        # placeholder (the actual value is in the DB and visible to
-        # CM via ``get_pending_count``).
-        waiting_for_by_instance: dict[str, int] = {iid: 0 for iid in tree_ids}
-
         return _CascadeUpdateResult(
             updated_ids=list(tree_ids),
             skipped_ids=[],
             agent_ids_by_instance={},  # caller pre-fetches for SSE
-            waiting_for_by_instance=waiting_for_by_instance,
         )
