@@ -82,13 +82,17 @@ class TestInstanceInfo:
         instance = InstanceInfo(**data)
         assert instance.parent_id == "parent-instance"
 
-    def test_instance_info_does_not_have_children_field(self):
-        """Phase 4: InstanceInfo no longer carries a denormalized children field.
+    def test_instance_info_has_children_field(self):
+        """Phase 4 dropped the denormalized ``children`` column on the
+        ``instances`` table, but commit 3cc8da05 re-exposed ``children``
+        on the ``InstanceInfo`` Pydantic model so E2E workflows can read
+        it via ``GET /api/instances/{id}``. The value is sourced from
+        the ``instance_hierarchy`` junction table (canonical) at the
+        service layer, not the DB column.
 
-        Parent-child relationships are now exposed via the ``instance_hierarchy``
-        junction table (and surfaced as ``child_ids`` elsewhere). The Pydantic
-        model must not accept or expose a ``children`` field — passing one is
-        silently dropped by Pydantic.
+        Assert the current shape: ``children`` is present and defaults
+        to ``None`` when not provided, and passing extra values is
+        honored (not silently dropped).
         """
         data = {
             "instance_id": "parent-instance",
@@ -98,14 +102,15 @@ class TestInstanceInfo:
             "parent_id": None,
             "created_at": datetime(2024, 1, 1, 0, 0, 0),
         }
-        
+
         instance = InstanceInfo(**data)
-        # Field must not be present on the model.
-        assert "children" not in instance.model_dump()
-        assert "children" not in instance.__class__.model_fields
-        # Pydantic silently drops unknown kwargs — assert that passing it is a no-op.
-        with_extra = InstanceInfo(**{**data, "children": ["child-1", "child-2"]})
-        assert "children" not in with_extra.model_dump()
+        # Field IS present on the model (re-added by 3cc8da05).
+        assert "children" in instance.__class__.model_fields
+        # Defaults to None when not provided.
+        assert instance.children is None
+        # Passing extra values is honored.
+        with_children = InstanceInfo(**{**data, "children": ["child-1", "child-2"]})
+        assert with_children.children == ["child-1", "child-2"]
 
 
 class TestMessageCreate:
