@@ -1344,8 +1344,16 @@ class InstanceLifecycleService:
             exclude_kb=exclude_kb,
             include_descendants=include_descendants,
         )
-        # Convert Instance objects to dicts for backward compatibility
-        return [i.to_dict() for i in instances], total
+        # Convert Instance objects to dicts for backward compatibility, then
+        # populate ``children`` from the canonical ``instance_hierarchy`` junction
+        # table (Phase 4 dropped the legacy denormalized ``Instance.children``
+        # column). See ``InstanceRepository.list_child_ids``.
+        result = []
+        for inst in instances:
+            info = inst.to_dict()
+            info["children"] = instance_repository.list_child_ids(inst.instance_id)
+            result.append(info)
+        return result, total
 
     def get_instance_info(self, instance_id: str) -> dict:
         """Get information about a specific instance.
