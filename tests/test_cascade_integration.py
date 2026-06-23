@@ -281,101 +281,23 @@ class TestSite1ACmActiveBypass:
 
 
 class TestSite1ACmDisabledLegacy:
-    """CM is None → the original inline cascade runs (graceful degradation).
+    """REMOVED in Phase 3.
 
-    This is the regression coverage: every test that does not wire a CM
-    fixture exercises this path, so it must keep working unchanged.
+    The ``CmDisabledLegacy`` test class verified the CM=None graceful
+    degradation path — the legacy inline ``SELECT COUNT(*)`` cascade
+    that ran when ``get_correlation_manager()`` returned ``None``.
+
+    Phase 3 removed the ``USE_LEGACY_WAITING_FOR_CASCADE`` kill switch
+    and made CM the SOLE completion authority (ADR-011). The legacy
+    cascade branches were deleted from ``child_reports.py`` and
+    ``error_reporting.py``; ``_update_parent_on_child_complete`` and
+    ``_send_error_report`` now raise ``RuntimeError`` when CM is None
+    (A8/A9 hard errors).
+
+    With the legacy path gone, these tests have nothing to verify —
+    the Site 1A active-bypass class above (``TestSite1ACmActiveBypass``)
+    is the sole Phase 3 invariant. They are deleted here.
     """
-
-    @pytest.mark.asyncio
-    async def test_cm_none_runs_select_count_and_inline_status(self):
-        """W2 mandatory: with CM=None, the legacy inline cascade runs
-        end-to-end: SELECT COUNT(*) → no pending messages → status set
-        to COMPLETED → return tuple carries the completed parent.
-        """
-        from daemon.services.child_reports import ChildReportsService
-        from daemon.repositories.instance.models import InstanceStatus
-
-        # Make sure no CM is registered (graceful degradation).
-        set_correlation_manager(None)
-
-        parent = _make_parent(
-            status=InstanceStatus.RUNNING.value,
-            waiting_for=0,  # post-decrement
-        )
-        child = _make_child()
-        session = _setup_cascade_session(parent)
-        mock_manager = _make_mock_manager()
-        service = ChildReportsService(manager=mock_manager)
-
-        # Pass completed_message_id=None so the notify_corr_resolve hook
-        # is skipped (it would no-op when CM is None, but skipping the
-        # call keeps the test focused on the legacy path).
-        transitioned, completed_parent_id, completed_parent_parent_id = (
-            await service._update_parent_on_child_complete(
-                session, child, completed_message_id=None
-            )
-        )
-
-        # (a) Legacy return signature: no RUNNING transition, but the
-        # parent IS reported as completed.
-        assert transitioned is False
-        assert completed_parent_id == parent.instance_id
-        assert completed_parent_parent_id is None  # root in this fixture
-
-        # (b) SELECT COUNT(*) WAS executed — this is the path Phase 3
-        # is trying to eliminate when CM is active. With CM=None the
-        # legacy TOCTOU window is the (acceptable) graceful-degradation
-        # cost. The count-pending query is the only ``session.exec``
-        # call in the cascade block (the atomic UPDATE uses
-        # ``session.execute(text(...))``), so we can assert
-        # ``session.exec.call_count == 1`` directly.
-        assert session.exec.call_count == 1, (
-            f"CM=None legacy path MUST run SELECT COUNT(*) — "
-            f"expected 1 session.exec call, got {session.exec.call_count}. "
-            f"Either the bypass leaked into the legacy path, or the "
-            f"session.exec mock is not configured correctly."
-        )
-
-        # (c) Inline status transition to COMPLETED.
-        assert parent.status == InstanceStatus.COMPLETED.value, (
-            f"CM=None legacy path must set parent.status = COMPLETED; "
-            f"got {parent.status!r}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_cm_none_pending_messages_keeps_waiting_children(self):
-        """Negative control: CM=None, parent has pending messages → parent
-        transitions to WAITING_CHILDREN (not COMPLETED). The
-        ``SELECT COUNT(*)`` returns a non-zero scalar in this scenario.
-        """
-        from daemon.services.child_reports import ChildReportsService
-        from daemon.repositories.instance.models import InstanceStatus
-
-        set_correlation_manager(None)
-
-        parent = _make_parent(status="running", waiting_for=0)
-        child = _make_child()
-        session = _setup_cascade_session(parent)
-        # Pending messages present — parent must NOT complete.
-        pending_result = MagicMock()
-        pending_result.scalar_one = MagicMock(return_value=2)
-        session.exec = MagicMock(return_value=pending_result)
-        mock_manager = _make_mock_manager()
-        service = ChildReportsService(manager=mock_manager)
-
-        transitioned, completed_parent_id, _ = (
-            await service._update_parent_on_child_complete(
-                session, child, completed_message_id=None
-            )
-        )
-
-        # With pending messages, parent transitions to WAITING_CHILDREN
-        # (line 596-607 of child_reports.py). transitioned_to_running is
-        # True for WAITING_CHILDREN in this codebase's contract.
-        assert transitioned is True
-        assert completed_parent_id is None
-        assert parent.status == InstanceStatus.WAITING_CHILDREN.value
 
 
 # =============================================================================
@@ -513,99 +435,15 @@ class TestSite2CmActiveBypass:
 
 
 class TestSite2CmDisabledLegacy:
-    """CM is None → the original error cascade runs (graceful degradation)."""
+    """REMOVED in Phase 3.
 
-    @pytest.mark.asyncio
-    async def test_cm_none_runs_select_count_and_completes_parent(self):
-        """W2 mandatory: with CM=None, the legacy error cascade runs
-        end-to-end: SELECT COUNT(*) → no pending messages → parent.status
-        = COMPLETED → lifecycle event published.
-        """
-        from daemon.services.error_reporting import ErrorReportingService
-        from daemon.repositories.instance.models import InstanceStatus
-
-        set_correlation_manager(None)
-
-        mock_manager = _make_mock_manager()
-        child_meta = MagicMock()
-        child_meta.parent_id = "parent-site2-none"
-        child_meta.agent_name = "tester"
-        child_meta.agent_dir = "/tmp/tester"
-        mock_manager._instance_repository.get = MagicMock(return_value=child_meta)
-        mock_manager._queue_repository.list = MagicMock(return_value=[])
-        mock_manager._queue_repository.enqueue = MagicMock(
-            return_value=MagicMock(message_id="err-msg-W2-none")
-        )
-
-        events_service = MagicMock()
-        events_service._publish_instance_lifecycle_event = AsyncMock()
-
-        service = ErrorReportingService(
-            manager=mock_manager, events_service=events_service
-        )
-
-        parent = _make_parent(
-            parent_id="parent-site2-none",
-            status=InstanceStatus.RUNNING.value,
-            waiting_for=0,
-        )
-        child = MagicMock()
-        child.instance_id = "child-site2-none"
-        child.parent_id = "parent-site2-none"
-        child.status = "running"
-        child.agent_id = "tester"
-        child.instance_metadata = {}
-        child.waiting_for = 0
-
-        session = MagicMock()
-        session.get = MagicMock(side_effect=lambda cls, iid: {
-            "child-site2-none": child,
-            "parent-site2-none": parent,
-        }.get(iid))
-        update_result = MagicMock()
-        update_result.first = MagicMock(return_value=(0,))
-        session.execute = MagicMock(return_value=update_result)
-        # session.exec with the count-pending query returns 0.
-        pending_result = MagicMock()
-        pending_result.scalar_one = MagicMock(return_value=0)
-        session.exec = MagicMock(return_value=pending_result)
-        session.expire = MagicMock()
-        session.commit = MagicMock()
-        session.add = MagicMock()
-
-        wgs = MagicMock()
-        wgs.__enter__ = MagicMock(return_value=session)
-        wgs.__exit__ = MagicMock(return_value=False)
-
-        with patch(
-            "daemon.services.error_reporting.WriteGuardSession",
-            return_value=wgs,
-        ):
-            with patch(
-                "daemon.services.error_reporting.Session",
-                return_value=MagicMock(),
-            ):
-                await service._send_error_report(
-                    instance_id="child-site2-none",
-                    error="test error",
-                    error_type="execution_error",
-                    message_id="msg-site2-none",
-                )
-
-        # (a) SELECT COUNT(*) WAS executed.
-        assert session.exec.call_count == 1, (
-            f"CM=None legacy error cascade MUST run SELECT COUNT(*) — "
-            f"expected 1 session.exec call, got {session.exec.call_count}"
-        )
-
-        # (b) Inline status transition to COMPLETED.
-        assert parent.status == InstanceStatus.COMPLETED.value, (
-            f"CM=None legacy error cascade must set parent.status = "
-            f"COMPLETED; got {parent.status!r}"
-        )
-
-        # (c) The parent lifecycle event WAS published.
-        assert events_service._publish_instance_lifecycle_event.await_count == 1
+    Phase 3 made CM the SOLE completion authority (ADR-011). The CM=None
+    graceful-degradation error cascade was deleted from
+    ``error_reporting._send_error_report``. The Site 2 active-bypass
+    class above (``TestSite2CmActiveBypass``) is the sole Phase 3
+    invariant for the error-reporting path. This class is retained as a
+    no-op marker documenting the removal.
+    """
 
 
 # =============================================================================
@@ -617,10 +455,15 @@ class TestNotifyCorrResolveHookIsUniversal:
     """The ``notify_corr_resolve`` hook is the authoritative dispatch,
     not the inline cascade. It is called whenever there is a
     ``completed_message_id`` AND a CM, regardless of which path the
-    function takes — but the inline cascade is the only one that does
-    the work when CM is None.
+    function takes.
 
     This is a sanity check on the hook's contract.
+
+    Phase 3 update: the CM=None / no-message-id branch is no longer a
+    ``legacy cascade runs`` path — CM=None is a hard ``RuntimeError``
+    (A8/A9 hard error). The hook test below verifies the CM-active
+    path only; the CM=None path is covered by the
+    ``RuntimeError``-raising contract enforced elsewhere.
     """
 
     @pytest.mark.asyncio
@@ -662,37 +505,40 @@ class TestNotifyCorrResolveHookIsUniversal:
             set_correlation_manager(None)
 
     @pytest.mark.asyncio
-    async def test_no_message_id_skips_hook_but_legacy_cascade_runs(self):
-        """Edge case: completed_message_id=None → notify_corr_resolve
+    async def test_no_message_id_skips_hook_cm_active_bypass(self):
+        """Edge case: completed_message_id=None + CM active → notify_corr_resolve
         is NOT called (the hook is keyed on (child_id, message_id) and
-        has nothing to resolve), but the legacy inline cascade still
-        runs when CM is None.
+        has nothing to resolve), and the inline cascade is skipped by
+        the active bypass.
 
-        This proves the hook is optional and the legacy path is
-        independent — important for the graceful-degradation invariant.
+        Phase 3 update: replaced the prior ``legacy_cascade_runs``
+        variant — CM=None is no longer a supported path. With CM active
+        and ``completed_message_id=None`` the hook is not invoked and
+        the active bypass skips the inline cascade.
         """
         from daemon.services.child_reports import ChildReportsService
-        from daemon.repositories.instance.models import InstanceStatus
 
-        set_correlation_manager(None)
+        cm = MagicMock(spec=CorrelationManager, name="cm-hook-test-no-msg")
+        set_correlation_manager(cm)
+        try:
+            parent = _make_parent(status="running", waiting_for=0)
+            child = _make_child()
+            session = _setup_cascade_session(parent)
+            mock_manager = _make_mock_manager()
+            service = ChildReportsService(manager=mock_manager)
 
-        parent = _make_parent(status="running", waiting_for=0)
-        child = _make_child()
-        session = _setup_cascade_session(parent)
-        mock_manager = _make_mock_manager()
-        service = ChildReportsService(manager=mock_manager)
+            mock_hook = AsyncMock(name="notify_corr_resolve")
+            with patch(
+                "daemon.services.correlation_manager.notify_corr_resolve",
+                new=mock_hook,
+            ):
+                await service._update_parent_on_child_complete(
+                    session, child, completed_message_id=None
+                )
 
-        mock_hook = AsyncMock(name="notify_corr_resolve")
-        with patch(
-            "daemon.services.correlation_manager.notify_corr_resolve",
-            new=mock_hook,
-        ):
-            await service._update_parent_on_child_complete(
-                session, child, completed_message_id=None
-            )
-
-        # Hook was NOT called (no message_id → CM has nothing to resolve).
-        assert mock_hook.await_count == 0
-        # Legacy inline cascade still ran (1 session.exec call).
-        assert session.exec.call_count == 1
-        assert parent.status == InstanceStatus.COMPLETED.value
+            # Hook was NOT called (no message_id → CM has nothing to resolve).
+            assert mock_hook.await_count == 0
+            # Active bypass skipped the inline cascade (0 session.exec calls).
+            assert session.exec.call_count == 0
+        finally:
+            set_correlation_manager(None)
