@@ -574,9 +574,10 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             )
         else:
             logger.warning(
-                "manager._task_repo is missing — cannot resolve "
-                "child task id; bus watcher registration skipped"
+                "manager._task_repo is missing — cannot resolve child task id"
             )
+            return ("ERROR: manager._task_repo is missing; cannot register "
+                    "dependency_bus watcher. Parent-child coordination unavailable.")
 
         # Register watcher when sender is the parent of the target instance.
         from sqlmodel import Session

@@ -1658,7 +1658,7 @@ class JobFeedbackObserver:
             logger.info(
                 f"Observer: aborting terminal transition for "
                 f"{instance_id[:8]}... — bus has PENDING watchers "
-                f"(bus count returned 0), "
+                f"(bus has pending watchers), "
                 f"deferring finalization"
             )
             return _FinalizeJobResult(
@@ -1805,7 +1805,7 @@ class JobFeedbackObserver:
                 if _bus_pending > 0:
                     logger.info(
                         f"Observer: aborting terminal transition for "
-                        f"{instance_id[:8]}... — CM says complete but "
+                        f"{instance_id[:8]}... — instance marked complete but "
                         f"bus has {_bus_pending} PENDING watchers "
                         f"(in-session gate), "
                         f"deferring finalization"
