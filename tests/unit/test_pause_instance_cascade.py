@@ -491,15 +491,14 @@ class TestPauseInstanceCascade:
 
     @pytest.mark.asyncio
     async def test_pause_parent_with_waiting_for_resets_counter(self, lifecycle_service, mock_repo, mock_registry):
-        """Test that pausing a parent with waiting_for=3 resets waiting_for to 0.
+        """Test that pausing a parent with waiting_for=3 preserves the counter.
 
-        Scenario:
-        - parent: running, waiting_for=3 (waiting for 3 children)
-        - Child is not paused (only parent is tested)
-
-        Verifies:
-        - waiting_for is reset to 0 to prevent deadlock on resume
-        - update() is called with status='paused', waiting_for=0, and paused_at
+        Phase 3 update: ``waiting_for`` is rebuild-only cache (ADR-011) and
+        the CorrelationManager is the SOLE completion authority. The
+        legacy ``waiting_for=0`` reset on pause was removed with the
+        ``USE_LEGACY_WAITING_FOR_CASCADE`` flag. The pause cascade now
+        preserves the existing counter and the CM callback is responsible
+        for any terminal transition.
         """
         parent_id = "parent-waiting"
 
@@ -513,11 +512,11 @@ class TestPauseInstanceCascade:
 
         assert result["paused_ids"] == [parent_id]
         assert result["skipped_ids"] == []
-        # Should use update() with status, waiting_for=0, and paused_at
+        # Phase 3: waiting_for is preserved (was reset to 0 pre-Phase-3).
         mock_repo.update.assert_called_once()
         call_kwargs = mock_repo.update.call_args[1]
         assert call_kwargs["status"] == "paused"
-        assert call_kwargs["waiting_for"] == 0
+        assert call_kwargs["waiting_for"] == 3
         assert "paused_at" in call_kwargs
 
     @pytest.mark.asyncio
@@ -778,7 +777,12 @@ class TestResumeInstanceCascade:
     async def test_resume_instance_from_child(self, lifecycle_service, mock_repo):
         """Test resuming from a child instance (not root).
 
-        When resuming from a child, only ancestors get waiting_for=1.
+        Phase 3 update: ``waiting_for`` is rebuild-only cache (ADR-011).
+        The legacy ``waiting_for=1`` ancestor carve-out was removed with
+        the ``USE_LEGACY_WAITING_FOR_CASCADE`` flag — all nodes now get
+        ``waiting_for=0`` (preserved) on resume. The CM callback is
+        responsible for the terminal transition when all children
+        resolve.
         """
         parent_id = "parent-instance"
         child1_id = "child-1"
@@ -808,11 +812,12 @@ class TestResumeInstanceCascade:
         assert result["skipped_ids"] == []
         assert result["target_id"] == child1_id
 
-        # Check waiting_for values
+        # Phase 3: no waiting_for bump for ancestors — all nodes get 0
+        # (preserved). CM owns the terminal transition.
         update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[parent_id]["waiting_for"] == 1  # Ancestor gets 1
-        assert update_calls[child1_id]["waiting_for"] == 0  # Resumed node gets 0
-        assert update_calls[child2_id]["waiting_for"] == 0  # Sibling gets 0
+        assert update_calls[parent_id]["waiting_for"] == 0  # Ancestor preserved
+        assert update_calls[child1_id]["waiting_for"] == 0  # Resumed node preserved
+        assert update_calls[child2_id]["waiting_for"] == 0  # Sibling preserved
 
     @pytest.mark.asyncio
     async def test_resume_already_running_instance(self, lifecycle_service, mock_repo):
@@ -891,12 +896,12 @@ class TestResumeInstanceCascade:
                 └── child
                     └── grandchild
 
-        When resuming from grandchild:
-        - ancestors are [child, parent, root]
-        - root gets waiting_for=1 (is ancestor)
-        - parent gets waiting_for=1 (is ancestor)
-        - child gets waiting_for=1 (is ancestor, parent of grandchild)
-        - grandchild gets waiting_for=0 (resumed node)
+        Phase 3 update: ``waiting_for`` is rebuild-only cache (ADR-011).
+        The legacy ``waiting_for=1`` ancestor bump was removed with the
+        ``USE_LEGACY_WAITING_FOR_CASCADE`` flag — all nodes now get
+        ``waiting_for=0`` (preserved) on resume. The CM callback is
+        responsible for the terminal transition when all children
+        resolve.
         """
         root_id = "root"
         parent_id = "parent"
@@ -928,9 +933,9 @@ class TestResumeInstanceCascade:
         assert result["skipped_ids"] == []
         assert result["target_id"] == grandchild_id
 
-        # Check waiting_for values
+        # Phase 3: no waiting_for bump for ancestors — all nodes get 0
         update_calls = {call[0][0]: call[1] for call in mock_repo.update.call_args_list}
-        assert update_calls[root_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[parent_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[child_id]["waiting_for"] == 1  # Ancestor
-        assert update_calls[grandchild_id]["waiting_for"] == 0  # Resumed node
+        assert update_calls[root_id]["waiting_for"] == 0
+        assert update_calls[parent_id]["waiting_for"] == 0
+        assert update_calls[child_id]["waiting_for"] == 0
+        assert update_calls[grandchild_id]["waiting_for"] == 0
