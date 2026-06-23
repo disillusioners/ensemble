@@ -751,14 +751,18 @@ class TaskRepository:
         Returns True if there is at least one PENDING task whose ``instance_id``
         also has a RUNNING task OR an *actively* PROCESSING MESSAGE job. A
         MESSAGE job is only "actively" blocking when the instance is NOT in
-        ``WAITING_CHILDREN`` (and has ``waiting_for = 0``) — in that state
-        the job is just a FIFO placeholder waiting for the instance
-        lifecycle to resolve, not holding the langgraph thread, so a
-        child-completion report task is not actually blocked. Used by the
-        worker pool to distinguish "no work" from "work exists but instance
-        is busy" in the empty-claim path. The job-queue probe joins
-        ``instances`` (via ``idx_instances_status``) and the
-        ``job_queue_items.instance_id`` index, so it stays cheap.
+        ``WAITING_CHILDREN`` — in that state the job is just a FIFO
+        placeholder waiting for the instance lifecycle to resolve, not
+        holding the langgraph thread, so a child-completion report task is
+        not actually blocked. Used by the worker pool to distinguish "no
+        work" from "work exists but instance is busy" in the empty-claim
+        path. The job-queue probe joins ``instances`` (via
+        ``idx_instances_status``) and the ``job_queue_items.instance_id``
+        index, so it stays cheap.
+
+        Phase 5: ``waiting_for`` column was dropped in Phase 4; the
+        ``i.status != waiting_children`` guard is the only FIFO carve-out
+        left (mirrors ``claim_pending_task``).
 
         Mirrors the unified-dispatcher admission carve-out in
         :meth:`claim_pending_task`: a PROCESSING MESSAGE job is also NOT
@@ -796,12 +800,10 @@ class TaskRepository:
                             AND j_running.job_type = :job_type_message
                             AND j_running.instance_id = t_pending.instance_id
                             AND j_running.deleted_at IS NULL
-                            -- Phase 4: legacy ``waiting_for`` read in FIFO
-                            -- carve-out. See comment at the earlier
-                            -- ``find_processing_message_jobs_by_instance``
-                            -- block. DEPRECATED — to be migrated to a
-                            -- CM-aware SQL path in a future phase.
-                            AND COALESCE(i.waiting_for, 0) = 0
+                            -- Phase 4/5: ``waiting_for`` column dropped.
+                            -- The ``i.status != waiting_children`` guard
+                            -- below is the only FIFO carve-out left
+                            -- (mirrors ``claim_pending_task``).
                             AND (i.status IS NULL OR i.status != :status_waiting_children)
                             -- Unified-dispatcher admission carve-out
                             -- (mirror of claim_pending_task). A MESSAGE

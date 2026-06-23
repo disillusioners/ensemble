@@ -1358,18 +1358,26 @@ class InstanceLifecycleService:
             instance_id: The ID of the instance.
 
         Returns:
-            Instance metadata dictionary from the database.
+            Instance metadata dictionary from the database, enriched
+            with the working-set ``children`` list loaded from
+            ``instance_hierarchy`` (Phase 5 — the legacy denormalized
+            ``Instance.children`` column is no longer written to).
 
         Raises:
             KeyError: If instance is not found.
         """
         # Access manager's state dynamically
         instance_repository = self._manager._instance_repository
-        
+
         meta = instance_repository.get(instance_id)
         if meta is None:
             raise KeyError(f"Instance not found: {instance_id}")
-        return meta.to_dict()
+        info = meta.to_dict()
+        # Phase 5: load children from the canonical hierarchy junction
+        # table. The legacy ``Instance.children`` cache column is no
+        # longer written to — see ``InstanceRepository.list_child_ids``.
+        info["children"] = instance_repository.list_child_ids(instance_id)
+        return info
 
     def clear_all_instances(self) -> int:
         """Clear all instances from memory and database.
