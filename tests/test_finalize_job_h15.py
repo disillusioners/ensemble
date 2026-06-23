@@ -24,6 +24,7 @@ Run with::
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from contextlib import contextmanager
 from typing import Any
@@ -45,12 +46,18 @@ from daemon.write_pause_guard import WritePauseGuard
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Phase 3 fixture: DependencyBus is the SOLE completion authority (ADR-011).
+# Phase 5 fixture: DependencyBus is the SOLE completion authority (ADR-011).
 # The legacy ``use_legacy_waiting_for_cascade`` kill switch was removed in
 # Phase 3, so ``_finalize_job_db_sync`` now raises ``RuntimeError`` when the
 # bus is None (A9 hard error). Wire a mock bus globally; tests configure the
 # pending count via ``set_bus_pending(n)`` before exercising the code path
 # under test.
+#
+# Phase 5 also added ``bus._get_parent_lock`` (replaces CM ``_get_lock``) and
+# the orphan-race re-arm uses ``bus.get_generation()``. Both must be mocked
+# to return real values — MagicMock's default returns a non-awaitable
+# MagicMock for the lock (causing TypeError) and a truthy MagicMock for
+# generation (causing spurious re-arms).
 # ──────────────────────────────────────────────────────────────────────────────
 _BUS_PENDING = [0]
 
@@ -59,6 +66,14 @@ _BUS_PENDING = [0]
 def _wire_bus_mock():
     bus_mock = MagicMock()
     bus_mock.count_pending_for_target_sync = lambda iid: _BUS_PENDING[0]
+    # Phase 5: ``_finalize_job`` does ``async with await bus._get_parent_lock(iid)``.
+    # MagicMock default returns a non-awaitable MagicMock → TypeError. Use an
+    # AsyncMock that returns a real asyncio.Lock so the ``async with`` works.
+    bus_mock._get_parent_lock = AsyncMock(side_effect=lambda parent_id: asyncio.Lock())
+    # Phase 5: post-commit orphan-race re-arm reads ``bus.get_generation()``.
+    # Default MagicMock returns a truthy MagicMock, causing spurious
+    # COMPLETED→PROCESSING re-arms. Return 0 (stable) so no re-arm fires.
+    bus_mock.get_generation = MagicMock(return_value=0)
     set_dependency_bus(bus_mock)
     yield
     set_dependency_bus(None)
@@ -451,8 +466,13 @@ class TestH15C1Abort:
         # The C1 re-check reads ``_pending`` (a Python dict, GIL-protected),
         # so this MagicMock-based test verifies the re-check branch fires
         # and the helper returns skip=True.
+        #
+        # Phase 5: also mock ``_get_parent_lock`` and ``get_generation`` to
+        # avoid TypeError on the lock and spurious post-commit re-arms.
         bus = MagicMock()
         bus.count_pending_for_target_sync = MagicMock(return_value=1)  # 1 pending → abort
+        bus._get_parent_lock = AsyncMock(side_effect=lambda parent_id: asyncio.Lock())
+        bus.get_generation = MagicMock(return_value=0)
 
         self.instance_id = instance_id
         self.job_id = job.job_id
@@ -466,6 +486,12 @@ class TestH15C1Abort:
     async def test_cm_pending_aborts_terminal_transition(self, engine):
         """CM pending > 0 → no job/instance/lock changes, no side effects."""
         observer, mocks = make_observer(engine)
+        # Phase 5: C1 abort requires ``use_dependency_bus=True`` so
+        # ``_is_dependency_bus_enabled()`` returns True and the
+        # ``_bus_count_pending_for_target_sync`` helper actually
+        # consults our mock (otherwise the defensive flag returns 0
+        # and the abort path is never exercised).
+        observer._config = MagicMock(use_dependency_bus=True)
         mocks["job_queue_service"].get_job_by_instance = AsyncMock(return_value=self.job)
         with patched_completion_registry():
             await observer.handle_correlation_complete(self.instance_id, "completed")
