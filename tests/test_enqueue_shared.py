@@ -1,9 +1,10 @@
 """Phase 5 — Tests for the shared `_prepare_enqueued_message` helper.
 
 These tests verify that the ``_prepare_enqueued_message`` helper — the
-extracted shared prelude for ``enqueue_message`` (WorkerPool) and
-``enqueue_message_via_jq`` (JobQueue) — produces **identical** pre-state
-side effects when called from either public method.
+extracted shared prelude for ``enqueue_message`` (both
+``dispatch_path="workerpool"`` and ``dispatch_path="jobqueue"``) —
+produces **identical** pre-state side effects when called from either
+branch of the unified dispatcher.
 
 What's tested (SHARED behavior, identical for both paths):
 
@@ -21,10 +22,10 @@ What's tested (SHARED behavior, identical for both paths):
 
 What's **NOT** tested (intentionally different between paths):
 
-  - ``Task`` row creation (only in WorkerPool path).
-  - ``JobQueueService.enqueue`` call (only in JobQueue path).
-  - WorkerPool ``notify_work`` (only in WorkerPool path).
-  - The ``_job_queue_service.enqueue`` call (only in JobQueue path).
+  - ``Task`` row creation (only for ``dispatch_path="workerpool"``).
+  - ``JobQueueService.enqueue`` call (only for ``dispatch_path="jobqueue"``).
+  - WorkerPool ``notify_work`` (only for ``dispatch_path="workerpool"``).
+  - The ``_job_queue_service.enqueue`` call (only for ``dispatch_path="jobqueue"``).
 
 These are tested separately in ``tests/job_queue/`` and
 ``tests/test_worker_notification*.py``.
@@ -157,7 +158,7 @@ def _build_manager(
     manager._worker_pool = MagicMock()
     manager._worker_pool.notify_work = MagicMock()
 
-    # ``enqueue_message_via_jq`` looks up instance + dispatches via JQS.
+    # The ``dispatch_path="jobqueue"`` branch looks up instance + dispatches via JQS.
     manager._job_queue_service = MagicMock()
     manager._job_queue_service.enqueue = AsyncMock(
         return_value=MagicMock(job_id="job-test-123")
@@ -250,15 +251,15 @@ class TestMessageQueueRowParity:
         assert row.message_id  # auto-minted
 
     @pytest.mark.asyncio
-    async def test_enqueue_message_via_jq_creates_message_queue_row(
+    async def test_enqueue_message_jobqueue_creates_message_queue_row(
         self, engine, manager, messaging_service
     ):
-        """``enqueue_message_via_jq`` inserts a MessageQueue with the input fields."""
+        """``enqueue_message(dispatch_path="jobqueue")`` inserts a MessageQueue with the input fields."""
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-1",
                 message="hello world",
                 source="api",
@@ -266,7 +267,7 @@ class TestMessageQueueRowParity:
             )
 
         rows = _load_message_queues(engine, "inst-1")
-        assert len(rows) == 1, "enqueue_message_via_jq should create exactly one MessageQueue"
+        assert len(rows) == 1, "enqueue_message(dispatch_path='jobqueue') should create exactly one MessageQueue"
         row = rows[0]
         assert row.instance_id == "inst-1"
         assert row.content == "hello world"
@@ -296,7 +297,7 @@ class TestMessageQueueRowParity:
                 source="telegram:user:42",
                 priority=0,
             )
-            jq_result = await messaging_service.enqueue_message_via_jq(
+            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-b",
                 message="identical body",
                 source="telegram:user:42",
@@ -342,7 +343,7 @@ class TestMessageQueueRowParity:
                 message="agent to agent",
                 source="internal_agent:other",
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-r",
                 message="completion report",
                 source="internal_report:child",
@@ -394,14 +395,14 @@ class TestEventRowParity:
         assert data["role"] == "user"
 
     @pytest.mark.asyncio
-    async def test_enqueue_message_via_jq_creates_message_received_event(
+    async def test_enqueue_message_jobqueue_creates_message_received_event(
         self, engine, manager, messaging_service
     ):
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            result = await messaging_service.enqueue_message_via_jq(
+            result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-1",
                 message="hi",
                 source="api",
@@ -432,7 +433,7 @@ class TestEventRowParity:
             wp_result = await messaging_service.enqueue_message(
                 instance_id="inst-1", message="x", source="api"
             )
-            jq_result = await messaging_service.enqueue_message_via_jq(
+            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-1", message="y", source="api"
             )
 
@@ -498,7 +499,7 @@ class TestStatusTransitionParity:
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id=jq_id, message="m", source="api"
             )
 
@@ -527,7 +528,7 @@ class TestStatusTransitionParity:
             await messaging_service.enqueue_message(
                 instance_id="inst-paused", message="x", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-paused", message="x", source="api"
             )
 
@@ -551,7 +552,7 @@ class TestStatusTransitionParity:
             await messaging_service.enqueue_message(
                 instance_id="inst-run", message="m", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-run", message="m", source="api"
             )
 
@@ -586,16 +587,17 @@ class TestStatusTransitionParity:
     ):
         """JobQueue path raises ``ValueError`` if the instance is missing.
 
-        This is intentional asymmetry: ``enqueue_message`` (WorkerPool) tolerates
-        a missing instance and only logs a warning, while ``enqueue_message_via_jq``
-        needs the instance metadata (agent_id, project_id) to enqueue the
-        MESSAGE job, so it raises.
+        This is intentional asymmetry: ``enqueue_message(dispatch_path="workerpool")``
+        tolerates a missing instance and only logs a warning, while
+        ``enqueue_message(dispatch_path="jobqueue")`` needs the instance
+        metadata (agent_id, project_id) to enqueue the MESSAGE job, so
+        it raises.
         """
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
             with pytest.raises(ValueError, match="Instance ghost-jq not found"):
-                await messaging_service.enqueue_message_via_jq(
+                await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                     instance_id="ghost-jq", message="hi", source="api"
                 )
 
@@ -632,7 +634,7 @@ class TestTitleGenerationParity:
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ) as mock_bridge:
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message="hello", source="api"
             )
 
@@ -661,7 +663,7 @@ class TestTitleGenerationParity:
             await messaging_service.enqueue_message(
                 instance_id="inst-c-wp", message="resume", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-c-jq", message="resume", source="api"
             )
 
@@ -689,7 +691,7 @@ class TestTitleGenerationParity:
             await messaging_service.enqueue_message(
                 instance_id="inst-w-wp", message="child report", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-w-jq", message="child report", source="api"
             )
 
@@ -980,7 +982,7 @@ class TestDispatchLayerDifference:
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            result = await messaging_service.enqueue_message_via_jq(
+            result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-1", message="x", source="api"
             )
 

@@ -151,7 +151,6 @@ def _seed_root_instance(
     *,
     instance_id: str | None = None,
     status: str = InstanceStatus.RUNNING.value,
-    waiting_for: int = 0,
 ) -> str:
     """Insert a root Instance row (parent_id=None)."""
     iid = instance_id or f"root-{uuid.uuid4().hex[:8]}"
@@ -163,10 +162,8 @@ def _seed_root_instance(
             agent_dir="/tmp/leader",
             parent_id=None,
             status=status,
-            waiting_for=waiting_for,
             version=1,
             instance_metadata={},
-            children="[]",
         )
         session.add(inst)
         session.commit()

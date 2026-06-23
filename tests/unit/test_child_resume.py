@@ -73,10 +73,8 @@ def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_re
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
-    # Mock enqueue_message for WorkerPool path (child instances)
+    # Mock enqueue_message (used by both WorkerPool and JobQueue paths)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
-    # Mock enqueue_message_via_jq for JobQueue path (parent instances)
-    manager.enqueue_message_via_jq = AsyncMock(return_value=MockAsyncMessageResult())
     manager._graph_tasks = {}
     return manager
 
@@ -90,7 +88,6 @@ def instance_manager(mock_manager):
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
     manager.enqueue_message = mock_manager.enqueue_message
-    manager.enqueue_message_via_jq = mock_manager.enqueue_message_via_jq
     manager._graph_tasks = {}
     return manager
 

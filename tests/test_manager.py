@@ -1707,7 +1707,7 @@ class TestTitleGenerationTrigger:
     async def test_agent_message_triggers_title_via_jq_on_idle_to_running(
         self, mock_manager, mock_cancellation_service, mock_instance_repository
     ):
-        """Test that AGENT message triggers title generation via enqueue_message_via_jq.
+        """Test that AGENT message triggers title generation via enqueue_message.
 
         This tests the JobQueue path which has the same title generation logic.
         """
@@ -1748,12 +1748,13 @@ class TestTitleGenerationTrigger:
 
             service = InstanceMessagingService(mock_manager, mock_cancellation_service)
 
-            # Call enqueue_message_via_jq with AGENT source
-            await service.enqueue_message_via_jq(
+            # Call enqueue_message with AGENT source
+            await service.enqueue_message(
                 instance_id="test-instance-id",
                 message="Agent message via jq",
                 source="internal_agent:parent-123",
                 priority=0,
+                dispatch_path="jobqueue",
             )
 
             # Verify title generation was triggered
@@ -1764,7 +1765,7 @@ class TestTitleGenerationTrigger:
     async def test_title_generation_skipped_via_jq_when_already_running(
         self, mock_manager, mock_cancellation_service, mock_instance_repository
     ):
-        """Test that title generation is NOT triggered via enqueue_message_via_jq when already RUNNING."""
+        """Test that title generation is NOT triggered via enqueue_message when already RUNNING."""
         from daemon.services.instance_messaging import InstanceMessagingService
         from daemon.repositories.instance.models import InstanceStatus
 
@@ -1802,12 +1803,13 @@ class TestTitleGenerationTrigger:
 
             service = InstanceMessagingService(mock_manager, mock_cancellation_service)
 
-            # Call enqueue_message_via_jq with default source (triggers HUMAN)
-            await service.enqueue_message_via_jq(
+            # Call enqueue_message with default source (triggers HUMAN)
+            await service.enqueue_message(
                 instance_id="test-instance-id",
                 message="Human message via jq",
                 source="user",
                 priority=0,
+                dispatch_path="jobqueue",
             )
 
             # Verify title generation was NOT triggered

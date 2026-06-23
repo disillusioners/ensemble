@@ -1024,8 +1024,8 @@ class TestWaitingChildrenToRunningTransition:
             "FIX C3 violation: Instance should transition WAITING_CHILDREN → RUNNING on message enqueue"
         )
 
-    def test_enqueue_message_via_jq_transitions_waiting_children_to_running(self, engine, message_repo):
-        """FIX C3: enqueue_message_via_jq() transitions instance from WAITING_CHILDREN to RUNNING."""
+    def test_enqueue_message_transitions_waiting_children_to_running(self, engine, message_repo):
+        """FIX C3: enqueue_message() transitions instance from WAITING_CHILDREN to RUNNING."""
         instance_id = str(uuid.uuid4())
 
         # Create instance in WAITING_CHILDREN status
@@ -1039,7 +1039,7 @@ class TestWaitingChildrenToRunningTransition:
         instance = get_instance(engine, instance_id)
         assert instance.status == InstanceStatus.WAITING_CHILDREN.value
 
-        # Enqueue message and update status (simulating enqueue_message_via_jq behavior)
+        # Enqueue message and update status (simulating enqueue_message behavior)
         with Session(engine) as session:
             instance = session.get(Instance, instance_id)
             # This is the key fix: WAITING_CHILDREN is now included in the transition check

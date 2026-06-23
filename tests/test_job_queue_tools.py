@@ -890,11 +890,11 @@ class TestJobContinueTool:
 
     @pytest.fixture
     def mock_manager(self):
-        """Build a manager mock with _instance_repository and enqueue_message_via_jq."""
+        """Build a manager mock with _instance_repository and enqueue_message."""
         manager = MagicMock()
         instance_repo = MagicMock()
         manager._instance_repository = instance_repo
-        manager.enqueue_message_via_jq = AsyncMock()
+        manager.enqueue_message = AsyncMock()
         return manager
 
     @pytest.fixture
@@ -933,7 +933,7 @@ class TestJobContinueTool:
         mock_manager._instance_repository.get.return_value = instance
         # enqueue returns an AsyncMessageResult-like object
         from daemon.manager import AsyncMessageResult
-        mock_manager.enqueue_message_via_jq.return_value = AsyncMessageResult(
+        mock_manager.enqueue_message.return_value = AsyncMessageResult(
             message_id="msg-1",
             instance_id="inst-1",
             status="queued",
@@ -960,7 +960,7 @@ class TestJobContinueTool:
             "new_job_id": new_job_id,
             "status": "queued",
         }
-        mock_manager.enqueue_message_via_jq.assert_awaited_once()
+        mock_manager.enqueue_message.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_job_continue_job_not_found(self, mock_services, tools):
@@ -1028,7 +1028,7 @@ class TestJobContinueTool:
         })
 
         assert result == {"error": "Instance is terminated — spawn a new instance instead"}
-        mock_manager.enqueue_message_via_jq.assert_not_awaited()
+        mock_manager.enqueue_message.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_continue_instance_paused(self, mock_services, mock_manager, tools):
@@ -1046,7 +1046,7 @@ class TestJobContinueTool:
         })
 
         assert result == {"error": "Instance is paused — unpause it first"}
-        mock_manager.enqueue_message_via_jq.assert_not_awaited()
+        mock_manager.enqueue_message.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_job_continue_manager_is_none(self, mock_services, tools):
@@ -1094,4 +1094,4 @@ class TestJobContinueTool:
         assert "has a job still processing" in result["error"]
         assert "inst-1" in result["error"]
         # Critical: enqueue should NOT have been called
-        mock_manager.enqueue_message_via_jq.assert_not_awaited()
+        mock_manager.enqueue_message.assert_not_awaited()

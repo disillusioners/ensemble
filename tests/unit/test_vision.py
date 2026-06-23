@@ -748,7 +748,7 @@ class TestImagesWithoutVisionConfig:
         mock_manager = MagicMock()
         mock_manager.config = mock_config
         mock_manager.get_instance = AsyncMock()  # Instance exists
-        mock_manager.enqueue_message_via_jq = AsyncMock(return_value=mock_result)
+        mock_manager.enqueue_message = AsyncMock(return_value=mock_result)
         # Phase 3: routers check manager.is_write_paused; MagicMock auto-attr is truthy → 503.
         mock_manager.is_write_paused = False
 
@@ -773,8 +773,8 @@ class TestImagesWithoutVisionConfig:
             ))
             
             # Verify enqueue was called with images=None
-            mock_manager.enqueue_message_via_jq.assert_called_once()
-            call_kwargs = mock_manager.enqueue_message_via_jq.call_args.kwargs
+            mock_manager.enqueue_message.assert_called_once()
+            call_kwargs = mock_manager.enqueue_message.call_args.kwargs
             assert call_kwargs["images"] is None
 
 

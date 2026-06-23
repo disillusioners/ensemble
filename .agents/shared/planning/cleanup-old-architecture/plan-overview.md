@@ -387,14 +387,14 @@ Merge the `enqueue_message_via_jq` duplicate path into a single enqueue function
 | # | Task | Details | Key Files |
 |---|------|---------|-----------|
 | **6.1** | Consolidate `enqueue_message_via_jq` | Merge into single `manager.enqueue_message()`. Update 4 callers: `manager.py:2135, 2165`, `routers/messages.py:119`, `tools/job_queue.py:473`. These are currently unconditional — the function is NOT legacy-gated, just a duplicate path. | `daemon/services/instance_messaging.py:1495`, 4 callers |
-| **6.2** | Review `_has_no_active_message_job` | This is a defense-in-depth guard at `child_reports.py:532`, called from 4 unconditional sites (L1211, 1645, 1770, 2104). Determine if it's still needed after bus consolidation or if it's redundant. If redundant, remove. If still useful, document why. | `daemon/services/child_reports.py:532` |
+| **6.2** | Review `_has_no_active_message_job` | Defense-in-depth guard at `daemon/services/child_reports.py:611`, called from 4 sites (~L1209, L1646, L1772, L2052). **Decision (2026-06-24): KEEP the guard, document why.** The bus covers parent→child correlation (``dependency_watchers``) but does NOT see the MESSAGE-worker lifecycle on ``job_item`` the guard checks — orthogonal concerns. See the method docstring for the full bus-vs-guard separation analysis. | `daemon/services/child_reports.py:611` |
 | **6.3** | Sweep manager.py for dead branches | After Phase 2 (Lease removal) and Phase 3 (flag removal), grep `manager.py` for any orphaned code paths that referenced removed constructs. | `daemon/manager.py` |
 | **6.4** | Sweep message_processing_pipeline.py | Same sweep for pipeline. Check for dead branches after Lease and flag removal. | `daemon/services/message_processing_pipeline.py` |
 
 #### Acceptance Criteria
 
-- [ ] Single `enqueue_message()` function — no `enqueue_message_via_jq` duplicate.
-- [ ] `_has_no_active_message_job` either removed (with justification) or documented.
+- [x] Single `enqueue_message()` function — no `enqueue_message_via_jq` duplicate.
+- [x] `_has_no_active_message_job` either removed (with justification) or documented. **KEEP + documented** (2026-06-24) — bus covers ``dependency_watchers`` (parent→child correlation) but not ``job_item`` (MESSAGE-worker lifecycle) the guard checks; orthogonal concerns. See method docstring at `daemon/services/child_reports.py:611` for the full analysis.
 - [ ] No dead branches in `manager.py` or `message_processing_pipeline.py`.
 - [ ] All message dispatch tests pass.
 

@@ -623,6 +623,52 @@ class ChildReportsService:
         ACTIVE jobs (PENDING/PROCESSING), not terminal jobs, to avoid false
         positives when a completed old job coexists with an active new job.
 
+        **Why this guard is STILL NEEDED after Phase 5 (bus consolidation)**
+
+        The ``DependencyBus`` (see :mod:`daemon.services.dependency_bus`) replaced
+        :class:`CorrelationManager` in Phases 1–5 and is now the SOLE completion
+        authority for *parent→child correlation* — i.e. whether a parent
+        instance is still waiting on any child's terminal event. The bus tracks
+        this state in the ``dependency_watchers`` table and exposes
+        :meth:`DependencyBus.count_pending_for_target_sync` as the completion
+        gate.
+
+        The bus does **NOT** cover the concern this guard checks. The guard
+        queries a different table (``job_item``) for a different state (the
+        MESSAGE worker-job lifecycle), which the bus does not track:
+
+          * **Bus tracks**: ``dependency_watchers`` — PENDING watchers per
+            ``target_instance_id`` (parent→child correlation). Answers the
+            question "is the parent still waiting on any child's response?".
+          * **Guard tracks**: ``job_item`` — active (PENDING/PROCESSING)
+            MESSAGE jobs per ``instance_id``. Answers the question "is any
+            worker currently processing (or queued to process) a message for
+            this instance?".
+
+        The race the guard protects against is a **task-claim race** in the
+        message-queue layer: a ``task.claim_pending_task`` call claims a task
+        and a ``message_queue`` row is created, but the corresponding
+        ``job_item`` for that message ends up terminal or soft-deleted before
+        any worker picks it up. The ``message_queue`` row is still
+        READY/PROCESSING (so a ``SELECT COUNT(*) FROM message_queue WHERE
+        status IN (READY, PROCESSING, RETRYING)`` returns > 0), but no
+        worker is going to drain it. Writing ``WAITING_CHILDREN`` in that
+        case strands the instance because nothing is coming to wake it.
+
+        The bus's ``count_pending_for_target_sync`` gate returns 0 in that
+        scenario (no PENDING watchers for this instance), so the bus-active
+        path falls through to the WAITING_CHILDREN write — the guard is the
+        only thing that catches the stale-queue case before the write lands.
+        Both call sites at the bus path (L1593, the deferred_waiting_children
+        branch) and the legacy non-bus path (L1709, the root_waiting_children
+        branch) consult the guard for this reason.
+
+        The guard is a cheap, single ``SELECT COUNT(*)`` on a small index
+        (``ix_job_item_instance_type_status``) and is exercised by
+        ``tests/unit/services/test_child_reports.py`` (F5/F8 carve-out
+        coverage). See the ``cleanup-old-architecture`` plan, Task 6.2,
+        for the full Phase 5 bus-vs-guard separation analysis.
+
         Args:
             session: Active SQLModel session (DB read happens here, not committed).
             instance_id: The instance to check.
@@ -1160,6 +1206,13 @@ Provide a concise summary:"""
                 # the WAITING_CHILDREN write to avoid permanently
                 # stranding the parent — fall through to ``return False,
                 # None, None`` so no transition is recorded.
+                #
+                # Phase 5: the guard is STILL required after bus
+                # consolidation. The bus tracks parent→child correlation
+                # (``dependency_watchers``) but does NOT cover the
+                # ``job_item`` MESSAGE-worker lifecycle this guard
+                # checks. See the method docstring for the full
+                # bus-vs-guard separation analysis.
                 if self._has_no_active_message_job(session, parent.instance_id):
                     logger.warning(
                         f"Parent {parent.instance_id[:8]}... has {parent_pending} pending "
@@ -1590,6 +1643,16 @@ Provide a concise summary:"""
                             # the regular ``root_waiting_children``
                             # path below — bus path must be
                             # consistent with the non-bus path.
+                            #
+                            # Phase 5: the bus PENDING-watcher count
+                            # (``bus_pending > 0``) reflects parent→
+                            # child correlation, NOT the MESSAGE-job
+                            # lifecycle. The guard catches the case
+                            # where watchers exist but no MESSAGE
+                            # worker is in flight (stale/duplicate
+                            # from task-claim race). See the method
+                            # docstring for the full bus-vs-guard
+                            # separation analysis.
                             if self._has_no_active_message_job(session, instance_id):
                                 logger.warning(
                                     f"Instance {instance_id[:8]}... has "
@@ -1706,6 +1769,15 @@ Provide a concise summary:"""
                     # jobs, not terminal jobs, to avoid false positives
                     # when a completed old job coexists with an active new
                     # job.
+                    #
+                    # Phase 5: the guard is STILL required after bus
+                    # consolidation. The bus's
+                    # ``count_pending_for_target_sync`` covers parent→
+                    # child correlation (``dependency_watchers``) but
+                    # does NOT see the MESSAGE-worker lifecycle on
+                    # ``job_item`` this guard checks. See the method
+                    # docstring for the full bus-vs-guard separation
+                    # analysis.
                     if self._has_no_active_message_job(session, instance_id):
                         logger.warning(
                             f"Instance {instance_id[:8]}... has pending_count={pending_count} "
@@ -1977,6 +2049,17 @@ Provide a concise summary:"""
                         # hierarchy delete) is still real and we let
                         # the function proceed to commit + emit
                         # events — just leave the parent status as-is.
+                        #
+                        # Phase 5: the guard is STILL required after bus
+                        # consolidation. The bus's
+                        # ``count_pending_for_target_sync`` already
+                        # gates the inline cascade above (returning
+                        # ``is_parent_complete = bus.count_pending... ==
+                        # 0``); once we cross into the pending-messages
+                        # branch the bus is no longer the authority —
+                        # the ``message_queue`` / ``job_item`` lifecycle
+                        # is. See the method docstring for the full
+                        # bus-vs-guard separation analysis.
                         if self._has_no_active_message_job(session, parent.instance_id):
                             logger.warning(
                                 f"Parent {parent.instance_id[:8]}... has {parent_pending} pending "

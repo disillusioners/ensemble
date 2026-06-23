@@ -917,7 +917,6 @@ class TestJobProcessorOrphanDetection:
         )
 
     @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
-    @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_processor_cancels_orphan_task_job_for_terminated_instance(
         self, processor, mock_queue_service, mock_instance_manager,
@@ -974,7 +973,6 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
-    @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_processor_completes_orphan_task_job_for_completed_instance(
         self, processor, mock_queue_service, mock_instance_manager,
@@ -1028,7 +1026,6 @@ class TestJobProcessorOrphanDetection:
         assert call_args.kwargs.get("demand_state") == DemandState.COMPLETED
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
-    @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_processor_fails_orphan_task_job_for_error_instance(
@@ -1185,7 +1182,6 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.enqueue_message.assert_called()
 
     @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
-    @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_processor_completes_orphan_message_job_for_completed_instance(
         self, processor, mock_queue_service, mock_instance_manager,
@@ -1246,7 +1242,6 @@ class TestJobProcessorOrphanDetection:
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
     @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
-    @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_processor_cancels_orphan_message_job_for_terminated_instance(
         self, processor, mock_queue_service, mock_instance_manager,
@@ -1302,7 +1297,6 @@ class TestJobProcessorOrphanDetection:
         assert "terminated" in call_args.kwargs.get("error", "").lower()
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 
-    @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.skip(reason="Phase 4: orphan detection logic changed; obsolete behavior")
     @pytest.mark.asyncio
     async def test_processor_completes_message_job_with_completed_instance_even_when_get_message_fails(

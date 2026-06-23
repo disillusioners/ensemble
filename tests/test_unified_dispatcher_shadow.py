@@ -257,7 +257,7 @@ def _make_job(
 ) -> JobItem:
     """Construct an in-memory JobItem (not yet persisted).
 
-    Mirrors what ``enqueue_message_via_jq`` produces: ``instance_id``
+    Mirrors what ``enqueue_message`` produces: ``instance_id``
     is pre-set on the column, ``message_id`` is in ``job_metadata``.
     """
     return JobItem(

@@ -116,11 +116,12 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
     
     # --- NORMAL PATH: Not paused, enqueue message ---
     try:
-        result = await manager.enqueue_message_via_jq(
+        result = await manager.enqueue_message(
             instance_id=instance_id,
             message=message.content,
             source="api",
             images=message.images,
+            dispatch_path="jobqueue",
         )
     except Exception as e:
         raise HTTPException(

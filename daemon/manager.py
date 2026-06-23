@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
 from langgraph.graph.state import CompiledStateGraph
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.outputs import LLMResult
@@ -18,8 +17,8 @@ from langchain_core.outputs import LLMResult
 from .config import Config
 from .ensemble_config import EnsembleConfig
 from .graph import build_instance_graph
-from .loader import PromptCache, load_and_cache_prompt
-from .utils import parse_think_tags, serialize_message, find_near_instance, DEFAULT_FUZZY_MATCH_DISTANCE  # noqa: F401
+from .loader import PromptCache, load_and_cache_prompt  # re-exported: instance_lifecycle does `from ..manager import load_and_cache_prompt` and tests patch `daemon.manager.load_and_cache_prompt`
+from .utils import parse_think_tags, serialize_message, find_near_instance, DEFAULT_FUZZY_MATCH_DISTANCE  # noqa: F401  # re-exported for backward compat with tests/tools
 from .persistence import (
     get_instance_messages,
     get_checkpointer,
@@ -75,12 +74,12 @@ from .cancellation import (
     OperationCancelledError
 )
 from .request_registry import ActiveRequestRegistry
-from .compaction import ContextCompactor, CompactionContext
+from .compaction import ContextCompactor
 from .constants import WORKER_POOL_SIZE
 from .write_pause_guard import WritePauseGuard
 
 # Worker pool imports (lazy import to avoid circular dependency)
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from .services.worker_pool import WorkerPool
@@ -2110,19 +2109,26 @@ class InstanceManager:
         return await self._messaging_service.send_message(instance_id, message)
 
     async def enqueue_message(
-        self, 
-        instance_id: str, 
-        message: str, 
+        self,
+        instance_id: str,
+        message: str,
         source: str = "api",
         priority: int = 1,
         images: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        dispatch_path: Literal["workerpool", "jobqueue"] = "workerpool",
     ) -> AsyncMessageResult:
-        """Enqueue a message using the worker pool (DB-backed) path.
-        
-        This method creates BOTH a MessageQueue entry AND a Task entry atomically
-        in a single transaction. Workers poll the task table and process messages.
-        
+        """Enqueue a message via the unified dispatcher.
+
+        Routes to the worker-pool path (default) for child-instance
+        resumptions and internal agent-to-agent comms, or to the
+        JobQueue path for external entry points that need a ``job_id``
+        back.
+
+        This method creates a MessageQueue entry plus the dispatch-side
+        side effects (a ``Task`` row + worker wake-up for ``workerpool``,
+        or a ``JobItem`` row + JobQueue dispatch for ``jobqueue``).
+
         Args:
             instance_id: The ID of the target instance.
             message: The message content.
@@ -2130,9 +2136,12 @@ class InstanceManager:
             priority: Message priority (0=system, 1=user).
             images: Optional list of base64-encoded images for vision messages.
             metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-        
+            dispatch_path: Routing strategy — see
+                :meth:`InstanceMessagingService.enqueue_message`.
+
         Returns:
-            AsyncMessageResult with message_id and status.
+            AsyncMessageResult with message_id; ``job_id`` is populated
+            only when ``dispatch_path="jobqueue"``.
         """
         return await self._messaging_service.enqueue_message(
             instance_id=instance_id,
@@ -2141,45 +2150,7 @@ class InstanceManager:
             priority=priority,
             images=images,
             metadata=metadata,
-        )
-
-    async def enqueue_message_via_jq(
-        self,
-        instance_id: str,
-        message: str,
-        source: str = "api",
-        priority: int = 1,
-        images: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> AsyncMessageResult:
-        """Enqueue a message via JobQueue instead of WorkerPool.
-
-        Creates MessageQueue entry + all side effects (same as enqueue_message),
-        then enqueues a MESSAGE-type job via JobQueueService.
-        Does NOT create Task or notify WorkerPool.
-
-        Args:
-            instance_id: The ID of the target instance.
-            message: The message content.
-            source: Source identifier (e.g., "api", "web", "telegram:user:123").
-            priority: Message priority (0=system, 1=user).
-            images: Optional list of base64-encoded images for vision messages.
-            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-
-        Returns:
-            AsyncMessageResult with message_id and status.
-        """
-        logger.info(
-            f"[TRACE] InstanceManager.enqueue_message_via_jq: called "
-            f"instance={instance_id[:8]}... source={source}"
-        )
-        return await self._messaging_service.enqueue_message_via_jq(
-            instance_id=instance_id,
-            message=message,
-            source=source,
-            priority=priority,
-            images=images,
-            metadata=metadata,
+            dispatch_path=dispatch_path,
         )
 
     async def _process_message_with_tracking(
@@ -2967,7 +2938,8 @@ class InstanceManager:
                 #    carve-out in ``Observer._admit_via_worker_pool``): the
                 #    Task was created with ``message_id`` copied from
                 #    ``JobItem.job_metadata['message_id']`` (set by
-                #    ``enqueue_message_via_jq`` at instance_messaging.py:1578),
+                #    ``enqueue_message`` (dispatch_path="jobqueue") in
+                #    ``daemon.services.instance_messaging.InstanceMessagingService``),
                 #    so we recover the original message_id from the JobItem
                 #    and look up the Task via ``get_by_message``.
                 try:

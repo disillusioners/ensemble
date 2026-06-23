@@ -357,11 +357,11 @@ class TestBackwardCompatibility:
     def test_internal_messages_use_worker_pool(self, sample_job_data):
         """Test internal messages create Task, not MESSAGE job (WorkerPool path)."""
         # This verifies the distinction between enqueue_message (WorkerPool)
-        # and enqueue_message_via_jq (JobQueue)
+        # and enqueue_message (JobQueue)
         # Internal messages should use WorkerPool path via Task creation
 
         # The key difference: enqueue_message creates Task entries,
-        # enqueue_message_via_jq creates MESSAGE jobs
+        # enqueue_message creates MESSAGE jobs
         # This test documents the expected behavior
         job_type = "message"  # Via JobQueue
         is_task = False  # No Task created via JobQueue path
@@ -378,14 +378,14 @@ class TestSideEffectsParity:
 
     def test_side_effect_status_idle_to_running(self, repository, sample_job_data):
         """Test instance status transitions from IDLE to RUNNING on message."""
-        # The enqueue_message_via_jq method updates instance status
+        # The enqueue_message method updates instance status
         # This test verifies the transition logic exists
         instance_id = "status-transition-instance"
 
         job = create_message_job(repository, sample_job_data, instance_id)
 
         # Job creation doesn't change instance status directly
-        # The status transition happens in enqueue_message_via_jq
+        # The status transition happens in enqueue_message
         # This test documents the expected behavior
         assert job.status == JobStatus.PENDING.value
 
@@ -401,7 +401,7 @@ class TestSideEffectsParity:
             job_metadata={"message_id": message_id, "source": "api"},
         )
 
-        # The event is created in enqueue_message_via_jq
+        # The event is created in enqueue_message
         # This test verifies the job has correct metadata for event creation
         assert job.job_metadata.get("message_id") == message_id
 
@@ -411,7 +411,7 @@ class TestSideEffectsParity:
 
         job = create_message_job(repository, sample_job_data, instance_id)
 
-        # Activity updates happen in enqueue_message_via_jq
+        # Activity updates happen in enqueue_message
         # Job creation stores instance_id for activity tracking
         assert job.instance_id == instance_id
 

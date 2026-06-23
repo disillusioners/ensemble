@@ -59,14 +59,8 @@ async def mock_manager():
         "processing_count": 0,
         "oldest_message_age_seconds": None
     })
-    # Mock async enqueue_message (worker pool path)
+    # Mock async enqueue_message (job queue path - used by router)
     manager.enqueue_message = AsyncMock(return_value=Mock(
-        message_id="test-message-id",
-        instance_id="test-instance-id",
-        status="queued"
-    ))
-    # Mock async enqueue_message_via_jq (job queue path - used by router)
-    manager.enqueue_message_via_jq = AsyncMock(return_value=Mock(
         message_id="test-message-id",
         instance_id="test-instance-id",
         status="queued"
@@ -809,11 +803,12 @@ async def test_send_message_success(client, mock_manager):
     assert "message_id" in data
     assert data["role"] == "assistant"
     assert data["content"] == ""  # Response comes async via SSE
-    mock_manager.enqueue_message_via_jq.assert_called_once_with(
+    mock_manager.enqueue_message.assert_called_once_with(
         instance_id="test-instance-id",
         message="Hello, agent!",
         source="api",
-        images=None
+        images=None,
+        dispatch_path="jobqueue"
     )
 
 
@@ -849,9 +844,9 @@ async def test_get_messages(client, mock_manager):
 @pytest.mark.asyncio
 async def test_global_exception_handler(client, mock_manager):
     """Test that exceptions return proper error response."""
-    # Make enqueue_message_via_jq raise an unexpected exception
+    # Make enqueue_message raise an unexpected exception
     mock_manager.get_instance.return_value = AsyncMock()
-    mock_manager.enqueue_message_via_jq.side_effect = RuntimeError("Unexpected error")
+    mock_manager.enqueue_message.side_effect = RuntimeError("Unexpected error")
     
     response = await client.post(
         "/instances/test-instance-id/messages",

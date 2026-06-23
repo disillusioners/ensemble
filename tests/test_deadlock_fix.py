@@ -183,7 +183,6 @@ def _seed_instance(
     agent_dir: str = "/tmp/agent",
     parent_id: str | None = None,
     status: str = InstanceStatus.IDLE.value,
-    waiting_for: int = 0,
 ) -> str:
     """Insert an Instance row. Returns the instance_id used."""
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
@@ -195,10 +194,8 @@ def _seed_instance(
             agent_dir=agent_dir,
             parent_id=parent_id,
             status=status,
-            waiting_for=waiting_for,
             version=1,
             instance_metadata={},
-            children="[]",
         )
         session.add(inst)
         session.commit()
@@ -345,7 +342,6 @@ def _build_error_reporting_service(
         agent_id="coder",
         agent_name="coder",
         status=InstanceStatus.RUNNING.value,
-        waiting_for=1,
     )
     _seed_instance(
         engine,
@@ -354,7 +350,6 @@ def _build_error_reporting_service(
         agent_name="coder",
         parent_id=parent_id,
         status=InstanceStatus.RUNNING.value,
-        waiting_for=0,
     )
 
     manager = MagicMock(name="InstanceManager")

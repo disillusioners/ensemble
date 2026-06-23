@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -736,7 +736,7 @@ class InstanceMessagingService:
         create_task_row: bool = False,
         path_label: str = "",
     ) -> _PreparedEnqueueContext:
-        """Shared prelude for `enqueue_message` and `enqueue_message_via_jq`.
+        """Shared prelude for `enqueue_message` (both dispatch paths).
 
         Performs the work both paths do identically before diverging into
         path-specific dispatch (WorkerPool Task + notify vs JobQueue enqueue):
@@ -892,8 +892,14 @@ class InstanceMessagingService:
         priority: int = 1,
         images: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        dispatch_path: Literal["workerpool", "jobqueue"] = "workerpool",
     ) -> "AsyncMessageResult":
-        """Enqueue a message using the worker pool (DB-backed) path.
+        """Enqueue a message via the unified dispatcher.
+
+        Routes to the worker-pool path (default) for child-instance
+        resumptions and internal agent-to-agent comms, or to the
+        JobQueue path for external entry points that need a ``job_id``
+        back.
 
         Args:
             instance_id: The ID of the target instance.
@@ -902,9 +908,17 @@ class InstanceMessagingService:
             priority: Message priority (0=system, 1=user).
             images: Optional list of base64-encoded images for vision messages.
             metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
+            dispatch_path: Routing strategy. ``"workerpool"`` (default)
+                writes a Task row and notifies WorkerPool — used for
+                child-instance resumption and internal agent-to-agent
+                comms where no JobQueue job exists. ``"jobqueue"``
+                enqueues a MESSAGE JobItem via JobQueueService and
+                returns its ``job_id`` — used by external entry points
+                (HTTP API, ``job_continue`` tool).
 
         Returns:
-            AsyncMessageResult with message_id and status.
+            AsyncMessageResult with message_id and status. ``job_id`` is
+            populated only for ``dispatch_path="jobqueue"``.
         """
         from ..manager import AsyncMessageResult
 
@@ -913,6 +927,8 @@ class InstanceMessagingService:
         # SQLite WAL write contention (busy_timeout=30s) a sync commit on the
         # event loop thread would wedge the loop completely — Ctrl+C ignored,
         # all APIs frozen. See the deadlock analysis in the experience docs.
+        create_task_row = (dispatch_path == "workerpool")
+        path_label = "WorkerPool" if create_task_row else ""
         ctx = await asyncio.to_thread(
             self._prepare_enqueued_message,
             instance_id=instance_id,
@@ -921,8 +937,8 @@ class InstanceMessagingService:
             priority=priority,
             images=images,
             metadata=metadata,
-            create_task_row=True,
-            path_label="WorkerPool",
+            create_task_row=create_task_row,
+            path_label=path_label,
         )
 
         # Emit status_change event if status was changed to running
@@ -937,25 +953,62 @@ class InstanceMessagingService:
             instance_id, message, ctx.is_idle_to_running
         )
 
-        # After commit — task is now visible in DB
-        if self._manager._worker_pool is not None:
-            self._manager._worker_pool.notify_work()
+        job_id: str | None = None
+        if dispatch_path == "jobqueue":
+            # JobQueue path: look up instance metadata + enqueue MESSAGE job.
+            # Wrap the sync DB read in ``asyncio.to_thread`` (see deadlock
+            # analysis in experience docs).
+            instance_meta = await asyncio.to_thread(
+                self._manager._instance_repository.get, instance_id
+            )
+            if instance_meta is None:
+                raise ValueError(f"Instance {instance_id} not found")
 
-        logger.debug(
-            f"Enqueued message {ctx.message_id} for instance {instance_id} "
-            f"dispatch_path=workerpool_direct"
-        )
+            agent_id = instance_meta.agent_id
+            project_id = instance_meta.project_id
+
+            # instance_id goes to JobItem.instance_id column (not metadata)
+            # Pass resume_mode from caller metadata
+            resume_mode = metadata.get("resume_mode") if metadata else None
+            job = await self._manager._job_queue_service.enqueue(
+                agent_id=agent_id,
+                message=message,
+                source=source,
+                project_id=project_id,
+                priority=priority,
+                job_type="message",
+                instance_id=instance_id,  # stored in JobItem.instance_id column
+                metadata={
+                    "message_id": ctx.message_id,
+                    "source": source,
+                    "images": images,
+                    "resume_mode": resume_mode,
+                },
+            )
+            job_id = job.job_id
+
+            # [TRACE] Log job enqueue
+            instance_status = ctx.previous_status if ctx.previous_status is not None else "unknown"
+            logger.info(
+                f"[TRACE] enqueue_message: instance={instance_id[:8]} dispatch=jobqueue "
+                f"status={instance_status} job_id={job.job_id[:8]}... job_type=message"
+            )
+            # DispatchEventBus notification is sent internally by _job_queue_service.enqueue()
+            logger.debug(f"[TRACE] enqueue_message: job {job.job_id[:8]}... dispatched via DispatchEventBus")
+        else:
+            # WorkerPool path: after commit — task is now visible in DB, wake a worker.
+            if self._manager._worker_pool is not None:
+                self._manager._worker_pool.notify_work()
+            logger.debug(
+                f"Enqueued message {ctx.message_id} for instance {instance_id} "
+                f"dispatch_path=workerpool_direct"
+            )
 
         return AsyncMessageResult(
             message_id=ctx.message_id,
             instance_id=instance_id,
             status="queued",
-        )
-
-        return AsyncMessageResult(
-            message_id=ctx.message_id,
-            instance_id=instance_id,
-            status="queued",
+            job_id=job_id,
         )
 
     async def _process_message_with_tracking(
@@ -1492,108 +1545,3 @@ class InstanceMessagingService:
             "oldest_message_age_seconds": stats["oldest_message_age_seconds"]
         }
 
-    async def enqueue_message_via_jq(
-        self,
-        instance_id: str,
-        message: str,
-        source: str = "api",
-        priority: int = 1,
-        images: list[str] | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> "AsyncMessageResult":
-        """Enqueue a message via JobQueue instead of WorkerPool.
-
-        Creates MessageQueue entry + all side effects (same as enqueue_message),
-        then enqueues a MESSAGE-type job via JobQueueService.
-        Does NOT create Task or notify WorkerPool.
-
-        Args:
-            instance_id: The ID of the target instance.
-            message: The message content.
-            source: Source identifier (e.g., "api", "web", "telegram:user:123").
-            priority: Message priority (0=system, 1=user).
-            images: Optional list of base64-encoded images for vision messages.
-            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-        """
-        logger.info(
-            "enqueue_message_via_jq is a legacy dispatch path (JobQueue). "
-            "C-M5 will route this through the observer. "
-            "dispatch_path=jobqueue_legacy"
-        )
-        from ..manager import AsyncMessageResult
-
-        # Wrap the sync DB prelude in asyncio.to_thread so the session.commit()
-        # inside `_prepare_enqueued_message` cannot block the event loop. See
-        # the deadlock analysis in the experience docs for the full chain.
-        ctx = await asyncio.to_thread(
-            self._prepare_enqueued_message,
-            instance_id=instance_id,
-            message=message,
-            source=source,
-            priority=priority,
-            images=images,
-            metadata=metadata,
-            create_task_row=False,
-            path_label="",
-        )
-
-        # Emit SSE status_change if instance transitioned to RUNNING
-        if ctx.status_changed_to_running:
-            await self._manager._live_hub.stream_status_change(
-                instance_id, InstanceStatus.RUNNING.value, agent_id=ctx.instance_agent_id
-            )
-
-        # Trigger title generation for first message (fire-and-forget)
-        # This fires when instance transitions from IDLE -> RUNNING with any message type
-        self._maybe_trigger_title_generation(
-            instance_id, message, ctx.is_idle_to_running
-        )
-
-        # Look up instance metadata for JobQueue enqueue
-        #    Use instance repository for agent_id and project_id lookup.
-        #    Wrap the sync DB read in ``asyncio.to_thread`` (see deadlock
-        #    analysis in experience docs).
-        instance_meta = await asyncio.to_thread(
-            self._manager._instance_repository.get, instance_id
-        )
-        if instance_meta is None:
-            raise ValueError(f"Instance {instance_id} not found")
-
-        agent_id = instance_meta.agent_id
-        project_id = instance_meta.project_id
-
-        # Enqueue as MESSAGE job via JobQueueService
-        #    instance_id goes to JobItem.instance_id column (not metadata)
-        #    Pass resume_mode from caller metadata
-        resume_mode = metadata.get("resume_mode") if metadata else None
-        job = await self._manager._job_queue_service.enqueue(
-            agent_id=agent_id,
-            message=message,
-            source=source,
-            project_id=project_id,
-            priority=priority,
-            job_type="message",
-            instance_id=instance_id,  # stored in JobItem.instance_id column
-            metadata={
-                "message_id": ctx.message_id,
-                "source": source,
-                "images": images,
-                "resume_mode": resume_mode,
-            },
-        )
-
-        # [TRACE] Log job enqueue
-        instance_status = ctx.previous_status if ctx.previous_status is not None else "unknown"
-        logger.info(
-            f"[TRACE] enqueue_message_via_jq: instance={instance_id[:8]} status={instance_status} "
-            f"job_id={job.job_id[:8]}... job_type=message"
-        )
-        # DispatchEventBus notification is sent internally by _job_queue_service.enqueue()
-        logger.debug(f"[TRACE] enqueue_message_via_jq: job {job.job_id[:8]}... dispatched via DispatchEventBus")
-
-        return AsyncMessageResult(
-            message_id=ctx.message_id,
-            instance_id=instance_id,
-            status="queued",
-            job_id=job.job_id,
-        )

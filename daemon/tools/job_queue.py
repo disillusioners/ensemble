@@ -445,8 +445,9 @@ def create_job_tools(
             if manager is None:
                 return {"error": "Instance manager not available — job_continue requires manager access"}
 
-            # 5. Pre-check instance status (enqueue_message_via_jq silently enqueues
-            #    for terminated/error/paused instances, so guard explicitly here).
+            # 5. Pre-check instance status (the JobQueue dispatch path
+            #    silently enqueues for terminated/error/paused instances,
+            #    so guard explicitly here).
             instance_meta = manager._instance_repository.get(instance_id)
             if instance_meta is None:
                 return {"error": f"Instance {instance_id} not found"}
@@ -469,10 +470,11 @@ def create_job_tools(
                 return {"error": f"Instance {instance_id} has a job still processing — wait for it to complete first"}
 
             # 6. Send message via the JobQueue path (same as FE "send message")
-            result = await manager.enqueue_message_via_jq(
+            result = await manager.enqueue_message(
                 instance_id=instance_id,
                 message=message,
                 source=f"agent:{caller_agent_id}" if caller_agent_id else "api",
+                dispatch_path="jobqueue",
             )
 
             # 7. Return new job_id (provided by AsyncMessageResult)

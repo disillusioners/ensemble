@@ -563,7 +563,8 @@ class JobFeedbackObserver:
         ``job_type='message'`` job, it calls this method. The method:
 
           1. Extracts ``message_id`` from ``job.job_metadata`` (set by
-             :meth:`InstanceMessagingService.enqueue_message_via_jq`).
+             :meth:`InstanceMessagingService.enqueue_message` with
+             ``dispatch_path="jobqueue"``).
           2. Creates a ``Task`` row pointing at the same ``message_id``
              (same pattern as :meth:`InstanceMessagingService.enqueue_message`).
           3. Calls ``worker_pool.notify_work()`` to wake a worker.

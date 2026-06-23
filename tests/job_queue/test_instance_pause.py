@@ -4,7 +4,7 @@ These tests verify the behavior when instances are paused:
 1. When instance is paused, new jobs for it stay PENDING
 2. When instance is resumed, pending jobs get processed
 3. Currently processing jobs are NOT affected by pause
-4. enqueue_message_via_jq() does NOT auto-resume a paused instance
+4. enqueue_message() does NOT auto-resume a paused instance
 """
 
 import asyncio
@@ -455,7 +455,7 @@ class TestJobProcessorInstancePause:
 
 
 class TestInstanceMessagingNoAutoResume:
-    """Tests for ensuring enqueue_message_via_jq() does NOT auto-resume paused instances.
+    """Tests for ensuring enqueue_message() does NOT auto-resume paused instances.
 
     Note: These tests verify the FIX for the bug where messages to paused instances
     would incorrectly auto-resume them. The fix ensures:

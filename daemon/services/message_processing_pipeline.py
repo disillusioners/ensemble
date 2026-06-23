@@ -15,8 +15,8 @@ instance's langgraph thread:
    :class:`daemon.services.message_job_handler.MessageJobHandler` is
    driven by ``JobProcessor._process_loop`` polling the
    ``job_queue_items`` table. Triggered by
-   ``enqueue_message_via_jq`` (the API/HTTP entry point and some
-   internal paths).
+   ``enqueue_message`` with ``dispatch_path="jobqueue"`` (the API/HTTP
+   entry point and some internal paths).
 
 Before Phase 5, the two paths each contained near-identical copies of
 the same six shared stages: building the ``_do_process`` closure,
@@ -169,7 +169,6 @@ class ProcessingResult:
 # pipeline applies a default behaviour when a callback is None.
 OnSuccessCb = Callable[["ProcessingResult"], Awaitable[None]]
 OnErrorCb = Callable[["ProcessingResult"], Awaitable[None]]
-OnDeferCb = Callable[["ProcessingResult"], Awaitable[None]]
 OnContentionCb = Callable[[Exception], Awaitable[Optional["ProcessingResult"]]]
 OnCancelCb = Callable[[Exception], Awaitable[Optional["ProcessingResult"]]]
 
@@ -191,10 +190,7 @@ class PipelineCallbacks:
         stages have run. The WorkerPool path uses this to call
         ``TaskRepository.complete_task`` (it does NOT do this in the
         pipeline because ``complete_task`` lives on a different repo
-        than ``queue_repository``). The JobQueue path uses this to
-        call ``JobQueueService.complete_job(COMPLETED)`` — possibly
-        gated by the CM deferral check, which the
-        JobQueue still performs locally.
+        than ``queue_repository``).
 
     ``on_error``
         Called after ``handle_message_processing_error`` runs. The
@@ -203,16 +199,6 @@ class PipelineCallbacks:
         ``job_id`` is passed, so this is a no-op for JobQueue). The
         WorkerPool path uses this for nothing today — the error
         helper handles the side-effects.
-
-    ``on_defer``
-        Called when the pipeline defers completion because the
-        CM check reports pending child correlations
-        (JobQueue only). WorkerPool does not consult CM in the
-        hot path; this is a JobQueue-specific concern. When the
-        pipeline sees a happy-path result but reports deferred
-        completion, ``on_defer`` is the place for the JobQueue
-        callback to emit ``notify_watchers(status="in_progress")``
-        and return.
 
     ``on_contention``
         Defensive callback for any future gate that signals contention.
@@ -250,7 +236,6 @@ class PipelineCallbacks:
 
     on_success: OnSuccessCb | None = None
     on_error: OnErrorCb | None = None
-    on_defer: OnDeferCb | None = None
     on_contention: OnContentionCb | None = None
     on_cancel: OnCancelCb | None = None
 
@@ -305,7 +290,7 @@ class MessageProcessingPipeline:
         Args:
             execution_gate: The :class:`ExecutionGateService` instance
                 (typically ``manager.execution_gate``). Required —
-                the lease acquisition is the pipeline's first shared
+                the lock acquisition is the pipeline's first shared
                 stage.
             manager: The ``InstanceManager`` facade. The pipeline
                 uses ``manager._process_message_with_tracking``,
@@ -349,8 +334,9 @@ class MessageProcessingPipeline:
                 to process.
             holder_id: Stable identifier for this caller (e.g.
                 ``f"task:{task.id}"`` or ``f"message_job:{job_id}"``).
-                Used by the Execution Gate's lease release to verify
-                ownership.
+                Accepted by the Execution Gate for diagnostic logging;
+                the asyncio.Lock gate does not verify ownership on
+                release.
             holder_kind: A short string tag identifying the caller for
                 diagnostics (e.g. ``"task"`` or ``"message_job"``).
                 The asyncio.Lock gate ignores the value; it is kept
@@ -412,8 +398,8 @@ class MessageProcessingPipeline:
         # no-ops, leaving ``pending_count`` permanently non-zero. That in
         # turn breaks the ``send_message`` in-progress guard in
         # ``daemon/tools/instance.py`` which checks ``get_queue_stats()``.
-        # We claim before acquiring the lease so a "stale retry" check
-        # doesn't race a still-READY message past the lease boundary.
+        # We claim before acquiring the lock so a "stale retry" check
+        # doesn't race a still-READY message past the lock boundary.
         # The claim is best-effort: if it fails (message already
         # PROCESSING/COMPLETED/FAILED — e.g. concurrent actor) we still
         # proceed, since the downstream transitions remain safe.

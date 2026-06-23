@@ -1,16 +1,17 @@
-"""Path-equivalence tests for ``enqueue_message`` vs ``enqueue_message_via_jq``.
+"""Path-equivalence tests for ``enqueue_message`` (both dispatch paths).
 
-These tests assert that calling the two public enqueue methods with the
-**same inputs** produces the same observable state — for everything that
-the two paths are supposed to share (the ``_prepare_enqueued_message``
+These tests assert that calling the unified ``enqueue_message`` with
+``dispatch_path="workerpool"`` and ``dispatch_path="jobqueue"`` with
+the **same inputs** produces the same observable state — for everything
+that the two paths are supposed to share (the ``_prepare_enqueued_message``
 prelude side-effects).
 
 The two paths are *deliberately* divergent at the dispatch layer:
 
-  * ``enqueue_message`` (WorkerPool) writes a ``Task`` row and notifies
-    ``_worker_pool.notify_work()``.
-  * ``enqueue_message_via_jq`` (JobQueue) writes a ``JobItem`` row and
-    calls ``_job_queue_service.enqueue()``.
+  * ``enqueue_message(dispatch_path="workerpool")`` writes a ``Task``
+    row and notifies ``_worker_pool.notify_work()``.
+  * ``enqueue_message(dispatch_path="jobqueue")`` writes a ``JobItem``
+    row and calls ``_job_queue_service.enqueue()``.
 
 That divergence is tested explicitly as a sanity check (tests 4 and 5)
 so future refactors can't accidentally collapse the two dispatchers.
@@ -222,7 +223,7 @@ class TestDispatcherPathEquivalence:
                 images=_SAMPLE_IMAGES,
                 metadata={"resume_mode": True},
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq",
                 message=_SAMPLE_MESSAGE,
                 source=_SAMPLE_SOURCE,
@@ -287,7 +288,7 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message="m", source="api"
             )
 
@@ -317,7 +318,7 @@ class TestDispatcherPathEquivalence:
             wp_result = await messaging_service.enqueue_message(
                 instance_id="inst-wp", message=_SAMPLE_MESSAGE, source=_SAMPLE_SOURCE
             )
-            jq_result = await messaging_service.enqueue_message_via_jq(
+            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message=_SAMPLE_MESSAGE, source=_SAMPLE_SOURCE
             )
 
@@ -367,7 +368,7 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message="m", source="api"
             )
 
@@ -401,7 +402,7 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message="m", source="api"
             )
 
@@ -432,7 +433,7 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="x", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message="x", source="api"
             )
 
@@ -460,7 +461,7 @@ class TestDispatcherPathEquivalence:
             wp_result = await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            jq_result = await messaging_service.enqueue_message_via_jq(
+            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message="m", source="api"
             )
 
@@ -502,7 +503,7 @@ class TestDispatcherPathEquivalence:
                 source="api",
                 images=_SAMPLE_IMAGES,
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq",
                 message="vision",
                 source="api",
@@ -538,7 +539,7 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id=wp_id, message="m", source="api", priority=priority
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id=jq_id, message="m", source="api", priority=priority
             )
 
@@ -570,7 +571,7 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            await messaging_service.enqueue_message_via_jq(
+            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-jq", message="m", source="api"
             )
 
