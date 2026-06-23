@@ -1,6 +1,6 @@
 # Job-Task-Pause-Resume Architecture
 
-> **Note (2026-06-21):** Updated for Phase D (Dependency Bus & Cleanup). The MESSAGE-dispatch branch in `JobProcessor` and `MessageJobHandler` itself are deleted (D11–D13). Pause-vs-terminate discrimination now happens as a pre-check in `JobProcessor.start_job`, not inside a MESSAGE handler. Parent termination cancels bus watchers via `dependency_bus.cancel_for_target(parent_id)`. `waiting_for`, `children`, and `instance_hierarchy` are deprecated as control-flow and pending drop (D10 migration, IRREVERSIBLE). For the current message-processing architecture, see [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md).
+> **Note (2026-06-24):** Updated for the post-cleanup architecture. The Dependency Bus is the sole completion authority; the CorrelationManager is deleted. `MessageJobHandler` is deleted. Pause-vs-terminate discrimination happens as a pre-check in `JobProcessor.start_job`, not inside a MESSAGE handler. Parent pause / terminate cancels bus watchers via `dependency_bus.cancel_for_target(parent_id)`. The `waiting_for` and `children` columns have been dropped from the SQLModel. For the current message-processing architecture, see [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md).
 
 ## 1. Overview
 
@@ -255,9 +255,6 @@ Manages instance lifecycle operations.
    - Cancel active requests (`_request_registry.cancel_by_instance`)
    - Cancel graph task (`_graph_tasks.pop().cancel()`)
    - Update status to PAUSED, set `paused_at`
-   - **Conditional reset of `waiting_for`**: Only resets `waiting_for` to 0 if the instance has `waiting_for > 0` (was waiting for children). Instances without pending children just get `status=PAUSED` without modifying `waiting_for`.
-
-   > *(Deprecated as control-flow; rebuild-only cache per ADR-011 — `CorrelationManager` (rollback path) and DependencyBus (authoritative) hold the in-flight correlation state.)*
 4. Emit status_change SSE events
 5. **Cancel bus watchers for paused parents**: `dependency_bus.cancel_for_target(instance_id)` is called to cancel any in-flight FollowUps targeting the paused instance, so resumed work starts from a clean slate.
 
@@ -265,12 +262,9 @@ Manages instance lifecycle operations.
 1. Find tree root and all node IDs
 2. For each node:
    - Update status to RUNNING, clear `paused_at`
-   - Set `waiting_for` based on position:
-     - Root resume: all nodes get `waiting_for=0`
-     - Child resume: ancestors get `waiting_for=1`, others get `waiting_for=0`
 3. Emit status_change SSE events
 
-**Pause pre-check in `JobProcessor.start_job` (Phase D):**
+**Pause pre-check in `JobProcessor.start_job`:**
 
 Before admitting a job, `JobProcessor.start_job` checks the target instance's status:
 - If `RUNNING` — admit (atomic transition `PENDING → PROCESSING`, hand to WorkerPool).
@@ -333,26 +327,19 @@ Handles child instance completion reports to parents.
 1. Check idempotency (no duplicate reports for same message)
 2. If tool invocation: skip parent notification
 3. Create completion report message for parent
-4. **Phase D wiring** — `dependency_bus.emit_terminal(source_task_id=child_task_id, outcome=COMPLETED)` is the authoritative terminal-emit. The bus looks up the registered watcher, marks it FIRED, and enqueues a FollowUp `Task` onto the parent instance with the pre-built completion-report payload.
-5. CM (rollback path) — if `use_dependency_bus=False`, the historical `notify_corr_resolve()` → `CM.resolve_response()` path is used instead. Pure in-memory set operations.
-
-   > ⚠️ Note: The decision "is the parent done?" was historically gated on `waiting_for == 0` and is now gated by the DependencyBus (DB-backed, source of truth) or the CM (in-memory, rollback path). `waiting_for` is retained only as a dead-but-present column pending the D10 drop migration.
-6. Delete from `instance_hierarchy` junction table (deprecated; pending D10 drop)
+4. **DependencyBus wiring** — `dependency_bus.emit_terminal(source_task_id=child_task_id, outcome=COMPLETED)` is the authoritative terminal-emit. The bus atomically transitions the watcher `PENDING → FIRED` and enqueues a FollowUp `Task` onto the parent instance with the pre-built completion-report payload.
+5. Delete from `instance_hierarchy` junction table (the canonical working set)
 
 > **Idempotency Note:** `dependency_bus.emit_terminal()` is idempotent on `source_task_id`. Multiple emits for the same source are safe; the second emit is a no-op (the watcher is already FIRED). This eliminates the historical "double-decrement" bug class where CM `is_complete()` could race with concurrent register/resolve.
-
-**Parent's `children[]` Cache Update:**
-- When child completes, the child's ID is removed from the parent's denormalized `children` JSON array
-- This maintains consistency with the `instance_hierarchy` table (canonical source)
 
 **Instance Hierarchy Deletion:**
 - Child is removed from `instance_hierarchy` junction table via `DELETE FROM instance_hierarchy WHERE child_id = :id`
 - The instance record in `instances` table is NOT deleted (soft state change only)
 
 **Status Transition Logic:**
-- When `waiting_for == 0` but has pending messages → stays in WAITING_CHILDREN
+- When there are still pending children → stays in `WAITING_CHILDREN`
 - Parent waits for its own message processing to complete before marking job done
-- When parent completes its message, status check keeps it in WAITING_CHILDREN, cascade marks it COMPLETED
+- When parent completes its message, status check keeps it in `WAITING_CHILDREN`, cascade marks it `COMPLETED`
 
 **Idempotency Key:**
 ```python
@@ -504,14 +491,8 @@ sequenceDiagram
         InstanceLifecycle->>Repository: cancel_by_instance()
         Note over InstanceLifecycle: Cancels LLM requests
         InstanceLifecycle->>WorkerPool: _graph_tasks.pop().cancel()
-        Note over WorkerPool: asyncio.CancelledError<br/>(no MESSAGE handler to discriminate)
+        Note over WorkerPool: asyncio.CancelledError
         InstanceLifecycle->>Repository: Update status=PAUSED, paused_at=now
-        alt waiting_for > 0
-            InstanceLifecycle->>Repository: waiting_for=0
-            Note over InstanceLifecycle: cache reset — dead-but-present column, pending D10 drop
-        else waiting_for == 0
-            Note over InstanceLifecycle: waiting_for unchanged (was already 0)
-        end
         InstanceLifecycle->>Bus: cancel_for_target(node_id)
         Note over Bus: cancels watchers whose<br/>target=node_id (orphaned FollowUps)
         InstanceLifecycle->>User: Emit SSE status_change
@@ -519,7 +500,7 @@ sequenceDiagram
     API-->>User: {paused_ids: [...], skipped_ids: [...]}
 ```
 
-> **Phase D change:** The historical `MessageJobHandler` pause-vs-terminate discrimination (mid-flight `asyncio.CancelledError` catch) is gone. The MESSAGE handler itself is deleted. `JobProcessor.start_job` now performs the pause check as a pre-check before admitting a job (see §2.5).
+> **Note:** The historical `MessageJobHandler` pause-vs-terminate discrimination (mid-flight `asyncio.CancelledError` catch) is gone. The MESSAGE handler itself is deleted. `JobProcessor.start_job` now performs the pause check as a pre-check before admitting a job (see §2.5). The `waiting_for` reset that used to be part of the pause cascade has been removed because the column itself has been dropped from the schema — the bus is the source of truth for pending children.
 
 ### Resume Flow (Root Instance)
 
@@ -539,9 +520,7 @@ sequenceDiagram
     InstanceLifecycle->>Repository: get_tree_root_id(id)
     InstanceLifecycle->>Repository: get_tree_ids(root)
     loop For each node in tree
-        InstanceLifecycle->>Repository: Update status=RUNNING, waiting_for=0
-        Note over InstanceLifecycle: is_root_resume=True → waiting_for=0 for all
-        Note over InstanceLifecycle: cache reset — dead-but-present column, pending D10 drop
+        InstanceLifecycle->>Repository: Update status=RUNNING, paused_at=null
         InstanceLifecycle->>User: Emit SSE status_change
     end
     API->>Manager: resume_processing_job(target_id, message, silent=False)
@@ -578,13 +557,7 @@ sequenceDiagram
     InstanceLifecycle->>Repository: get_tree_ids(root)
     loop For each node in tree
         InstanceLifecycle->>Repository: Update status=RUNNING
-        alt Node is ancestor of resumed child
-            InstanceLifecycle->>Repository: waiting_for=1
-            Note over InstanceLifecycle: Parent needs to wait for resumed child
-        else Node is not ancestor
-            InstanceLifecycle->>Repository: waiting_for=0
-            Note over InstanceLifecycle: cache reset — safe; CM re-registers on resume (ADR-011)
-        end
+        InstanceLifecycle->>User: Emit SSE status_change
     end
     API->>Manager: resume_processing_job(child_id, message="resume", silent=True)
     alt Child has checkpoint
@@ -721,13 +694,33 @@ class Instance(SQLModel, table=True):
     agent_id: str                 # Agent type (e.g., "coder")
     agent_dir: str                # Path to agent files
     parent_id: str | None         # Parent instance ID
-    status: str                   # idle | running | paused | completed | error | terminated
-    children: str                 # JSON array of child IDs
-    waiting_for: int              # Count of pending child completions (deprecated as control-flow; rebuild-only cache per ADR-011 — CorrelationManager is authoritative)
+    status: str                   # idle | running | paused | completed | error | terminated | waiting_children
     paused_at: str | None         # ISO timestamp when paused
     created_at: str               # ISO timestamp
     updated_at: str               # ISO timestamp
     instance_metadata: dict       # JSON: project_id, mcp_tool_names, etc.
+```
+
+> **Note:** The legacy `waiting_for` (pending-children count) and `children` (denormalized JSON cache) columns have been dropped from this model. Parent-child correlation is owned by the **DependencyBus** (`dependency_watchers` table) and the canonical working set is the `instance_hierarchy` junction table. See [`docs/architecture/completion-authority.md`](completion-authority.md) and [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md).
+
+**Instance Status Lifecycle:**
+```mermaid
+stateDiagram-v2
+    [*] --> idle: spawn_instance()
+    idle --> running: First message
+    running --> paused: User pauses
+    paused --> running: User resumes
+    running --> waiting_children: All messages done, waiting for children (bus says pending)
+    waiting_children --> running: Child completion report (enqueue_message)
+    waiting_children --> completed: Last child done (bus says no pending)
+
+    running --> error: Unhandled exception
+    error --> terminated: Auto-cleanup
+
+    running --> terminated: terminate_instance()
+    paused --> terminated: terminate_instance()
+    completed --> [*]
+    terminated --> [*]
 ```
 
 **Instance Status Lifecycle:**
@@ -858,13 +851,13 @@ stateDiagram-v2
     running --> paused: pause_instance_cascade()
     paused --> running: resume_instance_cascade()
 
-    running --> completed: All messages done + waiting_for=0
-    running --> waiting_children: waiting_for>0 + no pending
+    running --> completed: All messages done + DependencyBus says no pending children
+    running --> waiting_children: DependencyBus has pending children + no own-queue messages
 
-    Note over running,waiting_children: ⚠️ Transition guards above are LEGACY control-flow. The current architecture routes completion decisions through CorrelationManager (`is_complete` / `get_pending_count`); `waiting_for` is retained only as a rebuild-only cache (ADR-011).
+    Note over running,waiting_children: Completion decisions are made by the DependencyBus — `dependency_bus.count_pending_for_target_sync(instance_id)` is the source of truth for "are children still running?"
 
     waiting_children --> running: Child completion report (enqueue_message)
-    waiting_children --> completed: Last child done
+    waiting_children --> completed: Last child done (bus pending count → 0)
 
     running --> error: Unhandled exception
     error --> terminated: Auto-cleanup
@@ -899,9 +892,7 @@ stateDiagram-v2
 
 ### 6.1 Why Cascade?
 
-**Problem:** Agent instances can spawn child instances. A parent may `waiting_for` children.
-
-> *(Deprecated as control-flow; rebuild-only cache per ADR-011 — `CorrelationManager` is authoritative for child correlation.)*
+**Problem:** Agent instances can spawn child instances. A parent may have outstanding FollowUps enqueued from in-flight children.
 
 **Without Cascade:**
 1. Parent pauses → Parent status = PAUSED
@@ -910,21 +901,11 @@ stateDiagram-v2
 
 **With Cascade:**
 1. Parent pauses → All children pause
-2. `waiting_for` reset to 0 for all nodes — *cache reset; safe because paused children cannot send completions, and CM holds authoritative in-memory state (ADR-011)*
-3. Resume → All children resume together
+2. Bus watchers targeting any node in the tree are cancelled via `dependency_bus.cancel_for_target(node_id)`, so no FollowUps are enqueued onto paused instances
+3. Resume → All children resume together; new `send_message` calls re-register watchers on the bus
 4. No deadlock possible
 
-**Implementation:**
-```python
-# In pause_instance_cascade()
-tree_ids = repo.get_tree_ids(root_id)
-for node_id in tree_ids:
-    # Conditional: only reset waiting_for if instance was waiting for children
-    if meta.waiting_for and meta.waiting_for > 0:
-        repo.update(node_id, status=PAUSED, waiting_for=0, paused_at=now)
-    else:
-        repo.update(node_id, status=PAUSED, paused_at=now)
-```
+> The historical implementation also reset a `waiting_for` column on pause/resume. That column has been dropped; the DependencyBus is now the sole source of truth for pending-children state.
 
 ---
 
@@ -1005,37 +986,7 @@ async for event in graph.astream(graph_input, config):
 
 ---
 
-### 6.5 Why waiting_for > 0 Defense-in-Depth?
-
-> **DEPRECATED 2026-06-21 (Phase D, ADR-011).** The `waiting_for > 0` defense-in-depth check shown below was historically applied inside `MessageJobHandler.handle()` before deferring job completion. With the MESSAGE handler deleted (D12) and the Dependency Bus as the authoritative completion mechanism, the `waiting_for` column itself is dead-but-present and pending the D10 drop migration (`20260621_000002_drop_legacy_completion_columns.sql`). The bus is the source of truth for "is the parent done?" — operators must NOT read `waiting_for` to make completion decisions. The defensive check below still functions on the `use_dependency_bus=False` rollback path, but is no longer load-bearing.
-
-**Historical context (retained for archival):**
-
-**Purpose:** Prevent premature job completion when parent is waiting for children.
-
-```python
-# In MessageJobHandler.handle() [DELETED in Phase D]
-instance = repo.get(instance_id)
-if instance.waiting_for > 0:
-    logger.info(f"Instance has waiting_for={waiting_for}, deferring completion")
-    skip_complete = True
-
-if skip_complete:
-    return  # Don't call complete_job()
-
-await self._job_service.complete_job(job.job_id, demand_state=COMPLETED)
-```
-
-**Why it existed:**
-- Race condition: Child reports may arrive while parent job is processing
-- `waiting_for` could be decremented after job completion check
-- Defense-in-depth prevents orphan children
-
-**Phase D replacement:** The same race is closed structurally by the Dependency Bus. `dependency_bus.emit_terminal()` is idempotent on `source_task_id`, and backpressure is enforced via the `dependency_watchers` row lock. There is no longer a separate job-completion decision to defer — completion flows through the bus, full stop.
-
----
-
-### 6.6 Why the Dependency Bus Cancellation Path (Phase D)?
+### 6.5 Why the Dependency Bus Cancellation Path?
 
 **Purpose:** Prevent orphan FollowUp tasks from being enqueued onto a parent that is being paused, resumed, or terminated.
 
@@ -1043,7 +994,6 @@ await self._job_service.complete_job(job.job_id, demand_state=COMPLETED)
 # In InstanceLifecycleService.pause_instance_cascade()
 loop for node in tree_ids:
     repo.update(node, status=PAUSED, paused_at=now)
-    # NEW (Phase D): cancel bus watchers targeting this node
     await dependency_bus.cancel_for_target(node_id)
 ```
 
@@ -1059,7 +1009,7 @@ await dependency_bus.cancel_for_target(instance_id)
 # Then proceed with the historical cascade termination logic.
 ```
 
-**Why the bus, not the CM?** The CM (rollback path) could only cancel via `cancel_parent_correlations(parent_id)`, which only cleared in-memory `_pending`. The bus `cancel_for_target` clears `dependency_watchers` rows — durable, restart-safe, and idempotent. The bus is the single source of truth for in-flight parent-child coupling; cancellation must go through it.
+**Why the bus?** The bus `cancel_for_target` clears `dependency_watchers` rows — durable, restart-safe, and idempotent. It is the single source of truth for in-flight parent-child coupling; cancellation must go through it.
 
 ---
 
@@ -1338,18 +1288,18 @@ POST /api/instances/{instance_id}/messages
 | `daemon/repositories/task/models.py` | 103 | Task model |
 | `daemon/services/task_processor.py` | 505 | Task routing |
 | `daemon/services/worker_pool.py` | 488 | Worker thread pool |
-| ~~`daemon/services/message_job_handler.py`~~ | ~~254~~ | **REMOVED in Phase D (D12)** — MESSAGE handler deleted; pause check moved to `JobProcessor.start_job` pre-check |
-| `daemon/services/dependency_bus.py` | — | **NEW in Phase D** — DB-backed completion authority; `watch` / `emit_terminal` / `cancel_for_target` API |
-| `daemon/repositories/dependency_bus/` | — | **NEW in Phase D** — `dependency_watchers` table + repository (WriteGuardSession pattern) |
+| `daemon/services/dependency_bus.py` | — | Sole completion authority (DB-backed); `watch` / `emit_terminal` / `cancel_for_target` API |
+| `daemon/repositories/dependency_bus/` | — | `dependency_watchers` table + repository (WriteGuardSession pattern) |
 | `daemon/services/instance_lifecycle.py` | 835 | Lifecycle operations; pause-time `dependency_bus.cancel_for_target()` |
-| `daemon/services/instance_messaging.py` | 1288 | Message handling |
-| `daemon/services/child_reports.py` | 816 | Child completion reports; `dependency_bus.emit_terminal()` (Phase D) |
+| `daemon/services/instance_messaging.py` | 1288 | Message handling; unified `enqueue_message(... dispatch_path=...)` |
+| `daemon/services/child_reports.py` | 816 | Child completion reports; calls `dependency_bus.emit_terminal()` |
 | `daemon/services/job_feedback_observer.py` | 378 | Job completion observer |
 | `daemon/services/job_state_machine.py` | 114 | Job state machine |
-| `daemon/services/job_processor.py` | — | **Phase D (D11):** MESSAGE-dispatch branch removed; pause pre-check added to `start_job` |
+| `daemon/services/job_processor.py` | — | Pause pre-check added to `start_job`; MESSAGE-dispatch branch removed |
+| `daemon/services/execution_gate.py` | 205 | Per-instance `asyncio.Lock` gate; no Lease stubs |
 | `daemon/graph.py` | 618 | LangGraph definition |
 | `daemon/routers/instances.py` | 323 | Instance API endpoints |
 | `daemon/routers/messages.py` | 252 | Message API endpoints |
-| `daemon/repositories/instance/models.py` | 99 | Instance model |
+| `daemon/repositories/instance/models.py` | 95 | Instance model (`waiting_for` and `children` columns dropped) |
 | `daemon/repositories/message_queue/models.py` | 101 | MessageQueue model |
-| `daemon/services/job_queue_service.py` | 1445 | Job queue service (Phase D-M8: MESSAGE-specific helpers removed) |
+| `daemon/services/job_queue_service.py` | 1445 | Job queue service (scheduling vocabulary only for `Task` rows) |

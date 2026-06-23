@@ -1,21 +1,19 @@
 # Execution Gate: Threading Model Decision
 
-**Status**: Decided (C12a) — implementer of C12 (asyncio.Lock collapse)
+**Status**: Implemented (C12a, C12). Per-instance `asyncio.Lock` is the current execution gate primitive. The previous DB-backed lease implementation has been fully removed; `LeaseContention`, `LeaseLostError`, `LeaseHolderKind`, and `LeaseContentionReason` have been deleted from `daemon/services/execution_gate.py`. The `instance_execution_leases` table is no longer written at runtime.
 
 ## Decision (TL;DR)
 
-Replace the DB-backed lease in `ExecutionGateService` with a per-instance
-**`asyncio.Lock`** owned by the main daemon event loop:
+Per-instance **`asyncio.Lock`** owned by the main daemon event loop:
 
 ```python
-async def run(self, instance_id, holder_id, holder_kind, work_fn):
+async def run(self, instance_id, work_fn):
     lock = self._lock_for(instance_id)
     async with lock:
         return await work_fn()
 ```
 
-No heartbeat task. No `recover_stale_leases`. No DB row. The `LeaseContention`
-machinery is no longer needed; back-off stays in the dispatchers.
+No heartbeat task. No `recover_stale_leases`. No DB row. The legacy `LeaseContention` / `LeaseLostError` machinery is gone; back-off stays in the dispatchers.
 
 ## 1. Which event loop owns the per-instance `asyncio.Lock`?
 
@@ -111,41 +109,17 @@ Why the DB lease was overkill:
 What `asyncio.Lock` gives up (and why that's fine):
 
 - Cross-process safety: not needed (single-process daemon).
-- Crash recovery of a held lock: process death releases everything; the
-  in-memory dict dies with it. Next startup has nothing to clean up.
-- `holder_id` discrimination: the lock has no holder — work_fn is the
-  only thing it guards. The current `holder_id`/`holder_kind` was used
-  only by `on_contention` logging, which can carry it via exception payload.
-- Mid-execution lease-loss detection: not needed. The only way `work_fn`
-  is interrupted mid-stream is `cancel_instance_execution` (terminate /
-  pause), which already works via `asyncio.current_task()` cancellation —
-  that mechanism is independent of the gate.
+- Crash recovery of a held lock: process death releases everything; the in-memory dict dies with it. Next startup has nothing to clean up.
+- Mid-execution lease-loss detection: not needed. The only way `work_fn` is interrupted mid-stream is `cancel_instance_execution` (terminate / pause), which already works via `asyncio.current_task()` cancellation — that mechanism is independent of the gate.
 
 ## Alternatives considered (and rejected)
 
-**Option B: keep DB lease, drop heartbeat.** Still requires a row write
-per acquire/release, a startup `recover_stale_leases`, and SQLAlchemy
-round-trips on the hot path. Adds latency and surface for a threat that
-doesn't apply.
+**Option B: keep DB lease, drop heartbeat.** Still requires a row write per acquire/release, a startup `recover_stale_leases`, and SQLAlchemy round-trips on the hot path. Adds latency and surface for a threat that doesn't apply.
 
-**Option C: `threading.Lock`.** Wrong primitive. WorkerPool threads never
-hold the lock — they only block on a `Future`. A `threading.Lock` inside
-`gate.run` would require acquiring it from the main loop (legal for a
-thread lock but blocks the loop, defeating the scheduler; and if the
-worker thread is itself awaiting a main-loop coroutine, the classic
-"thread waits for loop waits for thread" deadlock becomes possible). The
-right primitive for "serialize coroutines on one loop" is `asyncio.Lock`.
+**Option C: `threading.Lock`.** Wrong primitive. WorkerPool threads never hold the lock — they only block on a `Future`. A `threading.Lock` inside `gate.run` would require acquiring it from the main loop (legal for a thread lock but blocks the loop, defeating the scheduler; and if the worker thread is itself awaiting a main-loop coroutine, the classic "thread waits for loop waits for thread" deadlock becomes possible). The right primitive for "serialize coroutines on one loop" is `asyncio.Lock`.
 
-**Option D: `asyncio.Lock` per `holder_id`.** Rejected. The gate guards
-"one `graph.astream` per instance". Two holders for the same instance
-(e.g. one MESSAGE_JOB and one TASK) must still serialise. Per-instance
-key, not per-holder.
+**Option D: `asyncio.Lock` per `holder_id`.** Rejected. The gate guards "one `graph.astream` per instance". Two holders for the same instance (e.g. one MESSAGE_JOB and one TASK) must still serialise. Per-instance key, not per-holder.
 
 ## Conclusion
 
-`asyncio.Lock` is the correct primitive because the threading model
-funnels every `gate.run` call onto a single event loop. Replace the
-DB-backed lease with `self._locks: dict[str, asyncio.Lock]`, lazily
-populated inside `run`. Drop heartbeat, recovery, `LeaseContention`,
-`LeaseLostError`, and the `instance_execution_leases` table. Cancellation
-semantics already work via `asyncio.current_task()` and need no changes.
+`asyncio.Lock` is the correct primitive because the threading model funnels every `gate.run` call onto a single event loop. The DB-backed lease, the heartbeat task, `recover_stale_leases`, the `LeaseContention` / `LeaseLostError` / `LeaseHolderKind` / `LeaseContentionReason` classes, and the `instance_execution_leases` table are all removed. Cancellation semantics already work via `asyncio.current_task()` and need no changes.

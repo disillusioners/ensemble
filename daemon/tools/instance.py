@@ -616,35 +616,23 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         with WriteGuardSession(Session(manager.engine), manager.write_guard) as session:
             target_instance = session.get(Instance, instance_id)
             if target_instance and target_instance.parent_id == current_instance_id:
-                # ─── Phase A/D: CM/bus is the authoritative completion path ───
-                # The CorrelationManager (Phase A) or DependencyBus (Phase D)
-                # is the SOLE completion authority. The legacy SQL
-                # increment + parent-revive UPDATE were removed with the
-                # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
+                # ─── Bus is the SOLE completion authority ───
+                # The DependencyBus is the sole parent→child correlation
+                # authority. The legacy SQL increment + parent-revive
+                # UPDATE were removed with the
+                # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3, and
+                # ``CorrelationManager`` (the prior sole authority) was
+                # removed in Phase 5 — there is no alternative path to
+                # fall back on.
                 #
-                # C3 fix: invoke the underlying ``register_message_send``
-                # (which surfaces exceptions) rather than ``notify_corr_register``
-                # (which swallows them) so the caller can observe the
-                # failure. The CM call is in-memory and surfaces exceptions
-                # to the caller so the agent sees an ERROR string and the
-                # orchestrator can retry. If the CM is not wired up
-                # (``get_correlation_manager() is None``), skip the call —
-                # the bus path below is the active authority when
-                # ``use_dependency_bus=ON``.
-                #
-                # Phase D (DependencyBus): when ``use_dependency_bus=ON``,
-                # the bus REPLACES the CM as the parent-waits-for-children
-                # authority. We skip ``register_message_send`` entirely and
-                # instead call ``bus.watch(...)`` to register a FollowUp
-                # keyed on the child task id. The CM call is skipped — not
-                # invoked in parallel — so the two authorities cannot drift.
-                # The bus path is the bus-side equivalent of CM's
-                # ``register_message_send``: a PENDING row in
-                # ``dependency_watchers``, fired on terminal event by
-                # ``emit_terminal`` (called from ``child_reports`` /
-                # ``error_reporting``).
+                # The bus path is the unconditional behavior of
+                # ``send_message``: call ``bus.watch(...)`` to register a
+                # ``FollowUp`` keyed on the child task id. The bus stores
+                # a PENDING row in ``dependency_watchers`` and fires the
+                # follow-up on terminal event via ``emit_terminal`` (called
+                # from ``child_reports`` / ``error_reporting``).
                 if use_dep_bus and child_task is not None:
-                    # ─── Phase D: DependencyBus path (replaces CM) ───────
+                    # ─── Bus path: register a PENDING watcher ────────────
                     from daemon.services.dependency_bus import (
                         FollowUp,
                         get_dependency_bus,
@@ -652,9 +640,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     _bus = get_dependency_bus()
                     if _bus is None:
                         # Bus singleton missing despite the flag being ON —
-                        # treat as a wiring failure and fall through to the
-                        # CM path (graceful degradation, matches the CM's
-                        # own behavior when ``get_correlation_manager() is None``).
+                        # this is a wiring failure (the bus is mandatory
+                        # post-Phase-5). We fall through to the error
+                        # branch below rather than silently dropping the
+                        # correlation, so the caller can surface the
+                        # failure to the user.
                         logger.warning(
                             "use_dependency_bus=ON but bus singleton is "
                             "None; falling back to legacy CM register"
@@ -694,20 +684,19 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                                 f"child={instance_id[:8]}, "
                                 f"task={str(child_task.id)[:8]}): {hook_err}"
                             )
-                            # Mirror CM's contract: surface the failure so
-                            # the agent sees an ERROR string and the caller
-                            # can decide whether to retry.
+                            # Surface the failure so the agent sees an
+                            # ERROR string and the caller can decide
+                            # whether to retry.
                             return (
                                 f"ERROR: Failed to register message "
                                 f"correlation (dependency_bus): {hook_err}"
                             )
                 else:
-                    # Phase 5 (2026-06-23): the CorrelationManager class
-                    # was REMOVED. The bus is the SOLE completion
-                    # authority — ``use_dependency_bus=OFF`` is an
-                    # invalid state per ADR-011. Surface the error to
-                    # the caller (the agent) so it can decide whether
-                    # to retry with the bus enabled.
+                    # The bus is mandatory for parent→child correlation
+                    # — ``use_dependency_bus=OFF`` is an invalid state
+                    # per ADR-011, and there is no fallback authority.
+                    # Surface the error to the caller (the agent) so it
+                    # can decide whether to retry with the bus enabled.
                     logger.error(
                         f"send_message: use_dependency_bus=OFF but "
                         f"the bus is the SOLE completion authority "

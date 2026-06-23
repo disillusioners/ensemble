@@ -27,12 +27,13 @@ Architecture (Phase 2):
     ``CorrelationManager.completion_callback``. It is the SOLE path for terminal
     transitions when a parent has pending children tracked by CM.
   - ``_process_event`` emits ``in_progress`` notifications when a child completes
-    but other responses are still pending (CM authoritative). When CM has no
-    pending entry (no children / already resolved), the handler falls through to
-    the shared terminal transition (same as the graceful-degradation path).
-  - **Graceful degradation**: when ``get_correlation_manager()`` returns ``None``
-    (CM disabled / not wired), the observer falls back to a bus-based check.
-    This keeps the system safe even if CM is broken.
+    but other responses are still pending. When no children are still pending
+    (none / already resolved), the handler falls through to the shared
+    terminal transition (same as the bus-singleton-missing path below).
+  - **Bus singleton missing**: when ``get_dependency_bus()`` returns ``None``
+    (bus not wired), the gate is treated as a no-op (returns 0). This
+    keeps the system safe when the bus wiring is incomplete — the caller's
+    own in-session gate remains the authoritative decision point.
   - **N4 constraint**: ``handle_correlation_complete`` runs AFTER the per-parent
     lock is released (W1 fix). It must NOT call any CM method for the same
     parent_id — would deadlock. If cascade work is needed, schedule via
@@ -280,9 +281,10 @@ class JobFeedbackObserver:
         this gate MUST consult it to prevent premature job
         finalization.
 
-        Graceful-degradation semantics (matches the
-        ``get_correlation_manager() is not None`` guards elsewhere):
-        bus singleton missing or flag OFF → returns 0.
+        Fallback semantics: bus singleton missing or flag OFF → returns 0.
+        This treats the gate as a no-op when the bus is not wired, so the
+        caller falls through to its own safe default rather than blocking
+        on an unavailable authority.
 
         The implementation delegates to
         :meth:`DependencyBus.count_pending_for_target_sync` which
@@ -689,9 +691,11 @@ class JobFeedbackObserver:
              idempotency guard in ``_finalize_job`` (``job.status !=
              PROCESSING``) prevents double-completion.
 
-          2. **Graceful degradation — CM is not wired** (``get_correlation_manager()``
-             returns ``None``). Falls back to a bus-based check. This
-             keeps the system safe even if CM is broken or disabled.
+          2. **Bus singleton missing** (``get_dependency_bus()`` returns
+             ``None``). The bus gate is treated as a no-op (returns 0),
+             so the in-process check falls through to the terminal
+             transition. This keeps the system safe when the bus wiring
+             is incomplete.
 
         Race #1 is eliminated because when ``cm_pending > 0``, we do NOT do a
         terminal transition here — we defer to the authoritative CM callback.

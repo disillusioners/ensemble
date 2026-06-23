@@ -167,9 +167,10 @@ class ChildReportsService:
         COMPLETED prematurely while children are still running —
         the exact bug Phase D was designed to prevent.
 
-        Graceful-degradation semantics (matches the
-        ``get_correlation_manager() is not None`` guards elsewhere):
-        bus singleton missing or flag OFF → returns 0.
+        Fallback semantics: bus singleton missing or flag OFF → returns 0.
+        This treats the gate as a no-op when the bus is not wired, so the
+        caller falls through to its own safe default rather than blocking
+        on an unavailable authority.
 
         The implementation delegates to
         :meth:`DependencyBus.count_pending_for_target_sync` which
@@ -656,12 +657,13 @@ class ChildReportsService:
         case strands the instance because nothing is coming to wake it.
 
         The bus's ``count_pending_for_target_sync`` gate returns 0 in that
-        scenario (no PENDING watchers for this instance), so the bus-active
-        path falls through to the WAITING_CHILDREN write — the guard is the
+        scenario (no PENDING watchers for this instance), so the bus gate
+        falls through to the WAITING_CHILDREN write — the guard is the
         only thing that catches the stale-queue case before the write lands.
-        Both call sites at the bus path (L1593, the deferred_waiting_children
-        branch) and the legacy non-bus path (L1709, the root_waiting_children
-        branch) consult the guard for this reason.
+        All WAITING_CHILDREN write sites consult the guard for this reason:
+        the guard returns True (allowing the write) when no active MESSAGE
+        job exists, and False (deferring the write) when at least one is
+        still in flight.
 
         The guard is a cheap, single ``SELECT COUNT(*)`` on a small index
         (``ix_job_item_instance_type_status``) and is exercised by

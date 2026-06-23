@@ -109,5 +109,8 @@ services:
 # Job System Settings
 job_system:
   job_retry_scheduler_enabled: null  # null/empty = disabled. Set to true to enable background retry polling.
-
-  # ─── Phase D dependency-bus feature flag ───────────────────────────────
+  # The legacy completion flags (USE_LEGACY_WAITING_FOR_CASCADE,
+  # USE_LEGACY_JOBQUEUE_DISPATCH, DEBUG_COMPLETION_INVARIANT) were removed in
+  # the cleanup-old-architecture migration. USE_DEPENDENCY_BUS is still wired
+  # in daemon/config.py with default true; it will be removed in a follow-up
+  # cleanup pass.

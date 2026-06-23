@@ -617,12 +617,14 @@ async def test_terminate_summary_log_has_all_fields(
     for field in required_fields:
         assert field in trace_msg, f"Summary log missing '{field}'; got: {trace_msg}"
 
-    # Verify children field is present (Phase 4: children column removed, count may be 0)
-    import re
-    m = re.search(r"children=(\d+)", trace_msg)
-    assert m is not None, (
-        f"Expected children= field in log; got: {trace_msg}"
-    )
+    # NOTE: Phase 4 dropped the ``children`` column from the DB, so the
+    # ``children=N`` count in the trace log is no longer populated from
+    # instance rows. The field is kept in the log format for stability
+    # but always renders as ``children=0``. A stronger assertion would
+    # require either (a) rebuilding the count from ``instance_hierarchy``
+    # rows or (b) restoring the column. Both are deferred until a real
+    # regression motivates it; the format-presence check above is the
+    # current invariant.
 
 
 # =============================================================================
@@ -649,7 +651,7 @@ async def test_terminate_resets_waiting_for_to_zero_on_instance_repo(
     from daemon.repositories.instance.models import InstanceStatus
 
     instance_id = "wf-reset-123"
-    seed_instance_in_engine(engine, instance_id, waiting_for=5)
+    seed_instance_in_engine(engine, instance_id)
 
     manager = make_manager(
         meta_for={instance_id: make_meta(instance_id)},
@@ -700,7 +702,7 @@ async def test_terminate_writes_status_and_waiting_for_in_single_atomic_update(
     from daemon.repositories.instance.models import InstanceStatus
 
     instance_id = "atomic-123"
-    seed_instance_in_engine(engine, instance_id, waiting_for=3)
+    seed_instance_in_engine(engine, instance_id)
 
     manager = make_manager(
         meta_for={instance_id: make_meta(instance_id)},
@@ -721,178 +723,6 @@ async def test_terminate_writes_status_and_waiting_for_in_single_atomic_update(
     assert inst.status == InstanceStatus.TERMINATED.value, (
         f"Status must be 'terminated'; got {inst.status!r}"
     )
-
-
-# =============================================================================
-# Test 11 — terminate_instance clears CorrelationManager state (Fix 3 part B)
-# =============================================================================
-
-
-@pytest.mark.skip(reason="Phase 5: CorrelationManager removed; rewrite against DependencyBus")
-@pytest.mark.asyncio
-async def test_terminate_clears_correlation_manager_state_for_instance():
-    """terminate_instance must call ``cm.clear_for_instance(instance_id)``.
-
-    Otherwise a terminated-and-revived instance would inherit its previous
-    ``_pending[parent_id]`` entry, and ``is_complete()`` would never return
-    True until daemon restart (S3 leak from the CM docs).
-
-    Phase 5: CorrelationManager is removed; this test is skipped. Rewrite
-    against ``bus.cancel_for_target(instance_id)`` if/when re-enabled.
-    """
-    # CM-era import below was removed in Phase 5.
-
-    instance_id = "cm-clear-123"
-
-    manager = make_manager(
-        meta_for={instance_id: make_meta(instance_id)},
-        graph_tasks={},
-        with_dispatch_bus=True,
-    )
-    svc = make_lifecycle_service(manager, make_job_queue_service())
-
-    # Wire a real CM and populate its state for this parent.
-    cm = CorrelationManager(
-        instance_repository=make_instance_repo_mock(),
-        message_queue_repository=make_msg_repo_mock(),
-    )
-    await cm.start()
-    set_correlation_manager(cm)
-    try:
-        # Register a correlation so _pending and _locks are populated.
-        await cm.register_message_send(instance_id, "child-001", "msg-001")
-        assert cm.get_pending_count(instance_id) == 1
-        assert instance_id in cm._pending
-        assert instance_id in cm._locks
-
-        # Terminate — must clear CM state for this parent.
-        await svc.terminate_instance(instance_id)
-
-        # CM state for this parent is gone.
-        assert instance_id not in cm._pending, (
-            f"_pending should be cleared; found: {list(cm._pending)}"
-        )
-        assert instance_id not in cm._locks, (
-            f"_locks should be cleared; found: {list(cm._locks)}"
-        )
-        assert cm.get_pending_count(instance_id) == 0
-    finally:
-        await cm.stop()
-        set_correlation_manager(None)
-
-
-# =============================================================================
-# Test 12 — terminate_instance with no CM registered still completes
-# =============================================================================
-
-
-@pytest.mark.skip(reason="Phase 5: CorrelationManager removed; rewrite against DependencyBus")
-@pytest.mark.asyncio
-async def test_terminate_succeeds_when_correlation_manager_is_none():
-    """When CM is None (not wired), terminate_instance must NOT crash.
-
-    The CM cleanup is wrapped in a None-check (``if cm is not None``). The
-    daemon must remain safe when CM is absent (graceful degradation path).
-
-    Phase 5: CorrelationManager is removed; this test is skipped. Rewrite
-    against ``bus`` if/when re-enabled.
-    """
-    # CM-era import below was removed in Phase 5.
-
-    instance_id = "no-cm-123"
-
-    manager = make_manager(
-        meta_for={instance_id: make_meta(instance_id)},
-        graph_tasks={},
-        with_dispatch_bus=True,
-    )
-    svc = make_lifecycle_service(manager, make_job_queue_service())
-
-    # Ensure no CM is wired.
-    set_correlation_manager(None)
-    try:
-        # Must not raise.
-        result = await svc.terminate_instance(instance_id)
-        assert result is True
-    finally:
-        set_correlation_manager(None)
-
-
-# =============================================================================
-# Test 13 — terminate_instance with CM that raises does not fail termination
-# =============================================================================
-
-
-@pytest.mark.skip(reason="Phase 5: CorrelationManager removed; rewrite against DependencyBus")
-@pytest.mark.asyncio
-async def test_terminate_handles_correlation_manager_failure_gracefully(
-    caplog: pytest.LogCaptureFixture,
-):
-    """When ``cm.clear_for_instance`` raises, terminate_instance must still
-    complete (defensive try/except in step 7.8). The CM failure is logged at
-    WARNING but does NOT propagate — legacy ``waiting_for`` cascade is the
-    graceful-degradation fallback.
-
-    Phase 5: CorrelationManager is removed; this test is skipped. Rewrite
-    against ``bus`` if/when re-enabled.
-    """
-    # CM-era imports below were removed in Phase 5.
-
-    instance_id = "cm-raises-123"
-
-    manager = make_manager(
-        meta_for={instance_id: make_meta(instance_id)},
-        graph_tasks={},
-        with_dispatch_bus=True,
-    )
-    svc = make_lifecycle_service(manager, make_job_queue_service())
-
-    # Wire a CM mock whose clear_for_instance raises.
-    cm = MagicMock(spec=CorrelationManager)
-    cm.clear_for_instance = AsyncMock(
-        side_effect=RuntimeError("simulated CM failure")
-    )
-    set_correlation_manager(cm)
-    caplog.set_level(logging.WARNING)
-    try:
-        # Must NOT propagate the CM error.
-        result = await svc.terminate_instance(instance_id)
-
-        assert result is True
-        # The failing CM was called (we know the code path was reached).
-        cm.clear_for_instance.assert_awaited_once_with(instance_id)
-
-        # Failure was logged.
-        fail_logs = [
-            r for r in caplog.records
-            if "Failed to clear CM state" in r.message
-            and instance_id[:8] in r.message
-        ]
-        assert len(fail_logs) >= 1, (
-            f"Expected failure log; got: "
-            f"{[r.message for r in caplog.records]}"
-        )
-    finally:
-        set_correlation_manager(None)
-
-
-def make_instance_repo_mock():
-    """Lightweight mock for InstanceRepo used by CM tests."""
-    from unittest.mock import MagicMock
-
-    repo = MagicMock(name="InstanceRepo")
-    repo.get = MagicMock(return_value=None)
-    repo.get_all_with_waiting_for = MagicMock(return_value=[])
-    return repo
-
-
-def make_msg_repo_mock():
-    """Lightweight mock for MessageQueueRepo used by CM tests."""
-    from unittest.mock import MagicMock
-
-    repo = MagicMock(name="MsgRepo")
-    repo.get_pending_for_instances = MagicMock(return_value=[])
-    return repo
 
 
 # ─── Shared fixtures for H10 fix verification (real in-memory SQLite) ─────────
@@ -949,7 +779,6 @@ def seed_instance_in_engine(
     instance_id: str,
     *,
     status: str = InstanceStatus.RUNNING.value,
-    waiting_for: int = 0,
     parent_id: str | None = None,
     agent_id: str = "test-agent",
 ) -> None:
@@ -964,9 +793,7 @@ def seed_instance_in_engine(
                 agent_name=agent_id,
                 parent_id=parent_id,
                 status=status,
-                waiting_for=waiting_for,
                 instance_metadata={},
-                children="[]",
                 version=1,
                 created_at=now_iso,
                 updated_at=now_iso,

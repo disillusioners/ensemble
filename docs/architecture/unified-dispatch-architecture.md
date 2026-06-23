@@ -1,7 +1,12 @@
 # Unified Dispatch & Execution Architecture
 
-> Target architecture for the message/job/task subsystems.
-> Status: Proposed
+> **Status (2026-06-24): Implemented.** This document described the proposed unified dispatch architecture; it has since been built. The Dependency Bus is the sole completion authority, the JobQueue is scheduling-vocabulary-only, the ExecutionGate is a pure per-instance `asyncio.Lock` (no Lease stubs), and message dispatch is unified into a single `enqueue_message(dispatch_path=...)` function. For the **current** authoritative description of these layers, see:
+>
+> - [`docs/architecture/message-processing-and-correlation.md`](message-processing-and-correlation.md) — message processing + correlation
+> - [`docs/architecture/completion-authority.md`](completion-authority.md) — sole completion authority (Dependency Bus)
+> - [`docs/architecture/execution-gate-threading-model.md`](execution-gate-threading-model.md) — pure `asyncio.Lock` gate
+>
+> The body of this document is retained as the historical proposal that drove the implementation. References to the `waiting_for` counter, `CorrelationManager`, `LeaseContention`, and the dual-dispatcher model describe the **pre-implementation state** that the proposal aimed to replace.
 
 ## Goal
 

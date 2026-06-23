@@ -1,6 +1,6 @@
 # Agents Ensemble Architecture
 
-> **Note (2026-06-21):** Phase D (Dependency Bus & Cleanup) is complete. The Dependency Bus is the authoritative parent-waits-for-children mechanism (default ON); the CorrelationManager is the rollback path. `MessageJobHandler` is deleted; the JobQueue is scheduling vocabulary only. See the new [Completion Architecture (Phase D — Dependency Bus)](#completion-architecture-phase-d--dependency-bus) summary below, and [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the current authoritative reference.
+> **Note (2026-06-24):** Post-cleanup architecture. The Dependency Bus is the **sole** parent-waits-for-children mechanism; the CorrelationManager is deleted. The `USE_LEGACY_WAITING_FOR_CASCADE`, `USE_LEGACY_JOBQUEUE_DISPATCH`, and `DEBUG_COMPLETION_INVARIANT` flags are all removed. `MessageJobHandler` is deleted. The JobQueue is scheduling vocabulary only. Message dispatch is unified into a single `enqueue_message()` function with a `dispatch_path` parameter. See the [Completion Architecture](#completion-architecture) summary below, and [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the current authoritative reference.
 
 ## Core Design Philosophy
 
@@ -92,7 +92,7 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 
 ## Agent-to-Agent Messaging Architecture
 
-> **Current model (2026-06-21):** The agents-ensemble uses a single-dispatcher, DB-backed completion model. The Dependency Bus (`daemon/services/dependency_bus.py`) is the authoritative parent-waits-for-children mechanism (default `use_dependency_bus=True`); the CorrelationManager is the rollback path. `waiting_for`, `children`, and `instance_hierarchy` are dead-but-present columns pending the D10 drop migration. Both the unified `MessageProcessingPipeline` and the per-instance `asyncio.Lock` `ExecutionGate` are unchanged from prior phases. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the full reference.
+> **Current model (2026-06-24):** The agents-ensemble uses a single-dispatcher, DB-backed completion model. The Dependency Bus (`daemon/services/dependency_bus.py`) is the **sole** parent-waits-for-children mechanism. The CorrelationManager, `waiting_for`, `children`, and `instance_hierarchy`-as-control-flow are all gone; `waiting_for` and `children` columns have been dropped from the SQLModel. The unified `MessageProcessingPipeline` and the per-instance `asyncio.Lock` `ExecutionGate` are unchanged. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) for the full reference.
 
 ### Flow Overview
 
@@ -108,6 +108,7 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 │     send_message(child_id, "implement login")                       │
 │     └─> MessageQueue DB row created (status=READY)                 │
 │     └─> Task DB row created (status=PENDING)                       │
+│     └─> DependencyBus.watch() writes dependency_watchers row      │
 │                                                                     │
 │  3. Worker pool picks up task                                       │
 │     claim_task() → atomic UPDATE-RETURNING                         │
@@ -116,9 +117,9 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 │                                                                     │
 │  4. Child completes                                                 │
 │     Child LangGraph returns → completion event                    │
-│     └─> CorrelationManager.resolve_response() (authoritative)     │
-│     └─> When last child resolves, CM fires completion callback    │
-│     └─> JobFeedbackObserver finalizes parent job                  │
+│     └─> dependency_bus.emit_terminal() (sole completion authority) │
+│     └─> Watcher atomically transitions PENDING → FIRED            │
+│     └─> FollowUp task enqueued onto parent via Task row            │
 │                                                                     │
 │  5. Parent receives report                                          │
 │     Worker processes parent's task                                  │
@@ -131,11 +132,9 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 
 1. **Atomic claiming**: `UPDATE-RETURNING` prevents worker race conditions
 2. **Idempotent completion**: Won't send duplicate COMPLETION_REPORT
-3. **Correlation via DependencyBus**: Parent-child tracking is authoritative in the DB-backed `DependencyBus` (Phase D); `CorrelationManager` is the rollback path. `waiting_for` is dead-but-present pending the D10 drop migration.
+3. **Sole completion authority**: The DependencyBus (DB-backed `dependency_watchers` table) is the only mechanism that answers "is the parent done?". The CorrelationManager is deleted.
 4. **Fire-and-forget**: Parent doesn't block, system handles timing
 5. **Crash-safe**: Workers can die, tasks retried, state preserved; bus watcher state is durable in the `dependency_watchers` table
-
-> The `waiting_for` cascade described in earlier versions of this doc is **deprecated as control-flow** (ADR-011) and dead-but-present post-Phase-D. The DependencyBus is the source of truth.
 
 ### Message Types
 
@@ -153,17 +152,14 @@ class Instance:
     instance_id: str      # Unique per instance
     agent_id: str         # Which agent type
     parent_id: str | None # Direct parent
-    waiting_for: int      # DEPRECATED (Phase D, ADR-011) — dead-but-present column; pending D10 drop migration
-    children: str         # DEPRECATED (Phase D) — denormalized JSON cache; pending D10 drop migration
-    status: str           # IDLE/RUNNING/WAITING_CHILDREN/COMPLETED
-
-# instance_hierarchy table — DEPRECATED (Phase D); pending D10 drop migration
-class InstanceHierarchy:
-    parent_id: str        # Composite PK
-    child_id: str         # Composite PK
+    status: str           # idle | running | waiting_children | paused | completed | error | terminated
+    # NOTE: `waiting_for` and `children` columns dropped from the SQLModel.
+    # Parent-child correlation lives in:
+    #   - DependencyBus: dependency_watchers table (in-flight FollowUps)
+    #   - instance_hierarchy junction table: canonical parent-child working set
 ```
 
-> **Parent-child correlation** is now authoritative in the **DependencyBus** (`daemon/services/dependency_bus.py`) — the in-memory `CorrelationManager` is the rollback path (Phase D). The `waiting_for`, `children`, and `instance_hierarchy` artifacts are dead-but-present and pending the IRREVERSIBLE D10 drop migration (`20260621_000002_drop_legacy_completion_columns.sql`, manual application after 2+ weeks of clean bus operation). See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md).
+> **Parent-child correlation** is now authoritative in the **DependencyBus** (`daemon/services/dependency_bus.py`). The `waiting_for` and `children` columns have been removed from the SQLModel; the canonical parent-child working set is the `instance_hierarchy` junction table. See [`docs/architecture/message-processing-and-correlation.md`](architecture/message-processing-and-correlation.md) and [`docs/architecture/completion-authority.md`](architecture/completion-authority.md).
 
 ---
 
@@ -461,22 +457,21 @@ Ensemble could add:
 
 ---
 
-## Completion Architecture (Phase D — Dependency Bus)
+## Completion Architecture
 
 The agents-ensemble uses a single-dispatcher, DB-backed completion model:
 
 1. **Dispatcher**: WorkerPool (4 threads) is the sole execution path for all work (messages, tasks). The JobQueue is scheduling vocabulary only (priority, queue management, project scoping).
 
-2. **Completion Authority**: The Dependency Bus (`daemon/services/dependency_bus.py`) is the authoritative parent-waits-for-children mechanism. When a parent sends a message to a child, a `dependency_watchers` row is written. When the child's task reaches a terminal event, the bus fires the watcher's FollowUp (enqueued back onto the parent). The bus is DB-backed — watcher state survives restart.
+2. **Sole Completion Authority**: The Dependency Bus (`daemon/services/dependency_bus.py`) is the **sole** parent-waits-for-children mechanism. When a parent sends a message to a child, a `dependency_watchers` row is written. When the child's task reaches a terminal event, the bus atomically transitions the watcher `PENDING → FIRED` and enqueues a FollowUp back onto the parent. The bus is DB-backed — watcher state survives restart.
 
-3. **Rollback Path**: The CorrelationManager (in-memory `_pending` dict + generation counter) is retained as the rollback path (`use_dependency_bus=false`). It provides a rollback path for one more release.
+3. **No Rollback Path**: The CorrelationManager (in-memory `_pending` dict + generation counter) is **deleted**. There is no kill-switch flag — `USE_LEGACY_WAITING_FOR_CASCADE`, `USE_LEGACY_JOBQUEUE_DISPATCH`, and `DEBUG_COMPLETION_INVARIANT` have all been removed.
 
-4. **Legacy Columns**: `waiting_for`, `children`, and `instance_hierarchy` are dead-but-present. A migration exists to drop them (IRREVERSIBLE, manual application after 2+ weeks of clean bus operation).
+4. **No Legacy Columns**: The `waiting_for` and `children` columns have been dropped from the SQLModel. A migration exists to drop them on existing DBs (`20260621_000002_drop_legacy_completion_columns.sql`); it is operator-applied (manual).
 
-Feature flags:
-- `use_dependency_bus` (default ON) — bus vs CM
-- `use_legacy_waiting_for_cascade` (default OFF) — kill switch for the original bug class
-- `debug_completion_invariant` (default OFF) — CM/waiting_for divergence observability
+5. **No Lease Stubs**: The `ExecutionGate` is a pure per-instance `asyncio.Lock`. The `LeaseContention`, `LeaseLostError`, `LeaseHolderKind`, and `LeaseContentionReason` classes are deleted.
+
+6. **Unified Message Dispatch**: Message dispatch is consolidated into a single `enqueue_message()` function with a `dispatch_path` parameter (`"workerpool"` or `"jobqueue"`). The legacy `enqueue_message_via_jq` is gone.
 
 ---
 
@@ -511,8 +506,6 @@ Feature flags:
 | Component | File | Purpose |
 |-----------|------|---------|
 | MessageProcessingPipeline | `daemon/services/message_processing_pipeline.py` | 6-stage shared pipeline (gate → process → mark → dispatch → child-check via DependencyBus → error-handle) |
-| **DependencyBus** | `daemon/services/dependency_bus.py` | **NEW Phase D — authoritative parent-waits-for-children mechanism. DB-backed `dependency_watchers` table, `watch` / `emit_terminal` / `cancel_for_target` API. Watcher state survives restart by construction.** |
-| ~~MessageJobHandler~~ | ~~`daemon/services/message_job_handler.py`~~ | **REMOVED Phase D (D12) — pause check moved to `JobProcessor.start_job` pre-check** |
-| CorrelationManager | `daemon/services/correlation_manager.py` | **Rollback path post-Phase-D. In-memory `_pending` dict + per-parent asyncio.Lock. Reachable via `use_dependency_bus=False`.** |
-| ExecutionGate | `daemon/services/execution_gate.py` | Per-instance `asyncio.Lock` serializing `graph.astream`; required on ALL paths including resume (Race #5 fix) |
+| **DependencyBus** | `daemon/services/dependency_bus.py` | **Sole parent-waits-for-children mechanism. DB-backed `dependency_watchers` table, `watch` / `emit_terminal` / `cancel_for_target` API. Watcher state survives restart by construction.** |
+| ExecutionGate | `daemon/services/execution_gate.py` | Per-instance `asyncio.Lock` serializing `graph.astream`; required on ALL paths including resume (Race #5 fix). No Lease stubs. |
 | Message processing errors | `daemon/services/message_processing_errors.py` | Shared error side-effects (event write, lifecycle event, parent report, job FAILED) |

@@ -776,6 +776,11 @@ class TestImagesWithoutVisionConfig:
             mock_manager.enqueue_message.assert_called_once()
             call_kwargs = mock_manager.enqueue_message.call_args.kwargs
             assert call_kwargs["images"] is None
+            # Phase 6: HTTP router routes external entries through jobqueue.
+            assert call_kwargs.get("dispatch_path") == "jobqueue", (
+                f"Expected dispatch_path='jobqueue' from HTTP send_message; "
+                f"got {call_kwargs.get('dispatch_path')!r}"
+            )
 
 
 # =============================================================================

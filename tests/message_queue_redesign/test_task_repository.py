@@ -399,7 +399,6 @@ class TestTaskClaiming:
                 agent_id="leader",
                 agent_dir="agents/leader",
                 status="waiting_children",
-                waiting_for=1,
             ))
             session.add(JobItem(
                 job_id="job-W1",
