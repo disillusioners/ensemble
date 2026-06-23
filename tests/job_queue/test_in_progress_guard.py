@@ -47,6 +47,33 @@ from daemon.services.correlation_manager import set_correlation_manager
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Phase 3 fixture: CM is the SOLE completion authority (ADR-011). The legacy
+# ``use_legacy_waiting_for_cascade`` kill switch was removed in Phase 3, so
+# code paths that previously fell back to ``instance_meta.waiting_for`` now
+# raise ``RuntimeError`` when CM is None. Wire a mock CM globally; tests
+# configure the pending count via ``set_cm_pending(n)`` before exercising
+# the code path under test.
+# ──────────────────────────────────────────────────────────────────────────────
+_CM_PENDING = [0]
+
+
+@pytest.fixture(autouse=True)
+def _wire_cm_mock():
+    cm_mock = MagicMock()
+    cm_mock.get_pending_count = lambda iid: _CM_PENDING[0]
+    cm_mock.is_complete = lambda iid: _CM_PENDING[0] == 0
+    set_correlation_manager(cm_mock)
+    yield
+    set_correlation_manager(None)
+    _CM_PENDING[0] = 0
+
+
+def set_cm_pending(n: int) -> None:
+    """Set the pending child count the mocked CM will return."""
+    _CM_PENDING[0] = n
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Shared helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -434,6 +461,9 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         from sqlalchemy.pool import StaticPool
         from sqlmodel import SQLModel
 
+        # Phase 3: tell the autouse CM mock what pending count to report.
+        set_cm_pending(waiting_for)
+
         # Build a tiny fresh in-memory engine for the queue repo
         eng = create_engine(
             "sqlite:///:memory:",
@@ -788,11 +818,15 @@ class TestJobProcessorInProgressGuardReviewFixes:
       helper itself does not emit a second notification for the terminal.
     """
 
-    def _build_processor(self):
+    def _build_processor(self, pending: int = 2):
         """Construct a JobProcessor with mocked collaborators.
 
         Only ``_queue_service.notify_watchers`` and ``_queue_service.complete_job``
         are interesting here — every other collaborator is a MagicMock.
+
+        ``pending`` is the number of children the autouse CM mock should report
+        as pending (Phase 3: CM is the SOLE completion authority; no kill
+        switch fallback).
         """
         mock_project_repo = MagicMock()
         mock_project_repo.list_projects = MagicMock(return_value=[])
@@ -816,6 +850,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
             queue_repo=mock_queue_repo,
             poll_interval=0.1,
         )
+        set_cm_pending(pending)
         return processor, mock_queue_service
 
     @staticmethod
@@ -960,6 +995,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
 
         # Phase 2: simulate child reports — waiting_for drops to 0.
         instance_meta_done = self._make_instance_meta(waiting_for=0)
+        set_cm_pending(0)
         second = await processor._emit_in_progress_if_children_pending(
             instance_meta_done, proc_job, "TASK", "completed"
         )
@@ -1069,6 +1105,7 @@ class TestCascadePreservesErrorOnChildComplete:
         )
         child = self._make_child()
         session = self._setup_cascade_session(parent, child)
+        set_cm_pending(0)  # Phase 3: parent is complete (waiting_for=0)
 
         # Minimal manager mock — the cascade only touches the session.
         mock_manager = MagicMock()
@@ -1076,7 +1113,6 @@ class TestCascadePreservesErrorOnChildComplete:
         mock_manager._checkpointer = None
         mock_manager.config = MagicMock()
         mock_manager.config.llm = MagicMock()
-
         service = ChildReportsService(manager=mock_manager)
 
         # Pre-condition: parent is in ERROR and has 1 child pending.
@@ -1128,6 +1164,7 @@ class TestCascadePreservesErrorOnChildComplete:
         )
         child = self._make_child()
         session = self._setup_cascade_session(parent, child)
+        set_cm_pending(0)  # Phase 3: parent is complete (waiting_for=0)
 
         mock_manager = MagicMock()
         mock_manager._live_hub = None
@@ -1148,8 +1185,15 @@ class TestCascadePreservesErrorOnChildComplete:
     @pytest.mark.asyncio
     async def test_running_parent_transitions_to_completed_normally(self):
         """Sanity / regression: with the W1 fix in place, a parent in
-        RUNNING (the common case) must STILL transition to COMPLETED
-        when its last child finishes — only ERROR is preserved.
+        RUNNING (the common case) must STILL complete when its last
+        child finishes — only ERROR is preserved.
+
+        Phase 3 update: with CM as the SOLE completion authority, the
+        inline cascade is a no-op (returns ``False, None, None``) and the
+        CM's ``handle_correlation_complete`` callback owns the terminal
+        transition. The test verifies the cascade does not interfere with
+        the RUNNING → COMPLETED path; the CM callback path is covered by
+        CM-specific tests.
         """
         from daemon.services.child_reports import ChildReportsService
         from daemon.repositories.instance.models import InstanceStatus
@@ -1160,6 +1204,7 @@ class TestCascadePreservesErrorOnChildComplete:
         )
         child = self._make_child()
         session = self._setup_cascade_session(parent, child)
+        set_cm_pending(0)  # Phase 3: parent is complete (waiting_for=0)
 
         mock_manager = MagicMock()
         mock_manager._live_hub = None
@@ -1174,7 +1219,11 @@ class TestCascadePreservesErrorOnChildComplete:
         )
 
         # RUNNING → COMPLETED is the normal happy path; the W1 fix
-        # must not have broken it.
+        # must not have broken it. Phase 3: with CM as the SOLE
+        # completion authority, the inline cascade is a no-op —
+        # ``completed_parent_id`` is None because the CM callback owns
+        # the terminal transition. Parent status is preserved (RUNNING)
+        # for the same reason; the CM callback updates it.
         assert transitioned is False
-        assert completed_parent_id == parent.instance_id
-        assert parent.status == InstanceStatus.COMPLETED.value
+        assert completed_parent_id is None
+        assert parent.status == InstanceStatus.RUNNING.value
