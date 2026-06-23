@@ -492,11 +492,11 @@ class TestObserverRaceCondition:
         (the W3 fail-safe only fires for the generic Exception path, NOT
         for InvalidTransitionError — that's the idempotency guard).
         """
-        # Ensure CM is None — if a prior test in the suite left a CM
-        # registered, the lifecycle handler would take the cm-pending
+        # Ensure bus is None — if a prior test in the suite left a bus
+        # registered, the lifecycle handler would take the bus-pending
         # branch and never reach _finalize_job.
-        from daemon.services.correlation_manager import set_correlation_manager
-        set_correlation_manager(None)
+        from daemon.services.dependency_bus import set_dependency_bus
+        set_dependency_bus(None)
 
         mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
         # Use a MagicMock for the queue service and set get_job_by_instance

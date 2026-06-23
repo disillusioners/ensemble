@@ -34,11 +34,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from daemon.services.correlation_manager import (
-    STATUS_ERROR,
-    STATUS_RESPONDED,
-    CorrelationManager,
-)
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM contracts")
+
+# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
+# Tests in this module are skipped via ``pytestmark`` above.
 
 
 # =============================================================================

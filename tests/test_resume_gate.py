@@ -117,11 +117,11 @@ def _make_manager():
     by ``__new__`` + manual attribute setting.
 
     Phase 3: the ``use_legacy_waiting_for_cascade`` flag was removed.
-    The resume path now expects CM to be initialized; if it isn't, the
-    A9 hard error fires per ADR-011. We patch
-    ``daemon.manager.get_correlation_manager`` — the binding imported
-    into manager.py's namespace (``from .services.correlation_manager
-    import get_correlation_manager`` at line 62). Patching the source
+    The resume path now expects the bus to be initialized; if it isn't,
+    the A9 hard error fires per ADR-011. We patch
+    ``daemon.manager.get_dependency_bus`` — the binding imported
+    into manager.py's namespace (``from .services.dependency_bus
+    import get_dependency_bus``). Patching the source
     module alone is insufficient due to Python's ``from X import Y``
     binding semantics; the lookup in ``_resume_processing_background``
     resolves to the manager.py binding. The patch is scoped to the
@@ -168,18 +168,18 @@ def _make_manager():
 
         # Phase 3: wire CM mock so the A9 hard-error at
         # ``daemon/manager.py:2913`` does not fire when the resume
-        # path checks ``cm is not None``. The CM mock reports 0
+        # path checks ``bus is not None``. The bus mock reports 0
         # pending children for any instance so the resume path
         # proceeds to job completion.
-        cm_mock = MagicMock()
-        cm_mock.get_pending_count = lambda iid: 0
-        cm_patcher = patch(
-            "daemon.manager.get_correlation_manager",
-            return_value=cm_mock,
+        bus_mock = MagicMock()
+        bus_mock.count_pending_for_target_sync = lambda iid: 0
+        bus_patcher = patch(
+            "daemon.manager.get_dependency_bus",
+            return_value=bus_mock,
         )
-        cm_patcher.start()
-        patchers.append(cm_patcher)
-        manager._cm_mock = cm_mock
+        bus_patcher.start()
+        patchers.append(bus_patcher)
+        manager._bus_mock = bus_mock
         return manager
 
     yield _factory

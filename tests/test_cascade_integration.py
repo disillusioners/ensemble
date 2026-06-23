@@ -43,10 +43,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from daemon.services.correlation_manager import (
-    CorrelationManager,
-    set_correlation_manager,
-)
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-specific cascade behavior")
+
+# CM-era imports were removed in Phase 5 (CorrelationManager → DependencyBus).
+# Tests in this module are skipped via ``pytestmark`` above, so the
+# undefined CM names referenced in test bodies are never resolved.
 
 
 # =============================================================================

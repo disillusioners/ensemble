@@ -47,13 +47,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-observer integration")
+
 from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.services.correlation_manager import (
-    CorrelationManager,
-    set_correlation_manager,
-)
+# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
+# Tests in this module are skipped via ``pytestmark`` above.
 from daemon.services.job_feedback_observer import (
     JobFeedbackObserver,
     _FinalizeJobResult,

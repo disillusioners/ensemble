@@ -78,7 +78,7 @@ from daemon.repositories.message_queue.models import (  # noqa: F401
 from daemon.repositories.task.models import Task  # noqa: F401
 from daemon.services.cancellation import CancellationService
 from daemon.services.child_reports import ChildReportsService
-from daemon.services.correlation_manager import set_correlation_manager
+from daemon.services.dependency_bus import set_dependency_bus
 from daemon.services.error_reporting import ErrorReportingService
 from daemon.services.instance_messaging import InstanceMessagingService
 from daemon.services.job_feedback_observer import JobFeedbackObserver
@@ -755,17 +755,17 @@ class TestSendErrorReportDbSyncOffloaded:
     """
 
     @pytest.fixture(autouse=True)
-    def _disable_cm(self):
-        """Pin the CorrelationManager to ``None`` for both tests.
+    def _disable_bus(self):
+        """Pin the DependencyBus to ``None`` for both tests.
 
-        The cascade decision reads ``cm.is_complete()`` (CM-active) or
-        falls back to ``parent.waiting_for == 0`` (CM-disabled). For the
+        The cascade decision reads ``bus.is_complete()`` (bus-active) or
+        falls back to ``parent.waiting_for == 0`` (bus-disabled). For the
         test we want the legacy fallback path so the sync helper
         exercises the ``session.exec`` / ``session.commit`` block.
         """
-        set_correlation_manager(None)
+        set_dependency_bus(None)
         yield
-        set_correlation_manager(None)
+        set_dependency_bus(None)
 
     @pytest.mark.asyncio
     async def test_send_error_report_db_sync_runs_off_loop_thread(self, engine):
@@ -781,7 +781,7 @@ class TestSendErrorReportDbSyncOffloaded:
             # mocked queue repo. The CM hook is patched below so the
             # post-commit path runs cleanly without a wired CM.
             with patch(
-                "daemon.services.correlation_manager.notify_corr_resolve",
+                "daemon.services.dependency_bus.emit_terminal",
                 new=AsyncMock(),
             ):
                 await service._send_error_report(
@@ -828,7 +828,7 @@ class TestSendErrorReportDbSyncOffloaded:
                 side_effect=spy_to_thread,
             ):
                 with patch(
-                    "daemon.services.correlation_manager.notify_corr_resolve",
+                    "daemon.services.dependency_bus.emit_terminal",
                     new=AsyncMock(),
                 ):
                     await service._send_error_report(

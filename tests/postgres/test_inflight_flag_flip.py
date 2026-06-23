@@ -65,10 +65,12 @@ from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageType,
 )
 from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
-from daemon.services.correlation_manager import (
-    CorrelationManager,
-    set_correlation_manager,
-)
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM crash recovery")
+
+# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
+# Tests in this module are skipped via ``pytestmark`` above.
 
 logger = logging.getLogger(__name__)
 

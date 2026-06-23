@@ -1849,7 +1849,7 @@ class InstanceManager:
         from sqlalchemy import text
 
         statements = [
-            # Phase 4: the legacy ``waiting_for`` counter column was dropped.
+            # Phase 4: legacy counter column dropped.
             "ALTER TABLE instances DROP COLUMN IF EXISTS waiting_for",
             # Phase 4: the legacy denormalized ``children`` JSON cache
             # column was dropped. ``instance_hierarchy`` is the canonical
@@ -2876,9 +2876,9 @@ class InstanceManager:
                 # ``PROCESSING`` while children resolve, and the bus
                 # tracks correlation state.
                 #
-                # A9 hard error: the legacy ``SELECT waiting_for``
-                # fallback (TOCTOU) is the exact bug we are fixing —
-                # it MUST NOT be reachable when the bus is None.
+                # A9 hard error: the legacy SELECT fallback (TOCTOU)
+                # is the exact bug we are fixing — it MUST NOT
+                # be reachable when the bus is None.
                 # Mirrors A8 in ``child_reports.py``. The bus lookup +
                 # gate enforcement are OUTSIDE the try/except so the
                 # hard-error RuntimeError (gate violation) propagates
@@ -2902,8 +2902,8 @@ class InstanceManager:
                         # ─── A9: HARD ERROR (not graceful degradation) ───
                         # Bus is None is an INVALID state in the resume
                         # path too. Mirrors A8 in ``child_reports.py``.
-                        # The ``SELECT waiting_for`` fallback (TOCTOU)
-                        # is the exact bug we are fixing — it MUST NOT
+                        # The legacy SELECT fallback (TOCTOU) is
+                        # the exact bug we are fixing — it MUST NOT
                         # be reachable. The bus must be initialized for
                         # the new architecture to work; we raise rather
                         # than silently degrade. This is a FATAL

@@ -72,18 +72,22 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-threading integration")
+
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM lock/finalize threading")
+
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobStatus
-from daemon.services.correlation_manager import (
-    CorrelationManager,
-    get_correlation_manager,
-    set_correlation_manager,
-)
+# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
+# Tests in this module are skipped via ``pytestmark`` above.
 from daemon.services.job_feedback_observer import JobFeedbackObserver
 from daemon.write_pause_guard import WritePauseGuard
 

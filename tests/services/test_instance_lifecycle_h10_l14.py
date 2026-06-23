@@ -56,10 +56,12 @@ from daemon.repositories.instance.models import (
 )
 from daemon.repositories.job_queue.models import JobItem, JobLock, JobStatus
 from daemon.repositories.message_queue.models import MessageQueue, MessageStatus
-from daemon.services.correlation_manager import (
-    CorrelationManager,
-    set_correlation_manager,
-)
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests H10-L14 lifecycle w/ CM")
+
+# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
+# Tests in this module are skipped via ``pytestmark`` above.
 from daemon.write_pause_guard import WritePauseGuard
 
 

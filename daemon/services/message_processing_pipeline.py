@@ -193,7 +193,7 @@ class PipelineCallbacks:
         pipeline because ``complete_task`` lives on a different repo
         than ``queue_repository``). The JobQueue path uses this to
         call ``JobQueueService.complete_job(COMPLETED)`` — possibly
-        gated by the CM/waiting_for deferral check, which the
+        gated by the CM deferral check, which the
         JobQueue still performs locally.
 
     ``on_error``
@@ -206,7 +206,7 @@ class PipelineCallbacks:
 
     ``on_defer``
         Called when the pipeline defers completion because the
-        CM/waiting_for check reports pending child correlations
+        CM check reports pending child correlations
         (JobQueue only). WorkerPool does not consult CM in the
         hot path; this is a JobQueue-specific concern. When the
         pipeline sees a happy-path result but reports deferred

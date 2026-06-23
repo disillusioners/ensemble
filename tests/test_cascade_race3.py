@@ -42,53 +42,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from daemon.services.correlation_manager import (
-    STATUS_RESPONDED,
-    CorrelationManager,
-)
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-internal race conditions")
 
-
-# =============================================================================
-# Shared mock helpers
-# =============================================================================
-
-
-def make_instance_repo(
-    *,
-    instance_by_id: dict[str, Any] | None = None,
-) -> MagicMock:
-    """Mock SQLModelInstanceRepository. Tracks call counts."""
-    repo = MagicMock(name="InstanceRepo")
-    by_id = instance_by_id or {}
-    repo.get = MagicMock(side_effect=lambda iid: by_id.get(iid))
-    repo.get_all_with_waiting_for = MagicMock(return_value=[])
-    repo.get_children = MagicMock(return_value=[])
-    return repo
-
-
-def make_msg_repo() -> MagicMock:
-    """Mock SQLModelMessageQueueRepository. Tracks call counts."""
-    repo = MagicMock(name="MsgRepo")
-    repo.get_pending_for_instances = MagicMock(return_value=[])
-    repo.list = MagicMock(return_value=[])
-    return repo
-
-
-def make_cm(
-    *,
-    callback: Any = None,
-    instance_repo: MagicMock | None = None,
-    msg_repo: MagicMock | None = None,
-) -> tuple[CorrelationManager, MagicMock, MagicMock]:
-    """Build a CM and return (cm, instance_repo, msg_repo) for assertion."""
-    ir = instance_repo or make_instance_repo()
-    mr = msg_repo or make_msg_repo()
-    cm = CorrelationManager(
-        instance_repository=ir,
-        message_queue_repository=mr,
-        completion_callback=callback,
-    )
-    return cm, ir, mr
+# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
+# The names below are referenced in test bodies but those tests are
+# skipped via ``pytestmark`` above, so the undefined names are never
+# resolved at runtime.
 
 
 # =============================================================================

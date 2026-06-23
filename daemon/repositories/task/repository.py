@@ -285,16 +285,6 @@ class TaskRepository:
                         -- a soft-deleted PROCESSING job never auto-completes
                         -- and would otherwise permanently block the instance.
                         --
-                        -- Phase 4: legacy ``waiting_for`` read here is a
-                        -- SQL-level guard inside the FIFO carve-out. CM is
-                        -- an in-memory layer and cannot be queried from SQL,
-                        -- so this remains functional but is DEPRECATED.
-                        -- Future phase: replace with a CM-aware query path
-                        -- (e.g. a per-instance pending counter maintained
-                        -- alongside ``waiting_for``). The carve-out still
-                        -- serves as a defensive filter against the rare
-                        -- case where the CM singleton is None at startup.
-                        --
                         -- Unified-dispatcher admission carve-out: when the
                         -- unified dispatcher has already admitted the
                         -- MESSAGE job to a Task row (same message_id,
@@ -305,13 +295,15 @@ class TaskRepository:
                         -- carve-out, the Task can't claim (the job is
                         -- PROCESSING) and the job can't reach its
                         -- terminal transition (the Task never claimed).
+                        -- Phase 4: ``waiting_for`` column dropped; the
+                        -- ``i.status != waiting_children`` guard is the
+                        -- only FIFO carve-out left.
                         SELECT j.instance_id FROM job_queue_items j
                         LEFT JOIN instances i ON j.instance_id = i.instance_id
                         WHERE j.status = :status_processing
                         AND j.job_type = :job_type_message
                         AND j.instance_id IS NOT NULL
                         AND j.deleted_at IS NULL
-                        AND COALESCE(i.waiting_for, 0) = 0
                         AND (i.status IS NULL OR i.status != :status_waiting_children)
                         AND NOT EXISTS (
                             SELECT 1 FROM task t

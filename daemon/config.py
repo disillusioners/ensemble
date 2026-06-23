@@ -329,10 +329,9 @@ class JobSystemConfig(BaseSettings):
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
     # ─── Phase A completion-architecture feature flags ──────────────────────
-    # These gates protected the migration from the legacy ``waiting_for`` cascade
-    # path to the CorrelationManager-authoritative path. The legacy flag was
-    # removed in Phase 3 (cleanup-old-architecture) once the Dependency Bus
-    # became the sole completion authority. See
+    # These gates protected the migration to the CorrelationManager-authoritative
+    # path. The legacy flag was removed in Phase 3 (cleanup-old-architecture)
+    # once the Dependency Bus became the sole completion authority. See
     # ``docs/configuration/completion-flags.md`` for historical context.
 
     # ─── Phase D dependency-bus feature flag ───────────────────────────────

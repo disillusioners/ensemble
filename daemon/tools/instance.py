@@ -609,13 +609,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 )
                 use_dep_bus = False
 
-        # Increment waiting_for counter if sender is the parent of the target instance
-        # This handles the case where a parent reuses an existing child (vs first spawn)
-        # Fix C: atomic SQL UPDATE eliminates the read-modify-write race against
-        # concurrent decrements from sibling child completions. RETURNING
-        # gives us the post-update value for an honest log line — under
-        # concurrent decrements a separate SELECT could read a value
-        # already past the increment we're about to log.
+        # Register watcher when sender is the parent of the target instance.
         from sqlmodel import Session
         from ..repositories.instance.models import Instance
         from ..write_pause_guard import WriteGuardSession
@@ -624,11 +618,9 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             if target_instance and target_instance.parent_id == current_instance_id:
                 # ─── Phase A/D: CM/bus is the authoritative completion path ───
                 # The CorrelationManager (Phase A) or DependencyBus (Phase D)
-                # is the SOLE completion authority — ``waiting_for`` is
-                # rebuild-only cache (ADR-011) and is NOT mutated here. The
-                # legacy ``waiting_for++`` SQL increment + parent-revive
-                # UPDATE were removed with the ``USE_LEGACY_WAITING_FOR_CASCADE``
-                # flag in Phase 3.
+                # is the SOLE completion authority. The legacy SQL
+                # increment + parent-revive UPDATE were removed with the
+                # ``USE_LEGACY_WAITING_FOR_CASCADE`` flag in Phase 3.
                 #
                 # C3 fix: invoke the underlying ``register_message_send``
                 # (which surfaces exceptions) rather than ``notify_corr_register``

@@ -25,11 +25,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from daemon.services.correlation_manager import (
-    STATUS_ERROR,
-    STATUS_RESPONDED,
-    CorrelationManager,
-)
+import pytest
+
+pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests watch_job-CM integration")
+
+# CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
+# Tests in this module are skipped via ``pytestmark`` above.
 
 
 # =============================================================================
@@ -326,12 +327,10 @@ class TestReviewerFixes:
         returned None because ``daemon/api.py:249`` writes
         ``_watcher_repo`` (no "y"). This test would have failed with
         ``assert cm._watcher_repo is not None``.
+
+        Phase 5: skipped via module-level pytestmark.
         """
-        from daemon.services import correlation_manager as cm_module
-        from daemon.services.correlation_manager import (
-            CorrelationManager,
-            init_correlation_manager,
-        )
+        # CM-era imports removed in Phase 5; test body below is dead code.
 
         # Build a fake manager with a watcher_repo wired up (the
         # way ``daemon/api.py:249`` sets it on the real InstanceManager).
@@ -387,12 +386,10 @@ class TestReviewerFixes:
         degradation per the B1 contract. We do NOT want init to raise
         when the repo is missing; the daemon must keep running with
         message-only tracking.
+
+        Phase 5: skipped via module-level pytestmark.
         """
-        from daemon.services import correlation_manager as cm_module
-        from daemon.services.correlation_manager import (
-            CorrelationManager,
-            init_correlation_manager,
-        )
+        # CM-era imports removed in Phase 5; test body below is dead code.
 
         # Manager without _watcher_repo (simulates legacy / not-yet-wired).
         manager = MagicMock(name="InstanceManager")
@@ -599,7 +596,8 @@ class TestReviewerFixes:
         # about) with waiting_for=0 — meaning the DB has no pending
         # message children, only watched jobs. This is the exact
         # watched-job-only scenario the B-W3 fix protects.
-        from daemon.services.correlation_manager import CorrelationManager
+
+        # Phase 5: CM-era import removed; test body below is dead code.
 
         instance_repo = make_instance_repo()
         parent = MagicMock(name="DBParent")

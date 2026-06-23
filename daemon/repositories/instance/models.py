@@ -60,37 +60,21 @@ class Instance(SQLModel, table=True):
         default_factory=dict,
         sa_column=Column("metadata", JSONBType)
     )
-    
-    # Denormalized cache of child instance IDs (stored as JSON string)
-    # DEPRECATED: This JSON column is no longer written to. The
-    # ``instance_hierarchy`` junction table is the canonical source of
-    # parent-child relationships — _enrich_instance() in
-    # daemon/repositories/instance/repository.py loads children from it
-    # on every read. Writes to this JSON cache were doubly broken (RMW
-    # races at 4 sites AND overridden on every read) and persistently
-    # useless (no code ever reads the corrupted value). See C10.
-    # Kept for backward compatibility; SQLite cannot DROP COLUMN.
-    children: str = Field(default="[]")
-    # Count of pending child completions
-    # REBUILD-ONLY CACHE: This field is written for crash-recovery rebuild only
-    # (incremented at send_message, decremented at child completion).
-    # Do NOT read it for runtime control-flow decisions —
-    # use CorrelationManager.is_complete() / get_pending_count() instead.
-    waiting_for: int = Field(default=0)
+
     # Optimistic locking version
     version: int = Field(default=1)
     # For watchdog timeout detection
     last_activity_at: datetime | None = Field(default=None)
-    
+
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     paused_at: str | None = Field(default=None, index=True)
-    
+
     @property
     def title(self) -> str | None:
         """Extract title from instance_metadata."""
         return self.instance_metadata.get("title") if self.instance_metadata else None
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
@@ -103,8 +87,6 @@ class Instance(SQLModel, table=True):
             "status": self.status,
             "title": self.title,
             "metadata": dict(self.instance_metadata) if self.instance_metadata else {},
-            "children": self.children if self.children else [],
-            "waiting_for": self.waiting_for,
             "version": self.version,
             "last_activity_at": self.last_activity_at.isoformat() if self.last_activity_at else None,
             "created_at": self.created_at,

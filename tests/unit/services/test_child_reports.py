@@ -42,7 +42,7 @@ from daemon.services.completion_registry import (
     CompletionResult,
     get_completion_registry,
 )
-from daemon.services.correlation_manager import set_correlation_manager
+from daemon.services.dependency_bus import set_dependency_bus
 from daemon.write_pause_guard import WritePauseGuard
 
 
@@ -67,15 +67,15 @@ def engine() -> Engine:
 
 
 @pytest.fixture(autouse=True)
-def _reset_correlation_manager():
-    """Ensure no CorrelationManager singleton leaks between tests.
+def _reset_dependency_bus():
+    """Ensure no DependencyBus singleton leaks between tests.
 
     The legacy ``waiting_for`` fallback path is required for the carve-out
-    test (CM is None → falls through to ``instance.waiting_for`` read).
+    test (bus is None → falls through to ``instance.waiting_for`` read).
     """
-    set_correlation_manager(None)
+    set_dependency_bus(None)
     yield
-    set_correlation_manager(None)
+    set_dependency_bus(None)
 
 
 def _build_child_reports_service(engine: Engine) -> ChildReportsService:

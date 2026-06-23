@@ -23,7 +23,7 @@ from daemon.repositories.job_queue import JobRepository, JobStatus
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.services.correlation_manager import set_correlation_manager
+from daemon.services.dependency_bus import set_dependency_bus
 from daemon.services.job_feedback_observer import (
     JobFeedbackObserver,
     _FinalizeJobResult,
@@ -124,8 +124,8 @@ class TestDoubleEventDelivery:
         2. Second event: _finalize_job_db_sync raises InvalidTransitionError,
            handled gracefully, no lock release attempted
         """
-        # Ensure CM is None (a leftover CM would route via cm_pending branch).
-        set_correlation_manager(None)
+        # Ensure bus is None (a leftover bus would route via bus_pending branch).
+        set_dependency_bus(None)
 
         # Set up job queue service mock
         mock_job = create_mock_job(job_id="dup-job", status="processing", instance_id="dup-instance")
@@ -187,7 +187,7 @@ class TestDoubleEventDelivery:
     @pytest.mark.asyncio
     async def test_observer_handles_duplicate_error_event(self):
         """Same error event delivered twice - second should be no-op."""
-        set_correlation_manager(None)
+        set_dependency_bus(None)
 
         mock_job = create_mock_job(job_id="dup-err-job", status="processing", instance_id="dup-err-instance")
         mock_job_queue_service = MagicMock()
@@ -238,7 +238,7 @@ class TestDoubleEventDelivery:
     @pytest.mark.asyncio
     async def test_observer_handles_duplicate_event_with_different_job_state(self):
         """Duplicate event when job has already moved to a terminal state."""
-        set_correlation_manager(None)
+        set_dependency_bus(None)
 
         mock_job = create_mock_job(job_id="terminal-job", status="processing", instance_id="terminal-instance")
         mock_job_queue_service = MagicMock()

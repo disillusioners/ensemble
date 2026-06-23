@@ -43,34 +43,33 @@ from daemon.services.job_feedback_observer import (
     _FinalizeJobResult,
 )
 from daemon.services.job_processor import JobProcessor
-from daemon.services.correlation_manager import set_correlation_manager
+from daemon.services.dependency_bus import set_dependency_bus
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Phase 3 fixture: CM is the SOLE completion authority (ADR-011). The legacy
-# ``use_legacy_waiting_for_cascade`` kill switch was removed in Phase 3, so
-# code paths that previously fell back to ``instance_meta.waiting_for`` now
-# raise ``RuntimeError`` when CM is None. Wire a mock CM globally; tests
-# configure the pending count via ``set_cm_pending(n)`` before exercising
-# the code path under test.
+# Phase 5 fixture: DependencyBus is the SOLE completion authority (ADR-011).
+# The legacy ``use_legacy_waiting_for_cascade`` kill switch was removed in
+# Phase 3; the CorrelationManager is removed in Phase 5 and replaced by
+# DependencyBus. Wire a mock bus globally; tests configure the pending
+# count via ``set_bus_pending(n)`` before exercising the code path under
+# test.
 # ──────────────────────────────────────────────────────────────────────────────
-_CM_PENDING = [0]
+_BUS_PENDING = [0]
 
 
 @pytest.fixture(autouse=True)
-def _wire_cm_mock():
-    cm_mock = MagicMock()
-    cm_mock.get_pending_count = lambda iid: _CM_PENDING[0]
-    cm_mock.is_complete = lambda iid: _CM_PENDING[0] == 0
-    set_correlation_manager(cm_mock)
+def _wire_bus_mock():
+    bus_mock = MagicMock()
+    bus_mock.count_pending_for_target_sync = lambda iid: _BUS_PENDING[0]
+    set_dependency_bus(bus_mock)
     yield
-    set_correlation_manager(None)
-    _CM_PENDING[0] = 0
+    set_dependency_bus(None)
+    _BUS_PENDING[0] = 0
 
 
-def set_cm_pending(n: int) -> None:
-    """Set the pending child count the mocked CM will return."""
-    _CM_PENDING[0] = n
+def set_bus_pending(n: int) -> None:
+    """Set the pending child count the mocked bus will return."""
+    _BUS_PENDING[0] = n
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -259,8 +258,8 @@ class TestJobFeedbackObserverWaitingForGuard:
         waiting_for: int,
     ) -> tuple[JobFeedbackObserver, MagicMock, MagicMock, MagicMock]:
         """Build a JobFeedbackObserver with a real instance_meta stub."""
-        # Ensure CM is None (a leftover CM would route via cm_pending branch).
-        set_correlation_manager(None)
+        # Ensure the bus is None (a leftover bus would route via bus_pending branch).
+        set_dependency_bus(None)
 
         mock_job_queue_service = MagicMock()
         mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
@@ -462,7 +461,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         from sqlmodel import SQLModel
 
         # Phase 3: tell the autouse CM mock what pending count to report.
-        set_cm_pending(waiting_for)
+        set_bus_pending(waiting_for)
 
         # Build a tiny fresh in-memory engine for the queue repo
         eng = create_engine(
@@ -850,7 +849,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
             queue_repo=mock_queue_repo,
             poll_interval=0.1,
         )
-        set_cm_pending(pending)
+        set_bus_pending(pending)
         return processor, mock_queue_service
 
     @staticmethod
@@ -995,7 +994,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
 
         # Phase 2: simulate child reports — waiting_for drops to 0.
         instance_meta_done = self._make_instance_meta(waiting_for=0)
-        set_cm_pending(0)
+        set_bus_pending(0)
         second = await processor._emit_in_progress_if_children_pending(
             instance_meta_done, proc_job, "TASK", "completed"
         )
@@ -1105,7 +1104,7 @@ class TestCascadePreservesErrorOnChildComplete:
         )
         child = self._make_child()
         session = self._setup_cascade_session(parent, child)
-        set_cm_pending(0)  # Phase 3: parent is complete (waiting_for=0)
+        set_bus_pending(0)  # Phase 3: parent is complete (waiting_for=0)
 
         # Minimal manager mock — the cascade only touches the session.
         mock_manager = MagicMock()
@@ -1164,7 +1163,7 @@ class TestCascadePreservesErrorOnChildComplete:
         )
         child = self._make_child()
         session = self._setup_cascade_session(parent, child)
-        set_cm_pending(0)  # Phase 3: parent is complete (waiting_for=0)
+        set_bus_pending(0)  # Phase 3: parent is complete (waiting_for=0)
 
         mock_manager = MagicMock()
         mock_manager._live_hub = None
@@ -1204,7 +1203,7 @@ class TestCascadePreservesErrorOnChildComplete:
         )
         child = self._make_child()
         session = self._setup_cascade_session(parent, child)
-        set_cm_pending(0)  # Phase 3: parent is complete (waiting_for=0)
+        set_bus_pending(0)  # Phase 3: parent is complete (waiting_for=0)
 
         mock_manager = MagicMock()
         mock_manager._live_hub = None
