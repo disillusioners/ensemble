@@ -89,7 +89,7 @@ class JobProcessor:
         # ``setup_job_feedback_observer`` (called from ``daemon/api.py``
         # after both the processor and the observer are constructed).
         # The unified observer → Task → WorkerPool path is the SOLE
-        # execution path for message work (Phase C / Phase D).
+        # execution path for message work.
         self._job_feedback_observer: "JobFeedbackObserver" | None = None
         # Throttle/dedup state for in_progress notifications.
         # Keyed by job_id. ``_last_in_progress`` records (timestamp, pending_count) of
@@ -110,8 +110,8 @@ class JobProcessor:
         observer are constructed. With this reference in place, the
         processor routes MESSAGE-type work through
         ``observer._admit_via_worker_pool``. The observer is the SOLE
-        dispatch authority for MESSAGE jobs (Phase D removed the legacy
-        handler path).
+        dispatch authority for MESSAGE jobs (legacy handler path
+        removed).
 
         Idempotent: setting the same observer twice is a no-op.
 
@@ -426,11 +426,11 @@ class JobProcessor:
                         statuses=["processing"]
                     )
                     for proc_job in (processing or []):
-                        # NOTE (Phase D): The legacy MESSAGE-specific orphan guard
+                        # NOTE: The legacy MESSAGE-specific orphan guard
                         # was removed in D11. The unified dispatcher owns message
                         # completion end-to-end — orphan PROCESSING rows are
                         # resolved by the JobFeedbackObserver event subscription
-                        # (``_finalize_job`` → ``handle_correlation_complete``).
+                        # (``_finalize_job``).
                         # A stuck PROCESSING MESSAGE row that survives both paths
                         # is recovered by ``JobRecoveryService`` at startup; we
                         # no longer attempt inline re-spawn or fail here.
@@ -604,7 +604,7 @@ class JobProcessor:
                     f"job_type={job_type} instance={job.instance_id[:8] if job.instance_id else 'N/A'}..."
                 )
 
-                # NOTE (Phase D): The legacy MESSAGE-specific DB-level
+                # NOTE: The legacy MESSAGE-specific DB-level
                 # sibling pre-check was removed in D11. The unified
                 # observer owns message dispatch end-to-end —
                 # ``_admit_via_worker_pool`` does the concurrency gate
@@ -670,14 +670,14 @@ class JobProcessor:
                     )
 
                     # >>> MESSAGE jobs: route through the unified observer (D11) <<<
-                    # Phase D removed the legacy message-handler dispatch
-                    # path. The JobFeedbackObserver is the SOLE dispatch
+                    # The legacy message-handler dispatch path was removed.
+                    # The JobFeedbackObserver is the SOLE dispatch
                     # authority for ``job_type='message'`` work — it admits
                     # the job to the WorkerPool (creates a Task row + wakes
                     # a worker). The observer's instance_lifecycle event
                     # subscription then drives the terminal JobItem
                     # transition (see ``_finalize_job`` /
-                    # ``handle_correlation_complete``).
+                    # ``_retrigger_parent_finalize``).
                     #
                     # TASK jobs fall through to the spawn-instance +
                     # enqueue-message path below — that path is the

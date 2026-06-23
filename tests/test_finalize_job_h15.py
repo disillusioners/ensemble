@@ -158,7 +158,6 @@ def seed_instance(
             status=status,
             version=version,
             instance_metadata={},
-            children="[]",
         )
         s.add(inst)
         s.commit()

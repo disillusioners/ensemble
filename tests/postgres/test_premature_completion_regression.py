@@ -166,8 +166,6 @@ def _make_instance(
         agent_dir=f"/tmp/agents/{agent_id}",
         parent_id=parent_id,
         status=status,
-        waiting_for=waiting_for,
-        children="[]",
         version=1,
         created_at=datetime.now(timezone.utc).isoformat(),
         updated_at=datetime.now(timezone.utc).isoformat(),

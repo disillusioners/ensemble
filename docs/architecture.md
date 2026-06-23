@@ -143,7 +143,7 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 | `HUMAN` | User input | API, Telegram, etc. |
 | `AGENT` | Agent-to-agent | `send_message()` tool |
 | `SYSTEM` | System events | Internal |
-| `COMPLETION_REPORT` | Child finished | `_check_child_completion_v2()` |
+| `COMPLETION_REPORT` | Child finished | `_check_child_completion()` |
 
 ### Instance Hierarchy
 
@@ -469,7 +469,7 @@ The agents-ensemble uses a single-dispatcher, DB-backed completion model:
 
 4. **No Legacy Columns**: The `waiting_for` and `children` columns have been dropped from the SQLModel. A migration exists to drop them on existing DBs (`20260621_000002_drop_legacy_completion_columns.sql`); it is operator-applied (manual).
 
-5. **No Lease Stubs**: The `ExecutionGate` is a pure per-instance `asyncio.Lock`. The `LeaseContention`, `LeaseLostError`, `LeaseHolderKind`, and `LeaseContentionReason` classes are deleted.
+5. **No Lease Stubs**: The `ExecutionGate` is a pure per-instance `asyncio.Lock`. The `LeaseContention`, `LeaseLostError`, `LeaseHolderKind`, and `LeaseContentionReason` classes are deleted. The `instance_execution_leases` table is retained (created at startup as part of released history) but no code writes to it at runtime — the `asyncio.Lock` is the gate, and since the lock provides no contention-return path there is no need for holders/leases to be tracked in the DB.
 
 6. **Unified Message Dispatch**: Message dispatch is consolidated into a single `enqueue_message()` function with a `dispatch_path` parameter (`"workerpool"` or `"jobqueue"`). The legacy `enqueue_message_via_jq` is gone.
 

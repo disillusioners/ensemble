@@ -225,7 +225,7 @@ class JobWatcherRepository:
         Without this rebuild hook, a daemon crash during a parent job that
         has watched children would leave the parent's ``pending_jobs``
         empty after restart; the first ``is_complete`` call would fire
-        ``handle_correlation_complete`` prematurely, and the late watched
+        the terminal transition prematurely, and the late watched
         job's terminal event would find no PROCESSING job to resolve.
 
         Semantics: returns the ``job_id`` (string) of every job that

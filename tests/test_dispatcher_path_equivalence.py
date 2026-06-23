@@ -97,7 +97,6 @@ def _seed_instance(
         status=status,
         version=version,
         instance_metadata={},
-        children="[]",
     )
     with Session(engine) as session:
         session.add(inst)

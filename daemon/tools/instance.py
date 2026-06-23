@@ -267,16 +267,15 @@ def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
     ``JobProcessor._is_legacy_jobqueue_dispatch_enabled`` so test mocks
     that bypass ``InstanceManager.__init__`` (e.g. ``MagicMock()``
     without explicit ``config``) don't crash. The default is False
-    (Phase D feature flag OFF = legacy CM path is active), matching
-    the config field's default.
+    (bus disabled — flag slated for removal in Phase 8 cleanup),
+    matching the config field's default.
 
     Args:
         manager: The InstanceManager (or test mock).
 
     Returns:
         True if the operator has enabled the DB-backed DependencyBus
-        completion-delivery path; False otherwise (the default —
-        the CM remains the sole completion authority).
+        completion-delivery path; False otherwise.
     """
     _config = getattr(manager, "config", None)
     _job_system = getattr(_config, "job_system", None)
@@ -589,7 +588,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         message_id = result.message_id
 
         # Resolve the freshly-created child task id. The DependencyBus
-        # (Phase D) keys watchers on the child task id, so when the
+        # keys watchers on the child task id, so when the
         # ``use_dependency_bus`` flag is ON we look up the task the
         # ``enqueue_message`` call just wrote. The lookup is gated on
         # the flag so the default OFF path adds zero DB cost.
@@ -604,8 +603,8 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             else:
                 logger.warning(
                     "use_dependency_bus=ON but manager._task_repo is "
-                    "missing — cannot resolve child task id; skipping "
-                    "bus.watch and falling back to legacy CM path"
+                    "missing — cannot resolve child task id; bus "
+                    "watcher registration skipped (no fallback)"
                 )
                 use_dep_bus = False
 
@@ -640,14 +639,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                     _bus = get_dependency_bus()
                     if _bus is None:
                         # Bus singleton missing despite the flag being ON —
-                        # this is a wiring failure (the bus is mandatory
-                        # post-Phase-5). We fall through to the error
-                        # branch below rather than silently dropping the
-                        # correlation, so the caller can surface the
-                        # failure to the user.
+                        # this is a wiring failure (the bus is mandatory).
+                        # We fall through to the error branch below rather
+                        # than silently dropping the correlation, so the
+                        # caller can surface the failure to the user.
                         logger.warning(
                             "use_dependency_bus=ON but bus singleton is "
-                            "None; falling back to legacy CM register"
+                            "None — bus wiring failure (no fallback)"
                         )
                     else:
                         try:

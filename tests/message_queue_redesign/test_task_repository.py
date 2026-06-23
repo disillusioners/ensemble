@@ -342,7 +342,6 @@ class TestTaskClaiming:
                 agent_id="leader",
                 agent_dir="agents/leader",
                 status="running",
-                waiting_for=0,
             ))
             session.add(JobItem(
                 job_id="job-J1",
@@ -570,7 +569,6 @@ class TestTaskClaiming:
                 agent_id="leader",
                 agent_dir="agents/leader",
                 status="running",
-                waiting_for=0,
             ))
             session.add(JobItem(
                 job_id="job-UD-1",
@@ -634,7 +632,6 @@ class TestTaskClaiming:
                 agent_id="leader",
                 agent_dir="agents/leader",
                 status="running",
-                waiting_for=0,
             ))
             session.add(JobItem(
                 job_id="job-MIS-1",
@@ -703,7 +700,6 @@ class TestTaskClaiming:
                 agent_id="leader",
                 agent_dir="agents/leader",
                 status="running",
-                waiting_for=0,
             ))
             session.add(JobItem(
                 job_id="job-TERM-1",
@@ -771,7 +767,6 @@ class TestTaskClaiming:
                 agent_id="leader",
                 agent_dir="agents/leader",
                 status="running",
-                waiting_for=0,
             ))
             session.add(JobItem(
                 job_id="job-EMPTY-1",

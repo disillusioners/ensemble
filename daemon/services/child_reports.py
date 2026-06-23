@@ -115,8 +115,8 @@ class ChildReportsService:
         sibling helper in ``daemon/tools/instance.py`` so test mocks
         that bypass ``InstanceManager.__init__`` (e.g. ``MagicMock()``
         without explicit ``config``) don't crash. The default is False
-        (Phase D feature flag OFF = legacy CM path is active), matching
-        the config field's default.
+        (bus disabled — flag slated for removal in Phase 8 cleanup),
+        matching the config field's default.
 
         Returns:
             True if the operator has enabled the DB-backed DependencyBus
@@ -159,18 +159,17 @@ class ChildReportsService:
         :meth:`_process_child_completion_db_sync` (which runs inside
         ``WriteGuardSession`` on a worker thread — an ``await`` is
         impossible there) to consult the bus under
-        ``use_dependency_bus=ON``. When the bus flag is ON, the CM's
-        in-memory pending set is starved (send_message skips
-        ``cm.register_message_send``), so the bus DB is the
-        authoritative source of pending-children truth. Without this
-        check, the root-instance completion gate falls through to
-        COMPLETED prematurely while children are still running —
-        the exact bug Phase D was designed to prevent.
+        ``use_dependency_bus=ON``. The bus is the SOLE
+        pending-children source — its DB-backed ``dependency_watchers``
+        table is authoritative. Without this check, the root-instance
+        completion gate falls through to COMPLETED prematurely while
+        children are still running — the exact bug the bus was
+        designed to prevent.
 
-        Fallback semantics: bus singleton missing or flag OFF → returns 0.
-        This treats the gate as a no-op when the bus is not wired, so the
-        caller falls through to its own safe default rather than blocking
-        on an unavailable authority.
+        Bus singleton missing → returns 0. This treats the gate as a
+        no-op when the bus is not wired (bus singleton missing is a
+        hard error), so the caller falls through to its own safe
+        default rather than blocking on an unavailable authority.
 
         The implementation delegates to
         :meth:`DependencyBus.count_pending_for_target_sync` which
@@ -229,11 +228,10 @@ class ChildReportsService:
     ) -> list:
         """Emit a terminal event via the DependencyBus and re-trigger parent finalization.
 
-        When the ``use_dependency_bus`` flag is ON, this helper replaces
-        the ``notify_corr_resolve`` call: it asks the bus to atomically
-        transition PENDING watchers for ``task_id`` to FIRED, then
-        **directly** re-triggers ``JobFeedbackObserver._finalize_job``
-        on any parent whose watchers are all FIRED.
+        This helper atomically transitions PENDING watchers for
+        ``task_id`` to FIRED via the bus, then **directly** re-triggers
+        ``JobFeedbackObserver._finalize_job`` on any parent whose
+        watchers are all FIRED.
 
         The bus is a state machine — it does NOT enqueue messages.
         The leader's LLM path is NEVER injected with a synthetic
@@ -296,7 +294,7 @@ class ChildReportsService:
         outcome = Outcome(status=status, error=error, summary=summary)
         fired = await bus.emit_terminal(task_id=str(task_id), outcome=outcome)
 
-        # ─── Phase D re-trigger (direct finalization) ────────────────
+        # ─── Bus re-trigger (direct finalization) ────────────────
         # After the bus fires watchers, check if each target (parent)
         # has ALL watchers resolved (0 PENDING). If so, directly call
         # ``_finalize_job`` on the JobFeedbackObserver — there is NO
@@ -304,13 +302,10 @@ class ChildReportsService:
         # that drives an internal finalization transition, not an
         # event source that the LLM consumes.
         #
-        # Why this is needed: on the bus path (use_dependency_bus=ON),
-        # the CM callback is starved — ``send_message`` skips
-        # ``cm.register_message_send``, so the CM never invokes
-        # ``handle_correlation_complete`` for wave-2 children. Without
-        # this direct re-trigger, the job stays PROCESSING forever
-        # (the inverse of the premature-completion bug the bus gate
-        # was added to prevent).
+        # Why this is needed: the bus owns completion end-to-end.
+        # Without this direct re-trigger, the job stays PROCESSING
+        # forever (the inverse of the premature-completion bug the
+        # bus gate was added to prevent).
         #
         # Guarded by a ``_retriggered`` set so a parent that received
         # multiple FollowUps from one terminal event is re-triggered
@@ -515,7 +510,7 @@ class ChildReportsService:
             resolved_status = InstanceStatus.COMPLETED.value
 
         # Find the PROCESSING job for this instance. Uses the same
-        # helper as ``handle_correlation_complete`` (job_feedback_observer
+        # helper as ``_retrigger_parent_finalize`` (job_feedback_observer
         # line 551) so the stale-job defense-in-depth re-query is applied
         # uniformly across both re-trigger paths.
         #
@@ -537,9 +532,8 @@ class ChildReportsService:
         if job is None:
             # The job is already terminal or never existed — finalization
             # is either already complete or irrelevant. Silent skip
-            # matches the behaviour of the CM callback when no
-            # PROCESSING job exists (see ``handle_correlation_complete``
-            # line 552-557).
+            # matches the behaviour of the bus callback when no
+            # PROCESSING job exists.
             logger.debug(
                 f"Bus re-trigger: no PROCESSING job for "
                 f"{instance_id[:8]}..., may already be finalized"
@@ -1025,8 +1019,7 @@ Provide a concise summary:"""
         # (returns ``[]`` on bus=None or missing task) so a wiring
         # failure cannot break the child-completion path. The inline
         # cascade below this hook is only reached when the bus is
-        # None (graceful degradation / bus disabled) — see the A8
-        # hard error.
+        # None — bus singleton missing is a hard error.
         #
         # Calling context: this method is called from
         # _process_child_completion_and_notify_parent, which is invoked
@@ -1041,11 +1034,11 @@ Provide a concise summary:"""
         # returns ``[]`` on a missing task — so this guard is
         # only a fast-path skip.
         #
-        # Phase 5: bus is the SOLE completion authority. CM is
-        # removed. The ``use_dependency_bus`` flag still controls
-        # ``send_message`` watcher registration (Phase D), but at
-        # completion time we always route through the bus; the
-        # helper handles the no-watchers case as a no-op.
+        # The bus is the SOLE completion authority. The
+        # ``use_dependency_bus`` flag controls ``send_message``
+        # watcher registration, but at completion time we always
+        # route through the bus; the helper handles the no-watchers
+        # case as a no-op.
         if completed_message_id:
             # Look up the child task id from the message_id — the
             # bus is keyed on task id, not message_id. The lookup
@@ -1114,9 +1107,7 @@ Provide a concise summary:"""
             # fallback (Race #3) is the exact bug we are fixing — it MUST
             # NOT be reachable. The bus must be initialized for the new
             # architecture to work; we raise rather than silently degrade
-            # into the TOCTOU fallback. See
-            # ``docs/configuration/completion-flags.md`` §"Required
-            # external precondition" and the decouple execution plan §A8.
+            # into the TOCTOU fallback.
             #
             # Honest propagation note: this RuntimeError is caught by the
             # W3 fail-safe (``except Exception``) in
@@ -1146,10 +1137,11 @@ Provide a concise summary:"""
             # ``_finalize_job`` directly. The bus DB is the source
             # of truth (no TOCTOU window — Race #3 eliminated).
             #
-            # When bus is None (graceful degradation), keep the existing
-            # logic with the SELECT COUNT(*) fallback. This path is also
-            # the one exercised by every test that does not wire a bus
-            # fixture (e.g. tests/job_queue/test_in_progress_guard.py).
+            # When bus is None (bus singleton missing — hard error),
+            # keep the existing logic with the SELECT COUNT(*)
+            # fallback. This path is also the one exercised by every
+            # test that does not wire a bus fixture (e.g.
+            # tests/job_queue/test_in_progress_guard.py).
             if bus is not None:
                 # Bus is active — bus callback handles completion.
                 # No count_pending query, no inline status transition,
@@ -1549,18 +1541,13 @@ Provide a concise summary:"""
                             parent_id=None,
                         )
 
-                # ─── Phase D bus gate (premature-completion fix) ───────────
-                # When ``use_dependency_bus=ON``, the CM is starved
-                # (``send_message`` skips ``cm.register_message_send``),
-                # so the two checks above (CM pending count + CM
-                # is_complete) both pass with "complete" even while
-                # children tracked via the bus are still running. The
-                # bus DB is the authoritative source of pending-
-                # children truth on the bus path — we MUST consult it
-                # here, before falling through to COMPLETED, or the
-                # root instance will be marked COMPLETED while a child
-                # is still working (the exact premature-completion
-                # bug Phase D was designed to prevent).
+                # ─── Bus gate (premature-completion fix) ───────────
+                # The bus DB is the authoritative source of pending-
+                # children truth — we MUST consult it here, before
+                # falling through to COMPLETED, or the root instance
+                # will be marked COMPLETED while a child is still
+                # working (the exact premature-completion bug the bus
+                # was designed to prevent).
                 #
                 # C2 fix (TOCTOU hardening, 2026-06-22): inline the
                 # COUNT query directly on the WriteGuardSession's
@@ -2145,18 +2132,19 @@ Provide a concise summary:"""
 
         Called on the event loop AFTER ``asyncio.to_thread`` returns from
         ``_process_child_completion_db_sync``. Dispatches SSE, CompletionRegistry,
-        lifecycle events, and the CM resolve hook based on the DB outcome.
+        lifecycle events, and the bus terminal hook based on the DB outcome.
 
-        The CM resolve hook (``notify_corr_resolve``) fires AFTER the commit so
-        that the CM's in-memory pending set is updated after the DB state is
-        consistent. The callback ``handle_correlation_complete`` does its own
-        separate DB transaction (via ``asyncio.to_thread``), so there is no
-        dependency between the commit orderings.
+        The bus terminal hook (``bus.emit_terminal``) fires AFTER the
+        commit so that the bus's DB-backed watcher state is updated
+        after the DB state is consistent. The bus's
+        ``_retrigger_parent_finalize`` callback does its own
+        separate DB transaction (via ``asyncio.to_thread``), so there
+        is no dependency between the commit orderings.
 
         Args:
             result: The outcome from the sync DB helper.
             last_content: The assistant message content (used for CompletionRegistry).
-            completed_message_id: The completed message ID (used for CM hook).
+            completed_message_id: The completed message ID (used for bus hook).
         """
         outcome = result.outcome
         instance_id = result.instance_id

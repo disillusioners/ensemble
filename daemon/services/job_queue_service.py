@@ -1690,7 +1690,7 @@ class JobQueueService:
     async def cancel_message_job(self, job_id: str) -> None:
         """Backward-compat shim for the legacy MESSAGE-specific cancel entry point.
 
-        Phase D removed the :class:`MessageJobHandler`; the per-job
+        The :class:`MessageJobHandler` was removed; the per-job
         CancellationToken that ``MessageJobHandler.cancel_message_job``
         used to signal no longer exists (unified dispatcher owns the
         cancellation token via the WorkerPool). This shim delegates to

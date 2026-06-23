@@ -309,11 +309,10 @@ class ServicesConfig(BaseSettings):
 
 
 class JobSystemConfig(BaseSettings):
-    """Configuration for the job system improvements.
+    """Configuration for the job system.
 
-    This section owns completion-architecture feature flags used by Phase A of the
-    decoupling plan (CorrelationManager migration). See
-    ``docs/configuration/completion-flags.md`` for the interaction matrix.
+    The DependencyBus is the SOLE completion authority for parent-waits-for-children.
+    There is no fallback or rollback path; the CorrelationManager was fully removed.
     """
 
     model_config = SettingsConfigDict(env_prefix="ENSEMBLE_JOB_SYSTEM_")
@@ -328,38 +327,19 @@ class JobSystemConfig(BaseSettings):
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
-    # ─── Phase A completion-architecture feature flags ──────────────────────
-    # These gates protected the migration to the CorrelationManager-authoritative
-    # path. The legacy flag was removed in Phase 3 (cleanup-old-architecture)
-    # once the Dependency Bus became the sole completion authority. See
-    # ``docs/configuration/completion-flags.md`` for historical context.
-
-    # ─── Phase D dependency-bus feature flag ───────────────────────────────
-    # When ON (default, D8 cutover), the Dependency Bus
-    # (`daemon/services/dependency_bus.py`) is the authoritative
-    # parent-waits-for-children mechanism, backed by the
-    # `dependency_watchers` table so watcher state survives restart. When OFF,
-    # the CorrelationManager is the sole completion authority (Phase A+B+C
-    # behavior) — this is the rollback path if a bus regression is discovered.
-    # The CM class is retained for rollback safety and rollback. See
-    # ``docs/plans/decouple-execution-plan.md`` §13 and
-    # ``docs/configuration/completion-flags.md``.
+    # The DependencyBus is unconditional — there is no legacy or rollback path.
+    # The ``use_dependency_bus`` field is retained only because it is slated for
+    # removal in Phase 8 cleanup; do not describe it as a kill-switch.
 
     use_dependency_bus: bool = Field(
         default=True,
         description=(
-            "Phase D feature flag for the DB-backed Dependency Bus. When ON "
-            "(default), the Dependency Bus is the authoritative "
-            "parent-waits-for-children mechanism — `send_message` writes a "
-            "`dependency_watchers` row (FollowUp) instead of calling "
-            "`notify_corr_register`, and terminal events call "
-            "`bus.emit_terminal(task_id, outcome)` instead of "
-            "`notify_corr_resolve`. The CM class is retained for "
-            "rollback safety for one more release. When OFF, the CM is the sole "
-            "completion authority (Phase A+B+C behavior) — this is the "
-            "rollback/kill-switch path if a bus regression is discovered. "
-            "Set via env var ENSEMBLE_JOB_SYSTEM_USE_DEPENDENCY_BUS=false to "
-            "roll back to CM."
+            "Controls DependencyBus activation. When ON (default), ``send_message`` "
+            "writes a ``dependency_watchers`` row (FollowUp) and terminal events "
+            "call ``bus.emit_terminal(task_id, outcome)``. The bus is the only "
+            "completion authority; setting this to OFF disables parent-waits-for-children "
+            "and is not a supported rollback path. Flag slated for removal in "
+            "Phase 8 cleanup."
         ),
     )
 

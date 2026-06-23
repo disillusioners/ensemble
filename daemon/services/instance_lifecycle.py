@@ -46,8 +46,8 @@ def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
     ``daemon/services/error_reporting.py``). Defensive ``getattr``
     chain so test mocks that bypass ``InstanceManager.__init__``
     (e.g. ``MagicMock()`` without explicit ``config``) don't crash.
-    Default is False (Phase D feature flag OFF = legacy CM path is
-    active), matching the config field's default.
+    Default is False (bus disabled — flag slated for removal in
+    Phase 8 cleanup), matching the config field's default.
 
     Args:
         manager: The InstanceManager (or test mock).
@@ -71,8 +71,8 @@ async def _cancel_bus_watchers_for(manager: "InstanceManager", instance_id: str,
     DB status transition has committed. Cancels PENDING watchers so
     an in-flight child task does not deliver a FollowUp onto a
     paused/terminated parent. No-op when the flag is OFF or the bus
-    singleton is missing (graceful degradation — the CM path is the
-    authoritative completion mechanism in that case).
+    singleton is missing (bus singleton missing is a hard error — the
+    bus is the only completion mechanism).
 
     Args:
         manager: The InstanceManager facade (used to read the flag).

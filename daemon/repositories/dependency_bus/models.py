@@ -1,8 +1,7 @@
-"""SQLModel table definitions for the Dependency Bus (Phase D).
+"""SQLModel table definitions for the Dependency Bus.
 
 Single table backing the DB-backed parent-waits-for-children
-mechanism that replaces the CorrelationManager in-memory pending
-map when the ``use_dependency_bus`` flag is ON.
+mechanism — the SOLE completion authority.
 
 * :class:`DependencyWatcher` — one row per registered FollowUp.
   Inserted by ``send_message`` when a parent calls into a child

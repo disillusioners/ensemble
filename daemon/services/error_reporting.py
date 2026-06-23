@@ -71,9 +71,9 @@ def _is_dependency_bus_enabled(manager: "InstanceManager") -> bool:
     ``ChildReportsService._is_dependency_bus_enabled``, and the sibling
     helper in ``daemon/tools/instance.py`` so test mocks that bypass
     ``InstanceManager.__init__`` (e.g. ``MagicMock()`` without explicit
-    ``config``) don't crash. Default is False (Phase D feature flag
-    OFF = legacy CM path is active), matching the config field's
-    default.
+    ``config``) don't crash. Default is False (bus disabled — flag
+    slated for removal in Phase 8 cleanup), matching the config
+    field's default.
 
     Args:
         manager: The InstanceManager (or test mock).
@@ -141,12 +141,10 @@ class ErrorReportingService:
              the SOLE completion authority.
              or WAITING_CHILDREN, then commit.
 
-        When the CM is active, the inline cascade is SKIPPED (the CM
-        callback owns completion). The CM hook itself
-        (``notify_corr_resolve``) is an in-memory notification that must
-        run on the asyncio event loop — it is NOT a DB operation and
-        therefore NOT in this helper. The async caller invokes it
-        AFTER this helper returns.
+        The bus terminal hook (``bus.emit_terminal``) is the SOLE
+        completion emission — it is NOT a DB operation and therefore
+        NOT in this helper. The async caller invokes it AFTER this
+        helper returns.
 
         Post-commit async side effects (SSE ``status_change``,
         lifecycle event publish) are also NOT in this helper — they
@@ -218,18 +216,18 @@ class ErrorReportingService:
             parent = session.get(Instance, parent_id)
             if parent:
 
-                # NOTE: The CM hook (``await notify_corr_resolve``) that
-                # used to live here has been moved out of this sync helper
-                # to the async caller. It is an in-memory CM notification
-                # that acquires the CM's per-parent asyncio.Lock (N3
-                # constraint: must run on the main event loop) — it
-                # cannot be called from a worker thread. The hook is
-                # safe to run AFTER this helper returns because:
-                #   - When CM is active, the inline cascade below is
-                #     SKIPPED anyway (CM callback owns completion), so
-                #     ordering the hook before or after the cascade check
-                #     does not change the outcome.
-                #   - When CM is None (disabled), the hook is a no-op.
+                # NOTE: The bus terminal hook (``await
+                # _emit_terminal_via_bus``) used to live here but has
+                # been moved out of this sync helper to the async
+                # caller. It is an async bus operation that runs on
+                # the asyncio event loop — it cannot be called from a
+                # worker thread. The hook is safe to run AFTER this
+                # helper returns because the bus DB state read here
+                # (``count_pending_for_target_sync``) is the only
+                # authoritative completion source: the post-commit
+                # emission + re-trigger in the async caller is what
+                # actually fires the bus terminal event and finalizes
+                # the parent job.
 
                 session.expire(parent)
                 parent = session.get(Instance, parent_id)
@@ -266,12 +264,10 @@ class ErrorReportingService:
                     and parent.status != InstanceStatus.COMPLETED.value
                     and parent.status != InstanceStatus.ERROR.value
                 ):
-                    # Phase 3 (Cascade Unification) — preserved through
-                    # Phase 5 (CM removal): when the completion authority
-                    # is wired, the inline cascade + SELECT COUNT(*)
-                    # fallback + inline status transition are all
-                    # SKIPPED. The DependencyBus (Phase D, the SOLE
-                    # completion authority after CM removal in Phase 5)
+                    # Cascade Unification: when the bus is wired, the
+                    # inline cascade + SELECT COUNT(*) fallback + inline
+                    # status transition are all SKIPPED. The
+                    # DependencyBus (the SOLE completion authority)
                     # fires ``_retrigger_parent_finalize`` from the
                     # async caller in ``_send_error_report``, which
                     # transitions the parent JOB to terminal via
@@ -499,34 +495,32 @@ class ErrorReportingService:
             # CM's per-parent ``asyncio.Lock``; N3 constraint: must run
             # on the main event loop) and is therefore NOT in the sync
             # helper. Safe to run after the helper because:
-            #   - When CM is active, the inline cascade inside the helper
-            #     is SKIPPED anyway (CM callback owns completion), so
-            #     ordering the hook before or after the cascade check
+            #   - The bus owns terminal completion (the inline cascade
+            #     inside the helper is SKIPPED when the bus is active),
+            #     so ordering the hook before or after the cascade check
             #     does not change the outcome.
-            #   - When CM is None (disabled / not wired), the hook is a
-            #     no-op (``notify_corr_resolve`` checks for CM and
-            #     returns early when absent).
+            #   - The bus terminal emission is fired from the async
+            #     caller via ``_emit_terminal_via_bus`` (not from this
+            #     worker thread — async operations cannot run there).
             #
             # Skip the hook when message_id is missing/empty:
-            # the CM keys correlations on (child_id, message_id) and
-            # cannot resolve a None/empty message_id against any
-            # registered entry. Calling with message_id="" would
-            # silently no-op and the pending entry would stay forever.
+            # the bus keys watchers on the child task id and
+            # cannot fire watchers with a None/empty message_id
+            # (no entry to resolve against). Calling with
+            # message_id="" would silently no-op and the pending
+            # entry would stay forever.
             #
-            # Phase D (DependencyBus): when ``use_dependency_bus=ON``, the
-            # CM ``notify_corr_resolve`` call is SKIPPED and replaced by
-            # ``bus.emit_terminal(...)`` keyed on the child task id,
-            # with ``status="error"`` and the error message forwarded as
-            # the Outcome's ``error`` field. The two authorities are
-            # mutually exclusive — never called in parallel — to prevent
-            # double-fire (Phase A lesson).
-            # The bus is a pure state machine — it does NOT deliver
-            # messages to the LLM. The re-trigger of ``_finalize_job``
-            # is the actual finalization path (see
-            # ``_emit_terminal_via_bus`` docstring).
+            # DependencyBus (SOLE completion authority): the bus
+            # emission is keyed on the child task id, with
+            # ``status="error"`` and the error message forwarded as
+            # the Outcome's ``error`` field. The bus is a pure state
+            # machine — it does NOT deliver messages to the LLM. The
+            # re-trigger of ``_finalize_job`` is the actual
+            # finalization path (see ``_emit_terminal_via_bus``
+            # docstring).
             if message_id:
                 if _is_dependency_bus_enabled(self._manager):
-                    # ─── Phase D: DependencyBus path (replaces CM) ───────
+                    # DependencyBus path — the SOLE completion authority.
                     _child_task_err = None
                     _task_repo_err = getattr(self._manager, "_task_repo", None)
                     if _task_repo_err is not None:
@@ -541,13 +535,15 @@ class ErrorReportingService:
                     )
                     _bus = get_dependency_bus()
                     if _bus is None:
+                        # Bus singleton missing under use_dependency_bus=ON is
+                        # an invalid state. Log loudly so operators see the
+                        # misconfiguration; there is no fallback path.
                         logger.warning(
                             "use_dependency_bus=ON but bus singleton is "
-                            "None; falling back to legacy CM resolve "
-                            "(error) path"
+                            "None — invalid state (bus must be initialized); "
+                            "no fallback available for child error finalization"
                         )
                     else:
-                        # ─── Phase D re-trigger (inverse-regression fix) ──
                         # Delegate the bus emission + FollowUp enqueue
                         # + re-trigger loop to
                         # ``child_reports._emit_terminal_via_bus`` so the
@@ -643,40 +639,37 @@ class ErrorReportingService:
                                     f"child={instance_id[:8]}...): {hook_err}"
                                 )
                 else:
-                    # Phase 5 (2026-06-23): the legacy CM path is
-                    # GONE — the CorrelationManager class was removed.
-                    # The bus is the SOLE completion authority; when
-                    # ``use_dependency_bus=OFF``, the daemon is in an
-                    # invalid state per ADR-011 (A9 hard error). Log
-                    # the failure at WARNING and continue — the
-                    # inline cascade in the sync helper above has
-                    # already committed the DB state, and the rest
-                    # of the error-reporting path (CompletionRegistry,
-                    # SSE, error message enqueue) proceeds normally.
-                    # The parent may stay PROCESSING in this OFF
-                    # state — that is the documented trade-off for
-                    # disabling the bus.
+                    # ``use_dependency_bus=False`` is an invalid state.
+                    # The bus is the SOLE completion authority; with
+                    # the flag OFF, the daemon cannot fire the terminal
+                    # event to resolve the parent. Log the failure at
+                    # WARNING and continue — the inline cascade in the
+                    # sync helper above has already committed the DB
+                    # state, and the rest of the error-reporting path
+                    # (CompletionRegistry, SSE, error message enqueue)
+                    # proceeds normally. The parent may stay PROCESSING
+                    # in this OFF state — there is no fallback path.
                     logger.warning(
                         f"Bus-off (use_dependency_bus=False): cannot "
                         f"resolve parent={parent_id[:8]}... for child "
                         f"error on instance={instance_id[:8]}... — "
-                        f"the bus is the SOLE completion authority "
-                        f"after Phase 5 CM removal; parent may stay "
-                        f"in PROCESSING until manual intervention. "
-                        f"Enable ``use_dependency_bus: true`` to "
-                        f"restore automatic finalization."
+                        f"the bus is the SOLE completion authority; "
+                        f"parent may stay in PROCESSING until manual "
+                        f"intervention. Enable ``use_dependency_bus: "
+                        f"true`` to restore automatic finalization."
                     )
             else:
                 logger.debug(
-                    f"CM hook: skipping resolve (error) for parent="
+                    f"bus hook: skipping resolve (error) for parent="
                     f"{parent_id[:8]}..., child={instance_id[:8]}... "
                     f"(no message_id — error reported without a tracked send)"
                 )
 
             # Post-commit side effects for the inline cascade
-            # (CM-disabled / graceful-degradation path only). The sync
-            # helper committed the parent status transition; we now fire
-            # the corresponding SSE + lifecycle event on the event loop.
+            # (bus is None — invalid state, no completion fires). The
+            # sync helper committed the parent status transition; we
+            # now fire the corresponding SSE + lifecycle event on the
+            # event loop.
             if db_result.cascade_status == "completed":
                 # Emit status_change SSE event for parent completed
                 if self._manager._live_hub:

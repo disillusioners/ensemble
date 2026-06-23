@@ -1,13 +1,12 @@
-"""DependencyBus: DB-backed parent-waits-for-children service (Phase D).
+"""DependencyBus: DB-backed parent-waits-for-children service.
 
 This is the in-process service layer over the
 :class:`~daemon.repositories.dependency_bus.repository.DependencyWatcherRepository`.
-It replaces the CorrelationManager's in-memory ``_pending`` dict with
-DB-backed watcher rows that survive process restart, gated by the
-``USE_DEPENDENCY_BUS`` runtime flag (the flag is checked at the call
-sites in ``send_message`` and ``task_processor`` — this class itself
-is flag-agnostic and always wired; the flag decides which delivery
-path is used).
+It is the SOLE completion authority for parent-waits-for-children.
+The ``use_dependency_bus`` runtime flag (slated for removal in Phase 8
+cleanup) is checked at the call sites in ``send_message`` and
+``task_processor`` — this class itself is flag-agnostic and always
+wired.
 
 Architecture
 ------------
@@ -54,8 +53,8 @@ The ``USE_DEPENDENCY_BUS`` flag is checked at the call sites, NOT
 in this class. The class is always wired; the flag decides whether
 ``send_message`` calls :meth:`watch` and whether the task processor
 calls :meth:`emit_terminal`. When the flag is OFF, the bus is
-inert (not called) and the legacy CM path is the active delivery
-mechanism.
+inert (not called) — there is no fallback path; completion is
+simply unavailable until the flag is enabled.
 
 Multi-process limitation
 ------------------------
@@ -662,16 +661,15 @@ class DependencyBus:
         ``child_reports._process_child_completion_db_sync`` and
         ``job_feedback_observer._finalize_job_db_sync``) where an
         ``await`` is impossible. The completion gate is the critical
-        reader of pending-children state under Phase D; without
-        consulting the bus under ``use_dependency_bus=ON``, the
-        root-instance completion gate falls through to COMPLETED
-        prematurely because the CM is starved.
+        reader of pending-children state; without consulting the bus,
+        the root-instance completion gate falls through to COMPLETED
+        prematurely.
 
-        Mirrors :class:`CorrelationManager`'s sync/async split
-        (e.g. ``get_pending_count`` is sync, ``is_complete`` has
-        both variants): the bus exposes an async primary API and a
-        sync convenience API for the rare caller inside a worker
-        thread.
+        Mirrors the sync/async API split of the historical
+        CorrelationManager (e.g. ``get_pending_count`` was sync,
+        ``is_complete`` had both variants): the bus exposes an async
+        primary API and a sync convenience API for the rare caller
+        inside a worker thread.
 
         Args:
             target_instance_id: The parent instance id to query.
@@ -1187,9 +1185,8 @@ def get_dependency_bus() -> DependencyBus | None:
 
     Returns:
         The singleton DependencyBus instance, or None if not
-        initialized. Callers should treat None as "bus not wired
-        up — skip hooks" (graceful degradation, same pattern as
-        :func:`get_correlation_manager`).
+        initialized. Callers must treat None as a hard error (bus
+        singleton missing — no fallback path).
     """
     return _dependency_bus
 

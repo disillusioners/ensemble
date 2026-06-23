@@ -1816,7 +1816,7 @@ class InstanceManager:
                 "    END LOOP;\n"
                 "END $$;"
             ),
-            # ── Dependency Bus enqueued_at marker (Phase D, 2026-06-21) ────
+            # ── Dependency Bus enqueued_at marker (2026-06-21) ────
             # The Dependency Bus crash-recovery contract requires an
             # ``enqueued_at`` column on ``dependency_watchers`` to distinguish
             # "FIRED and enqueued" from "FIRED and crashed". The .sql migration

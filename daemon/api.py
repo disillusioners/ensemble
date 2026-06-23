@@ -350,16 +350,14 @@ async def lifespan(app: FastAPI):
     await job_feedback_observer.start()
     logger.info("JobFeedbackObserver started")
 
-    # Initialize and start the DependencyBus (Phase D — bus is the SOLE
-    # completion authority as of Phase 5; CM is removed). Runs after
+    # Initialize and start the DependencyBus. Runs after
     # JobFeedbackObserver is created and before JobProcessor.start() so
-    # the bus is live when jobs flow. The bus is ALWAYS instantiated
-    # (cheap, no maintenance cost when OFF); the ``use_dependency_bus``
-    # flag is checked at the gated call sites in ``send_message``,
-    # ``child_reports``, and ``error_reporting`` and decides whether
-    # the bus path is taken. See ``daemon/services/dependency_bus.py``
-    # for the bus API and ``docs/configuration/completion-flags.md``
-    # for the flag semantics.
+    # the bus is live when jobs flow. The bus is ALWAYS instantiated —
+    # it is the SOLE completion authority (CM was removed in Phase 5).
+    # The ``use_dependency_bus`` flag is checked at the gated call sites
+    # in ``send_message``, ``child_reports``, and ``error_reporting`` and
+    # decides whether the bus path is taken. See
+    # ``daemon/services/dependency_bus.py`` for the bus API.
     await init_dependency_bus(app, manager)
 
     # Bootstrap system default project (Phase 1 of system_default_project feature)
@@ -395,11 +393,10 @@ async def lifespan(app: FastAPI):
     job_processor.setup_job_feedback_observer(job_feedback_observer)
     logger.info("JobFeedbackObserver wired into JobProcessor (dispatch_path=jobqueue_local)")
 
-    # Phase D (DependencyBus): wire the JobFeedbackObserver onto the
-    # InstanceManager facade so ``ChildReportsService`` can re-trigger
-    # ``_finalize_job`` after the bus fires the last watcher for a
-    # parent. Without this wiring the bus path would starve the
-    # terminal-transition callback — see
+    # Wire the JobFeedbackObserver onto the InstanceManager facade so
+    # ``ChildReportsService`` can re-trigger ``_finalize_job`` after the
+    # bus fires the last watcher for a parent. Without this wiring the
+    # bus path would starve the terminal-transition callback — see
     # fix/bus-retrigger-finalize-job for the full inverse-regression
     # analysis.
     manager.set_job_feedback_observer(job_feedback_observer)
@@ -504,22 +501,18 @@ async def lifespan(app: FastAPI):
 
 
 async def init_dependency_bus(app, manager) -> None:
-    """Initialize and start the DependencyBus (Phase D).
+    """Initialize and start the DependencyBus.
 
     Runs after JobFeedbackObserver is created and before
     JobProcessor.start(), so the bus is live when jobs flow. The bus
-    is ALWAYS instantiated — the ``use_dependency_bus`` flag is
+    is ALWAYS instantiated — it is the SOLE completion authority
+    (CM was removed in Phase 5). The ``use_dependency_bus`` flag is
     checked at the gated call sites (``send_message``,
     ``child_reports``, ``error_reporting``) and decides whether the
-    bus path is taken. As of Phase 5 the bus is the SOLE completion
-    authority (CM is removed); the flag's effect at completion time
-    is limited to ``send_message`` watcher registration.
+    bus path is taken.
 
-    Failure handling: a startup failure is logged at WARNING and the
-    daemon continues without the bus (graceful degradation). The
-    ``set_dependency_bus`` call ensures the module singleton is reset
-    to ``None`` on failure so the call sites correctly fall through
-    to the legacy fallback.
+    If the bus fails to initialize, log the error and leave the singleton
+    ``None``. Call sites must treat ``None`` as a hard error (no fallback).
 
     Args:
         app: The FastAPI app (used to stash the instance on ``app.state``

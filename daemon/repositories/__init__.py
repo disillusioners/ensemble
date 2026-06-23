@@ -42,7 +42,7 @@ from .infra.repository import SQLModelInfraRepository, BootstrapResult
 from .infra.models import InfraAsset, InfraAssetType, InfraAssetHistory, InfraChangeType
 from .infra.types import JSONBType, InfraTypeDefinition, INFRA_TYPE_DEFINITIONS
 
-# Dependency Bus repository (Phase D of the decouple architecture)
+# Dependency Bus repository.
 # Imported here so ``SQLModel.metadata.create_all()`` (called from
 # ``daemon/manager.py``) registers the ``dependency_watchers`` table
 # on fresh PostgreSQL databases. Fresh SQLite databases pick the
@@ -122,7 +122,7 @@ __all__ = [
     "JSONBType",
     "InfraTypeDefinition",
     "INFRA_TYPE_DEFINITIONS",
-    # Dependency Bus (Phase D)
+    # Dependency Bus
     "DependencyWatcher",
     "DependencyWatcherState",
     "DependencyWatcherRepository",

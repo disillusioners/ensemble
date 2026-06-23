@@ -18,12 +18,16 @@ The architecture is organized as three layers: a path-agnostic `MessageProcessin
 ```
 ┌───────────────────────────────────────────────────────────┐
 │  MessageProcessingPipeline (shared)                       │
-│  Stage 1: GATE ACQUIRE  ← ExecutionGate asyncio.Lock      │
-│  Stage 2: PROCESS        ← _process_message_with_tracking │
-│  Stage 3: MARK COMPLETE  ← message status → COMPLETED     │
-│  Stage 4: DISPATCH       ← dispatch_completed (SSE, etc.) │
-│  Stage 5: CHILD CHECK    ← DependencyBus emit_terminal    │
-│  Stage 6: ERROR HANDLE   ← shared error side-effects      │
+│  Stage 1:    BUILD CLOSURE  ← wrap _process_message_with_tracking │
+│  Stage 1.5:  CLAIM MESSAGE  ← READY → PROCESSING transition │
+│  Stage 2:    LOCK + WORK    ← ExecutionGate asyncio.Lock  │
+│  Stage 3:    ON_CONTENTION  ← defensive (unused, asyncio.Lock) │
+│  Stage 4:    MARK COMPLETE  ← message status → COMPLETED   │
+│  Stage 5:    DISPATCH       ← dispatch_completed (SSE, etc.) │
+│  Stage 6:    CHILD CHECK    ← DependencyBus emit_terminal  │
+│                                                           │
+│  Error handling: try/except wrapper around stages 3–6     │
+│  └─ handle_message_processing_error() on exception        │
 │                                                           │
 │  Callbacks (unified):                                     │
 │  └─ on_success: complete_task + emit_terminal to bus      │
@@ -47,14 +51,17 @@ The architecture is organized as three layers: a path-agnostic `MessageProcessin
 
 `daemon/services/message_processing_pipeline.py` — `MessageProcessingPipeline`
 
-The pipeline is the single shared execution layer. It takes a `ProcessingContext` (message metadata) and `PipelineCallbacks` and produces a `ProcessingResult`. The six stages are:
+The pipeline is the single shared execution layer. It takes a `ProcessingContext` (message metadata) and `PipelineCallbacks` and produces a `ProcessingResult`. The seven stages are:
 
-1. **GATE ACQUIRE** — wraps the work function in `execution_gate.run()`, acquiring the per-instance `asyncio.Lock` before any `graph.astream` call. The second caller for the same instance blocks on the event loop until the first releases.
-2. **PROCESS** — calls `manager._process_message_with_tracking()`, which runs the LangGraph streaming logic.
-3. **MARK COMPLETE** — calls `queue_repository.complete(message_id)` to set the message row to `COMPLETED`. Defensive (warn-log on failure; does not fail the message).
-4. **DISPATCH** — resolves the dispatch source (`internal_report` → `original_source` from instance metadata) and calls `source_dispatcher.dispatch_completed()` to route the response externally (SSE, etc.). Skipped when no valid external source is resolved.
-5. **CHILD CHECK** — calls `dependency_bus.emit_terminal(source_task_id, outcome)`. The bus resolves any registered watcher and enqueues a FollowUp task onto the parent. Idempotent — multiple emits for the same source_task_id are safe.
-6. **ERROR HANDLE** — catches any exception from stages 3–6 and calls `handle_message_processing_error()` (in `daemon/services/message_processing_errors.py`), which writes the error event to the DB, publishes the lifecycle event, sends the error report to the parent, and (when `job_id` is provided) marks the job as `FAILED`.
+1. **BUILD CLOSURE** — builds the `_do_process` closure wrapping `manager._process_message_with_tracking()`. The closure captures `context` so the caller doesn't need to thread parameters into the `work_fn` body, and reads `context.cancellation_token` at call time so a late-arriving cancellation sees the latest value.
+2. **CLAIM MESSAGE** — transitions the message `READY → PROCESSING` via `queue_repository.claim_specific(message_id)`. The downstream `complete()` and `fail()` guards require `status='processing'`, so without this step the message would stay in `READY` forever and `complete()` would silently no-op, leaving `pending_count` permanently non-zero. Best-effort: a failed claim (already `PROCESSING`/`COMPLETED`/`FAILED` — e.g. concurrent actor) does NOT block processing.
+3. **LOCK + WORK** — acquires the per-instance `asyncio.Lock` via `execution_gate.run(instance_id, holder_id, holder_kind, work_fn)` and calls `_do_process()` inside the `async with` block. The second caller for the same instance blocks on the event loop until the first releases. `holder_id` and `holder_kind` are accepted-and-ignored for backward compat — the `asyncio.Lock` provides no contention-return path, so there is no notion of "who holds the lock" to validate on release.
+4. **ON_CONTENTION (defensive, unused)** — a defensive dispatch for any future gate that signals contention. Under the `asyncio.Lock` gate this is never invoked — the second caller blocks on the same event loop until the holder releases. If invoked, the callback receives the gate's exception and returns a `ProcessingResult` OR `None` to re-raise.
+5. **MARK COMPLETE** — calls `queue_repository.complete(message_id)` to set the message row to `COMPLETED`. Defensive (warn-log on failure; does not fail the message).
+6. **DISPATCH** — resolves the dispatch source (`internal_report` → `original_source` from instance metadata) and calls `source_dispatcher.dispatch_completed()` to route the response externally (SSE, etc.). Skipped when no valid external source is resolved.
+7. **CHILD CHECK** — calls `dependency_bus.emit_terminal(source_task_id, outcome)`. The bus resolves any registered watcher and enqueues a FollowUp task onto the parent. Idempotent — multiple emits for the same `source_task_id` are safe.
+
+**Error handling** is a `try/except` wrapper around stages 3–6 (i.e. `LOCK + WORK` through `CHILD CHECK`). On any exception it calls `handle_message_processing_error()` (in `daemon/services/message_processing_errors.py`), which writes the error event to the DB, publishes the lifecycle event, sends the error report to the parent, and (when `job_id` is provided) marks the job as `FAILED`. `OperationCancelledError` and `asyncio.CancelledError` are routed to the `on_cancel` callback for pause-vs-terminate discrimination.
 
 The unified `on_success` callback calls `TaskRepository.complete_task()` and then `dependency_bus.emit_terminal()` so the bus can fire any registered FollowUp. There is no JobQueue path-specific callback any more — `MessageJobHandler` is deleted.
 
@@ -101,12 +108,14 @@ Worker claims task → ProcessMessageProcessor.run_task()
         ↓
   ┌─────────────────────────────────────────────────┐
   │  MessageProcessingPipeline (SHARED, single path)│
-  │  Stage 1: gate.run()                            │
-  │  Stage 2: process message                       │
-  │  Stage 3: mark complete                         │
-  │  Stage 4: dispatch                              │
-  │  Stage 5: emit_terminal to DependencyBus        │
-  │  Stage 6: error handling                        │
+  │  Stage 1:    build _do_process closure          │
+  │  Stage 1.5:  claim message (READY → PROCESSING)  │
+  │  Stage 2:    lock + work (gate.run)              │
+  │  Stage 3:    on_contention (defensive, unused)   │
+  │  Stage 4:    mark complete                      │
+  │  Stage 5:    dispatch                            │
+  │  Stage 6:    child check (emit_terminal)         │
+  │  Error handle: try/except around 3–6            │
   └─────────────────────────────────────────────────┘
         ↓
   on_success:

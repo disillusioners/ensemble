@@ -7,11 +7,19 @@
 Per-instance **`asyncio.Lock`** owned by the main daemon event loop:
 
 ```python
-async def run(self, instance_id, work_fn):
+async def run(
+    self,
+    instance_id: str,
+    holder_id: str,      # Accepted-and-ignored for backward compat
+    holder_kind: str,    # Accepted-and-ignored for backward compat
+    work_fn: WorkFn,
+):
     lock = self._lock_for(instance_id)
     async with lock:
         return await work_fn()
 ```
+
+`holder_id` and `holder_kind` are accepted-and-ignored for backward compat — the `asyncio.Lock` provides no contention-return path, so there is no notion of "who holds the lock" to validate on release. Old call sites (e.g. `InstanceManager`) that pass `lease_repo=...` and a holder identity keep working unchanged.
 
 No heartbeat task. No `recover_stale_leases`. No DB row. The legacy `LeaseContention` / `LeaseLostError` machinery is gone; back-off stays in the dispatchers.
 
