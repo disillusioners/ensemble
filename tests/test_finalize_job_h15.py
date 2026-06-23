@@ -38,9 +38,37 @@ from sqlmodel import Session, SQLModel
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobStatus
 from daemon.repositories.job_queue.models import JobLock
+from daemon.services.correlation_manager import set_correlation_manager
 from daemon.services.job_feedback_observer import JobFeedbackObserver
 from daemon.services.job_state_machine import InvalidTransitionError
 from daemon.write_pause_guard import WritePauseGuard
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Phase 3 fixture: CM is the SOLE completion authority (ADR-011). The legacy
+# ``use_legacy_waiting_for_cascade`` kill switch was removed in Phase 3, so
+# ``_finalize_job_db_sync`` now raises ``RuntimeError`` when CM is None (A9
+# hard error at ``job_feedback_observer.py:1832``). Wire a mock CM globally;
+# tests configure the pending count via ``set_cm_pending(n)`` before exercising
+# the code path under test.
+# ──────────────────────────────────────────────────────────────────────────────
+_CM_PENDING = [0]
+
+
+@pytest.fixture(autouse=True)
+def _wire_cm_mock():
+    cm_mock = MagicMock()
+    cm_mock.get_pending_count = lambda iid: _CM_PENDING[0]
+    cm_mock.is_complete = lambda iid: _CM_PENDING[0] == 0
+    set_correlation_manager(cm_mock)
+    yield
+    set_correlation_manager(None)
+    _CM_PENDING[0] = 0
+
+
+def set_cm_pending(n: int) -> None:
+    """Set the pending correlation count the mocked CM will return."""
+    _CM_PENDING[0] = n
 
 
 # ─── Shared fixtures & helpers ──────────────────────────────────────────────────
@@ -531,8 +559,16 @@ class TestH15W3FailSafe:
         mocks["job_queue_service"].get_job_by_instance = AsyncMock(return_value=job)
 
         # Patch sync helper to raise (sync, NOT async — see comment above).
+        #
+        # Phase 3 update: the W3 fail-safe catches generic ``Exception``
+        # (e.g. ``OSError``, ``sqlalchemy.exc.DBAPIError``) but
+        # ``RuntimeError`` is re-raised to preserve the A8 hard-error
+        # invariant (CM=None / config errors must NOT be silently
+        # converted to per-job FAILED). Use ``OSError`` here — it
+        # represents an unexpected DB / IO failure that the W3
+        # fail-safe is designed to recover from.
         def fake_sync(*args, **kwargs):
-            raise RuntimeError("Simulated sync failure")
+            raise OSError("Simulated sync failure")
 
         observer._finalize_job_db_sync = fake_sync
 
