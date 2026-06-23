@@ -63,6 +63,8 @@ from sqlmodel import SQLModel, Session
 
 # Model imports — required so SQLModel.metadata sees the tables when we
 # create them on the test engine.
+from daemon.repositories.dependency_bus.repository import DependencyWatcherRepository
+from daemon.repositories.dependency_bus.models import DependencyWatcher  # noqa: F401  (for SQLModel.metadata.create_all)
 from daemon.repositories.event.models import Event, EventKind  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import (
@@ -78,7 +80,7 @@ from daemon.repositories.message_queue.models import (  # noqa: F401
 from daemon.repositories.task.models import Task  # noqa: F401
 from daemon.services.cancellation import CancellationService
 from daemon.services.child_reports import ChildReportsService
-from daemon.services.dependency_bus import set_dependency_bus
+from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
 from daemon.services.error_reporting import ErrorReportingService
 from daemon.services.instance_messaging import InstanceMessagingService
 from daemon.services.job_feedback_observer import JobFeedbackObserver
@@ -636,8 +638,30 @@ class TestProcessChildCompletionDbSyncOffloaded:
     code path that previously wedged the loop.
     """
 
+    @pytest.fixture
+    async def bus(self, engine: Engine):
+        """Started DependencyBus bound to the test engine.
+
+        Phase 5: ``_process_child_completion_db_sync`` raises a hard
+        error when the bus singleton is ``None`` (bus is the sole
+        completion authority — see A8 in ``child_reports.py``). This
+        fixture wires a real bus so the tests can exercise the
+        ``root_completed`` code path.
+        """
+        repo = DependencyWatcherRepository(engine)
+        b = DependencyBus(repo)
+        await b.start()
+        set_dependency_bus(b)
+        try:
+            yield b
+        finally:
+            await b.stop()
+            set_dependency_bus(None)
+
     @pytest.mark.asyncio
-    async def test_process_child_completion_db_sync_runs_off_loop_thread(self, engine):
+    async def test_process_child_completion_db_sync_runs_off_loop_thread(
+        self, engine, bus
+    ):
         """``_process_child_completion_db_sync`` must execute on a worker thread.
 
         The async caller (``_process_child_completion_and_notify_parent``)
@@ -674,7 +698,9 @@ class TestProcessChildCompletionDbSyncOffloaded:
         )
 
     @pytest.mark.asyncio
-    async def test_process_child_completion_db_sync_is_scheduled_via_to_thread(self, engine):
+    async def test_process_child_completion_db_sync_is_scheduled_via_to_thread(
+        self, engine, bus
+    ):
         """``asyncio.to_thread`` must be invoked with
         ``_process_child_completion_db_sync``.
 
@@ -778,18 +804,16 @@ class TestSendErrorReportDbSyncOffloaded:
             thread_ids, spy = ctx
             service._send_error_report_db_sync = spy  # type: ignore[method-assign]
             # The dedup branch + metadata re-fetch use the real engine +
-            # mocked queue repo. The CM hook is patched below so the
-            # post-commit path runs cleanly without a wired CM.
-            with patch(
-                "daemon.services.dependency_bus.emit_terminal",
-                new=AsyncMock(),
-            ):
-                await service._send_error_report(
-                    instance_id="er-child-1",
-                    error="test error",
-                    error_type="execution_error",
-                    message_id="msg-er-1",
-                )
+            # mocked queue repo. With bus=None (fixture above), the
+            # bus emit path in ``_send_error_report`` is dormant
+            # (``get_dependency_bus() is None → warning, no call``),
+            # so no bus mock is required.
+            await service._send_error_report(
+                instance_id="er-child-1",
+                error="test error",
+                error_type="execution_error",
+                message_id="msg-er-1",
+            )
 
         loop_thread = threading.get_ident()
         assert thread_ids, "_send_error_report_db_sync was never called"
@@ -827,16 +851,15 @@ class TestSendErrorReportDbSyncOffloaded:
                 "daemon.services.error_reporting.asyncio.to_thread",
                 side_effect=spy_to_thread,
             ):
-                with patch(
-                    "daemon.services.dependency_bus.emit_terminal",
-                    new=AsyncMock(),
-                ):
-                    await service._send_error_report(
-                        instance_id="er-child-2",
-                        error="test error",
-                        error_type="execution_error",
-                        message_id="msg-er-2",
-                    )
+                # With bus=None (fixture above), the bus emit path
+                # in ``_send_error_report`` is dormant — see the
+                # parallel test above for the same reasoning.
+                await service._send_error_report(
+                    instance_id="er-child-2",
+                    error="test error",
+                    error_type="execution_error",
+                    message_id="msg-er-2",
+                )
 
         assert funcs_called, (
             "asyncio.to_thread was never called from _send_error_report"

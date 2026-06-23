@@ -27,6 +27,8 @@ from sqlmodel import Session, SQLModel
 
 # Model imports — required so SQLModel.metadata sees the tables when
 # create_all() runs on the test engine.
+from daemon.repositories.dependency_bus.models import DependencyWatcher  # noqa: F401  (for SQLModel.metadata.create_all)
+from daemon.repositories.dependency_bus.repository import DependencyWatcherRepository
 from daemon.repositories.event.models import Event, EventKind  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
@@ -42,7 +44,7 @@ from daemon.services.completion_registry import (
     CompletionResult,
     get_completion_registry,
 )
-from daemon.services.dependency_bus import set_dependency_bus
+from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
 from daemon.write_pause_guard import WritePauseGuard
 
 
@@ -67,11 +69,56 @@ def engine() -> Engine:
 
 
 @pytest.fixture(autouse=True)
+def bus(engine: Engine):
+    """Started DependencyBus bound to the test engine (autouse).
+
+    Phase 5: ``_process_child_completion_db_sync`` raises a hard error
+    when the bus singleton is ``None`` (bus is the sole completion
+    authority — see A8 in ``child_reports.py``). The carve-out tests
+    need a wired bus so the ``root_skipped_terminal_job`` /
+    ``root_waiting_children`` branches can resolve the bus state
+    without raising. Autouse so every test in this module gets the
+    wired bus; the other tests do not call into the bus-authority
+    code path, so the wiring is a no-op for them.
+    """
+    import asyncio
+    repo = DependencyWatcherRepository(engine)
+    b = DependencyBus(repo)
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                ex.submit(asyncio.run, b.start()).result()
+        else:
+            loop.run_until_complete(b.start())
+    except RuntimeError:
+        asyncio.run(b.start())
+    set_dependency_bus(b)
+    try:
+        yield b
+    finally:
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    ex.submit(asyncio.run, b.stop()).result()
+            else:
+                loop.run_until_complete(b.stop())
+        except RuntimeError:
+            asyncio.run(b.stop())
+        set_dependency_bus(None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_dependency_bus():
     """Ensure no DependencyBus singleton leaks between tests.
 
-    The legacy ``waiting_for`` fallback path is required for the carve-out
-    test (bus is None → falls through to ``instance.waiting_for`` read).
+    The ``bus`` fixture above wires a real bus; this autouse fixture
+    is a safety net that clears any leftover singleton from a previous
+    test that did not use ``bus`` (e.g. direct ``set_dependency_bus``
+    calls in test bodies).
     """
     set_dependency_bus(None)
     yield
