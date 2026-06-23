@@ -166,12 +166,15 @@ def _make_manager():
         manager.config = MagicMock()
         manager.config.job_system = MagicMock()
 
-        # Phase 3: wire CM mock so the A9 hard-error at
-        # ``daemon/manager.py:2913`` does not fire when the resume
-        # path checks ``bus is not None``. The bus mock reports 0
-        # pending children for any instance so the resume path
-        # proceeds to job completion.
+        # Phase 5: wire bus mock so the A9 hard-error at
+        # ``daemon/manager.py:2915`` does not fire when the resume
+        # path checks ``bus is not None``. The resume path awaits
+        # ``bus.count_pending_for_target(instance_id)`` (async) — the
+        # sync variant ``count_pending_for_target_sync`` is also
+        # provided for the child_reports path. Both report 0 pending
+        # children so the resume path proceeds to job completion.
         bus_mock = MagicMock()
+        bus_mock.count_pending_for_target = AsyncMock(return_value=0)
         bus_mock.count_pending_for_target_sync = lambda iid: 0
         bus_patcher = patch(
             "daemon.manager.get_dependency_bus",
