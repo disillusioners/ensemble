@@ -14,9 +14,25 @@ contend. The multi-threaded tests below use a tempfile-backed SQLite with
 a 30-second busy_timeout so writes are retried internally instead of
 failing the test. In production this code runs against Postgres, where
 each `UPDATE ... SET col = col - 1 WHERE ...` is row-atomic by MVCC.
+
+Phase 4 status: SKIPPED. The vestigial `waiting_for` (and `children`)
+columns were dropped from the `instances` table by Phase 4 (commit
+85eb4e4b). The atomic-counter feature has no production counterpart
+anymore — completion authority moved to the instance_hierarchy junction
+table + DependencyBus (Phase 5). The raw INSERT/UPDATE SQL in this file
+references columns that no longer exist, so every test would error at
+setup. Kept (skipped, not deleted) so the test logic is preserved for
+reference if a future phase reintroduces a counter column.
 """
 
-import os
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Phase 4 dropped `waiting_for` and `children` columns from "
+    "`instances`; the atomic-counter feature this file tests no "
+    "longer exists in production. See commit 85eb4e4b and the "
+    "instance_hierarchy + DependencyBus (Phase 5) replacement."
+)
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
