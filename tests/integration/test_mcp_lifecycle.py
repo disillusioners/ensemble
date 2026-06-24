@@ -13,6 +13,8 @@ These tests follow the lazy init path (Phase 1) used by the new
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+pytestmark = pytest.mark.integration
+
 
 def _make_schema(name: str, server_name: str = "test-server", description: str = ""):
     """Create a ``McpToolSchema`` for the lazy-path tests."""

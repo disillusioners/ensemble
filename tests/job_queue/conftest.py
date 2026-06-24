@@ -39,18 +39,25 @@ def setup_system_default_project():
 
 @pytest.fixture(autouse=True)
 def _truncate_tables(engine):
-    """Clear all tables between tests (function-scoped, runs after each test).
+    """Clear all tables around each test (function-scoped).
 
-    This ensures test isolation when engine is session-scoped:
-    - After yield: clear all data created by the test
-    - Uses DELETE FROM for compatibility with SQLite
+    Belt-and-braces isolation: truncate both BEFORE yield (to clear any
+    data left over from session-scoped engine setup or earlier fixtures
+    that populate data) and AFTER yield (to leave a clean slate for the
+    next test). Mirrors the PostgreSQL ``_pg_truncate_tables`` pattern in
+    ``tests/postgres/conftest.py``, adapted to ``DELETE FROM`` for SQLite
+    compatibility.
     """
+    def _truncate():
+        from sqlmodel import Session, text
+        with Session(engine) as session:
+            for table in SQLModel.metadata.tables:
+                session.exec(text(f'DELETE FROM "{table}"'))
+            session.commit()
+
+    _truncate()
     yield
-    from sqlmodel import Session, text
-    with Session(engine) as session:
-        for table in SQLModel.metadata.tables:
-            session.exec(text(f'DELETE FROM "{table}"'))
-        session.commit()
+    _truncate()
 
 
 @pytest.fixture(scope="session")

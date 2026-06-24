@@ -31,6 +31,7 @@ from langchain_core.messages import (
 from langchain_core.tools import BaseTool
 from pydantic import Field
 
+pytestmark = pytest.mark.integration
 
 # =============================================================================
 # Test Tools

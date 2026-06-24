@@ -18,6 +18,8 @@ from typing import Optional, Any
 from datetime import datetime
 from unittest.mock import MagicMock
 
+pytestmark = pytest.mark.integration
+
 # =============================================================================
 # UNMOCKING: Restore real langgraph modules for integration tests
 # Pattern from test_message_queue_e2e.py

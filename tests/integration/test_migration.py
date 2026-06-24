@@ -21,6 +21,8 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 
+pytestmark = pytest.mark.integration
+
 # Path to the migration file
 MIGRATION_FILE = os.path.join(
     os.path.dirname(__file__),

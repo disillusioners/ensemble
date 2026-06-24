@@ -477,6 +477,15 @@ _TRACKED_ENV_EXACT = frozenset({
     "TEMP",
     "TMP",
     "QUEUE_DISCARD_ON_STARTUP",
+    # tests/test_config.py substitution tests (no explicit cleanup)
+    "TEST_VAR",
+    "OUTER",
+    "INNER",
+    # Defense vs mid-test failure (tests/test_config.py:127-149)
+    "CUSTOM_LLM_URL",
+    "LLM_API_KEY",
+    "DAEMON_HOST",
+    "DAEMON_PORT",
 })
 # Prefix patterns that catch dynamic env writes (e.g. test_config.py
 # does delenv for every key starting with "OPENAI_").

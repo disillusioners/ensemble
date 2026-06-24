@@ -735,7 +735,7 @@ class TestApiModuleSize:
     """Test that daemon/api.py was reduced to expected size."""
 
     def test_api_module_is_small(self):
-        """Verify daemon/api.py is under 700 lines (was ~2095 before refactoring)."""
+        """Verify daemon/api.py is under 1200 lines (was ~2095 before refactoring)."""
         from pathlib import Path
         
         api_path = Path(__file__).parent.parent.parent / 'daemon' / 'api.py'

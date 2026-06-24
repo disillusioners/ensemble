@@ -47,6 +47,8 @@
 
 Default run excludes integration, postgres, and e2e tests via `addopts = "-m 'not integration and not postgres'"` in `pyproject.toml`.
 
+> **Note**: E2E tests are excluded from default runs because they carry the `integration` marker, not a separate `e2e` marker. To run them: `pytest -m integration`.
+
 ## 30-Second Stability Check
 
 ```bash

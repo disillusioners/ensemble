@@ -34,6 +34,7 @@ from daemon.repositories.job_queue.models import JobStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.repositories.project.repository import SQLModelProjectRepository
 
+pytestmark = pytest.mark.integration
 
 # =============================================================================
 # Fixtures
