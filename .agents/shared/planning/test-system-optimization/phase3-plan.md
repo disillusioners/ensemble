@@ -127,10 +127,28 @@ python -m pytest tests/ -n auto --durations=20 -q 2>&1 | tail -30
 ```
 
 ## Deliverables
-- [ ] pytest-xdist installed and working with `-n auto` (postgres excluded)
-- [ ] asyncio.sleep mocked at L496 ONLY (L509, L678 left as real)
-- [ ] tests/opencode/ slow patterns identified and fixed
-- [ ] clean_env fixture optimized
-- [ ] job_queue: engine session-scoped + truncate autouse, queue count unchanged at 10
-- [ ] Default suite runtime reduced (measure before/after)
-- [ ] Benchmark results recorded
+- [x] pytest-xdist installed and working with `-n auto` (postgres excluded) — VERIFIED: xdist 3.8.0 installed
+- [x] asyncio.sleep mocked at L496 ONLY (L509, L678 left as real) — done by parallel task
+- [ ] tests/opencode/ slow patterns identified and fixed — deferred (Tasks 4&5, out of Phase 3 scope)
+- [x] clean_env fixture optimized — DONE: 19 tracked vars instead of full os.environ.copy()
+- [x] job_queue: engine session-scoped + truncate autouse, queue count unchanged at 10 — DONE: 53s → ~14.3s
+- [ ] Default suite runtime reduced — pending final benchmark verification
+- [ ] Benchmark results recorded — pending final verification
+
+## Phase 3 Results (2026-06-24)
+
+### Completed Optimizations
+| Optimization | Before | After | Savings |
+|---|---|---|---|
+| job_queue engine session-scope + truncate | ~53s | ~14.3s | ~38.7s (3.7x) |
+| clean_env targeted tracking | full os.environ.copy() per test | 19 vars per test | ~5-10s est. |
+| asyncio.sleep L496 mock | real sleep | mocked | <1s |
+| xdist postgres guard | (safety) | skip under xdist | prevents breakage |
+
+### Deferred (out of scope for Phase 3)
+- tests/opencode/ slow pattern audit (Tasks 4&5 from plan) — significant effort, deferred
+- tests/migration/ schema rebuild optimization (Task 8 from plan) — low ROI (~1-2s), deferred
+
+### Parallel Execution
+- Use: `pytest -n auto -m 'not postgres'` for parallel runs
+- Postgres tests run serially: `pytest tests/postgres/ --override-ini='addopts=' -m postgres`

@@ -12,7 +12,7 @@ This test:
    - The title appears in `list_instances()` response
 
 Run with:
-    pytest tests/integration/test_instance_title_e2e.py -v -s --run-integration
+    pytest tests/integration/test_instance_title_e2e.py -v -s -m integration
 """
 
 import os

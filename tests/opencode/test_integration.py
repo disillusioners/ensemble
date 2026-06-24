@@ -8,7 +8,7 @@ the unit tests in this directory mock the HTTP boundary instead.
 Enable the suite by either:
 
 * starting an OpenCode server before running pytest, or
-* running with ``pytest --run-integration`` (the ``pytestmark`` below
+* running with ``pytest -m integration`` (the ``pytestmark`` below
   is keyed off a probe to ``127.0.0.1:4095`` — see ``_opencode_reachable``).
 
 Test scenarios:

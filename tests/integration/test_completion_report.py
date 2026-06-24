@@ -9,9 +9,9 @@ This test:
 
 Run with:
     pytest tests/integration/test_completion_report.py -v -s --log-cli-level=DEBUG
-    
+
 Or with integration marker:
-    pytest tests/integration/test_completion_report.py -v -s --run-integration
+    pytest tests/integration/test_completion_report.py -v -s -m integration
 """
 
 import os

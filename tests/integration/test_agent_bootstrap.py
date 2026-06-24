@@ -4,7 +4,7 @@ This test validates end-to-end functionality with real LLM API calls.
 It requires a valid .env file with OPENAI_API_KEY set.
 
 Run with:
-    pytest tests/integration/test_agent_bootstrap.py -v --run-integration
+    pytest tests/integration/test_agent_bootstrap.py -v -m integration
 """
 
 import os
@@ -16,7 +16,6 @@ from pathlib import Path
 # `integration` marker defined in pyproject.toml.
 pytestmark = [
     pytest.mark.integration,
-    # Skip all tests in this module unless --run-integration is passed
     pytest.mark.skipif(
         not os.environ.get("OPENAI_API_KEY"),
         reason="Set OPENAI_API_KEY to run integration tests"

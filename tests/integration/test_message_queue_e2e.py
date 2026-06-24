@@ -10,10 +10,10 @@ This test:
 6. Logs detailed information for debugging
 
 Run with:
-    pytest tests/integration/test_message_queue_e2e.py -v -s --run-integration
-    
+    pytest tests/integration/test_message_queue_e2e.py -v -s -m integration
+
 Or to run with specific verbose output:
-    pytest tests/integration/test_message_queue_e2e.py -v -s --run-integration --log-cli-level=DEBUG
+    pytest tests/integration/test_message_queue_e2e.py -v -s -m integration --log-cli-level=DEBUG
 """
 
 import os

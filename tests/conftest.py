@@ -452,22 +452,78 @@ def _ensure_app_state_manager():
         State.__getattr__ = original_getattr
 
 
+# Env vars tests are known to set/modify. Tracked instead of snapshotting
+# all of os.environ (~100+ entries on dev/CI) on every autouse invocation.
+# Built from grepping tests/ for os.environ writes and monkeypatch
+# setenv/delenv calls. ENSEMBLE_CONFIG is intentionally excluded from
+# restoration (tests may legitimately modify it).
+_TRACKED_ENV_EXACT = frozenset({
+    "RAG_IS_REQUIRED",
+    "MCP_ALLOW_LOCAL",
+    "MCP_POOL_TOOL_CALL_TIMEOUT",
+    "LIGHTRAG_HOST",
+    "LIGHTRAG_API_KEY",
+    "LIGHTRAG_WORKSPACE",
+    "LIGHTRAG_TIMEOUT",
+    "POSTGRES_HOST",
+    "POSTGRES_DB",
+    "POSTGRES_USER",
+    "POSTGRES_PASSWORD",
+    "POSTGRES_PORT",
+    "DATABASE_URL_POSTGRES",
+    "OPENAI_REASONING_ECHO_MODELS",
+    "OPENAI_MODEL_KEYWORDS",
+    "ENSEMBLE_DATA_DIR",
+    "TEMP",
+    "TMP",
+    "QUEUE_DISCARD_ON_STARTUP",
+})
+# Prefix patterns that catch dynamic env writes (e.g. test_config.py
+# does delenv for every key starting with "OPENAI_").
+_TRACKED_ENV_PREFIXES = ("OPENAI_", "ENSEMBLE_")
+
+
+def _is_tracked_env(key: str) -> bool:
+    if key in _TRACKED_ENV_EXACT:
+        return True
+    return any(key.startswith(p) for p in _TRACKED_ENV_PREFIXES)
+
+
 @pytest.fixture(autouse=True)
 def clean_env():
-    """Clean up environment variables before and after each test."""
-    # Store original env vars
-    original_env = os.environ.copy()
+    """Clean up tracked environment variables before and after each test.
+
+    Only snapshots and restores env vars that tests actually write to
+    (see ``_TRACKED_ENV_EXACT`` / ``_TRACKED_ENV_PREFIXES``), avoiding the
+    full ``os.environ.copy()`` + dict-diff on every test.
+
+    ``ENSEMBLE_CONFIG`` is preserved across tests because tests may
+    legitimately modify it.
+    """
+    # Snapshot only tracked vars (cheap: ~20 entries vs full os.environ).
+    original_snapshot = {key: os.environ[key] for key in os.environ if _is_tracked_env(key)}
 
     yield
 
-    # Restore original env (but don't restore ENSEMBLE_CONFIG as tests may modify it)
-    for key in os.environ:
-        if key not in original_env:
-            del os.environ[key]
+    # Teardown: restore each tracked var to its pre-test value (matches
+    # the original fixture's semantics — if a var existed before the
+    # test and was deleted or modified mid-test, restore it). Skip
+    # ENSEMBLE_CONFIG intentionally.
+    for key, original_value in original_snapshot.items():
+        if key == "ENSEMBLE_CONFIG":
+            continue
+        if os.environ.get(key) != original_value:
+            os.environ[key] = original_value
 
-    for key, value in original_env.items():
-        if key != "ENSEMBLE_CONFIG" and os.environ.get(key) != value:
-            os.environ[key] = value
+    # Catch tracked vars that were created during the test (not in the
+    # original snapshot) and need to be removed. ENSEMBLE_CONFIG is
+    # exempt so tests that create it stay consistent with the
+    # "don't restore" rule above.
+    for key in list(os.environ):
+        if key == "ENSEMBLE_CONFIG":
+            continue
+        if _is_tracked_env(key) and key not in original_snapshot:
+            del os.environ[key]
 
 
 @pytest.fixture(autouse=True)

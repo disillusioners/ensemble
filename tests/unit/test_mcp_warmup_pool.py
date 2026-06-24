@@ -492,8 +492,19 @@ class TestReplenish:
         pool.register_server("server2", _make_config(), pool_size=2)
         pool._running = True  # Must be running for replenish to execute
 
+        # Mock the slow_create sleep locally (mirrors L240/L321 track_sleep pattern)
+        # without using a global asyncio.sleep patch, so L509 timing primitive is preserved.
+        # Uses 0.15s instead of 0.5s — still > L509's 0.1s checkpoint so the semaphore
+        # assertion holds, but ~3x faster than the original 0.5s sleep.
+        sleep_durations: list[float] = []
+        original_sleep = asyncio.sleep
+
+        async def track_sleep(duration: float):
+            sleep_durations.append(duration)
+            await original_sleep(0.15)
+
         async def slow_create(*args, **kwargs):
-            await asyncio.sleep(0.5)
+            await track_sleep(0.5)
             return _make_pooled_connection()
 
         # Start two replenish tasks simultaneously

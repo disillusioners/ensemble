@@ -37,13 +37,32 @@ def setup_system_default_project():
     constants.SYSTEM_DEFAULT_PROJECT_ID = original
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
+def _truncate_tables(engine):
+    """Clear all tables between tests (function-scoped, runs after each test).
+
+    This ensures test isolation when engine is session-scoped:
+    - After yield: clear all data created by the test
+    - Uses DELETE FROM for compatibility with SQLite
+    """
+    yield
+    from sqlmodel import Session, text
+    with Session(engine) as session:
+        for table in SQLModel.metadata.tables:
+            session.exec(text(f'DELETE FROM "{table}"'))
+        session.commit()
+
+
+@pytest.fixture(scope="session")
 def engine():
-    """Create in-memory SQLite engine for testing.
-    
+    """Create in-memory SQLite engine for testing (session-scoped).
+
+    Session-scoped to avoid re-creating 27+ tables for every test.
     Uses StaticPool to reuse the same connection across threads.
     Required because asyncio.to_thread() runs workers in different threads,
     and SQLite in-memory databases are per-thread by default.
+    Tables are created once at session start; _truncate_tables clears data
+    between tests for isolation.
     """
     engine = create_engine(
         "sqlite:///:memory:",

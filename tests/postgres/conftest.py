@@ -24,6 +24,26 @@ except ImportError:  # pragma: no cover - psycopg3 is always a project dep
 
 logger = logging.getLogger(__name__)
 
+# --- xdist guard ---------------------------------------------------------
+# PostgreSQL tests cannot run under pytest-xdist parallelism: every worker
+# would call ``SQLModel.metadata.create_all()`` on the shared test database,
+# and concurrent ``create_all`` calls race on shared tables (e.g.
+# ``infra_asset_types``), producing ``UniqueViolation`` errors.
+#
+# xdist sets ``PYTEST_XDIST_WORKER`` per-worker (e.g. ``gw0``). When set, we
+# apply a skip marker to every postgres test at collection time (via the
+# existing ``pytest_collection_modifyitems`` hook below).
+#
+# Correct invocations:
+#   # Serial (recommended for postgres tests):
+#   pytest tests/postgres/ --override-ini="addopts=" -m postgres
+#
+#   # Parallel for the rest of the suite (postgres is excluded automatically
+#   # by the -m 'not postgres' default and by this guard):
+#   pytest -n auto -m 'not postgres'
+_XDIST_WORKER_ENV = "PYTEST_XDIST_WORKER"
+_RUNNING_UNDER_XDIST = _XDIST_WORKER_ENV in os.environ
+
 # Ensure all SQLModel table classes are registered in metadata before
 # ``pg_engine`` calls ``SQLModel.metadata.create_all``. Without these
 # imports, ``create_all`` produces an empty schema and the autouse
@@ -57,14 +77,22 @@ PG_URL = f"postgresql+psycopg://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_
 # Auto-apply the ``postgres`` marker to every test collected in this
 # directory so ``pytest -m postgres`` selects them and the default
 # ``-m 'not integration and not postgres'`` addopts skips them.
+# Also skip every postgres test when running under xdist (see xdist guard
+# above).
 def pytest_collection_modifyitems(config, items):
     postgres_marker = pytest.mark.postgres
+    xdist_skip_marker = pytest.mark.skip(
+        reason="PostgreSQL tests cannot run under xdist (schema conflicts). "
+        "Run serially: pytest tests/postgres/ --override-ini=\"addopts=\" -m postgres"
+    )
     for item in items:
         # Restrict to tests under tests/postgres/ — anything else that
         # happens to import this conftest via parent-directory inheritance
         # is left alone.
         if "tests/postgres/" in str(item.fspath):
             item.add_marker(postgres_marker)
+            if _RUNNING_UNDER_XDIST:
+                item.add_marker(xdist_skip_marker)
 
 
 # PostgreSQL SQLSTATE codes that indicate an authentication failure (as
