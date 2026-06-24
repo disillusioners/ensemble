@@ -83,6 +83,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from daemon.cancellation import OperationCancelledError
+from daemon.repositories.instance.models import InstanceStatus
+from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
@@ -430,6 +432,26 @@ class MessageProcessingPipeline:
             # still starts with ``internal_``.
             await self._dispatch_completed(context, gate_outcome)
 
+            # Stage 5.5: post-turn parent status transition.
+            # Bug fix: when an instance (typically a parent that spawned
+            # children) just finished a graph turn, status was left at
+            # RUNNING even though the LLM is done and the instance is
+            # only waiting on more child reports. The frontend then
+            # showed "running" until the last child reported, which
+            # was misleading. If the bus still tracks pending watchers
+            # for this instance, transition RUNNING → WAITING_CHILDREN
+            # and emit the matching SSE.
+            #
+            # Best-effort + race-safe: uses ``transition_status_if``
+            # with ``allowed_from=(RUNNING,)`` so a concurrent
+            # terminal write (ERROR/TERMINATED/FAILED from another
+            # path) wins. Best-effort on DB/SSE failures — the message
+            # itself already succeeded, and the next bus event or
+            # child completion will resync the status.
+            await self._maybe_transition_to_waiting_children(
+                context.instance_id
+            )
+
             # Stage 6: child completion check. Best-effort: a
             # failure here MUST NOT fail the message — the message
             # itself was processed successfully. Mirrors the
@@ -660,6 +682,91 @@ class MessageProcessingPipeline:
                 exc_info=True,
             )
             # Don't fail the task — the message was processed successfully.
+
+    async def _maybe_transition_to_waiting_children(
+        self,
+        instance_id: str,
+    ) -> None:
+        """Stage 5.5: transition RUNNING → WAITING_CHILDREN after a turn.
+
+        Bug fix: previously, when an instance finished a graph turn
+        (typically after consuming a child completion report) and the
+        bus still tracked pending watchers for it, the instance was
+        left at ``RUNNING`` until either the next child reported OR
+        the bus finally drained (and the lifecycle observer drove a
+        terminal transition). The frontend then displayed "running"
+        for an instance that was effectively idle waiting on more
+        child reports.
+
+        This stage runs once per pipeline success path, immediately
+        after ``_dispatch_completed``. It queries the bus for
+        pending watchers on ``instance_id`` and, if any exist,
+        performs an atomic ``transition_status_if`` from
+        ``RUNNING`` to ``WAITING_CHILDREN``. The atomic predicate
+        prevents clobbering a concurrent terminal write
+        (``ERROR``/``TERMINATED``/``FAILED`` from another path).
+
+        Behavioural notes:
+          * Best-effort: any failure here is logged at WARNING and
+            swallowed — the message itself already succeeded, and
+            the bus / lifecycle observer will eventually resync the
+            status via the normal terminal path.
+          * Idempotent: if the instance is already ``WAITING_CHILDREN``
+            (no transition fires) the helper simply emits no SSE.
+          * No-op when the bus is uninitialised (matches the rest
+            of the codebase, which treats ``get_dependency_bus() is
+            None`` as a configuration bug rather than degrading).
+        """
+        try:
+            bus = get_dependency_bus()
+            if bus is None:
+                return
+            pending = await bus.count_pending_for_target(instance_id)
+            if pending <= 0:
+                return
+            repo = getattr(self._manager, "_instance_repository", None)
+            if repo is None:
+                return
+            updated = await asyncio.to_thread(
+                repo.transition_status_if,
+                instance_id,
+                InstanceStatus.WAITING_CHILDREN.value,
+                (InstanceStatus.RUNNING.value,),
+            )
+            if updated is None:
+                # Concurrent writer changed the status between our
+                # check and the atomic UPDATE (e.g. a terminal write
+                # raced us). Don't emit a stale SSE — the other path
+                # owns the status now.
+                logger.debug(
+                    f"MessageProcessingPipeline: skip WAITING_CHILDREN "
+                    f"transition for {instance_id[:8]}... (status no longer RUNNING)"
+                )
+                return
+            live_hub = getattr(self._manager, "_live_hub", None)
+            if live_hub is not None:
+                try:
+                    await live_hub.stream_status_change(
+                        instance_id,
+                        InstanceStatus.WAITING_CHILDREN.value,
+                        agent_id=getattr(updated, "agent_id", None),
+                    )
+                except Exception as sse_err:
+                    logger.warning(
+                        f"MessageProcessingPipeline: failed to emit "
+                        f"WAITING_CHILDREN SSE for {instance_id[:8]}...: "
+                        f"{sse_err}"
+                    )
+            logger.info(
+                f"Parent instance {instance_id[:8]}... transitioned to "
+                f"WAITING_CHILDREN after graph turn (bus_pending={pending})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"MessageProcessingPipeline: WAITING_CHILDREN transition "
+                f"failed for {instance_id[:8]}... (non-fatal): {e}",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Boundary handlers (contention / cancel)
