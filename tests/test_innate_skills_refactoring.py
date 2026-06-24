@@ -53,14 +53,15 @@ class TestInnateSkillsSystemPromptIdentity:
         cache = PromptCache()
         
         # Test each agent
+        # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
         test_cases = [
-            ("coder", ["opencode"], "OpenCode_Skill"),
-            ("reviewer", ["opencode"], "OpenCode_Skill"),
-            ("tester", ["opencode", "test-pack"], "OpenCode_Skill"),  # tester gets BOTH
+            ("coder", ["opencode"], "OpenCode-Skill"),
+            ("reviewer", ["opencode"], "OpenCode-Skill"),
+            ("tester", ["opencode", "test-pack"], "OpenCode-Skill"),  # tester gets BOTH
             ("tester", ["opencode", "test-pack"], "Test Pack Skill"),  # tester gets BOTH
-            ("planner", ["opencode"], "OpenCode_Skill"),
-            ("tidier", ["opencode"], "OpenCode_Skill"),
-            ("approver", ["opencode"], "OpenCode_Skill"),
+            ("planner", ["opencode"], "OpenCode-Skill"),
+            ("tidier", ["opencode"], "OpenCode-Skill"),
+            ("approver", ["opencode"], "OpenCode-Skill"),
             ("leader", ["coordination"], "Coordination Skill"),
             ("jober", ["job-orchestration"], "Job Orchestration"),
             ("giter", [], None),  # giter has NO innate_skills
@@ -79,7 +80,8 @@ class TestInnateSkillsSystemPromptIdentity:
                 assert expected_skill_content in prompt, f"{agent_id} prompt should contain {expected_skill_content}"
             else:
                 # giter should NOT have any skill sections (no innate_skills, no legacy skills/)
-                assert "OpenCode_Skill" not in prompt, f"giter should NOT have opencode skill"
+                # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
+                assert "OpenCode-Skill" not in prompt, f"giter should NOT have opencode skill"
                 assert "Coordination Skill" not in prompt, f"giter should NOT have coordination skill"
                 assert "# Skill" not in prompt, f"giter should have no skill sections"
             
@@ -97,10 +99,11 @@ class TestInnateSkillsSystemPromptIdentity:
         prompt, _ = load_and_cache_prompt("tester", tester_meta.path, cache)
         
         # Should contain both skills
-        assert "OpenCode_Skill" in prompt
+        # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
+        assert "OpenCode-Skill" in prompt
         assert "Test Pack Skill" in prompt
         # Should appear in correct order (opencode before test-pack due to sorted())
-        opencode_pos = prompt.find("OpenCode_Skill")
+        opencode_pos = prompt.find("OpenCode-Skill")
         testpack_pos = prompt.find("Test Pack Skill")
         assert opencode_pos < testpack_pos, "opencode should appear before test-pack in prompt"
 
@@ -227,7 +230,7 @@ class TestEdgeCases:
         innate_dir = tmp_path / "_prompt_system" / "innate-skills"
         opencode_dir = innate_dir / "opencode"
         opencode_dir.mkdir(parents=True)
-        (opencode_dir / "skill.md").write_text("# OpenCode_Skill\nThis exists.")
+        (opencode_dir / "skill.md").write_text("# OpenCode-Skill\nThis exists.")
         
         with caplog.at_level("WARNING"):
             skills = load_agent_skills(agent_dir, meta_content)
@@ -343,7 +346,8 @@ class TestInnateSkillsIntegration:
         
         # Verify specific skill content is present for key agents
         tester_prompt, _ = load_and_cache_prompt("tester", real_registry.get("tester").path, cache)
-        assert "OpenCode_Skill" in tester_prompt
+        # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
+        assert "OpenCode-Skill" in tester_prompt
         assert "Test Pack Skill" in tester_prompt
         
         leader_prompt, _ = load_and_cache_prompt("leader", real_registry.get("leader").path, cache)

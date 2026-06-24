@@ -10,6 +10,7 @@ import pytest
 from daemon.config import Config, LLMConfig, LimitsConfig, QueueConfig
 from daemon.registry import AgentMetadata
 from daemon.services.instance_lifecycle import InstanceLifecycleService
+from daemon.services.instance_lifecycle import _SpawnResult
 
 
 def create_mock_config(
@@ -163,22 +164,20 @@ class TestSpawnInstanceLLMOverride:
             captured_llm_config.update(kwargs.get("llm_config", {}))
             return MagicMock()
 
-        # Mock sqlmodel.Session — spawn_instance creates a real Session
-        # inside _spawn_instance_db_sync and calls session.refresh() to
-        # load the deferred created_at column. The MagicMock Session is a
-        # no-op by default, so we configure refresh() to satisfy the
-        # loader itself.
-        # Stale test: mock session needs to satisfy deferred loader on refresh()
-        def fake_refresh(obj):
-            obj.created_at = datetime.now(timezone.utc).isoformat()
-            obj.updated_at = obj.created_at
-
-        mock_session = MagicMock()
-        mock_session.refresh.side_effect = fake_refresh
-
-        @contextmanager
-        def mock_session_ctx():
-            yield mock_session
+        # Stale test: _spawn_instance_db_sync does a real DB roundtrip
+        # (commit + refresh) that the MagicMock manager cannot satisfy
+        # via a fake ``session.refresh`` side-effect. The downstream
+        # test only needs spawn_instance to call build_instance_graph
+        # with the right llm_config, so patch the DB-sync method
+        # directly to return a synthetic _SpawnResult.
+        fake_spawn_result = _SpawnResult(
+            created=True,
+            parent_id=None,
+            agent_id="custom_agent",
+            project_id="test-project",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            inherited_source=False,
+        )
 
         # Patch get_registry in instance_lifecycle (imported at top of file)
         # Patch other imports in daemon.manager (imported inside spawn_instance method)
@@ -186,7 +185,10 @@ class TestSpawnInstanceLLMOverride:
              patch("daemon.manager.load_and_cache_prompt", return_value=("prompt", 100)), \
              patch("daemon.manager.create_instance_tools", return_value=[]), \
              patch("daemon.manager.build_instance_graph", side_effect=capture_build_graph), \
-             patch("sqlmodel.Session", return_value=mock_session_ctx()):
+             patch(
+                 "daemon.services.instance_lifecycle.InstanceLifecycleService._spawn_instance_db_sync",
+                 return_value=fake_spawn_result,
+             ):
 
             instance_id = lifecycle.spawn_instance(agent_id="custom_agent")
 
@@ -218,23 +220,29 @@ class TestSpawnInstanceLLMOverride:
             captured_llm_config.update(kwargs.get("llm_config", {}))
             return MagicMock()
 
-        # Stale test: mock session needs to satisfy deferred loader on refresh()
-        def fake_refresh(obj):
-            obj.created_at = datetime.now(timezone.utc).isoformat()
-            obj.updated_at = obj.created_at
-
-        mock_session = MagicMock()
-        mock_session.refresh.side_effect = fake_refresh
-
-        @contextmanager
-        def mock_session_ctx():
-            yield mock_session
+        # Stale test: _spawn_instance_db_sync does a real DB roundtrip
+        # (commit + refresh) that the MagicMock manager cannot satisfy
+        # via a fake ``session.refresh`` side-effect. The downstream
+        # test only needs spawn_instance to call build_instance_graph
+        # with the right llm_config, so patch the DB-sync method
+        # directly to return a synthetic _SpawnResult.
+        fake_spawn_result = _SpawnResult(
+            created=True,
+            parent_id=None,
+            agent_id="standard_agent",
+            project_id="test-project",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            inherited_source=False,
+        )
 
         with patch("daemon.services.instance_lifecycle.get_registry", return_value=mock_registry), \
              patch("daemon.manager.load_and_cache_prompt", return_value=("prompt", 100)), \
              patch("daemon.manager.create_instance_tools", return_value=[]), \
              patch("daemon.manager.build_instance_graph", side_effect=capture_build_graph), \
-             patch("sqlmodel.Session", return_value=mock_session_ctx()):
+             patch(
+                 "daemon.services.instance_lifecycle.InstanceLifecycleService._spawn_instance_db_sync",
+                 return_value=fake_spawn_result,
+             ):
 
             instance_id = lifecycle.spawn_instance(agent_id="standard_agent")
 

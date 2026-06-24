@@ -213,16 +213,17 @@ class TestLockManagerConcurrentAccess:
         assert manager._lock_repo.get_lock_count("project-1", "queue-1") == 2
 
     @pytest.mark.asyncio
-    async def test_concurrent_acquire_different_projects(self, lock_manager):
+    # SQLite concurrency: use concurrent_lock_manager (file-backed + QueuePool) for concurrent access tests
+    async def test_concurrent_acquire_different_projects(self, concurrent_lock_manager):
         """Test concurrent acquisitions for different projects all succeed."""
         results = await asyncio.gather(
-            lock_manager.acquire("project-1", "job-1", "instance-1"),
-            lock_manager.acquire("project-2", "job-2", "instance-2"),
-            lock_manager.acquire("project-3", "job-3", "instance-3"),
+            concurrent_lock_manager.acquire("project-1", "job-1", "instance-1"),
+            concurrent_lock_manager.acquire("project-2", "job-2", "instance-2"),
+            concurrent_lock_manager.acquire("project-3", "job-3", "instance-3"),
         )
         
         assert all(results)
-        assert await lock_manager.get_waiter_count("project:project-1") == 1
+        assert await concurrent_lock_manager.get_waiter_count("project:project-1") == 1
 
     @pytest.mark.asyncio
     async def test_concurrent_acquire_and_release(self, lock_manager):

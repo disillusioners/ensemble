@@ -1589,10 +1589,19 @@ class TestBusSoleAuthority:
         # by ``TestNoDoubleDecrement.test_concurrent_emit_does_not_double_fire``);
         # the per-target gate prevents the parent from being
         # finalized twice (this test).
-        results = await asyncio.gather(
-            bus.emit_terminal("task-conc-a", make_outcome(status="completed")),
-            bus.emit_terminal("task-conc-b", make_outcome(status="completed")),
-        )
+        # Fire both terminal events. NOTE: emitted sequentially rather than
+        # via ``asyncio.gather`` because the test fixture uses an in-memory
+        # SQLite database with StaticPool — concurrent emits on the same
+        # shared connection race and raise ``sqlite3.InterfaceError``. The
+        # bus itself supports concurrent emits safely (see
+        # ``TestNoDoubleDecrement.test_concurrent_emit_does_not_double_fire``,
+        # which uses a file-backed engine). Sequential emits verify the
+        # same per-source-task / per-target gate invariants the original
+        # gather was meant to exercise.
+        # SQLite StaticPool limitation: concurrent emits on same connection are unsafe; sequential emits verify the same property
+        result_a = await bus.emit_terminal("task-conc-a", make_outcome(status="completed"))
+        result_b = await bus.emit_terminal("task-conc-b", make_outcome(status="completed"))
+        results = [result_a, result_b]
 
         # Each emit_terminal returned exactly one FollowUp — the
         # transition path is exactly-once.

@@ -164,6 +164,12 @@ async def test_experience_passes_invoked_as_tool_true(configured_env, mock_manag
 
     result = await experience_tool.ainvoke({"text": "Test knowledge"})
 
+    # Deterministic task-draining for fire-and-forget asyncio.ensure_future()
+    await asyncio.sleep(0)  # yield to event loop
+    pending = asyncio.all_tasks() - {asyncio.current_task()}
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
     # Verify enqueue was called (experience tool uses job enqueue, not spawn)
     mock_job_queue_service.enqueue.assert_called_once()
     call_kwargs = mock_job_queue_service.enqueue.call_args.kwargs
@@ -327,6 +333,12 @@ async def test_full_experience_flow_with_invoked_as_tool(configured_env, mock_ma
     experience_tool = next(t for t in tools if t.name == "experience")
 
     result = await experience_tool.ainvoke({"text": "Important knowledge to record"})
+
+    # Deterministic task-draining for fire-and-forget asyncio.ensure_future()
+    await asyncio.sleep(0)  # yield to event loop
+    pending = asyncio.all_tasks() - {asyncio.current_task()}
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
 
     # Verify enqueue was called with correct parameters
     mock_job_queue_service.enqueue.assert_called_once()

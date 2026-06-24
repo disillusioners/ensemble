@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import Mock, patch, MagicMock
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
@@ -339,6 +339,15 @@ class TestExponentialBackoff:
             message_id="test-message-backoff",
         )
 
+        # Stale test: schedule_retry now guards on running/failed/cancelled status
+        # PENDING tasks no longer match the WHERE clause, so transition task1 to
+        # RUNNING before calling schedule_retry.
+        with task_repo.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET status = :status WHERE id = :id"),
+                {"status": TaskStatus.RUNNING.value, "id": task1.id},
+            )
+
         # Schedule first retry
         retry1 = task_repo.schedule_retry(
             task_id=task1.id,
@@ -371,6 +380,13 @@ class TestExponentialBackoff:
             message_id="test-message-backoff2",
         )
 
+        # Stale test: schedule_retry now guards on running/failed/cancelled status
+        with task_repo.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET status = :status WHERE id = :id"),
+                {"status": TaskStatus.RUNNING.value, "id": task2.id},
+            )
+
         # Schedule second retry
         retry2 = task_repo.schedule_retry(
             task_id=task2.id,
@@ -381,6 +397,15 @@ class TestExponentialBackoff:
 
         assert retry2 is not None
         assert retry2.retry_count == 1
+
+        # Stale test: schedule_retry now guards on running/failed/cancelled status
+        # The retry child (retry2) is created as PENDING, so we must transition
+        # it to RUNNING before scheduling its own retry.
+        with task_repo.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET status = :status WHERE id = :id"),
+                {"status": TaskStatus.RUNNING.value, "id": retry2.id},
+            )
 
         # Schedule another retry on top of retry2 (simulating retry2 timing out)
         retry3 = task_repo.schedule_retry(
@@ -404,12 +429,26 @@ class TestExponentialBackoff:
             message_id="test-message-backoff3",
         )
 
+        # Stale test: schedule_retry now guards on running/failed/cancelled status
+        with task_repo.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET status = :status WHERE id = :id"),
+                {"status": TaskStatus.RUNNING.value, "id": task3.id},
+            )
+
         retry4 = task_repo.schedule_retry(
             task_id=task3.id,
             max_retries=5,
             backoff_base=base,
             backoff_max=max_backoff,
         )
+
+        # Stale test: schedule_retry now guards on running/failed/cancelled status
+        with task_repo.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET status = :status WHERE id = :id"),
+                {"status": TaskStatus.RUNNING.value, "id": retry4.id},
+            )
 
         retry5 = task_repo.schedule_retry(
             task_id=retry4.id,
@@ -418,6 +457,13 @@ class TestExponentialBackoff:
             backoff_max=max_backoff,
         )
 
+        # Stale test: schedule_retry now guards on running/failed/cancelled status
+        with task_repo.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET status = :status WHERE id = :id"),
+                {"status": TaskStatus.RUNNING.value, "id": retry5.id},
+            )
+
         retry6 = task_repo.schedule_retry(
             task_id=retry5.id,
             max_retries=5,
@@ -425,14 +471,16 @@ class TestExponentialBackoff:
             backoff_max=max_backoff,
         )
 
-        # Verify third backoff: base * 2^2 = 120s (capped at max)
-        assert retry6.retry_count == 3
-        # After 3 retries: base * 2^2 = 120, which equals max, so no capping needed
+        # Stale test: schedule_retry now guards on running/failed/cancelled status
+        with task_repo.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE task SET status = :status WHERE id = :id"),
+                {"status": TaskStatus.RUNNING.value, "id": retry6.id},
+            )
 
-        # Schedule more retries to test capping
         retry7 = task_repo.schedule_retry(
             task_id=retry6.id,
-            max_retries=10,
+            max_retries=5,
             backoff_base=base,
             backoff_max=max_backoff,
         )

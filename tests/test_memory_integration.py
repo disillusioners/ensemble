@@ -532,7 +532,8 @@ class TestRegressionChecks:
             ("My name is Test", {"type": "identity", "targets": ["soul"]}),
             ("User prefers Python", {"type": "user_preference", "targets": ["user"]}),
             ("Always check tests", {"type": "workflow", "targets": ["workflow"]}),
-            ("I learned that X", {"type": "knowledge", "targets": ["memory", "memories"]}),
+            # Stale test: knowledge classification removed in inner-soul reform; falls back to event
+            ("I learned that X", {"type": "event", "targets": ["memories"]}),
             ("Random text", {"type": "event", "targets": ["memories"]}),  # Default fallback
         ]
 

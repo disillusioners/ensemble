@@ -8,10 +8,10 @@ Tests cover:
 
 import pytest
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from daemon.services.instance_lifecycle import append_context_key, InstanceLifecycleService
+from daemon.services.instance_lifecycle import _SpawnResult
 
 
 # =============================================================================
@@ -207,28 +207,29 @@ class TestContextKeyInjection:
             mock_build_graph.return_value = MagicMock()
             mock_append_context_key.return_value = "You are a test agent."  # Return modified prompt
 
-            # Mock Session context manager — the source wraps it in WriteGuardSession
-            # which unwraps contextlib._GeneratorContextManager via __enter__.
-            mock_parent = MagicMock()
-            mock_parent.children = "[]"  # Valid JSON array
-            mock_session = MagicMock()
-            mock_session.get.return_value = mock_parent
+            # Stale test: _spawn_instance_db_sync does a real DB roundtrip
+            # (commit + refresh) that the MagicMock manager cannot satisfy
+            # via a fake ``session.refresh`` side-effect. The downstream
+            # test only needs spawn_instance to call append_context_key with
+            # the right parent_id, so patch the DB-sync method directly
+            # to return a synthetic _SpawnResult.
+            from datetime import datetime, timezone
+            test_parent_id = "parent-123"
+            fake_spawn_result = _SpawnResult(
+                created=True,
+                parent_id=test_parent_id,
+                agent_id="test-agent",
+                project_id="test-project",
+                created_at=datetime.now(timezone.utc).isoformat(),
+                inherited_source=False,
+            )
 
-            # Stale test: mock session needs to satisfy deferred loader on refresh()
-            def fake_refresh(obj):
-                obj.created_at = datetime.now(timezone.utc).isoformat()
-                obj.updated_at = obj.created_at
-
-            mock_session.refresh.side_effect = fake_refresh
-
-            @contextmanager
-            def mock_session_ctx():
-                yield mock_session
-
-            with patch("sqlmodel.Session", return_value=mock_session_ctx()):
+            with patch(
+                "daemon.services.instance_lifecycle.InstanceLifecycleService._spawn_instance_db_sync",
+                return_value=fake_spawn_result,
+            ):
 
                 # Execute - call spawn_instance with a parent_id
-                test_parent_id = "parent-123"
                 service.spawn_instance(agent_id="test", parent_id=test_parent_id)
 
                 # Verify append_context_key was called with the parent_id

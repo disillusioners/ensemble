@@ -18,6 +18,7 @@ from daemon.models.instance import InstanceStatus
 from daemon.services.job_processor import JobProcessor
 from daemon.repositories.job_queue.models import JobItem, JobStatus
 from daemon.services.job_queue_service import DemandState
+from daemon.services.dependency_bus import set_dependency_bus
 
 
 class MockInstance:
@@ -95,14 +96,30 @@ def mock_queue_service():
     return service
 
 
+@pytest.fixture(autouse=True)
+def _wire_dependency_bus():
+    """Stale test: DependencyBus is now the SOLE completion authority (ADR-011).
+    Production raises RuntimeError when the bus is None, so wire a mock that
+    reports no pending children for every target.
+    """
+    bus_mock = MagicMock()
+    bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+    set_dependency_bus(bus_mock)
+    yield
+    set_dependency_bus(None)
+
+
 @pytest.fixture
 def mock_instance_manager(mock_queue_service):
     """Create mock InstanceManager with instance repository."""
     manager = MagicMock()
     manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
     manager.enqueue_message = AsyncMock()
-    # Stale test: get_instance is now async, requires AsyncMock
-    manager.get_instance = AsyncMock()
+    # Stale test: get_instance is now async, requires AsyncMock.
+    # Raise KeyError so the orphan-processing branch fires (DB status check
+    # followed by complete_job); a plain AsyncMock would just `continue`
+    # and never reach the completion assertion.
+    manager.get_instance = AsyncMock(side_effect=KeyError("instance not in memory"))
     manager._instance_repository = MagicMock()
     return manager
 

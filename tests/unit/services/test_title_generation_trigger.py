@@ -211,6 +211,12 @@ class TestCompletionPath1RootInstance:
         mock_exec_result = MagicMock()
         mock_exec_result.scalar_one.return_value = 0  # No pending messages
         mock_session.exec.return_value = mock_exec_result
+        # The C2 inline bus-COUNT query in _process_child_completion_db_sync
+        # uses ``session.scalar(...)`` (not ``session.exec(...).scalar_one()``)
+        # to share a transaction with the in-session status UPDATE. Without
+        # this mock, MagicMock.__int__ returns 1, falsely indicating a
+        # pending bus watcher and tripping the F8 carve-out guard.
+        mock_session.scalar.return_value = 0
 
         @contextmanager
         def mock_session_ctx():
