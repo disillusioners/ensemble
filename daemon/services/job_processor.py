@@ -676,8 +676,8 @@ class JobProcessor:
                     # the job to the WorkerPool (creates a Task row + wakes
                     # a worker). The observer's instance_lifecycle event
                     # subscription then drives the terminal JobItem
-                    # transition (see ``_finalize_job`` /
-                    # ``_retrigger_parent_finalize``).
+                    # transition (see ``_process_event`` →
+                    # ``_finalize_job``).
                     #
                     # TASK jobs fall through to the spawn-instance +
                     # enqueue-message path below — that path is the

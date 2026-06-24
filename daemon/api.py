@@ -385,20 +385,23 @@ async def lifespan(app: FastAPI):
     # C7: Wire JobFeedbackObserver into JobProcessor so MESSAGE-type jobs
     # route through the observer → Task → WorkerPool path. Both the observer
     # and the processor are already constructed; the observer is already
-    # started (line 354) and the bus completion callback (via
-    # ``_emit_terminal_via_bus`` → ``_retrigger_parent_finalize``) is
-    # wired (Phase 5 — CM removed; bus is the SOLE completion authority).
+    # started (line 354) and the bus-driven lifecycle path (report Task
+    # PROCESS_REPORT → ``_process_event`` → ``_finalize_job``) is wired
+    # (Phase 1 — CM removed; the lifecycle event is the SOLE completion
+    # authority for parents with children tracked by the bus).
     job_processor.setup_job_feedback_observer(job_feedback_observer)
     logger.info("JobFeedbackObserver wired into JobProcessor (dispatch_path=jobqueue_local)")
 
-    # Wire the JobFeedbackObserver onto the InstanceManager facade so
-    # ``ChildReportsService`` can re-trigger ``_finalize_job`` after the
-    # bus fires the last watcher for a parent. Without this wiring the
-    # bus path would starve the terminal-transition callback — see
-    # fix/bus-retrigger-finalize-job for the full inverse-regression
-    # analysis.
+    # Wire the JobFeedbackObserver onto the InstanceManager facade so the
+    # observer's ``_process_event`` lifecycle handler can finalize the
+    # parent job after a report turn emits its ``instance_lifecycle``
+    # event (i.e. ``_process_event`` → ``_finalize_job``). The bus
+    # itself is a pure state machine that only transitions PENDING →
+    # FIRED watchers; it does NOT call back into the observer
+    # directly — the report Task (PROCESS_REPORT) is the bridge that
+    # drives the parent graph turn and produces the lifecycle event.
     manager.set_job_feedback_observer(job_feedback_observer)
-    logger.info("JobFeedbackObserver wired into InstanceManager (bus_retrigger=ON)")
+    logger.info("JobFeedbackObserver wired into InstanceManager (report_lane=ON)")
     
     # Initialize LiveEventHub for live-only SSE streaming
     app.state.live_hub = manager._live_hub
@@ -527,29 +530,35 @@ async def init_dependency_bus(app, manager) -> None:
         recovered = await bus.start()
         # C1 fix: process FIRED-but-unsent FollowUps from a prior
         # crash. Each ``(watch_id, FollowUp)`` tuple corresponds to a
-        # row whose child task terminated and whose finalization
-        # step (direct ``_retrigger_parent_finalize`` call) was
-        # either never executed (process died mid-emit) or executed
-        # but never stamped (process died after the retrigger, before
-        # ``mark_enqueued``). The dedup is the ``enqueued_at IS NULL``
-        # filter in :meth:`DependencyBus._recover_fired_unsent` — a
-        # second crash does not double-trigger because the stamp
-        # survives the restart.
+        # row whose child task terminated and whose finalization step
+        # was either never executed (process died mid-emit) or executed
+        # but never stamped (process died after the finalization
+        # call, before ``mark_enqueued``). The dedup is the
+        # ``enqueued_at IS NULL`` filter in
+        # :meth:`DependencyBus._recover_fired_unsent` — a second crash
+        # does not double-trigger because the stamp survives the
+        # restart.
         #
-        # Post-FollowUp-removal semantics: the bus no longer
-        # enqueues messages. The recovery step is therefore a
-        # finalization step, not a message-delivery step. For each
-        # unique target in the recovered set, we ask the bus whether
-        # the target still has any PENDING watchers. If the answer
-        # is 0 (all watchers fired before the crash), the recovery
-        # invokes ``_retrigger_parent_finalize`` so the parent job
-        # transitions PROCESSING → COMPLETED. The ``_retriggered``
-        # set dedupes the per-target invocation when multiple
-        # recovered rows share the same parent (e.g. a parent with
-        # N completed children, all FIRED in the previous process).
+        # Post-FollowUp-removal semantics: the bus no longer enqueues
+        # messages. The recovery step is therefore a finalization
+        # step, not a message-delivery step. For each unique target
+        # in the recovered set, we ask the bus whether the target
+        # still has any PENDING watchers. If the answer is 0 (all
+        # watchers fired before the crash), the recovery decides:
+        #   * If a report Task is in flight (``has_inflight_task``),
+        #     stamp the row and defer — the task's lifecycle event
+        #     will drive ``_process_event`` → ``_finalize_job``
+        #     naturally when its turn ends.
+        #   * Otherwise, invoke ``_finalize_job`` directly via the
+        #     single finalize path with the bus error override, so
+        #     the parent job transitions PROCESSING → COMPLETED/ERROR.
+        # The ``_retriggered_targets`` set dedupes the per-target
+        # invocation when multiple recovered rows share the same
+        # parent (e.g. a parent with N completed children, all FIRED
+        # in the previous process).
         #
         # We deliberately stamp ``enqueued_at`` AFTER a successful
-        # finalization attempt so a transient retrigger failure
+        # finalization attempt so a transient finalize failure
         # (e.g. observer not yet wired) does NOT lock the row out
         # of a future recovery — it will be picked up on the next
         # restart.
@@ -758,14 +767,17 @@ async def init_dependency_bus(app, manager) -> None:
                     continue
 
                 # ─── Conservative "any error → error" rule (same source as ``_process_event``) ───
-                _final_status = InstanceStatus.COMPLETED.value
-                _final_error: str | None = None
-                if bus.had_parent_error(target_id):
-                    _final_status = InstanceStatus.ERROR.value
-                    _final_error = (
-                        bus.parent_error_message(target_id)
-                        or "child agent error"
-                    )
+                # Delegates to the shared helper in
+                # ``daemon.services.job_feedback_observer`` so the rule
+                # lives in one place. The clear-after-finalize mirrors
+                # ``_process_event`` (Step 1.7) so a revived instance
+                # doesn't inherit the sticky error state.
+                from daemon.services.job_feedback_observer import (
+                    _resolve_finalize_status,
+                )
+                _final_status, _final_error = _resolve_finalize_status(
+                    bus, target_id, InstanceStatus.COMPLETED.value
+                )
 
                 try:
                     await _observer._finalize_job(

@@ -1169,7 +1169,7 @@ class TestCountPendingForTarget:
 #   * Loop-level guard: a failure on one target's re-trigger does not
 #     abort the rest of the loop.
 #   * Helper-level guard: ``_get_processing_job_for_instance`` raising
-#     does not propagate out of ``_retrigger_parent_finalize``.
+#     does not propagate out of ``_process_event``.
 
 
 class TestBusRetriggerFinalize:
@@ -1281,10 +1281,12 @@ class TestBusRetriggerFinalize:
 # Task 5.7 added a behavioral fix: when a child task emits a terminal
 # event with ``status="error"``, the bus stamps
 # ``_parent_errored[target_id] = True`` for each fired FollowUp's parent.
-# This flag is then read by ``ChildReportsService._retrigger_parent_finalize``
-# so a parent whose LAST child errored finalizes as ``"error"`` instead
-# of ``"completed"`` (mirrors the old CM
-# ``_determine_terminal_status`` "any error → error" conservative rule).
+# This flag is then read by
+# ``JobFeedbackObserver._process_event`` (via
+# ``_resolve_finalize_status``) so a parent whose LAST child errored
+# finalizes as ``"error"`` instead of ``"completed"`` (mirrors the old
+# CM ``_determine_terminal_status`` "any error → error" conservative
+# rule).
 #
 # The tests below pin down the bus-side contracts that Phase 5 relies
 # on. They use the existing ``bus`` / ``bus_repo`` fixtures (in-memory
@@ -1314,8 +1316,10 @@ class TestBusSoleAuthority:
         waiting on children". ``count_pending_for_target(parent)``
         must be > 0 while any PENDING watcher exists and == 0 only
         when the last one has fired. This is the gate
-        ``_retrigger_parent_finalize`` uses to decide whether to
-        re-trigger the parent job's finalization.
+        ``_process_event`` (in ``JobFeedbackObserver``) consults to
+        decide whether to fall through to finalize or to emit
+        ``in_progress`` and wait for the report Task to fire its
+        own lifecycle event.
         """
         parent_id = f"parent-{uuid.uuid4().hex[:8]}"
 
@@ -1388,9 +1392,10 @@ class TestBusSoleAuthority:
             "the old CM 'any error → error' rule."
         )
 
-        # count_pending_for_target == 0 means the retrigger gate
-        # is open. ``_retrigger_parent_finalize`` would resolve the
-        # parent job to ``"error"`` because of the sticky flag.
+        # count_pending_for_target == 0 means the finalize gate
+        # is open. ``_process_event`` would resolve the parent job
+        # to ``"error"`` because of the sticky flag (via
+        # ``_resolve_finalize_status``).
         assert bus.count_pending_for_target_sync(parent_id) == 0
 
         # Cleanup: explicit clear for symmetry with the production
@@ -1557,9 +1562,9 @@ class TestBusSoleAuthority:
              gate's ``== 0`` check fires exactly once.
 
         This is the concurrency invariant that keeps
-        ``_retrigger_parent_finalize`` from racing itself: the bus
-        serializes per-source-task state transitions with the
-        per-task lock, and ``count_pending_for_target`` is a
+        ``_process_event``'s finalize branch from racing itself:
+        the bus serializes per-source-task state transitions with
+        the per-task lock, and ``count_pending_for_target`` is a
         consistent DB read, so the gate's release condition is
         true exactly once across the gather (not twice — which
         would call ``_finalize_job`` twice and break the
@@ -1603,12 +1608,12 @@ class TestBusSoleAuthority:
             f"double-fire on the bus side."
         )
 
-        # The parent is fully resolved: count is 0. The retrigger
+        # The parent is fully resolved: count is 0. The finalize
         # gate (``count_pending_for_target == 0``) is now open, and
         # it will fire exactly once when the post-fire
-        # ``_retrigger_parent_finalize`` runs — not twice, because
-        # the gate is checked once per FollowUp and only the LAST
-        # watcher crossing the threshold opens it.
+        # ``_process_event`` runs — not twice, because the gate is
+        # checked once per FollowUp and only the LAST watcher
+        # crossing the threshold opens it.
         assert bus.count_pending_for_target_sync(parent_id) == 0, (
             "After concurrent fires, parent must have 0 pending — "
             "the retrigger gate's release condition is satisfied "

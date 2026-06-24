@@ -239,11 +239,14 @@ class ErrorReportingService:
                     # inline cascade + SELECT COUNT(*) fallback + inline
                     # status transition are all SKIPPED. The
                     # DependencyBus (the SOLE completion authority)
-                    # fires ``_retrigger_parent_finalize`` from the
-                    # async caller in ``_send_error_report``, which
-                    # transitions the parent JOB to terminal via
-                    # ``_finalize_job``. No DB query, no TOCTOU window
-                    # (Race #3 eliminated).
+                    # transitions PENDING → FIRED watchers via
+                    # ``emit_terminal(status="error")`` from the
+                    # async caller in ``_send_error_report``; the bus
+                    # stamps ``_parent_errored`` so the next
+                    # ``_process_event`` lifecycle event on the
+                    # parent's report Task applies the error
+                    # override when ``_finalize_job`` runs. No DB
+                    # query, no TOCTOU window (Race #3 eliminated).
                     #
                     # ``bus`` is already in scope from the
                     # ``get_dependency_bus()`` call at the top of

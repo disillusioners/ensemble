@@ -86,6 +86,54 @@ _TERMINAL_INSTANCE_STATUSES: frozenset[str] = frozenset({
     InstanceStatus.FAILED.value,
 })
 
+# Fallback error string when the bus has a parent-error flag set but no
+# explicit ``parent_error_message`` (e.g. the bus was never told which
+# child failed). Used by :func:`_resolve_finalize_status` to keep the
+# finalize call deterministic in the absence of message context.
+CHILD_AGENT_ERROR_FALLBACK = "child agent error"
+
+
+def _resolve_finalize_status(
+    bus,
+    instance_id: str,
+    default_status: str,
+    default_error: str | None = None,
+) -> tuple[str, str | None]:
+    """Apply the parent-error override for finalize.
+
+    The conservative rule: a child error propagates to the parent job's
+    terminal status, overriding the parent's own (possibly successful)
+    turn. If the bus has ``had_parent_error(instance_id)`` set, the
+    returned status is ``InstanceStatus.ERROR.value`` and the error
+    string is the bus's ``parent_error_message(instance_id)`` (or
+    :data:`CHILD_AGENT_ERROR_FALLBACK` when the bus did not record a
+    message). Otherwise the ``default_status`` / ``default_error`` pair
+    is returned unchanged.
+
+    Centralized so both :meth:`JobFeedbackObserver._process_event` and
+    the crash-recovery path in ``daemon/api.py`` apply the same rule
+    from a single source.
+
+    Args:
+        bus: The :class:`DependencyBus` singleton (or ``None`` when
+            the bus is uninitialized — treated as "no error override").
+        instance_id: The parent instance id whose sticky error flag
+            to consult.
+        default_status: The status to return when no error override
+            applies.
+        default_error: The error string to return when no error
+            override applies (may be ``None``).
+
+    Returns:
+        A ``(status, error)`` tuple suitable for passing directly to
+        :meth:`JobFeedbackObserver._finalize_job`.
+    """
+    if bus is not None and bus.had_parent_error(instance_id):
+        status = InstanceStatus.ERROR.value
+        error = bus.parent_error_message(instance_id) or CHILD_AGENT_ERROR_FALLBACK
+        return status, error
+    return default_status, default_error
+
 
 # Bounded defer counter for the bus gate's exception fallback
 # (F1 fix, 2026-06-20). When the gate keeps raising exceptions (e.g.,
@@ -754,26 +802,20 @@ class JobFeedbackObserver:
         # ``ChildReportsService._retrigger_parent_finalize``) was
         # removed (Step 1.4) because it was the source of the
         # orphan-Task bug — it terminated the parent's job while
-        # its report Task was still PENDING. We consult the bus's
-        # per-parent error flag (``had_parent_error``) and the new
+        # its report Task was still PENDING. The rule is now
+        # centralized in :func:`_resolve_finalize_status` so both
+        # this handler and the bus crash-recovery path in
+        # ``daemon/api.py`` apply the same override from a single
+        # source. We consult the bus's per-parent error flag
+        # (``had_parent_error``) and the new
         # ``parent_error_message`` so a parent whose last child
         # errored still finalizes as ``ERROR`` even though the
         # parent's own report turn completed cleanly. Sticky
         # ``_parent_errored`` is cleared after finalize so a
         # revived instance does not inherit the flag.
-        status_to_finalize = status
-        error_for_finalize = error
-        # Part C (L1): reuse the `bus` retrieved above instead of
-        # re-fetching the singleton. `bus` may be None when the
-        # gate above fell through to the "bus singleton missing"
-        # hard-error path; the existing `is not None` check below
-        # already handles that.
-        bus_for_err = bus
-        if bus_for_err is not None and bus_for_err.had_parent_error(instance_id):
-            status_to_finalize = InstanceStatus.ERROR.value
-            error_for_finalize = (
-                bus_for_err.parent_error_message(instance_id) or "child agent error"
-            )
+        status_to_finalize, error_for_finalize = _resolve_finalize_status(
+            bus, instance_id, status, error
+        )
         await self._finalize_job(
             job, instance_id, status_to_finalize, error=error_for_finalize
         )
@@ -782,8 +824,8 @@ class JobFeedbackObserver:
         # inherit the error state from its previous incarnation.
         # The clear is idempotent and safe — the flag's only
         # purpose was the override above, which has been applied.
-        if bus_for_err is not None and bus_for_err.had_parent_error(instance_id):
-            bus_for_err.clear_parent_error(instance_id)
+        if bus is not None and bus.had_parent_error(instance_id):
+            bus.clear_parent_error(instance_id)
 
     async def _emit_in_progress(
         self, job, instance_id: str
