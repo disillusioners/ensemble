@@ -976,14 +976,25 @@ class TaskRepository:
 
         Atomicity / concurrency: the parent UPDATE carries the full guard
         (``retry_scheduled = false``, ``retry_count < max_retries``, and
-        ``status IN ('running','failed')``) directly in the SQL WHERE clause.
-        The child INSERT is gated on ``UPDATE.rowcount == 1`` inside the same
-        ``engine.begin()`` transaction, so two concurrent callers cannot
-        both pass the check and create duplicate retry children — only the
-        first UPDATE will match the row and produce a rowcount of 1, and
-        only that caller will then INSERT the child. If the UPDATE returns
-        0 rows (already retried, max retries exceeded, status not eligible,
-        or task not found), this method returns None and does not INSERT.
+        ``status IN ('running','failed','cancelled')``) directly in the SQL
+        WHERE clause. The child INSERT is gated on ``UPDATE.rowcount == 1``
+        inside the same ``engine.begin()`` transaction, so two concurrent
+        callers cannot both pass the check and create duplicate retry
+        children — only the first UPDATE will match the row and produce a
+        rowcount of 1, and only that caller will then INSERT the child. If
+        the UPDATE returns 0 rows (already retried, max retries exceeded,
+        status not eligible, or task not found), this method returns None
+        and does not INSERT.
+
+        ``cancelled`` is included in the eligible set on purpose: an
+        orphaned CANCELLED task (``status=cancelled, retry_scheduled=false``,
+        no child) is exactly the crash-recovery case
+        ``find_orphaned_cancelled_tasks()`` detects on startup. The double-
+        retry guard (``retry_scheduled = false``) and the
+        ``retry_count < max_retries`` guard together still prevent
+        duplicate retry creation. The terminal states ``completed`` and
+        ``failed`` (when the worker already reported outcome) are
+        excluded — a terminal task must never get a retry child.
 
         Returns the new retry task, or None if no retry was scheduled.
         """
@@ -993,12 +1004,14 @@ class TaskRepository:
         with self.engine.begin() as conn:
             # Atomic UPDATE: gate the WHOLE operation on the row still
             # matching the preconditions. The status guard
-            # (``IN ('running','failed')``) replaces the prior Python-side
-            # check and also prevents clobbering a concurrent terminal-state
-            # write (e.g. a parallel `complete_task` that set status to
-            # 'completed'). Use Python booleans as bound values so the
-            # comparison works on both SQLite (INTEGER 0/1) and PostgreSQL
-            # (BOOLEAN false/true).
+            # (``IN ('running','failed','cancelled')``) replaces the prior
+            # Python-side check and also prevents clobbering a concurrent
+            # terminal-state write (e.g. a parallel `complete_task` that
+            # set status to 'completed'). Use Python booleans as bound
+            # values so the comparison works on both SQLite (INTEGER 0/1)
+            # and PostgreSQL (BOOLEAN false/true). `cancelled` is included
+            # so the orphan-recovery path (CANCELLED + retry_scheduled=false)
+            # can schedule a retry child; see method docstring.
             parent_row = conn.execute(
                 text("""
                     UPDATE task
@@ -1010,7 +1023,7 @@ class TaskRepository:
                     WHERE id = :task_id
                       AND retry_scheduled = :retry_scheduled_false
                       AND retry_count < :max_retries
-                      AND status IN (:status_running, :status_failed)
+                      AND status IN (:status_running, :status_failed, :status_cancelled)
                     RETURNING *
                 """),
                 {
@@ -1022,6 +1035,7 @@ class TaskRepository:
                     "max_retries": max_retries,
                     "status_running": TaskStatus.RUNNING.value,
                     "status_failed": TaskStatus.FAILED.value,
+                    "status_cancelled": TaskStatus.CANCELLED.value,
                     "now": now,
                 },
             ).fetchone()
