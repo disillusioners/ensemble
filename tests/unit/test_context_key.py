@@ -8,6 +8,7 @@ Tests cover:
 
 import pytest
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from daemon.services.instance_lifecycle import append_context_key, InstanceLifecycleService
@@ -212,6 +213,13 @@ class TestContextKeyInjection:
             mock_parent.children = "[]"  # Valid JSON array
             mock_session = MagicMock()
             mock_session.get.return_value = mock_parent
+
+            # Stale test: mock session needs to satisfy deferred loader on refresh()
+            def fake_refresh(obj):
+                obj.created_at = datetime.now(timezone.utc).isoformat()
+                obj.updated_at = obj.created_at
+
+            mock_session.refresh.side_effect = fake_refresh
 
             @contextmanager
             def mock_session_ctx():

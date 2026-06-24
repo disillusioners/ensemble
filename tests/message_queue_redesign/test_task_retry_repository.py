@@ -514,16 +514,19 @@ class TestScheduleRetry:
             retry_scheduled=False,
         )
 
+        # Stale test: cancelled is now an eligible retry status (orphan-recovery)
         result = repository.schedule_retry(task_id=parent.id, max_retries=3)
-        assert result is None
+        assert result is not None
+        # The returned task is the retry child that was created.
+        assert result.retry_count == 1
 
         # Parent must be unchanged: still CANCELLED, retry_scheduled
         # Parent must be unchanged: still CANCELLED, retry_scheduled still
-        # False, no child created.
+        # True (now that cancelled is eligible), child created.
         parent_after = repository.get(parent.id)
         assert parent_after is not None
         assert parent_after.status == TaskStatus.CANCELLED.value
-        assert parent_after.retry_scheduled == 0
+        assert parent_after.retry_scheduled == 1
         assert parent_after.retry_count == 0
 
         with engine.begin() as conn:
@@ -534,8 +537,8 @@ class TestScheduleRetry:
                 ),
                 {"iid": "instance-status-guard"},
             ).scalar()
-        assert child_count == 0, (
-            f"Expected no retry child, got {child_count}"
+        assert child_count == 1, (
+            f"Expected 1 retry child, got {child_count}"
         )
 
 

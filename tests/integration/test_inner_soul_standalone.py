@@ -22,6 +22,12 @@ import socket
 
 from daemon.registry import AgentMetadata
 
+# All tests in this file require live LLM infrastructure (real OpenAI API + MCP),
+# so they are excluded from the default non-integration test gate via the
+# `integration` marker defined in pyproject.toml. Per-test skipif conditions
+# (skip_llm_tests / requires_local_server) remain as secondary gates below.
+pytestmark = pytest.mark.integration
+
 
 def _load_env():
     """Load environment variables from .env file."""

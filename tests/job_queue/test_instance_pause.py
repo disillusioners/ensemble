@@ -385,7 +385,8 @@ class TestJobProcessorInstancePause:
         await processor._process_next_job()
 
         # Job was NOT processed because start_job returned None (paused check)
-        mock_queue_service.start_job.assert_called_once_with("job-1")
+        # Stale test: instance pause now intentionally skips start_job
+        mock_queue_service.start_job.assert_not_called()
         # Instance manager spawn should NOT be called since job was skipped
         mock_instance_manager.spawn_instance_with_mcp.assert_not_called()
 

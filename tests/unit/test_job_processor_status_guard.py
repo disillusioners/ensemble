@@ -101,7 +101,8 @@ def mock_instance_manager(mock_queue_service):
     manager = MagicMock()
     manager.spawn_instance_with_mcp = AsyncMock(return_value="test-instance-id")
     manager.enqueue_message = AsyncMock()
-    manager.get_instance = MagicMock()
+    # Stale test: get_instance is now async, requires AsyncMock
+    manager.get_instance = AsyncMock()
     manager._instance_repository = MagicMock()
     return manager
 

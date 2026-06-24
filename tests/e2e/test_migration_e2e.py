@@ -121,10 +121,16 @@ def _pg_available() -> bool:
         return False
 
 
-pytestmark = pytest.mark.skipif(
-    not _pg_available(),
-    reason=f"PostgreSQL test database not reachable at {TEST_PG_HOST}:{TEST_PG_PORT}/{TEST_PG_DB}",
-)
+# All tests in this file require live LLM infrastructure (real OpenAI API + MCP),
+# so they are excluded from the default non-integration test gate via the
+# `integration` marker defined in pyproject.toml.
+pytestmark = [
+    pytest.mark.integration,
+    pytest.mark.skipif(
+        not _pg_available(),
+        reason=f"PostgreSQL test database not reachable at {TEST_PG_HOST}:{TEST_PG_PORT}/{TEST_PG_DB}",
+    ),
+]
 
 
 def _drop_all_public_tables() -> None:

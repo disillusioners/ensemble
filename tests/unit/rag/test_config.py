@@ -27,8 +27,11 @@ from daemon.rag import (
 
 
 @pytest.fixture(autouse=True)
-def clean_rag_state():
+def clean_rag_state(monkeypatch):
     """Ensure RAG state is clean before and after each test."""
+    # Clear RAG_IS_REQUIRED so tests don't inherit it from shell/.env.
+    # monkeypatch auto-restores the original value after the test.
+    monkeypatch.delenv("RAG_IS_REQUIRED", raising=False)
     enable_rag()  # Reset to default enabled state
     yield
     enable_rag()  # Reset after test

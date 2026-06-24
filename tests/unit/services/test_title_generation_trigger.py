@@ -20,6 +20,39 @@ from daemon.repositories.instance.models import InstanceStatus
 # ─── Fixtures ───────────────────────────────────────────────────────────────────
 
 
+@pytest.fixture
+async def dependency_bus():
+    """Initialize a real DependencyBus with in-memory SQLite for tests that traverse the completion code path.
+
+    Non-autouse so only tests that explicitly opt in pay the setup cost and so
+    tests that don't traverse the bus-authority code path are unaffected.
+    Mirrors the pattern in tests/unit/services/test_child_reports.py:71-125.
+    The bus is required because _process_child_completion_db_sync raises a hard
+    error when the bus singleton is None (bus is the sole completion authority).
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import SQLModel
+    from daemon.repositories.dependency_bus.repository import DependencyWatcherRepository
+    from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
+
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    SQLModel.metadata.create_all(eng)
+    repo = DependencyWatcherRepository(eng)
+    bus = DependencyBus(repo)
+    await bus.start()
+    set_dependency_bus(bus)
+    try:
+        yield bus
+    finally:
+        await bus.stop()
+        set_dependency_bus(None)
+
+
 @pytest.fixture(autouse=True)
 def reset_registry():
     """Reset the global CompletionRegistry singleton between tests."""
@@ -156,7 +189,7 @@ class TestCompletionPath1RootInstance:
 
     @pytest.mark.asyncio
     async def test_root_instance_completion_triggers_title_generation(
-        self, mock_manager, mock_events_service, mock_instance, mock_message
+        self, mock_manager, mock_events_service, mock_instance, mock_message, dependency_bus
     ):
         """Verify title generation is triggered when root instance completes."""
         # Setup: root instance (no parent), waiting_for=0
@@ -275,7 +308,7 @@ class TestCompletionPath3RegularChild:
 
     @pytest.mark.asyncio
     async def test_regular_child_completion_triggers_title_generation(
-        self, mock_manager, mock_events_service, mock_instance, mock_message
+        self, mock_manager, mock_events_service, mock_instance, mock_message, dependency_bus
     ):
         """Verify title generation is triggered when regular child completes."""
         # Setup: regular child instance (has parent, not invoked_as_tool)

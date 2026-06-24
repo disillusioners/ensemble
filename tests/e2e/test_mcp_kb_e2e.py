@@ -15,11 +15,17 @@ import os
 import pytest
 import pytest_asyncio
 
-# Skip all tests if RUN_E2E_TESTS is not set to "1"
-pytestmark = pytest.mark.skipif(
-    os.environ.get("RUN_E2E_TESTS") != "1",
-    reason="E2E tests require RUN_E2E_TESTS=1 and a running dev server at http://localhost:8079"
-)
+# All tests in this file require live LLM infrastructure (real OpenAI API + MCP),
+# so they are excluded from the default non-integration test gate via the
+# `integration` marker defined in pyproject.toml.
+pytestmark = [
+    pytest.mark.integration,
+    # Skip all tests if RUN_E2E_TESTS is not set to "1"
+    pytest.mark.skipif(
+        os.environ.get("RUN_E2E_TESTS") != "1",
+        reason="E2E tests require RUN_E2E_TESTS=1 and a running dev server at http://localhost:8079"
+    ),
+]
 
 # Configuration
 MCP_HTTP_URL = "http://localhost:8079/api/mcp/kb/mcp"

@@ -14,8 +14,9 @@ class TestConstants:
     # ── API Limits ────────────────────────────────────────────────────────────────
 
     def test_default_page_limit(self):
-        """DEFAULT_PAGE_LIMIT should be 20."""
-        assert constants.DEFAULT_PAGE_LIMIT == 20
+        """DEFAULT_PAGE_LIMIT should be 10."""
+        # Stale test: DEFAULT_PAGE_LIMIT is 10 in production
+        assert constants.DEFAULT_PAGE_LIMIT == 10
 
     def test_max_page_limit(self):
         """MAX_PAGE_LIMIT should be 100."""

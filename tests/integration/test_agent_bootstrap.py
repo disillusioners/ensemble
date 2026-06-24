@@ -11,11 +11,17 @@ import os
 import pytest
 from pathlib import Path
 
-# Skip all tests in this module unless --run-integration is passed
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("OPENAI_API_KEY"),
-    reason="Set OPENAI_API_KEY to run integration tests"
-)
+# All tests in this file require live LLM infrastructure (real OpenAI API + MCP),
+# so they are excluded from the default non-integration test gate via the
+# `integration` marker defined in pyproject.toml.
+pytestmark = [
+    pytest.mark.integration,
+    # Skip all tests in this module unless --run-integration is passed
+    pytest.mark.skipif(
+        not os.environ.get("OPENAI_API_KEY"),
+        reason="Set OPENAI_API_KEY to run integration tests"
+    ),
+]
 
 
 @pytest.fixture

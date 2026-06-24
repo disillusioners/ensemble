@@ -39,7 +39,9 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
     "httpx>=0.28.0",
-]
+    "pytest-timeout>=2.3",
+    "pytest-xdist>=3.5",
+] 
 
 [project.scripts]
 ensemble = "daemon.__main__:main"
@@ -64,3 +66,5 @@ markers = [
 ]
 addopts = "-m 'not integration and not postgres'"
 asyncio_mode = "auto"
+timeout = 30
+timeout_method = "thread"
