@@ -2,11 +2,11 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT — Risks 1 (pause) & 3 (error) covered; crash-recovery still open |
+| **Status** | DRAFT — all three risks (pause, error, crash-recovery) covered |
 | **Supersedes** | Option A sketch in `logs/report-flow-before-after.mmd` (refines the guard change) |
 | **Goal** | Child-report Tasks reach the parent graph independently; one finalize path; no cross-system guard entanglement for reports |
-| **Scope** | MEDIUM — ~6 files, 1 SQL restructure, 1 new TaskType, behavior change on a hot path |
-| **Risk** | Hot path (task claim, child completion) — requires pause/resume + crash-recovery test coverage |
+| **Scope** | MEDIUM — ~7 files, 1 SQL restructure, 1 new TaskType, behavior change on a hot path |
+| **Risk** | Hot path (task claim, child completion, startup recovery) — requires pause/resume + crash-recovery test coverage |
 
 ---
 
@@ -193,6 +193,50 @@ point: `_process_event`.
   (`_emit_terminal_via_bus(status="error", error=...)`) — unchanged. What changes is *where* the
   resulting error status is consumed (finalize path instead of the deleted retrigger).
 
+**1.8 Crash-recovery reconciliation (Risk 2 — covered, moderate-easy).**
+The existing startup recovery loop in `daemon/api.py:555-664` already has the right *structure*:
+on `bus.start()` it iterates FIRED-but-unsent watcher rows (`enqueued_at IS NULL`), dedups per
+target, checks `bus.count_pending_for_target`, and stamps after handling. The only thing it does
+that this plan removes is call the deleted `_retrigger_parent_finalize`. We replace that one call
+with a **decision** rather than a bypass. For each recovered target with
+`count_pending_for_target == 0`:
+
+```python
+# Is anything still going to drive a parent turn that will finalize naturally?
+if task_repo.has_inflight_task(target_id):   # PENDING or RUNNING task exists
+    await bus.mark_enqueued(watch_id)         # stamp dedup; the task will finalize
+    continue
+# Nothing will drive finalization → finalize directly via the SINGLE path.
+job = await observer._get_processing_job_for_instance(target_id)
+if job is not None:
+    status = InstanceStatus.ERROR.value if bus.had_parent_error(target_id) \
+             else InstanceStatus.COMPLETED.value
+    error = bus.parent_error_message(target_id) if status == ERROR else None
+    await observer._finalize_job(job, target_id, status, error=error)
+    if bus.had_parent_error(target_id):
+        bus.clear_parent_error(target_id)
+await bus.mark_enqueued(watch_id)             # stamp after finalize (crash-safe: idempotent retry)
+```
+
+- **Why the `has_inflight_task` guard matters:** in the new design, finalization happens *after*
+  a report Task's turn ends. A naive "always finalize on recovery" (what the current code does via
+  `_retrigger_parent_finalize`) would finalize a job whose report Task is still PENDING and about
+  to run — re-introducing the orphan-Task bug. The guard makes recovery **defer** when a turn is
+  pending, and **finalize** only when nothing else will (the genuine stuck-parent case: report Task
+  already ran/crashed, no turn pending, watcher fired, job still PROCESSING).
+- **`has_inflight_task`** (new, small): `SELECT 1 FROM task WHERE instance_id = ? AND status IN
+  ('pending','running') LIMIT 1`. Sibling of the existing `find_running_by_instance`
+  (task/repository.py:119), widened to include PENDING. One indexed EXISTS.
+- **Stamp-after-finalize ordering preserved:** a crash before the stamp leaves the row un-stamped
+  → next restart retries. `_finalize_job` is idempotent (atomic `WHERE status = PROCESSING`), so
+  retry is safe.
+- **Self-healing:** the only remaining stuck window is a PENDING report Task that can *never* run
+  (e.g. corrupted message row) — a general task-recovery failure surfaced by the existing
+  stale-task sweep, not a finalization bug. Every other crash window either has an in-flight task
+  (deferred, self-heals when it runs) or is finalized directly.
+- **Difficulty:** ~30 lines in one existing loop + one small task-repo helper, reusing the
+  idempotent single-path `_finalize_job`. No new services/tables/lifecycle events.
+
 ### Phase 2 — Hardening & tests
 
 **2.1** Independent-turn test: 2 children complete at different times → parent produces 2
@@ -201,8 +245,12 @@ distinct assistant turns (not one batched). Assert Task claim order and lifecycl
 claimed for the paused instance (explicit gate), (b) a child completing during pause creates
 its report Task and it stays PENDING, (c) on resume `notify_work()` fires and the queued report
 Task is claimed and processed. Assert instance never runs `graph.astream` while PAUSED.
-**2.3** Crash recovery: kill process after report Task PENDING, before claim → restart reclaims
-and runs the turn; kill after bus fired but before stamp → restart retries, idempotent.
+**2.3** Crash recovery (Risk 2): four windows — (a) crash after report Task PENDING before bus
+fire → watcher stays PENDING (pre-existing gap, note only); (b) crash after bus fire before
+claim → recovery stamps, PENDING Task is reclaimed and finalizes naturally; (c) crash after the
+report turn ran but before finalize → no in-flight task → recovery finalizes directly; (d) second
+crash before stamp → row un-stamped, retried on next restart (idempotent). Assert no stuck
+PROCESSING job survives a clean restart.
 **2.4** Error propagation (Risk 3): (a) one child errors, one completes → parent job finalizes
 as `ERROR` with the child's error message, even though the parent's own report turns completed;
 (b) all children succeed → parent finalizes `COMPLETED`; (c) `clear_parent_error` runs after
@@ -227,12 +275,12 @@ stability guarantee; not needed to fix the bug.
   the protection. 1.6 restores it explicitly and uniformly: `claim_pending_task` excludes
   PAUSED/TERMINATED instances for *all* task types, and `resume_instance_cascade` calls
   `notify_work()`. No special-case for reports.
-- **Crash recovery (OPEN).** Removing the direct `_retrigger_parent_finalize` (1.4) removes a
-  startup safety net for parents that are fired-but-unfinalized (bus watchers all FIRED,
-  `count_pending == 0`, but the job still PROCESSING with no pending report Task to drive a
-  turn). With the bypass gone, restart must reconcile these: a startup sweep that finalizes any
-  PROCESSING message job whose instance has `bus.count_pending_for_target == 0`. Design needed
-  — this is the one risk still open.
+- ~~**Crash recovery**~~ — **covered (1.8).** The deleted `_retrigger_parent_finalize` was the
+  startup safety net for fired-but-unfinalized parents. 1.8 reuses the *existing* `api.py`
+  recovery loop but swaps the finalize call for a decision: defer when a report Task is in flight
+  (it will finalize naturally), finalize directly via the single-path `_finalize_job` only when
+  nothing else will. Self-healing across restarts via stamp-after-finalize + idempotent retry.
+  Moderate-easy (~30 lines, one small helper).
 - ~~**Error status threading**~~ — **covered (1.7).** The any-error→error rule moved from the
   deleted retrigger into `_process_event`'s finalize branch, sourced from the bus's
   `had_parent_error` + a new `parent_error_message`. Sticky flag cleared after finalize.
