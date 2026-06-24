@@ -1123,10 +1123,10 @@ class InstanceLifecycleService:
 
         # Single batched UPDATE — L14 transaction-boundary fix.
         # The helper issues one UPDATE that flips status + clears
-        # paused_at for all eligible nodes. Phase 4: the
-        # Phase 4: column dropped; this UPDATE no
-        # longer touches any completion counter. Parent-waits-for-
-        # children is owned by the CorrelationManager / Dependency Bus.
+        # paused_at for all eligible nodes. Phase 4: column
+        # dropped; this UPDATE no longer touches any completion
+        # counter. Parent-waits-for-children is owned by the
+        # CorrelationManager / Dependency Bus.
         if resumable_ids:
             db_result = await asyncio.to_thread(
                 self._resume_cascade_db_sync,

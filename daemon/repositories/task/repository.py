@@ -294,14 +294,12 @@ class TaskRepository:
             column="j.metadata", key="message_id"
         )
 
-        # Build the literal "process_message" SQL fragment for the
-        # cross-system guard scope. The report lane (PROCESS_REPORT)
-        # must bypass the job-coordination exclusion entirely —
-        # reports have no JobItem to collide with, so the original
-        # guard is irrelevant for them. We pass the literal directly
-        # (the value is a fixed enum string, not user input) so the
-        # predicate is identical on both backends.
-        process_message_literal = TaskType.PROCESS_MESSAGE.value
+        # Cross-system guard scope: the report lane (PROCESS_REPORT)
+        # bypasses the job-coordination exclusion entirely — reports
+        # have no JobItem to collide with, so the original guard is
+        # irrelevant for them. We pass the literal directly (a fixed
+        # enum string, not user input) so the predicate is identical
+        # on both backends.
 
         with self.engine.begin() as conn:
             stmt = text(f"""
@@ -391,7 +389,7 @@ class TaskRepository:
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
                 "status_paused": InstanceStatus.PAUSED.value,
                 "status_terminated": InstanceStatus.TERMINATED.value,
-                "process_message_type": process_message_literal,
+                "process_message_type": TaskType.PROCESS_MESSAGE.value,
                 "now_str": now_str,
             }).fetchone()
 
