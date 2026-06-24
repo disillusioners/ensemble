@@ -830,11 +830,18 @@ class TestErrorPropagation:
     async def test_error_flag_propagates_to_finalize_status(self, engine, bus):
         """(a) Verifies the finalize status override: had_parent_error → ERROR.
 
-        This test exercises the contract that _process_event uses:
-          if bus.had_parent_error(instance_id):
-              status_to_finalize = ERROR
-              error_for_finalize = bus.parent_error_message(instance_id)
+        Calls the real ``_resolve_finalize_status`` helper from
+        ``job_feedback_observer`` (the single source of truth for the
+        "any error → error" rule applied by both ``_process_event`` and
+        the bus crash-recovery path in ``daemon/api.py``). Duplicating
+        the rule here would let the helper drift from the test without
+        any signal.
         """
+        from daemon.services.job_feedback_observer import (
+            CHILD_AGENT_ERROR_FALLBACK,
+            _resolve_finalize_status,
+        )
+
         parent_id = _seed_instance(engine)
         child_id = _seed_instance(engine, parent_id=parent_id)
         child_task_id = _seed_child_task(engine, child_instance_id=child_id)
@@ -842,17 +849,69 @@ class TestErrorPropagation:
         await bus.watch(str(child_task_id), FollowUp(target_instance_id=parent_id, message="c", source="t"))
         await bus.emit_terminal(str(child_task_id), Outcome(status="error", error="oops"))
 
-        # Simulate the finalize override logic that _process_event applies.
-        status_override = InstanceStatus.ERROR.value if bus.had_parent_error(parent_id) else None
-        error_override = bus.parent_error_message(parent_id) if bus.had_parent_error(parent_id) else None
-
-        assert status_override == InstanceStatus.ERROR.value
-        assert error_override == "oops"
+        # Default would be COMPLETED (parent's own turn ended cleanly).
+        # The bus error flag overrides to ERROR + the captured child error.
+        status, error = _resolve_finalize_status(
+            bus, parent_id,
+            default_status=InstanceStatus.COMPLETED.value,
+            default_error=None,
+        )
+        assert status == InstanceStatus.ERROR.value
+        assert error == "oops"
 
         # Simulate the clear after finalize.
         bus.clear_parent_error(parent_id)
 
-        # After clear: no override would apply.
-        assert bus.had_parent_error(parent_id) is False
-        status_override_after = InstanceStatus.ERROR.value if bus.had_parent_error(parent_id) else None
-        assert status_override_after is None
+        # After clear: the helper returns the default (no override).
+        status_after, error_after = _resolve_finalize_status(
+            bus, parent_id,
+            default_status=InstanceStatus.COMPLETED.value,
+            default_error=None,
+        )
+        assert status_after == InstanceStatus.COMPLETED.value
+        assert error_after is None
+
+    @pytest.mark.asyncio
+    async def test_error_flag_uses_fallback_when_message_missing(self, engine, bus):
+        """The override returns a non-None error string even when the bus
+        did not capture a specific error message. Guards against the
+        override silently returning ``None`` and breaking the finalize
+        call's ``error=`` argument.
+
+        Note: the bus's ``emit_terminal`` itself populates a "child
+        agent error" fallback via ``setdefault`` when ``outcome.error``
+        is empty, so in practice ``parent_error_message`` is always
+        non-None when ``had_parent_error`` is True. The helper's own
+        ``or CHILD_AGENT_ERROR_FALLBACK`` is a second line of defense
+        against that fallback being cleared (e.g. on a stop+restart
+        that wiped the message dict but not the flag — impossible
+        with the current ``stop()`` implementation, but the helper
+        stays conservative).
+        """
+        from daemon.services.job_feedback_observer import (
+            CHILD_AGENT_ERROR_FALLBACK,
+            _resolve_finalize_status,
+        )
+
+        parent_id = _seed_instance(engine)
+        child_id = _seed_instance(engine, parent_id=parent_id)
+        child_task_id = _seed_child_task(engine, child_instance_id=child_id)
+
+        await bus.watch(str(child_task_id), FollowUp(target_instance_id=parent_id, message="c", source="t"))
+        # status="error" with error=None — the bus sets the flag AND
+        # populates the message dict with its own "child agent error"
+        # fallback via setdefault.
+        await bus.emit_terminal(str(child_task_id), Outcome(status="error"))
+
+        assert bus.had_parent_error(parent_id) is True
+        assert bus.parent_error_message(parent_id) == CHILD_AGENT_ERROR_FALLBACK
+
+        # Helper returns ERROR + a non-None error string (the bus's
+        # own fallback, which equals CHILD_AGENT_ERROR_FALLBACK).
+        status, error = _resolve_finalize_status(
+            bus, parent_id,
+            default_status=InstanceStatus.COMPLETED.value,
+            default_error=None,
+        )
+        assert status == InstanceStatus.ERROR.value
+        assert error == CHILD_AGENT_ERROR_FALLBACK
