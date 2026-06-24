@@ -231,9 +231,9 @@ class ChildReportsService:
             PENDING to FIRED. The list is returned for backward
             compatibility and observability (callers can log how many
             watchers fired), but the FollowUps are NOT enqueued as
-            messages — see ``_retrigger_parent_finalize`` below for
-            the actual finalization path. Empty list when no watchers
-            existed.
+            messages — finalization flows through the report Task
+            (``PROCESS_REPORT``) → ``_process_event`` path. Empty
+            list when no watchers existed.
         """
         from .dependency_bus import (
             Outcome,
@@ -262,85 +262,28 @@ class ChildReportsService:
         outcome = Outcome(status=status, error=error, summary=summary)
         fired = await bus.emit_terminal(task_id=str(task_id), outcome=outcome)
 
-        # ─── Bus re-trigger (direct finalization) ────────────────
-        # After the bus fires watchers, check if each target (parent)
-        # has ALL watchers resolved (0 PENDING). If so, directly call
-        # ``_finalize_job`` on the JobFeedbackObserver — there is NO
-        # message-queue follow-up step. The bus is a state machine
-        # that drives an internal finalization transition, not an
-        # event source that the LLM consumes.
+        # Phase 1 (2026-06-24, report-lane decoupling): the bus no
+        # longer re-triggers ``_finalize_job`` directly. The old
+        # loop below used to iterate the fired FollowUps, check
+        # ``count_pending_for_target == 0`` and call the deleted
+        # ``_retrigger_parent_finalize`` shortcut (which itself
+        # called ``_finalize_job`` on the JobFeedbackObserver) to
+        # short-circuit the natural finalize path.
         #
-        # Why this is needed: the bus owns completion end-to-end.
-        # Without this direct re-trigger, the job stays PROCESSING
-        # forever (the inverse of the premature-completion bug the
-        # bus gate was added to prevent).
+        # That shortcut was the source of the orphan-Task bug: a
+        # finalize fired by the bus would terminate the parent's job
+        # while its report Task was still PENDING, leaving the Task
+        # with no JobItem to drive it.
         #
-        # Guarded by a ``_retriggered`` set so a parent that received
-        # multiple FollowUps from one terminal event is re-triggered
-        # at most once per call (avoids redundant observer work when
-        # N fired FollowUps all target the same parent).
-        #
-        # **Stamp ordering (crash-recovery invariant, 2026-06-22)**:
-        # the ``mark_enqueued_by_source_target`` stamp MUST happen
-        # AFTER the finalization attempt (not before). If we stamped
-        # first, a crash between stamp and retrigger would leave
-        # ``enqueued_at IS NOT NULL`` and a future restart's
-        # :meth:`DependencyBus._recover_fired_unsent` would skip the
-        # row — the parent would stay PROCESSING forever. Stamping
-        # AFTER the finalization attempt is correct: a crash before
-        # finalization leaves the row un-stamped → next restart
-        # retries finalization → safe because ``_finalize_job`` is
-        # idempotent (atomic ``WHERE status = PROCESSING`` UPDATE).
-        # This matches the recovery pattern in ``api.py`` which
-        # correctly orders retrigger → stamp.
-        _retriggered: set[str] = set()
-        for fu in fired:
-            target_id = fu.target_instance_id
-            if target_id in _retriggered:
-                continue
-            _retriggered.add(target_id)
-            try:
-                remaining = await bus.count_pending_for_target(target_id)
-            except Exception as e:
-                logger.warning(
-                    f"Bus re-trigger check failed for {target_id[:8]}...: {e}"
-                )
-                continue
-            if remaining == 0:
-                logger.info(
-                    f"Bus: all watchers fired for {target_id[:8]}... "
-                    f"(remaining PENDING=0), re-triggering finalize"
-                )
-                # Loop-level exception guard: even though
-                # ``_retrigger_parent_finalize`` now has internal
-                # try/except around its two DB calls, a defensive
-                # outer guard here ensures a bug or unexpected
-                # error path inside the helper cannot abort the
-                # iteration and skip re-triggering the remaining
-                # targets.
-                #
-                # Phase 5 (2026-06-23): thread the outcome's
-                # ``status`` and ``error`` into the re-trigger
-                # helper so a parent whose last child errored
-                # finalizes as ``"error"`` instead of the
-                # hardcoded ``"completed"`` the pre-Phase-5
-                # helper used. The helper also consults
-                # ``bus.had_parent_error(target_id)`` for the
-                # sticky cross-child case (a parent whose first
-                # child errored and subsequent children completed
-                # normally must still finalize as ``"error"`` —
-                # the conservative "any error → error" rule).
-                try:
-                    await self._retrigger_parent_finalize(
-                        target_id,
-                        terminal_status=status,
-                        error=error,
-                    )
-                except Exception as retrigger_err:
-                    logger.warning(
-                        f"Bus re-trigger: unexpected error for "
-                        f"{target_id[:8]}...: {retrigger_err}"
-                    )
+        # The natural path is now the only path: the report Task
+        # runs (Phase 1.1: ``notify_work()`` wakes the worker; Phase
+        # 1.2: ``PROCESS_REPORT`` TaskType uses the same
+        # ProcessMessageProcessor delivery), emits a lifecycle
+        # event, and ``JobFeedbackObserver._process_event`` checks
+        # the bus pending count and finalizes the job when 0.
+        # Per-child error status is threaded into the finalize path
+        # from the bus's ``had_parent_error`` + new
+        # ``parent_error_message`` (Step 1.7).
 
         # ─── Crash-recovery dedup stamp (C1, 2026-06-22 reorder) ───
         # Stamp ``enqueued_at`` on every fired FollowUp AFTER the
@@ -382,176 +325,6 @@ class ChildReportsService:
                 )
 
         return fired
-
-    async def _retrigger_parent_finalize(
-        self,
-        instance_id: str,
-        terminal_status: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Re-trigger job finalization for a parent after all bus watchers fired.
-
-        On the bus path, the bus completion callback never
-        re-fires because ``send_message`` no longer goes through CM
-        (Phase 5 removal). After the bus fires the last watcher, we
-        must explicitly re-attempt job finalization via the
-        :class:`JobFeedbackObserver` so the job transitions
-        PROCESSING → COMPLETED and locks are released.
-
-        Safety properties:
-          * **No deadlock**: ``_emit_terminal_via_bus`` runs in post-commit
-            dispatch (after ``WriteGuardSession`` closed). The observer's
-            ``_finalize_job`` acquires the CM per-parent lock and opens its
-            own ``WriteGuardSession``. No shared transaction, no nested locks.
-          * **Idempotent**: ``_finalize_job_db_sync`` uses an atomic
-            ``WHERE status = PROCESSING`` guard. If the job was already
-            finalized by another path, ``rowcount=0`` and the helper
-            returns ``skip=True`` — no duplicate side effects.
-          * **Defense-in-depth**: ``getattr(manager, "_job_feedback_observer",
-            None)`` lets the helper degrade gracefully when the observer
-            has not been wired (unit tests, partial init). A missing
-            observer is logged at DEBUG, not WARN, because it is the
-            expected state for tests.
-
-        Phase 5 (2026-06-23): ``terminal_status`` threads the child
-        outcome's status from :meth:`_emit_terminal_via_bus` so a
-        parent whose last child errored finalizes as ``"error"``
-        instead of the pre-Phase-5 hardcoded ``"completed"``. The
-        helper also consults :meth:`DependencyBus.had_parent_error`
-        for the sticky cross-child case — a parent whose first
-        child errored but subsequent children completed normally
-        must still finalize as ``"error"`` (the conservative "any
-        error → error" rule that was lost when CM was removed).
-
-        Args:
-            instance_id: The parent instance whose job may need to be
-                finalized. Resolved to its PROCESSING ``JobItem`` via
-                ``JobFeedbackObserver._get_processing_job_for_instance``.
-            terminal_status: The child outcome's status (``"completed"``
-                or ``"error"``). ``None`` defaults to ``"completed"``
-                for backward compatibility with the pre-Phase-5
-                call site in ``daemon/api.py`` crash-recovery path
-                (which has no per-child status context).
-            error: The child outcome's error message (only set when
-                ``terminal_status == "error"``). Forwarded to
-                ``_finalize_job`` so the parent's job is marked
-                FAILED with a meaningful error message.
-        """
-        observer = getattr(self._manager, "_job_feedback_observer", None)
-        if observer is None:
-            # Expected in unit tests where ChildReportsService is built
-            # against a bare MagicMock manager; the bus re-trigger is a
-            # no-op there. In production the observer is wired by
-            # ``daemon/api.py`` via ``InstanceManager.set_job_feedback_observer``.
-            logger.debug(
-                f"Bus re-trigger: no observer available for "
-                f"{instance_id[:8]}... (skipping — not wired in test?)"
-            )
-            return
-
-        # Phase 5 (2026-06-23): determine the final terminal_status
-        # using the conservative "any error → error" rule. We
-        # consult the bus's per-parent error flag (sticky across
-        # all children) AND the terminal_status passed by the caller
-        # (the immediate child's outcome). Either path can flip the
-        # final status to "error"; the completion path wins for
-        # ``"completed"`` only when no error has been recorded for
-        # this parent on the bus.
-        from .dependency_bus import get_dependency_bus
-
-        bus = get_dependency_bus()
-        had_error = (
-            bus.had_parent_error(instance_id) if bus is not None else False
-        )
-        # Conservative rule: any child error → parent "error".
-        # ``terminal_status`` defaults to "completed" when the caller
-        # has no per-child status context (e.g. the api.py
-        # crash-recovery path that re-triggers finalization on a
-        # watched target whose last watcher fired before a crash).
-        if had_error:
-            resolved_status = InstanceStatus.ERROR.value
-        elif terminal_status in (
-            InstanceStatus.COMPLETED.value,
-            InstanceStatus.ERROR.value,
-        ):
-            resolved_status = terminal_status
-        else:
-            resolved_status = InstanceStatus.COMPLETED.value
-
-        # Find the PROCESSING job for this instance. Uses the same
-        # helper as ``_retrigger_parent_finalize`` (job_feedback_observer
-        # line 551) so the stale-job defense-in-depth re-query is applied
-        # uniformly across both re-trigger paths.
-        #
-        # Exception-safety: the helper opens its own ``WriteGuardSession``
-        # and runs sync DB queries on a worker thread. A transient DB
-        # failure here would propagate out of ``_retrigger_parent_finalize``
-        # and break the retrigger loop in ``_emit_terminal_via_bus`` for
-        # all subsequent targets. Wrap so a single failure logs and
-        # returns cleanly — the next child completion (or a manual
-        # recovery sweep) can retry the finalization.
-        try:
-            job = await observer._get_processing_job_for_instance(instance_id)
-        except Exception as e:
-            logger.warning(
-                f"Bus re-trigger: job lookup failed for "
-                f"{instance_id[:8]}...: {e}"
-            )
-            return
-        if job is None:
-            # The job is already terminal or never existed — finalization
-            # is either already complete or irrelevant. Silent skip
-            # matches the behaviour of the bus callback when no
-            # PROCESSING job exists.
-            logger.debug(
-                f"Bus re-trigger: no PROCESSING job for "
-                f"{instance_id[:8]}..., may already be finalized"
-            )
-            return
-
-        logger.info(
-            f"Bus re-trigger: calling _finalize_job for {instance_id[:8]}... "
-            f"(job={job.job_id[:8]}..., terminal_status={resolved_status}, "
-            f"had_error={had_error})"
-        )
-        try:
-            # _finalize_job re-checks ALL bus gates before transitioning.
-            # On the bus path the bus gate passes (0 PENDING) and the
-            # transition proceeds. Result: PROCESSING → COMPLETED,
-            # instance → COMPLETED, locks released.
-            #
-            # Phase 5 (2026-06-23): pass ``resolved_status`` (not the
-            # hardcoded ``COMPLETED``) so a parent whose child errored
-            # finalizes as ``"error"``. The ``error`` argument is the
-            # forwarded child error message (only meaningful when
-            # ``resolved_status == "error"``).
-            await observer._finalize_job(
-                job,
-                instance_id,
-                resolved_status,
-                error=error,
-            )
-            # Clear the per-parent error flag on the bus so a future
-            # revive / re-spawn of the same instance id does NOT
-            # inherit the sticky error signal. Without this, a
-            # terminated-then-revived instance would incorrectly
-            # finalize any future wave as ``"error"`` (the flag
-            # was set during the previous incarnation).
-            if bus is not None and had_error:
-                bus.clear_parent_error(instance_id)
-        except Exception as e:
-            # Defensive guard: a single re-trigger failure must not
-            # crash the bus finalization path. The bus no longer
-            # enqueues FollowUp messages onto the parent's queue —
-            # the bus is a pure state machine that drives a direct
-            # ``_finalize_job`` call (see ``_emit_terminal_via_bus``
-            # docstring). The next child completion (or a manual
-            # recovery sweep) can retry the finalization; the
-            # ``_finalize_job`` itself is idempotent.
-            logger.warning(
-                f"Bus re-trigger: _finalize_job failed for "
-                f"{instance_id[:8]}...: {e}"
-            )
 
     @property
     def _instance_repository(self) -> "SQLModelInstanceRepository":
@@ -905,17 +678,28 @@ Provide a concise summary:"""
         completed_message_id: str,
     ) -> tuple[MessageQueue, Task, str]:
         """Create the completion report message and task for the parent.
-        
+
         Updates the child instance status to COMPLETED and creates:
         - COMPLETION_REPORT message for parent
-        - PROCESS_MESSAGE task
-        
+        - PROCESS_REPORT task (Phase 1, 2026-06-24, report-lane
+          decoupling)
+
+        Phase 1: the report Task is now typed as ``PROCESS_REPORT``
+        (new ``TaskType`` member) instead of ``PROCESS_MESSAGE``. The
+        two types share the same ``ProcessMessageProcessor`` delivery
+        pipeline — see ``daemon/services/task_processor.py`` — but
+        differ in admission: the cross-system job-coordination guard
+        in ``claim_pending_task`` applies only to ``PROCESS_MESSAGE``,
+        so reports bypass it. Reports have no ``JobItem`` to collide
+        with, so the original guard was the wrong shape for them
+        (and was the root cause of the orphan-Task bug).
+
         Args:
             session: Database session.
             instance: The child Instance object.
             last_content: The content to include in the report (fetched before transaction).
             completed_message_id: The message ID that completed (for unique report source).
-            
+
         Returns:
             Tuple of (report_message, report_task, report_message_id).
         """
@@ -924,7 +708,7 @@ Provide a concise summary:"""
         instance.updated_at = datetime.now(timezone.utc).isoformat()
         instance.last_activity_at = datetime.now(timezone.utc)
         instance.version = (instance.version or 1) + 1
-        
+
         # Create completion report message for parent
         # Include message_id in source for per-message idempotency
         report_message_id = str(uuid.uuid4())
@@ -939,17 +723,18 @@ Provide a concise summary:"""
             enqueued_at=datetime.now(timezone.utc),
         )
         session.add(report_message)
-        
-        # Create task for parent to process the report
+
+        # Create task for parent to process the report.
+        # Phase 1 (2026-06-24): PROCESS_REPORT — see TaskType docstring.
         report_task = Task(
-            task_type=TaskType.PROCESS_MESSAGE.value,
+            task_type=TaskType.PROCESS_REPORT.value,
             instance_id=instance.parent_id,
             message_id=report_message_id,
             status=TaskStatus.PENDING.value,
             created_at=datetime.now(timezone.utc),
         )
         session.add(report_task)
-        
+
         return report_message, report_task, report_message_id
 
     async def _update_parent_on_child_complete(self, session, instance, completed_message_id: str | None = None) -> tuple[bool, str | None, str | None]:
@@ -1897,9 +1682,10 @@ Provide a concise summary:"""
             )
             session.add(report_message)
             
-            # Create task for parent to process the report
+            # Create task for parent to process the report.
+            # Phase 1 (2026-06-24): PROCESS_REPORT — see TaskType docstring.
             report_task = Task(
-                task_type=TaskType.PROCESS_MESSAGE.value,
+                task_type=TaskType.PROCESS_REPORT.value,
                 instance_id=instance.parent_id,
                 message_id=report_message_id,
                 status=TaskStatus.PENDING.value,
@@ -2101,10 +1887,12 @@ Provide a concise summary:"""
 
         The bus terminal hook (``bus.emit_terminal``) fires AFTER the
         commit so that the bus's DB-backed watcher state is updated
-        after the DB state is consistent. The bus's
-        ``_retrigger_parent_finalize`` callback does its own
-        separate DB transaction (via ``asyncio.to_thread``), so there
-        is no dependency between the commit orderings.
+        after the DB state is consistent. Finalization then flows
+        through the report ``Task`` (PROCESS_REPORT) →
+        ``JobFeedbackObserver._process_event`` path — the bus is a
+        pure state machine, the observer handles terminal
+        transitions. There is no longer a separate bus-callback DB
+        transaction.
 
         Args:
             result: The outcome from the sync DB helper.
@@ -2260,6 +2048,24 @@ Provide a concise summary:"""
                     status="completed",
                     summary="regular child completed",
                 )
+
+            # Phase 1 (2026-06-24, report-lane decoupling): Wake the
+            # worker pool after the report Task is committed. Before
+            # this, the report Task sat PENDING until the worker pool's
+            # 3-second poll noticed it — that delay meant the parent's
+            # next graph turn could lag noticeably behind the child's
+            # completion. The worker pool's ``notify_work()`` is
+            # thread-safe and best-effort: a missing pool is tolerated
+            # (tests may build a bare InstanceManager without one).
+            worker_pool = getattr(self._manager, "_worker_pool", None)
+            if worker_pool is not None:
+                try:
+                    worker_pool.notify_work()
+                except Exception as notify_err:
+                    logger.warning(
+                        f"child_reports: worker_pool.notify_work() "
+                        f"failed for report Task (non-fatal): {notify_err}"
+                    )
 
             # CompletionRegistry
             from .completion_registry import get_completion_registry

@@ -1204,13 +1204,21 @@ class TestPausedInstanceSkipped:
         """find_cancellable_tasks must not return tasks whose instance is PAUSED."""
         # Instance is paused (the user paused it) but the in-flight task
         # is still RUNNING with a stale heartbeat (the worker was cancelled).
-        self._insert_instance(engine, "paused-inst", "paused")
+        #
+        # Setup order matters: insert instance as 'running' so the fixture's
+        # claim_pending_task succeeds (the pause gate in claim_pending_task
+        # correctly blocks claims for paused instances), then flip the
+        # instance to 'paused' to simulate the user pausing after the
+        # worker started. The fixture creates a RUNNING task with a stale
+        # heartbeat before the status flip.
+        self._insert_instance(engine, "paused-inst", "running")
         paused_task = create_stale_running_task(
             repository,
             instance_id="paused-inst",
             message_id="paused-msg",
             age_minutes=20,
         )
+        self._insert_instance(engine, "paused-inst", "paused")
 
         # A non-paused instance's stale task — control case, must be returned.
         self._insert_instance(engine, "active-inst", "running")
@@ -1229,21 +1237,26 @@ class TestPausedInstanceSkipped:
 
     def test_find_stale_running_tasks_skips_paused_instance(self, repository, engine):
         """find_stale_running_tasks must not return tasks on paused instances."""
-        self._insert_instance(engine, "paused-inst", "paused")
+        # See test_find_cancellable_tasks_skips_paused_instance for why we
+        # create with status='running' then flip to the paused/terminated
+        # status after the fixture has claimed the task.
+        self._insert_instance(engine, "paused-inst", "running")
         paused_task = create_stale_running_task(
             repository,
             instance_id="paused-inst",
             message_id="paused-msg",
             age_minutes=20,
         )
+        self._insert_instance(engine, "paused-inst", "paused")
 
-        self._insert_instance(engine, "terminated-inst", "terminated")
+        self._insert_instance(engine, "terminated-inst", "running")
         terminated_task = create_stale_running_task(
             repository,
             instance_id="terminated-inst",
             message_id="terminated-msg",
             age_minutes=20,
         )
+        self._insert_instance(engine, "terminated-inst", "terminated")
 
         self._insert_instance(engine, "active-inst", "running")
         active_task = create_stale_running_task(
@@ -1262,13 +1275,17 @@ class TestPausedInstanceSkipped:
 
     def test_recover_stale_tasks_does_not_resume_paused_instance(self, repository, engine):
         """End-to-end: recover_stale_tasks must not act on paused instances."""
-        self._insert_instance(engine, "paused-inst", "paused")
+        # See test_find_cancellable_tasks_skips_paused_instance for why we
+        # create with status='running' then flip to 'paused' after the
+        # fixture has claimed the task.
+        self._insert_instance(engine, "paused-inst", "running")
         paused_task = create_stale_running_task(
             repository,
             instance_id="paused-inst",
             message_id="paused-msg",
             age_minutes=20,
         )
+        self._insert_instance(engine, "paused-inst", "paused")
 
         mock_message_repo = MockMessageRepository()
 

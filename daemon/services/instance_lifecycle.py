@@ -1155,6 +1155,28 @@ class InstanceLifecycleService:
                 )
             logger.info(f"Resumed instance {node_id[:8]}...")
 
+        # Phase 1 (2026-06-24, report-lane decoupling): Wake the worker
+        # pool on a successful resume so any tasks that were queued
+        # during the pause (e.g. ``PROCESS_REPORT`` tasks created while
+        # a child completed mid-pause) are immediately reconsidered.
+        # Without this, the workers would not poll until their 3s tick
+        # — fine for latency in normal operation, but the new report
+        # lane relies on tight claim→run→finalize cycles (each child
+        # completion becomes its own parent turn), so every idle cycle
+        # delays the parent's view of its children. Guarded with
+        # ``getattr`` so tests that build a bare InstanceManager
+        # without a worker pool do not crash.
+        if resumed_ids:
+            worker_pool = getattr(self._manager, "_worker_pool", None)
+            if worker_pool is not None:
+                try:
+                    worker_pool.notify_work()
+                except Exception as notify_err:
+                    logger.warning(
+                        f"resume_instance_cascade: worker_pool.notify_work() "
+                        f"failed (non-fatal): {notify_err}"
+                    )
+
         return {"resumed_ids": resumed_ids, "skipped_ids": skipped_ids, "target_id": instance_id}
 
     async def get_instance(self, instance_id: str) -> CompiledStateGraph:

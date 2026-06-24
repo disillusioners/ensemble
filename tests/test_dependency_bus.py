@@ -1173,12 +1173,17 @@ class TestCountPendingForTarget:
 
 
 class TestBusRetriggerFinalize:
-    """Tests for the bus re-trigger finalize path in ``_emit_terminal_via_bus``.
+    """Pin down the negative case: the bus does NOT re-trigger finalize.
 
-    The re-trigger is the inverse-regression fix for the bus-path
-    ``send_message`` starves the CM callback bug — without it, jobs on
-    the bus path stay PROCESSING forever. The tests below pin down the
-    three safety contracts that the fix relies on.
+    Phase 1 (2026-06-24, report-lane decoupling) removed the
+    re-trigger finalize loop from ``_emit_terminal_via_bus`` — the
+    bus is a pure state machine, and finalization flows through the
+    report ``Task`` (PROCESS_REPORT) → ``_process_event`` path in
+    ``JobFeedbackObserver``. The single remaining test below pins
+    the contract: firing a watcher for a parent with multiple
+    watchers does NOT call the observer's ``_finalize_job`` —
+    neither via the old retrigger loop nor via any other side
+    channel from ``_emit_terminal_via_bus``.
     """
 
     @pytest.fixture(autouse=True)
@@ -1222,62 +1227,17 @@ class TestBusRetriggerFinalize:
         return service
 
     @pytest.mark.asyncio
-    async def test_retrigger_fires_when_all_watchers_resolved(self):
-        """R1: register one watcher → fire it → _finalize_job called once.
-
-        When the bus transitions the only PENDING watcher to FIRED, the
-        post-fire ``count_pending_for_target`` returns 0 for the target,
-        and the retrigger guard fires ``observer._finalize_job`` exactly
-        once with the COMPLETED status. This is the happy path that
-        releases the parent job lock after the bus has fully resolved.
-        """
-        # Mock observer: a PROCESSING job exists, _finalize_job succeeds.
-        fake_job = MagicMock(name="JobItem")
-        fake_job.job_id = f"job-{uuid.uuid4().hex[:8]}"
-
-        observer = MagicMock(name="JobFeedbackObserver")
-        observer._get_processing_job_for_instance = AsyncMock(
-            return_value=fake_job
-        )
-        observer._finalize_job = AsyncMock(name="_finalize_job")
-
-        service = self._build_service_with_observer(observer)
-        target_id = f"parent-{uuid.uuid4().hex[:8]}"
-
-        bus = get_dependency_bus()
-        await bus.watch("task-1", make_fu(target_id=target_id))
-
-        # task_id is converted to str() inside _emit_terminal_via_bus
-        # before being passed to bus.emit_terminal(), so use the string
-        # form directly to match the watcher's source_task_id.
-        fired = await service._emit_terminal_via_bus(
-            task_id="task-1", status="completed"
-        )
-
-        # The bus returned the FollowUp and the retrigger fired finalize.
-        assert len(fired) == 1
-        assert fired[0].target_instance_id == target_id
-        observer._get_processing_job_for_instance.assert_awaited_once_with(
-            target_id
-        )
-        observer._finalize_job.assert_awaited_once()
-        _args, kwargs = observer._finalize_job.call_args
-        # _finalize_job signature: (job, instance_id, status, error)
-        # The status argument must be "completed" so the parent job
-        # transitions PROCESSING → COMPLETED.
-        assert kwargs.get("status") == "completed" or (
-            len(_args) >= 3 and _args[2] == "completed"
-        )
-
-    @pytest.mark.asyncio
     async def test_retrigger_skipped_when_watchers_remain(self):
         """R2: 2 watchers on same target → fire only 1 → finalize NOT called.
 
-        The gate is ``count_pending_for_target(target) == 0``. When one
-        watcher is still PENDING, the retrigger MUST skip — calling
-        ``_finalize_job`` prematurely would race the bus and risk
-        double-fire / premature completion (the bug class the gate
-        exists to prevent).
+        Phase 1 (2026-06-24, report-lane decoupling): the bus no longer
+        re-triggers ``_finalize_job`` from ``_emit_terminal_via_bus`` —
+        finalization flows through the report Task → ``_process_event``
+        path instead. This test pins the contract that firing a single
+        watcher for a parent with multiple watchers does NOT call the
+        observer's ``_finalize_job`` (the old gate) — the test still
+        passes under the new design because the bus does not call
+        ``_finalize_job`` at all from this path.
         """
         # Observer with a real-looking job so the helper would otherwise
         # proceed — but the gate must skip it.
@@ -1303,223 +1263,10 @@ class TestBusRetriggerFinalize:
         )
 
         assert len(fired) == 1
-        # CRITICAL: the gate must have blocked the retrigger — the other
-        # watcher is still PENDING.
+        # CRITICAL: the bus does not re-trigger finalize (the report-lane
+        # decoupling moved finalization to the Task → _process_event path).
         observer._get_processing_job_for_instance.assert_not_called()
         observer._finalize_job.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_retrigger_skipped_when_job_already_terminal(self):
-        """R3: no PROCESSING job exists → _retrigger_parent_finalize no-ops.
-
-        The observer's ``_get_processing_job_for_instance`` returns
-        ``None`` (the job was already finalized or never existed).
-        ``_retrigger_parent_finalize`` MUST return cleanly without
-        raising — the helper is called from the post-commit dispatch
-        path where any propagated exception would surface as a job
-        error and re-trigger subsequent failures.
-        """
-        # Observer where the job lookup returns None (already terminal).
-        observer = MagicMock(name="JobFeedbackObserver")
-        observer._get_processing_job_for_instance = AsyncMock(return_value=None)
-        observer._finalize_job = AsyncMock(name="_finalize_job")
-
-        service = self._build_service_with_observer(observer)
-        target_id = f"parent-{uuid.uuid4().hex[:8]}"
-
-        bus = get_dependency_bus()
-        await bus.watch("task-1", make_fu(target_id=target_id))
-
-        # Should NOT raise — clean skip on None job.
-        fired = await service._emit_terminal_via_bus(
-            task_id="task-1", status="completed"
-        )
-
-        assert len(fired) == 1
-        observer._get_processing_job_for_instance.assert_awaited_once_with(
-            target_id
-        )
-        # The critical assertion: _finalize_job was NEVER called.
-        observer._finalize_job.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_retrigger_helper_swallows_lookup_exception(self):
-        """E1 (review fix): ``_get_processing_job_for_instance`` raising
-        does NOT propagate out of ``_retrigger_parent_finalize``.
-
-        A transient DB error during the job lookup must be logged and
-        swallowed — the helper returns ``None`` semantically (we don't
-        know if there's a job to finalize), so the safe behavior is to
-        skip and let the next child completion retry. The previous
-        version of the helper would propagate the exception out to the
-        retrigger loop in ``_emit_terminal_via_bus`` and abort
-        re-triggering of all subsequent targets.
-        """
-        observer = MagicMock(name="JobFeedbackObserver")
-        observer._get_processing_job_for_instance = AsyncMock(
-            side_effect=RuntimeError("transient DB failure")
-        )
-        observer._finalize_job = AsyncMock(name="_finalize_job")
-
-        service = self._build_service_with_observer(observer)
-        target_id = f"parent-{uuid.uuid4().hex[:8]}"
-
-        # Should NOT raise — the helper swallows the lookup error.
-        await service._retrigger_parent_finalize(target_id)
-
-        # _finalize_job MUST NOT be called when the lookup failed.
-        observer._finalize_job.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_retrigger_loop_continues_after_target_failure(self):
-        """E2 (review fix): a failure on one target's retrigger does not
-        abort re-triggering the remaining targets.
-
-        The outer ``for fu in fired`` loop in ``_emit_terminal_via_bus``
-        wraps ``_retrigger_parent_finalize`` in its own try/except. If
-        the inner helper were to raise (bug, unexpected error path),
-        the loop MUST continue to the next target — the enqueue above
-        already succeeded for all targets, so abandoning the rest would
-        strand multiple parents.
-        """
-        # Observer whose _finalize_job raises on the first target and
-        # succeeds on the second. _get_processing_job_for_instance
-        # always returns a fake job (so the helper proceeds to the
-        # _finalize_job call).
-        fake_job_a = MagicMock(name="JobItem-a")
-        fake_job_a.job_id = f"job-a-{uuid.uuid4().hex[:8]}"
-        fake_job_b = MagicMock(name="JobItem-b")
-        fake_job_b.job_id = f"job-b-{uuid.uuid4().hex[:8]}"
-
-        observer = MagicMock(name="JobFeedbackObserver")
-
-        async def lookup_job(instance_id: str):
-            return {"parent-A": fake_job_a, "parent-B": fake_job_b}[instance_id]
-
-        observer._get_processing_job_for_instance = AsyncMock(side_effect=lookup_job)
-
-        finalize_calls: list[str] = []
-
-        async def finalize(job, instance_id, status, error):
-            finalize_calls.append(instance_id)
-            if instance_id == "parent-A":
-                raise RuntimeError("simulated finalize failure")
-
-        observer._finalize_job = AsyncMock(side_effect=finalize)
-
-        service = self._build_service_with_observer(observer)
-        target_a = "parent-A"
-        target_b = "parent-B"
-
-        bus = get_dependency_bus()
-        # Two watchers on the SAME source task, each targeting a
-        # different parent. The bus fires both FollowUps atomically;
-        # the retrigger loop then visits each distinct target once.
-        await bus.watch("task-both", make_fu(target_id=target_a))
-        await bus.watch("task-both", make_fu(target_id=target_b))
-
-        # Fire the single source — both FollowUps come back in one
-        # call, so the retrigger loop hits both targets. The first
-        # target's finalize raises; the second must still run.
-        fired = await service._emit_terminal_via_bus(
-            task_id="task-both", status="completed"
-        )
-
-        assert len(fired) == 2
-        # CRITICAL: the second target's finalize was reached despite the
-        # first target's exception. Without the loop-level guard, the
-        # first exception would propagate and parent-B would stay
-        # PROCESSING forever (the inverse-regression bug).
-        assert finalize_calls == [target_a, target_b], (
-            f"Loop-level exception guard failed: expected both targets "
-            f"finalized, got {finalize_calls}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_retrigger_helper_noop_without_observer(self):
-        """R4 (graceful degradation): no observer wired → clean no-op.
-
-        In unit tests and during partial init, the manager may not have
-        ``_job_feedback_observer`` set yet. The helper must return
-        cleanly (logged at DEBUG) rather than raise AttributeError.
-        """
-        service = self._build_service_with_observer(observer=None)
-
-        # Must NOT raise.
-        await service._retrigger_parent_finalize("any-instance-id")
-
-    @pytest.mark.asyncio
-    async def test_retrigger_fires_on_error_path(self):
-        """R5 (inverse-regression): the error path also fires finalize.
-
-        Bug: ``daemon/services/error_reporting.py`` used to call
-        ``_bus.emit_terminal()`` directly and enqueue FollowUps, but
-        NEVER invoked ``_retrigger_parent_finalize``. If the errored
-        child was the last PENDING watcher for its parent, the parent's
-        job finalization was never re-triggered and the parent stayed
-        in PROCESSING forever — the exact inverse-regression bug the
-        re-trigger was added to prevent on the completion path.
-
-        Fix: ``error_reporting.py`` now delegates to
-        ``child_reports._emit_terminal_via_bus()`` (which handles
-        FollowUp enqueue + the re-trigger loop uniformly). This test
-        pins down the contract: when the error path fires the last
-        PENDING watcher, ``_finalize_job`` is invoked on the parent's
-        observer so the parent job transitions PROCESSING → ERROR
-        (not stuck, and not silently downgraded to COMPLETED).
-
-        The test mirrors R1 (``test_retrigger_fires_when_all_watchers_resolved``)
-        but with ``status="error"`` and a non-None ``error`` payload,
-        matching the call signature used by
-        ``ErrorReportingService._send_error_report`` after the fix.
-        """
-        # Mock observer: a PROCESSING job exists, _finalize_job succeeds.
-        fake_job = MagicMock(name="JobItem")
-        fake_job.job_id = f"job-{uuid.uuid4().hex[:8]}"
-
-        observer = MagicMock(name="JobFeedbackObserver")
-        observer._get_processing_job_for_instance = AsyncMock(
-            return_value=fake_job
-        )
-        observer._finalize_job = AsyncMock(name="_finalize_job")
-
-        service = self._build_service_with_observer(observer)
-        target_id = f"parent-{uuid.uuid4().hex[:8]}"
-
-        bus = get_dependency_bus()
-        await bus.watch("task-1", make_fu(target_id=target_id))
-
-        # Simulate the error path: status="error" with an error payload,
-        # exactly as ``ErrorReportingService._send_error_report`` calls
-        # it after the fix. The bus keys on the string task_id.
-        fired = await service._emit_terminal_via_bus(
-            task_id="task-1",
-            status="error",
-            error="max_retries_exceeded",
-            summary="child errored: max_retries_exceeded",
-        )
-
-        # The bus returned the FollowUp and the retrigger fired finalize
-        # — the exact behavior the fix is meant to guarantee for the
-        # error path. Without the fix, ``_finalize_job`` would NOT be
-        # called here and the parent would stay PROCESSING.
-        assert len(fired) == 1
-        assert fired[0].target_instance_id == target_id
-        observer._get_processing_job_for_instance.assert_awaited_once_with(
-            target_id
-        )
-        observer._finalize_job.assert_awaited_once()
-        _args, kwargs = observer._finalize_job.call_args
-        # _finalize_job signature: (job, instance_id, status, error).
-        # Phase 5: parent finalizes as "error" (conservative "any
-        # error → error" rule from bus.had_parent_error — the child
-        # errored, so the parent is marked error). The child status
-        # was already written by ``ErrorReportingService``; this
-        # call only finalizes the PARENT job's status, which mirrors
-        # the errored child.
-        assert kwargs.get("status") == "error" or (
-            len(_args) >= 3 and _args[2] == "error"
-        )
 
 
 # -------------------------------------------------------------------------

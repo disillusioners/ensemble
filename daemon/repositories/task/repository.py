@@ -146,6 +146,49 @@ class TaskRepository:
             )
             return db_session.exec(stmt).first()
 
+    def has_inflight_task(self, instance_id: str) -> bool:
+        """Return True if any PENDING or RUNNING ``task`` row exists for ``instance_id``.
+
+        Phase 1 (2026-06-24, report-lane decoupling). Used by
+        ``daemon/api.py`` crash-recovery to decide whether to
+        finalize a parent directly (no in-flight task will drive
+        the natural path) or defer to the natural path (a report
+        Task is still PENDING or RUNNING and will finalize the
+        parent itself when it ends).
+
+        Sister query to :meth:`find_running_by_instance` —
+        widened to include PENDING so a not-yet-claimed report
+        Task is also treated as in-flight. One indexed EXISTS
+        against ``ix_task_instance_id``.
+
+        Dual-driver SQL: pure SQLModel via ``session.scalar`` —
+        the parameterized ``IN (:pending, :running)`` works on
+        both SQLite and PostgreSQL (matches the pattern in
+        ``has_pending_tasks_blocked_by_busy_instance`` /
+        ``find_cancellable_tasks``).
+
+        Args:
+            instance_id: The instance ID to check.
+
+        Returns:
+            True if any PENDING or RUNNING task exists for the
+            instance; False otherwise (only terminal tasks, or
+            none at all).
+        """
+        with self.engine.begin() as conn:
+            stmt = text("""
+                SELECT 1 FROM task
+                WHERE instance_id = :instance_id
+                AND status IN (:status_pending, :status_running)
+                LIMIT 1
+            """)
+            row = conn.execute(stmt, {
+                "instance_id": instance_id,
+                "status_pending": TaskStatus.PENDING.value,
+                "status_running": TaskStatus.RUNNING.value,
+            }).fetchone()
+            return row is not None
+
     # --------------------------------------------------------
     # CLAIM (Atomic)
     # --------------------------------------------------------
@@ -251,6 +294,15 @@ class TaskRepository:
             column="j.metadata", key="message_id"
         )
 
+        # Build the literal "process_message" SQL fragment for the
+        # cross-system guard scope. The report lane (PROCESS_REPORT)
+        # must bypass the job-coordination exclusion entirely —
+        # reports have no JobItem to collide with, so the original
+        # guard is irrelevant for them. We pass the literal directly
+        # (the value is a fixed enum string, not user input) so the
+        # predicate is identical on both backends.
+        process_message_literal = TaskType.PROCESS_MESSAGE.value
+
         with self.engine.begin() as conn:
             stmt = text(f"""
                 UPDATE task
@@ -267,50 +319,63 @@ class TaskRepository:
                         WHERE status = :status_running_guard
                     )
                     AND instance_id NOT IN (
-                        -- Cross-system guard: a MESSAGE job only blocks the
-                        -- task when it is *actively* driving graph.astream.
-                        -- When the instance has transitioned to
-                        -- WAITING_CHILDREN, the job is just a FIFO placeholder
-                        -- (JobFeedbackObserver will complete it when the
-                        -- instance lifecycle resolves) — it is NOT holding
-                        -- the langgraph thread, so the child-completion
-                        -- report task must be allowed to claim and deliver
-                        -- the child result. Without this carve-out, the
-                        -- job waits for the child report and the child
-                        -- report waits for the job: deadlock.
+                        -- Phase 1 (2026-06-24, report-lane decoupling):
+                        -- Pause gate. Excludes instances whose status is
+                        -- PAUSED or TERMINATED for ALL task types. Before
+                        -- this change, pause protection for report tasks
+                        -- was accidental — it fell out of the cross-system
+                        -- job guard (the instance's status was checked
+                        -- inside that guard against ``waiting_children``,
+                        -- which is orthogonal to pause). Now that the
+                        -- cross-system guard is scoped to PROCESS_MESSAGE
+                        -- only (see below), pause protection for reports
+                        -- would have been lost. This explicit gate
+                        -- restores it uniformly for every task type —
+                        -- user messages and reports alike — and mirrors
+                        -- the existing recovery exclusions in
+                        -- ``find_stale_running_tasks`` /
+                        -- ``find_cancellable_tasks`` (parameterized
+                        -- ``IN (status_paused, status_terminated)`` works
+                        -- on both SQLite and PostgreSQL).
+                        SELECT instance_id FROM instances
+                        WHERE status IN (:status_paused, :status_terminated)
+                    )
+                    AND (
+                        -- Cross-system guard: JOB COORDINATION ONLY —
+                        -- scoped to ``process_message`` tasks. Report
+                        -- tasks (``process_report`` and any future
+                        -- non-message types) bypass the guard entirely.
+                        -- A report's ``message_id`` matches no
+                        -- ``JobItem``, so the guard would (a) block the
+                        -- report's claim forever (the report Task waits
+                        -- for the job that never references its
+                        -- ``message_id`` to terminate) and (b) orphan
+                        -- the report — the report is the only thing
+                        -- that would deliver the child's result to the
+                        -- parent. Bypassing the guard restores
+                        -- independent-turn delivery: each child
+                        -- completion becomes its own parent graph turn.
                         --
-                        -- ``deleted_at IS NULL`` matches the canonical
-                        -- job-side query
-                        -- (``find_processing_message_jobs_by_instance``):
-                        -- a soft-deleted PROCESSING job never auto-completes
-                        -- and would otherwise permanently block the instance.
-                        --
-                        -- Unified-dispatcher admission carve-out: when the
-                        -- unified dispatcher has already admitted the
-                        -- MESSAGE job to a Task row (same message_id,
-                        -- status pending or running), the job is the
-                        -- FIFO placeholder for that admission — it is NOT
-                        -- driving graph.astream — so the worker is
-                        -- allowed to claim the Task. Without this
-                        -- carve-out, the Task can't claim (the job is
-                        -- PROCESSING) and the job can't reach its
-                        -- terminal transition (the Task never claimed).
-                        -- FIFO carve-out: ``i.status != waiting_children``.
-                        SELECT j.instance_id FROM job_queue_items j
-                        LEFT JOIN instances i ON j.instance_id = i.instance_id
-                        WHERE j.status = :status_processing
-                        AND j.job_type = :job_type_message
-                        AND j.instance_id IS NOT NULL
-                        AND j.deleted_at IS NULL
-                        AND (i.status IS NULL OR i.status != :status_waiting_children)
-                        AND NOT EXISTS (
-                            SELECT 1 FROM task t
-                            WHERE t.message_id = {json_extract_message_id}
-                            AND t.status IN (:status_pending, :status_running)
+                        -- The per-instance serialization guard above
+                        -- (one RUNNING task per instance) still applies
+                        -- — that is the only invariant reports need.
+                        task_type != :process_message_type
+                        OR instance_id NOT IN (
+                            SELECT j.instance_id FROM job_queue_items j
+                            LEFT JOIN instances i ON j.instance_id = i.instance_id
+                            WHERE j.status = :status_processing
+                              AND j.job_type = :job_type_message
+                              AND j.instance_id IS NOT NULL
+                              AND j.deleted_at IS NULL
+                              AND (i.status IS NULL OR i.status != :status_waiting_children)
+                              AND NOT EXISTS (
+                                  SELECT 1 FROM task t
+                                  WHERE t.message_id = {json_extract_message_id}
+                                    AND t.status IN (:status_pending, :status_running)
+                              )
                         )
                     )
-                    ORDER BY created_at ASC
-                    LIMIT 1
+                  ORDER BY created_at ASC LIMIT 1
                 )
                 AND status = :status_pending
                 RETURNING *
@@ -324,6 +389,9 @@ class TaskRepository:
                 "status_processing": JobStatus.PROCESSING.value,
                 "job_type_message": JOB_TYPE_MESSAGE,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
+                "status_paused": InstanceStatus.PAUSED.value,
+                "status_terminated": InstanceStatus.TERMINATED.value,
+                "process_message_type": process_message_literal,
                 "now_str": now_str,
             }).fetchone()
 

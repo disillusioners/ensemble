@@ -16,8 +16,19 @@ from sqlmodel import SQLModel, Field
 
 
 class TaskType(str, enum.Enum):
-    """Task type enum."""
+    """Task type enum.
+
+    ``PROCESS_REPORT`` (Phase 1, 2026-06-24): the report lane — child
+    completion reports ride alongside user messages on the same
+    ``task`` table and the same ``ProcessMessageProcessor`` delivery
+    pipeline, but are admitted under a separate type so the cross-
+    system job-coordination guard in ``claim_pending_task`` does not
+    apply to them. Reports have no ``JobItem`` to collide with, so the
+    original job guard is irrelevant for them — only the per-instance
+    serialization guard (one RUNNING task per instance) applies.
+    """
     PROCESS_MESSAGE = "process_message"
+    PROCESS_REPORT = "process_report"
     SEND_REPORT = "send_report"
     CLEANUP = "cleanup"
 

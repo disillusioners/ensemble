@@ -500,8 +500,23 @@ class TaskProcessor:
         self._source_dispatcher = source_dispatcher
 
         # Create type-specific processors
+        # Phase 1 (2026-06-24, report-lane decoupling): PROCESS_REPORT
+        # shares the ProcessMessageProcessor pipeline because report
+        # delivery is identical — read ``message_queue`` row by
+        # ``message_id``, feed ``message.content`` to ``_do_process``.
+        # Reports differ from user messages ONLY in admission (they
+        # have no JobItem) and so are routed to a different TaskType
+        # that bypasses the cross-system job guard in
+        # ``claim_pending_task``. The processor itself is the same
+        # class instance — aliasing avoids code duplication while
+        # keeping the dispatcher table self-documenting.
         self._processors: dict[str, BaseProcessor] = {
             "process_message": ProcessMessageProcessor(
+                instance_manager, task_repo, event_repo,
+                message_repository=instance_manager._queue_repository,
+                source_dispatcher=source_dispatcher,
+            ),
+            "process_report": ProcessMessageProcessor(
                 instance_manager, task_repo, event_repo,
                 message_repository=instance_manager._queue_repository,
                 source_dispatcher=source_dispatcher,

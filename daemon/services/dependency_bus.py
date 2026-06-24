@@ -304,9 +304,10 @@ class DependencyBus:
         # Tracks whether ANY child of this parent emitted a
         # terminal event with ``status="error"``. Set by
         # :meth:`emit_terminal` on error outcomes, read by
-        # :meth:`ChildReportsService._retrigger_parent_finalize`
-        # to determine the parent's terminal_status (the
-        # conservative rule: any child error → parent "error").
+        # ``JobFeedbackObserver._process_event`` (the sole
+        # finalize path after Phase 1) to determine the parent's
+        # terminal_status (the conservative rule: any child error
+        # → parent "error").
         #
         # Lives on the bus because the bus is the SOLE completion
         # authority after CM removal — the per-parent error signal
@@ -317,6 +318,24 @@ class DependencyBus:
         # Cleared alongside the per-parent locks in :meth:`stop`
         # to avoid unbounded growth across terminate/revive cycles.
         self._parent_errored: dict[str, bool] = {}
+
+        # Phase 1 (2026-06-24, report-lane decoupling): parallel
+        # per-parent error-message dictionary. Captures the LAST
+        # child error text per parent, so the finalize path in
+        # ``JobFeedbackObserver._process_event`` can thread a
+        # meaningful error message into ``InstanceStatus.ERROR``
+        # transitions — the bus is a pure state machine; it does
+        # NOT finalize the parent directly (that was the deleted
+        # ``ChildReportsService._retrigger_parent_finalize``
+        # short-circuit and the source of the orphan-Task bug).
+        # Read via :meth:`parent_error_message`; cleared in
+        # :meth:`clear_parent_error` after finalize. In-memory only
+        # like ``_parent_errored``; same crash-recovery edge case
+        # (a crash between child-error and finalize loses the
+        # message — the parent finalizes as ``COMPLETED`` instead
+        # of ``ERROR``). Acceptable per the plan's "known
+        # limitation" — see api.py crash-recovery docstring.
+        self._parent_error_message: dict[str, str] = {}
 
         # Lifecycle flag. Set True by :meth:`start`, False by
         # :meth:`stop`. Public methods are tolerant of being called
@@ -509,11 +528,12 @@ class DependencyBus:
             # ``_parent_errored[target_id]`` is sticky across
             # multiple children (any error flips it to True) and
             # is read by
-            # ``ChildReportsService._retrigger_parent_finalize``
-            # when ``count_pending_for_target_sync() == 0`` for
-            # that target. Mirrors the old CM
-            # ``_determine_terminal_status`` "any error → error"
-            # rule that was lost when CM was removed in Phase 5.
+            # ``JobFeedbackObserver._process_event`` (the sole
+            # finalize path after Phase 1) when
+            # ``count_pending_for_target() == 0`` for that target.
+            # Mirrors the old CM ``_determine_terminal_status``
+            # "any error → error" rule that was lost when CM was
+            # removed in Phase 5.
             if outcome.status == "error":
                 # Collect the unique target ids of the watchers
                 # we're about to fire, then mark each as errored.
@@ -525,6 +545,19 @@ class DependencyBus:
                 }
                 for tgt in errored_targets:
                     self._parent_errored[tgt] = True
+                    # Phase 1 (2026-06-24): capture the LAST child
+                    # error text per parent. ``outcome.error`` is the
+                    # authoritative source from the bus terminal
+                    # emit; we use a non-empty fallback ("child
+                    # agent error") when the outcome carries no
+                    # message so the finalize path always has a
+                    # non-None string for ``InstanceStatus.ERROR``.
+                    if outcome.error:
+                        self._parent_error_message[tgt] = outcome.error
+                    else:
+                        self._parent_error_message.setdefault(
+                            tgt, "child agent error"
+                        )
 
             if not pending_rows:
                 logger.debug(
@@ -828,6 +861,11 @@ class DependencyBus:
         # dict alongside the per-parent locks — same rationale
         # (avoid unbounded growth across terminate/revive cycles).
         self._parent_errored.clear()
+        # Phase 1 (2026-06-24): also clear the per-parent error
+        # message dict — same rationale as the flag dict. Both
+        # are in-memory state that must be reset on shutdown so
+        # a fresh process starts clean.
+        self._parent_error_message.clear()
         logger.info(
             f"bus stop: cleared {cache_size} cached watchers",
             extra={"completion_delivery_path": "bus"},
@@ -977,8 +1015,38 @@ class DependencyBus:
         """
         return self._parent_errored.get(parent_id, False)
 
+    def parent_error_message(self, parent_id: str) -> str | None:
+        """Return the LAST captured child error message for ``parent_id``.
+
+        Phase 1 (2026-06-24, report-lane decoupling). The
+        :attr:`_parent_error_message` dict is populated by
+        :meth:`emit_terminal` when a child emits a terminal event
+        with ``status="error"``; the same code path that flips
+        :meth:`had_parent_error` to True.
+
+        Returns the most-recent non-empty ``outcome.error`` from a
+        child, or the ``"child agent error"`` fallback set when
+        the outcome carried no message but the status was error.
+        Returns ``None`` when no error has been recorded.
+
+        Used by ``JobFeedbackObserver._process_event`` to thread a
+        meaningful error message into ``_finalize_job`` when the
+        per-parent ``had_parent_error`` flag is True. Replaces the
+        message-flow that used to live in the deleted
+        ``ChildReportsService._retrigger_parent_finalize`` path.
+
+        Args:
+            parent_id: The parent instance ID whose error message
+                is being read.
+
+        Returns:
+            The last captured child error text, or ``None`` if no
+            error has been recorded for this parent.
+        """
+        return self._parent_error_message.get(parent_id)
+
     def clear_parent_error(self, parent_id: str) -> None:
-        """Clear the per-parent error flag (Phase 5).
+        """Clear the per-parent error flag AND error message (Phase 5 / Phase 1).
 
         Called after a parent has been finalized so the flag does
         not leak into a future revive / re-spawn of the same
@@ -987,13 +1055,17 @@ class DependencyBus:
         previous incarnation and incorrectly finalize any future
         wave as ``"error"``.
 
-        Idempotent: clearing a non-existent flag is a no-op.
+        Phase 1 (2026-06-24): also clears the parallel
+        :attr:`_parent_error_message` dict so the revived instance
+        does not inherit the previous incarnation's last error
+        text. Both clears are idempotent.
 
         Args:
-            parent_id: The parent instance ID whose flag to
-                clear.
+            parent_id: The parent instance ID whose flag and
+                message to clear.
         """
         self._parent_errored.pop(parent_id, None)
+        self._parent_error_message.pop(parent_id, None)
 
     def _now_iso(self) -> str:
         """Return current UTC time as ISO-8601 string.
@@ -1132,18 +1204,21 @@ class DependencyBus:
         Mirrors :meth:`mark_enqueued` (the per-watch_id variant) but
         stamps all FIRED rows for a ``(source_task_id, target_instance_id)``
         pair at once. Used by
-        :meth:`ChildReportsService._emit_terminal_via_bus` AFTER a
-        successful ``_retrigger_parent_finalize`` call so that:
+        :meth:`ChildReportsService._emit_terminal_via_bus` AFTER the
+        bus has fired its watchers but BEFORE the report Task has
+        claimed the work and driven the parent's terminal lifecycle
+        event, so that:
 
-          1. A crash between ``emit_terminal`` and the finalization
-             step leaves the row un-stamped — the next restart's
-             :meth:`_recover_fired_unsent` will pick it up and retry
-             finalization (correct semantics: we do NOT lock the
-             parent out of retry by stamping too early).
-          2. A crash between finalization and the stamp leaves the
-             row un-stamped too — but finalization is idempotent
-             (atomic ``WHERE status = PROCESSING`` UPDATE), so the
-             retry is safe.
+          1. A crash between ``emit_terminal`` and the report Task's
+             lifecycle event leaves the row un-stamped — the next
+             restart's :meth:`_recover_fired_unsent` will pick it up
+             and re-enqueue the FollowUp (correct semantics: we do
+             NOT lock the parent out of retry by stamping too early).
+          2. A crash between the report Task's finalize and the
+             stamp leaves the row un-stamped too — but finalization
+             is idempotent (atomic ``WHERE status = PROCESSING``
+             UPDATE in :meth:`_finalize_job_db_sync`), so the retry
+             is safe.
 
         The DB call is wrapped in ``asyncio.to_thread`` to avoid
         blocking the event loop, matching the project's standard

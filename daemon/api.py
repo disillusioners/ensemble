@@ -87,6 +87,7 @@ from daemon.ensemble_config import EnsembleConfig
 from daemon.services.live_event_hub import LiveEventHub
 from daemon.services.notification_broadcaster import get_notification_broadcaster
 from daemon.constants import SSE_TIMEOUT_S, SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE
+from daemon.repositories.instance.models import InstanceStatus
 from daemon import constants
 
 # Determine the base path (use working directory for production)
@@ -616,43 +617,179 @@ async def init_dependency_bus(app, manager) -> None:
                 # for the target. The previous process fired it
                 # but didn't get to retrigger finalization
                 # (crash window). Trigger now and stamp the row.
+                #
+                # Phase 1 (2026-06-24, report-lane decoupling):
+                # the deleted ``ChildReportsService._retrigger_parent_finalize``
+                # direct-finalize path is replaced with a
+                # **decision**: defer to the natural path when a
+                # report Task is in flight (the task's lifecycle
+                # event will finalize the parent itself when its
+                # turn ends), finalize directly via the single
+                # ``_finalize_job`` path only when nothing else
+                # will (the genuine stuck-parent case).
+                #
+                # **Why the ``has_inflight_task`` guard matters**:
+                # in the new design, finalization happens *after*
+                # a report Task's turn ends. A naive "always
+                # finalize on recovery" (what the deleted
+                # ``_retrigger_parent_finalize`` did) would
+                # finalize a job whose report Task is still
+                # PENDING and about to run — re-introducing the
+                # orphan-Task bug. The guard makes recovery
+                # **defer** when a turn is pending, and
+                # **finalize** only when nothing else will (the
+                # genuine stuck-parent case: report Task already
+                # ran/crashed, no turn pending, watcher fired,
+                # job still PROCESSING).
+                #
+                # **Known limitation (in-memory bus state)**: the
+                # bus's ``_parent_errored`` and the new
+                # ``_parent_error_message`` are in-memory dicts.
+                # If a crash occurs after a child errors but
+                # before finalize, crash recovery won't see
+                # ``had_parent_error`` and will finalize as
+                # COMPLETED instead of ERROR. Acceptable
+                # edge case — a permanent fix would require
+                # persisting per-parent error state to the DB.
                 logger.info(
                     f"bus crash recovery: target="
                     f"{target_id[:8]}... has 0 PENDING watchers — "
-                    f"retriggering finalize directly "
+                    f"deciding: defer if report Task in flight, "
+                    f"else finalize via single path "
                     f"(no FollowUp enqueue — bus path is internal "
                     f"plumbing, not an LLM message source)"
                 )
-                _child_reports_svc = getattr(
-                    manager, "_child_reports_service", None
+
+                # ─── Decision: in-flight check via has_inflight_task ───
+                _task_repo = getattr(manager, "_task_repo", None)
+                _observer = getattr(
+                    manager, "_job_feedback_observer", None
                 )
-                if _child_reports_svc is not None:
+                _has_inflight = False
+                if _task_repo is not None:
                     try:
-                        await _child_reports_svc._retrigger_parent_finalize(
-                            target_id
+                        _has_inflight = await asyncio.to_thread(
+                            _task_repo.has_inflight_task, target_id
                         )
-                    except Exception as retrigger_err:
+                    except Exception as inflight_err:
                         logger.warning(
-                            f"bus crash recovery: retrigger failed "
-                            f"target={target_id[:8]}...: {retrigger_err} "
-                            f"(row will be re-picked on next restart)"
+                            f"bus crash recovery: has_inflight_task "
+                            f"check failed target={target_id[:8]}...: "
+                            f"{inflight_err} — defaulting to defer "
+                            f"(safe: a task may still be in flight)"
                         )
-                        # Do NOT stamp — leave the row un-stamped
-                        # so a future restart retries the
-                        # finalization. The retrigger helper
-                        # itself is idempotent (atomic UPDATE
-                        # WHERE status=PROCESSING), so the
-                        # retry is safe.
-                        continue
+                        # Treat as in-flight (defer) — the safe
+                        # default; an extra recovery cycle is
+                        # acceptable, a premature finalize is not.
+                        _has_inflight = True
                 else:
+                    # No task_repo wired (test or partial init).
+                    # Defer rather than finalize directly — the
+                    # row will be re-picked on next restart.
+                    _has_inflight = True
+
+                if _has_inflight:
+                    # A report Task is pending or running. It will
+                    # drive the parent's lifecycle event → finalize
+                    # via the natural path (``_process_event``).
+                    # Stamp the row to dedup (no double-recovery
+                    # on next restart) but DO NOT finalize here.
+                    logger.info(
+                        f"bus crash recovery: target="
+                        f"{target_id[:8]}... has in-flight task — "
+                        f"deferring to natural finalize path, stamping row"
+                    )
+                    try:
+                        await bus.mark_enqueued(watch_id)
+                    except Exception as stamp_err:
+                        logger.warning(
+                            f"bus crash recovery: stamp (defer) "
+                            f"failed watch_id={watch_id[:8]}...: "
+                            f"{stamp_err}"
+                        )
+                    continue
+
+                # ─── No in-flight task → finalize directly via the single path ───
+                # The previous ``_retrigger_parent_finalize`` did
+                # the same logic in a slightly different shape
+                # (hardcoded COMPLETED + bus error override). The
+                # decision-based approach here mirrors
+                # ``_process_event``'s finalize branch: status =
+                # COMPLETED unless ``bus.had_parent_error`` is True,
+                # in which case ERROR + the bus's
+                # ``parent_error_message``. The clear-after-finalize
+                # also mirrors ``_process_event`` (Step 1.7) so a
+                # revived instance doesn't inherit the sticky
+                # error state.
+                if _observer is None:
                     logger.warning(
-                        f"bus crash recovery: child_reports "
-                        f"service not wired on manager; cannot "
-                        f"retrigger finalize for target="
+                        f"bus crash recovery: observer not wired on "
+                        f"manager; cannot finalize target="
                         f"{target_id[:8]}... (row will be re-picked "
-                        f"on next restart once service is wired)"
+                        f"on next restart once observer is wired)"
                     )
                     continue
+
+                try:
+                    _job = await _observer._get_processing_job_for_instance(
+                        target_id
+                    )
+                except Exception as lookup_err:
+                    logger.warning(
+                        f"bus crash recovery: job lookup failed "
+                        f"target={target_id[:8]}...: {lookup_err} "
+                        f"(row will be re-picked on next restart)"
+                    )
+                    continue
+
+                if _job is None:
+                    logger.debug(
+                        f"bus crash recovery: no PROCESSING job for "
+                        f"{target_id[:8]}..., may already be finalized"
+                    )
+                    try:
+                        await bus.mark_enqueued(watch_id)
+                    except Exception as stamp_err:
+                        logger.warning(
+                            f"bus crash recovery: stamp (no-job) "
+                            f"failed watch_id={watch_id[:8]}...: "
+                            f"{stamp_err}"
+                        )
+                    continue
+
+                # ─── Conservative "any error → error" rule (same source as ``_process_event``) ───
+                _final_status = InstanceStatus.COMPLETED.value
+                _final_error: str | None = None
+                if bus.had_parent_error(target_id):
+                    _final_status = InstanceStatus.ERROR.value
+                    _final_error = (
+                        bus.parent_error_message(target_id)
+                        or "child agent error"
+                    )
+
+                try:
+                    await _observer._finalize_job(
+                        _job,
+                        target_id,
+                        _final_status,
+                        error=_final_error,
+                    )
+                    # Clear the sticky error state so a revived
+                    # instance doesn't inherit it — mirrors
+                    # ``_process_event`` (Step 1.7).
+                    if bus.had_parent_error(target_id):
+                        bus.clear_parent_error(target_id)
+                except Exception as finalize_err:
+                    logger.warning(
+                        f"bus crash recovery: _finalize_job failed "
+                        f"target={target_id[:8]}...: {finalize_err} "
+                        f"(row will be re-picked on next restart)"
+                    )
+                    # Do NOT stamp — leave the row un-stamped so a
+                    # future restart retries. _finalize_job is
+                    # idempotent (atomic WHERE status=PROCESSING).
+                    continue
+
                 # Finalization dispatched — stamp the row so the
                 # next restart does not re-trigger.
                 try:

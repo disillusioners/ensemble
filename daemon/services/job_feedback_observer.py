@@ -10,11 +10,18 @@ Key behaviors:
 - Releases locks via lock_repo after job completion
 - Handles race conditions gracefully (e.g., with terminate_instance())
 - Provides health monitoring with periodic logging
-- **Phase 2 (DependencyBus)**: terminal transitions for parents with pending
-  children are driven by ``_retrigger_parent_finalize`` (bus callback), NOT by
-  the lifecycle event handler. The lifecycle handler only emits ``in_progress``
-  notifications for partial completions; terminal transitions happen via the
-  authoritative bus callback (no TOCTOU window — eliminates Race #1).
+- **Phase 1 (2026-06-24, report-lane decoupling)**: terminal transitions for
+  parents with pending children are driven by ``_process_event`` (the lifecycle
+  event handler), NOT by a bus callback. The bus is a pure state machine that
+  transitions PENDING → FIRED watchers; the report ``Task`` (PROCESS_REPORT)
+  claims the work, drives a parent graph turn, and emits the lifecycle event
+  that ``_process_event`` consumes to finalize. This eliminates the orphan-Task
+  bug (bus finalize killed the job while its report Task was still PENDING).
+- **Phase 2 (DependencyBus)**: ``_process_event`` consults the bus's per-parent
+  pending count to decide between ``in_progress`` (children still resolving) and
+  terminal (no children / already resolved). Per-child error status is threaded
+  from the bus's ``had_parent_error`` + new ``parent_error_message`` to
+  ``_finalize_job`` (Step 1.7 "any error → error" rule).
 - **Phase 3 (Cascade Unification)**: terminal transitions now perform the FULL
   instance-side fan-out (status update, CompletionRegistry signal, lifecycle
   event publish, SSE status_change). Without this, instances stay in RUNNING
@@ -23,14 +30,15 @@ Key behaviors:
   and ``error_reporting.py`` on the bus path.
 
 Architecture:
-  - ``_retrigger_parent_finalize(parent_id, terminal_status)`` is the bus
-    callback wired in via ``_bus_emit_terminal`` FollowUp fan-out. It is the
-    SOLE path for terminal transitions when a parent has pending children
-    tracked by the bus.
-  - ``_process_event`` emits ``in_progress`` notifications when a child completes
-    but other responses are still pending. When no children are still pending
-    (none / already resolved), the handler falls through to the shared
-    terminal transition (same as the bus-singleton-missing path below).
+  - The bus tracks per-parent state (pending count, error flag, error message,
+    generation counter) in ``dependency_watchers`` + in-memory dicts. It does
+    NOT directly call back into the observer — the report Task is the bridge.
+  - ``_process_event`` is the SOLE path for terminal transitions when a parent
+    has children tracked by the bus. It emits ``in_progress`` notifications
+    when a child completes but other responses are still pending; when no
+    children are still pending (none / already resolved), the handler falls
+    through to the shared terminal transition (same as the bus-singleton-
+    missing path below).
   - **Bus singleton missing**: when ``get_dependency_bus()`` returns ``None``
     (bus singleton missing — hard error), the gate is treated as a no-op
     (returns 0). The caller's own in-session gate remains the authoritative
@@ -413,13 +421,10 @@ class JobFeedbackObserver:
     ) -> JobItem | None:
         """Get the PROCESSING job for an instance, with stale-job defense.
 
-        Shared lookup used by both the bus callback path
-        (``_retrigger_parent_finalize``) and the lifecycle-event path
-        (:meth:`_process_event`). Both paths previously duplicated the
-        ``get_by_instance → status check → optional re-query`` dance inline;
-        that asymmetry left :meth:`_process_event` unprotected by the
-        defense-in-depth re-query that the bus callback got in
-        ``fix/revive-stale-job-lookup`` (commit b1218739).
+        Shared lookup used by the lifecycle-event path
+        (:meth:`_process_event`). The historical bus-callback
+        (``_retrigger_parent_finalize``) was removed in Phase 1; the
+        lifecycle-event path is now the sole consumer of this helper.
 
         Behavior:
           1. First lookup via the job queue service wrapper (functionally
@@ -645,24 +650,30 @@ class JobFeedbackObserver:
     async def _process_event(self, event: dict) -> None:
         """Process a single instance_lifecycle event.
 
-        Phase 2: this method is the ``in_progress`` notification path ONLY.
-        Terminal transitions for parents with pending children are handled by
-        the DependencyBus (``_retrigger_parent_finalize`` callback). This
-        handler still drives terminal transitions in two cases:
+        Phase 1 (2026-06-24, report-lane decoupling): this method is
+        the SOLE finalize path — it drives BOTH the ``in_progress``
+        notification AND the terminal transition. The historical
+        DependencyBus ``_retrigger_parent_finalize`` callback was
+        removed (the source of the orphan-Task bug). Finalization
+        now flows naturally: the report ``Task`` (PROCESS_REPORT)
+        claims the work, drives a parent graph turn, and emits the
+        lifecycle event that this method consumes to finalize.
 
-          1. **No pending watchers in the bus** (``bus_pending == 0``) — the
-             instance either never spawned children, or all children already
-             resolved (bus callback already fired, or is about to fire). The
-             idempotency guard in ``_finalize_job`` (``job.status !=
-             PROCESSING``) prevents double-completion.
+        Two cases still route to the terminal transition here:
+
+          1. **No pending watchers in the bus** (``bus_pending == 0``) —
+             the instance either never spawned children, or all children
+             already resolved. The idempotency guard in ``_finalize_job``
+             (``job.status != PROCESSING``) prevents double-completion.
 
           2. **Bus singleton missing** (``get_dependency_bus()`` returns
              ``None``) — invalid state, the in-process check falls through
              and the in-session gate raises a hard error below.
 
         Race #1 is eliminated because when ``bus_pending > 0``, we do NOT do
-        a terminal transition here — we defer to the authoritative bus
-        callback.
+        a terminal transition here — we emit ``in_progress`` and wait for
+        the report Task to fire its own lifecycle event (which will see
+        the now-zero pending count and finalize).
 
         Args:
             event: Event dict with ``event_type`` and ``data`` fields.
@@ -709,10 +720,13 @@ class JobFeedbackObserver:
                 # ASYNC context — use the awaitable variant.
                 bus_pending = await bus.count_pending_for_target(instance_id)
                 if bus_pending > 0:
-                    # Children still resolving → emit in_progress, defer terminal
-                    # to the bus callback (``_retrigger_parent_finalize``).
-                    # This is the Race #1 fix: no LLM fetch, no TOCTOU —
-                    # we simply notify watchers and wait for the bus.
+                    # Children still resolving → emit in_progress and
+                    # wait for the report Task (PROCESS_REPORT) to fire
+                    # its own lifecycle event (which will see the
+                    # now-zero pending count and finalize). This is the
+                    # Race #1 fix: no LLM fetch, no TOCTOU — we simply
+                    # notify watchers and let the report Task drive
+                    # the next finalize attempt.
                     await self._emit_in_progress(job, instance_id)
                     return
                 # bus_pending == 0: no pending watchers in bus.
@@ -732,7 +746,44 @@ class JobFeedbackObserver:
         # Shared terminal transition path. Reached when:
         #   - bus is None (hard error path), or
         #   - bus is active AND bus_pending == 0 (no children / already resolved).
-        await self._finalize_job(job, instance_id, status, error=error)
+        #
+        # Phase 1 (2026-06-24, report-lane decoupling): the
+        # "any error → error" rule now lives here at the single
+        # remaining finalize decision point. The previous
+        # direct-finalize path (the deleted
+        # ``ChildReportsService._retrigger_parent_finalize``) was
+        # removed (Step 1.4) because it was the source of the
+        # orphan-Task bug — it terminated the parent's job while
+        # its report Task was still PENDING. We consult the bus's
+        # per-parent error flag (``had_parent_error``) and the new
+        # ``parent_error_message`` so a parent whose last child
+        # errored still finalizes as ``ERROR`` even though the
+        # parent's own report turn completed cleanly. Sticky
+        # ``_parent_errored`` is cleared after finalize so a
+        # revived instance does not inherit the flag.
+        status_to_finalize = status
+        error_for_finalize = error
+        # Part C (L1): reuse the `bus` retrieved above instead of
+        # re-fetching the singleton. `bus` may be None when the
+        # gate above fell through to the "bus singleton missing"
+        # hard-error path; the existing `is not None` check below
+        # already handles that.
+        bus_for_err = bus
+        if bus_for_err is not None and bus_for_err.had_parent_error(instance_id):
+            status_to_finalize = InstanceStatus.ERROR.value
+            error_for_finalize = (
+                bus_for_err.parent_error_message(instance_id) or "child agent error"
+            )
+        await self._finalize_job(
+            job, instance_id, status_to_finalize, error=error_for_finalize
+        )
+        # Phase 1: clear the sticky error flag AFTER finalize so a
+        # future revive / re-spawn of the same instance id does not
+        # inherit the error state from its previous incarnation.
+        # The clear is idempotent and safe — the flag's only
+        # purpose was the override above, which has been applied.
+        if bus_for_err is not None and bus_for_err.had_parent_error(instance_id):
+            bus_for_err.clear_parent_error(instance_id)
 
     async def _emit_in_progress(
         self, job, instance_id: str
@@ -773,10 +824,15 @@ class JobFeedbackObserver:
     ) -> None:
         """Shared terminal transition path.
 
-        Used by both:
-          * The bus callback (``_retrigger_parent_finalize``, authoritative).
-          * :meth:`_process_event` (lifecycle handler, when the bus has
-            no pending entry for the instance).
+        Phase 1 (2026-06-24, report-lane decoupling): the SOLE
+        caller is :meth:`_process_event` (the lifecycle handler).
+        The historical bus-callback
+        (``_retrigger_parent_finalize``) was removed because it
+        short-circuited the natural finalize path (source of the
+        orphan-Task bug). The lifecycle handler is reached from
+        EITHER the report Task's emitted ``instance_lifecycle``
+        event (PROCESS_REPORT drove a parent graph turn) OR the
+        original message Task's emitted event (no children).
 
         The method is a no-op (returns silently) for unknown terminal_status
         values. Race conditions (job already transitioned by another actor) are
@@ -1189,11 +1245,16 @@ class JobFeedbackObserver:
             # production paths, because broader ``except Exception`` handlers
             # catch it one or two frames up:
             #
-            #   1. Bus-callback path — when invoked from the bus
-            #      ``_retrigger_parent_finalize``, the bus's own
-            #      ``except Exception`` handler catches the RuntimeError,
-            #      logs it at EXCEPTION level, and rolls back the watcher
-            #      state so a subsequent retry can recover the completion.
+            #   1. Bus terminal-event path — when invoked after
+            #      ``DependencyBus.emit_terminal`` fires a watcher
+            #      transition, the bus's own ``except Exception`` handler
+            #      catches the RuntimeError, logs it at EXCEPTION level,
+            #      and rolls back the watcher state so a subsequent
+            #      retry can recover the completion. (Phase 1: the
+            #      deleted ``_retrigger_parent_finalize`` callback
+            #      that used to drive direct finalize from the bus is
+            #      gone; the bus no longer calls into the observer
+            #      directly.)
             #
             #   2. Event-loop path — when invoked from
             #      :meth:`JobFeedbackObserver._process_event` via
