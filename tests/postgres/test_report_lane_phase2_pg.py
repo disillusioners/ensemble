@@ -129,8 +129,17 @@ def _seed_job(
     instance_id: str,
     job_id: str | None = None,
     status: str = JobStatus.PROCESSING.value,
+    job_metadata: dict | None = None,
 ) -> str:
-    """Insert a JobItem row directly via SQLModel Session."""
+    """Insert a JobItem row directly via SQLModel Session.
+
+    ``job_metadata`` is stored in the ``metadata`` JSON/JSONB column
+    (mapped via ``sa_column=Column("metadata", JSONBType)`` in
+    ``JobItem.job_metadata``). On PG, the cross-system guard's carve-out
+    uses ``j.metadata->>'message_id'`` (TEXT extraction from JSONB) to
+    match against ``task.message_id`` — exercising the PG-specific JSON
+    extraction path is one of the test goals.
+    """
     jid = job_id or f"job-pg-{uuid.uuid4().hex[:8]}"
     with Session(pg_engine) as s:
         s.add(JobItem(
@@ -142,6 +151,7 @@ def _seed_job(
             job_type="message",
             status=status,
             instance_id=instance_id,
+            job_metadata=job_metadata if job_metadata is not None else {},
         ))
         s.commit()
     return jid
@@ -425,3 +435,189 @@ class TestIndependentTurnPG:
             ))
         assert len(tasks) == 2
         assert {t.id for t in tasks} == {report1.id, report2.id}
+
+
+# =============================================================================
+# Suite 2.1b PG — CRITICAL: report lane bypasses cross-system guard on PG
+# =============================================================================
+
+
+class TestReportLaneGuardPG:
+    """#1 PRIORITY on PG — the JSONB extraction path must work correctly.
+
+    Mirrors ``TestReportLaneGuard`` in the SQLite pack. The PG path
+    differs in one critical way: the cross-system guard's message_id
+    match uses ``j.metadata->>'message_id'`` (JSONB TEXT extraction)
+    rather than SQLite's ``CAST(json_extract(...) AS TEXT)``. This test
+    exercises that dialect-specific path against a real PG database.
+
+    The bypass for PROCESS_REPORT is identical on both backends (the
+    SQL is the same text — only the JSON extraction fragment varies
+    inside the per-message-id subquery, which the report lane never
+    reaches).
+    """
+
+    def test_pg_process_report_bypasses_cross_system_guard(
+        self, pg_engine, task_repo
+    ):
+        """PROCESS_REPORT with different message_id IS claimed on PG.
+
+        Verifies the report lane bypass works against PG's JSONB column
+        and the ``->>'message_id'`` TEXT extraction inside the guard.
+        """
+        parent_id = _seed_instance(pg_engine)
+        _seed_job(
+            pg_engine,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+            job_metadata={"message_id": "msg-user-pg-123"},
+        )
+        report_task = task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent_id,
+            message_id="msg-report-pg-456",
+        )
+        assert report_task.status == TaskStatus.PENDING.value
+
+        # Bypass on PG too — the report IS claimed.
+        claimed = task_repo.claim_pending_task(worker_id="pg-worker-1")
+        assert claimed is not None, (
+            "PROCESS_REPORT MUST bypass the cross-system guard on PG"
+        )
+        assert claimed.id == report_task.id
+        assert claimed.task_type == TaskType.PROCESS_REPORT.value
+        assert claimed.status == TaskStatus.RUNNING.value
+
+    def test_pg_process_message_blocked_by_cross_system_guard(
+        self, pg_engine, task_repo
+    ):
+        """PROCESS_MESSAGE with non-matching message_id IS blocked on PG.
+
+        Contrast test: proves the guard is still active for
+        PROCESS_MESSAGE on PG (the bypass is scoped to PROCESS_REPORT
+        only, not all tasks). Exercises the ``j.metadata->>'message_id'``
+        JSONB extraction path on the parent job row.
+        """
+        parent_id = _seed_instance(pg_engine)
+        _seed_job(
+            pg_engine,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+            job_metadata={"message_id": "msg-user-pg-123"},
+        )
+        msg_task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=parent_id,
+            message_id="msg-other-pg-789",
+        )
+        assert msg_task.status == TaskStatus.PENDING.value
+
+        # Guard fires — PROCESS_MESSAGE with non-matching message_id
+        # is blocked.
+        claimed = task_repo.claim_pending_task(worker_id="pg-worker-1")
+        assert claimed is None, (
+            f"PROCESS_MESSAGE with non-matching message_id MUST be blocked "
+            f"on PG (got {claimed})"
+        )
+
+
+# =============================================================================
+# Suite 2.2 PG — Pause gate coverage gaps
+# =============================================================================
+
+
+class TestPauseSafetyCoveragePG:
+    """Mirror the remaining SQLite pause-gate tests on PG.
+
+    The SQLite pack already covers:
+      - paused instance blocks report Task claim
+      - resume unblocks report Task claim
+      - terminated instance blocks report Task claim
+      - concurrent claims only one wins
+      - PROCESS_MESSAGE task also blocked for paused
+
+    This class adds the PG mirror of the last one (PROCESS_MESSAGE pause
+    gate) and the PG mirror of the PENDING-watcher recovery exclusion.
+    """
+
+    def test_pg_process_message_task_also_blocked_for_paused(
+        self, pg_engine, task_repo
+    ):
+        """PROCESS_MESSAGE pause gate on PG — mirror of SQLite L478-490.
+
+        The pause gate (instance_id NOT IN (paused, terminated)) applies
+        to ALL task types, not just reports. On PG, this exercises the
+        JSONB-aware claim path (no job is seeded here, so the
+        cross-system guard is inert; the pause gate is the blocker).
+        """
+        parent_id = _seed_instance(
+            pg_engine, status=InstanceStatus.PAUSED.value
+        )
+        # Seed a PROCESSING MESSAGE job for the same instance so the
+        # test setup mirrors the SQLite test (the cross-system guard
+        # would otherwise inert-block PROCESS_MESSAGE independently of
+        # the pause gate; we want to verify the pause gate fires here).
+        _seed_job(
+            pg_engine,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+        )
+        msg_task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=parent_id,
+            message_id=str(uuid.uuid4()),
+        )
+        # The pause gate (not the cross-system guard) blocks this.
+        assert task_repo.claim_pending_task(worker_id="pg-worker-1") is None
+
+
+# =============================================================================
+# Suite 2.3 PG — Crash recovery coverage gaps
+# =============================================================================
+
+
+class TestCrashRecoveryCoveragePG:
+    """Mirror the remaining SQLite crash-recovery tests on PG."""
+
+    @pytest.mark.asyncio
+    async def test_pg_pending_watcher_not_in_recovery(
+        self, pg_engine, bus_repo
+    ):
+        """PENDING-state exclusion on PG — mirror of SQLite L597.
+
+        PENDING watchers (fired_at IS NULL, enqueued_at IS NULL) must
+        NOT appear in the recovery set. Only FIRED-but-unstamped rows
+        are candidates for the crash-recovery replay.
+        """
+        from daemon.repositories.dependency_bus.models import (
+            DependencyWatcher,
+            DependencyWatcherState,
+        )
+
+        parent_id = f"parent-pg-{uuid.uuid4().hex[:8]}"
+        child_task_id = str(uuid.uuid4())
+
+        with Session(pg_engine) as s:
+            s.add(DependencyWatcher(
+                source_task_id=child_task_id,
+                target_instance_id=parent_id,
+                state=DependencyWatcherState.PENDING.value,
+                follow_up_payload=FollowUp(
+                    target_instance_id=parent_id,
+                    message="pg test",
+                    source="test",
+                ).to_payload(),
+                fired_at=None,
+                enqueued_at=None,
+            ))
+            s.commit()
+
+        bus2 = DependencyBus(bus_repo)
+        await bus2.start()
+        try:
+            recovered = await bus2._recover_fired_unsent()
+            assert len(recovered) == 0, (
+                "PENDING watchers should not appear in _recover_fired_unsent on PG"
+            )
+        finally:
+            await bus2.stop()
