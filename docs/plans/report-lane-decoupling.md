@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | DRAFT — for discussion |
+| **Status** | DRAFT — Risks 1 (pause) & 3 (error) covered; crash-recovery still open |
 | **Supersedes** | Option A sketch in `logs/report-flow-before-after.mmd` (refines the guard change) |
 | **Goal** | Child-report Tasks reach the parent graph independently; one finalize path; no cross-system guard entanglement for reports |
 | **Scope** | MEDIUM — ~6 files, 1 SQL restructure, 1 new TaskType, behavior change on a hot path |
@@ -129,26 +129,84 @@ the natural finalize happens when the (re-claimed) report Task's turn ends.
 **1.5 Single finalize path already exists — verify only.**
 `daemon/services/job_feedback_observer.py:_process_event` (L703-735) already gates on
 `bus.count_pending_for_target`: `>0` → `_emit_in_progress` + return; `==0` → `_finalize_job`.
-No code change expected. **Verify:** the parent instance stays non-terminal (RUNNING) between
-report turns while `bus_pending > 0`, so the next report Task can still claim. Check the
-instance-status write site that follows the lifecycle event does not force COMPLETED when the
-observer deferred.
+No code change expected for the happy path. **Verify:** the parent instance stays non-terminal
+(RUNNING) between report turns while `bus_pending > 0`, so the next report Task can still claim.
+Check the instance-status write site that follows the lifecycle event does not force COMPLETED
+when the observer deferred.
+
+**1.6 Pause gate in `claim_pending_task` (Risk 1 — covered).**
+Today, pause protection for report Tasks is *accidental*: it falls out of the cross-system job
+guard (instance `PAUSED` ≠ `waiting_children` → guard blocks the claim). Once 1.3 exempts reports
+from that guard, the protection is lost. Make it **explicit and uniform** instead:
+
+- `daemon/repositories/task/repository.py` `claim_pending_task` candidate `WHERE`: add an
+  instance-status exclusion for **all** task types:
+  ```sql
+  AND instance_id NOT IN (
+      SELECT instance_id FROM instances
+      WHERE status IN (:paused, :terminated)
+  )
+  ```
+  This mirrors `JobProcessor`'s jobqueue skip (job_processor.py:633) and the recovery exclusions
+  (task/repository.py:684, 1084). Semantics: no new Task (user *or* report) is claimed for a
+  PAUSED/TERMINATED instance. Pending report Tasks created while paused simply wait; on resume
+  they are claimed in order.
+
+- `daemon/services/instance_lifecycle.py` `resume_instance_cascade` (~L1056): on a successful
+  resume, call `worker_pool.notify_work()` so workers immediately reconsider the now-runnable
+  pending Tasks (the mmd's RA5 gap — resume never notified). Guard with
+  `getattr(self._manager, "_worker_pool", None)`.
+
+Net: pause behaves correctly for reports by construction (explicit gate) rather than as a
+side-effect of the job guard. A child that completes *during* the parent's pause still creates
+its report MessageQueue + Task (that insertion is unrelated to claim eligibility); the Task sits
+PENDING until resume, then runs — exactly the desired pause-safe behavior.
+
+**1.7 Error-status threading into the finalize path (Risk 3 — covered).**
+The conservative "any child error → parent ERROR" rule currently lives in
+`_retrigger_parent_finalize` via `bus.had_parent_error(instance_id)` + the child's `error` text.
+Once 1.4 deletes that method, the rule must move to the single remaining finalize decision
+point: `_process_event`.
+
+- `daemon/services/dependency_bus.py`: the bus already keeps a sticky
+  `_parent_errored: dict[str, bool]` (set in `emit_terminal` when a child emits
+  `status="error"`, dependency_bus.py:527; read by `had_parent_error`, L950; cleared by
+  `clear_parent_error`, L980). Add a parallel **`_parent_error_message: dict[str, str]`**
+  capturing the last child `error` text (set in the same `emit_terminal` branch that flips the
+  bool). Expose `parent_error_message(parent_id) -> str | None` and clear it in
+  `clear_parent_error`.
+- `daemon/services/job_feedback_observer.py` `_process_event`, in the `bus_pending == 0`
+  finalize branch (just before `_finalize_job`, L735):
+  ```python
+  if bus is not None and bus.had_parent_error(instance_id):
+      status = InstanceStatus.ERROR.value
+      error = bus.parent_error_message(instance_id) or "child agent error"
+  await self._finalize_job(job, instance_id, status, error=error)
+  if bus is not None and bus.had_parent_error(instance_id):
+      bus.clear_parent_error(instance_id)   # moved from _retrigger_parent_finalize
+  ```
+  The parent's own graph turn may have completed cleanly (lifecycle `status=COMPLETED`); we
+  override to `ERROR` because a child errored — the conservative rule, now sourced from the bus
+  (the authority) at the finalize point. The parent's response text is still delivered (the turn
+  ran); only the *job* status reflects the child failure.
+- Note: the erroring child still drives the bus via `error_reporting.py:538`
+  (`_emit_terminal_via_bus(status="error", error=...)`) — unchanged. What changes is *where* the
+  resulting error status is consumed (finalize path instead of the deleted retrigger).
 
 ### Phase 2 — Hardening & tests
 
 **2.1** Independent-turn test: 2 children complete at different times → parent produces 2
 distinct assistant turns (not one batched). Assert Task claim order and lifecycle events.
-**2.2** Pause safety: pause cancels bus watchers → no new report Task created during pause
-(report path runs in post-commit of child completion; if child completes during pause the Task
-is created but not claimed until resume because instance is PAUSED — confirm the
-per-instance/serialization guard or a `status != paused` clause holds; if reports are exempt
-from the job guard they must still respect a PAUSED instance, add explicit check).
+**2.2** Pause safety (Risk 1): pause the parent while children run → (a) no report Task is
+claimed for the paused instance (explicit gate), (b) a child completing during pause creates
+its report Task and it stays PENDING, (c) on resume `notify_work()` fires and the queued report
+Task is claimed and processed. Assert instance never runs `graph.astream` while PAUSED.
 **2.3** Crash recovery: kill process after report Task PENDING, before claim → restart reclaims
 and runs the turn; kill after bus fired but before stamp → restart retries, idempotent.
-**2.4** Error propagation: a child that errors → report Task delivers the error; last report
-turn finalizes parent as `error` (conservative any-error→error rule). Confirm the error status
-is no longer threaded solely through the deleted `_retrigger_parent_finalize` — move it to the
-report message content / metadata consumed by the turn.
+**2.4** Error propagation (Risk 3): (a) one child errors, one completes → parent job finalizes
+as `ERROR` with the child's error message, even though the parent's own report turns completed;
+(b) all children succeed → parent finalizes `COMPLETED`; (c) `clear_parent_error` runs after
+finalize so a revived instance doesn't inherit the sticky error flag.
 
 ### Phase 3 (optional, defer) — Drop the report MessageQueue row
 
@@ -164,22 +222,22 @@ stability guarantee; not needed to fix the bug.
 
 ## 4. Risks / open questions
 
-- **Pause interaction (2.2):** exempting reports from the job guard removes the
-  `i.status != waiting_children` clause's reach over reports. Reports must still not run while
-  the instance is PAUSED. Need an explicit `instance.status != 'paused'` (or reuse the
-  per-instance RUNNING-task guard + a paused check). This is the one place the "exempt by
-  construction" model needs a small explicit gate.
+- ~~**Pause interaction**~~ — **covered (1.6).** Reports were only pause-safe by accident (the
+  job guard blocked them while `PAUSED`). Exempting reports from that guard would have removed
+  the protection. 1.6 restores it explicitly and uniformly: `claim_pending_task` excludes
+  PAUSED/TERMINATED instances for *all* task types, and `resume_instance_cascade` calls
+  `notify_work()`. No special-case for reports.
+- **Crash recovery (OPEN).** Removing the direct `_retrigger_parent_finalize` (1.4) removes a
+  startup safety net for parents that are fired-but-unfinalized (bus watchers all FIRED,
+  `count_pending == 0`, but the job still PROCESSING with no pending report Task to drive a
+  turn). With the bypass gone, restart must reconcile these: a startup sweep that finalizes any
+  PROCESSING message job whose instance has `bus.count_pending_for_target == 0`. Design needed
+  — this is the one risk still open.
+- ~~**Error status threading**~~ — **covered (1.7).** The any-error→error rule moved from the
+  deleted retrigger into `_process_event`'s finalize branch, sourced from the bus's
+  `had_parent_error` + a new `parent_error_message`. Sticky flag cleared after finalize.
 - **`_get_processing_job_for_instance` assumption:** still one PROCESSING job per instance.
   Unchanged by this plan (reports create no JobItem). Confirm no Phase-1 edit violates it.
-- **api.py crash-recovery retrigger (1.4):** the direct `_retrigger_parent_finalize` call on
-  restart is a belt-and-suspenders path for fired-but-unfinalized parents. With the bypass
-  removed, restart must rely on (a) report Tasks being reclaimed, or (b) the lifecycle event
-  on the next turn. A stuck parent with no pending report Task and a fired bus but unfinalized
-  job needs a recovery sweep — design a minimal "finalize parents with 0 pending watchers and
-  a PROCESSING job" reconciliation on startup.
-- **Error status threading (2.4):** currently `_retrigger_parent_finalize` carried
-  `terminal_status`/`had_parent_error`. Removing it means error info must ride the report
-  message. Ensure the conservative any-error→error semantics survive.
 
 ---
 
