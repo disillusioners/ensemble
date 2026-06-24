@@ -144,8 +144,17 @@ def _seed_job(
     job_id: str | None = None,
     status: str = JobStatus.PROCESSING.value,
     job_type: str = "message",
+    job_metadata: dict | None = None,
 ) -> str:
-    """Insert a JobItem row (needed for claim_pending_task cross-system guard)."""
+    """Insert a JobItem row (needed for claim_pending_task cross-system guard).
+
+    ``job_metadata`` is stored in the ``metadata`` JSON/JSONB column
+    (mapped via ``sa_column=Column("metadata", JSONBType)`` in
+    ``JobItem.job_metadata``). Pass a dict with ``{"message_id": ...}``
+    to model the unified-dispatcher admission path — the guard's
+    carve-out matches ``task.message_id`` against this value via
+    dialect-aware JSON extraction.
+    """
     jid = job_id or f"job-{uuid.uuid4().hex[:8]}"
     with Session(engine) as s:
         s.add(JobItem(
@@ -157,6 +166,7 @@ def _seed_job(
             job_type=job_type,
             status=status,
             instance_id=instance_id,
+            job_metadata=job_metadata if job_metadata is not None else {},
         ))
         s.commit()
     return jid
@@ -366,6 +376,305 @@ class TestIndependentTurn:
             msg_ids.add(t.message_id)
 
         assert len(msg_ids) == 2, "Report tasks must have distinct message_ids"
+
+
+# =============================================================================
+# Suite 2.1b — CRITICAL: report lane bypasses cross-system guard
+# =============================================================================
+
+
+class TestReportLaneGuard:
+    """#1 PRIORITY — the single most important contract of this feature.
+
+    The report-lane decoupling invariant::
+
+        PROCESS_REPORT tasks MUST bypass the cross-system guard in
+        ``claim_pending_task`` (they have no ``JobItem`` to collide with),
+        while PROCESS_MESSAGE tasks MUST still be blocked by the guard
+        when the parent's MESSAGE job is PROCESSING with a non-matching
+        ``message_id``.
+
+    This is the core "decoupling" — without it, a child-completion report
+    waits forever for a JobItem that will never reference its message_id,
+    and the parent's graph never receives the child's result.
+
+    Previous review: only task *creation* was tested. The contract that
+    ``claim_pending_task`` actually applies the bypass on real SQL (both
+    SQLite and PostgreSQL) was unverified. These tests close that gap.
+    """
+
+    def test_process_report_bypasses_cross_system_guard(self, engine, task_repo):
+        """PROCESS_REPORT with a different message_id IS claimed — guard bypassed.
+
+        Setup: parent's MESSAGE job is PROCESSING with
+        ``metadata.message_id = "msg-user-123"`` (the user message driving
+        the graph). A PROCESS_REPORT task exists for the same parent
+        instance with ``message_id = "msg-report-456"`` (a child
+        completion report — a different message than the job references).
+
+        Invariant: ``claim_pending_task`` MUST return the report task. If
+        the guard fired on reports, it would block the claim forever
+        (the report waits for a job that never references its message_id
+        to terminate) and orphan the report.
+        """
+        parent_id = _seed_instance(engine)
+        # A user message job actively driving the graph for this parent.
+        _seed_job(
+            engine,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+            job_metadata={"message_id": "msg-user-123"},
+        )
+        # A child-completion report task for the same parent, with a
+        # DIFFERENT message_id (the report's own message_id, NOT the
+        # user message's).
+        report_task = task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent_id,
+            message_id="msg-report-456",
+        )
+        assert report_task.status == TaskStatus.PENDING.value
+
+        # The CRITICAL assertion: the report IS claimed. The cross-system
+        # guard's job-coordination check is scoped to PROCESS_MESSAGE only
+        # (see repository.py claim_pending_task), so PROCESS_REPORT
+        # bypasses it entirely.
+        claimed = task_repo.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None, (
+            "PROCESS_REPORT MUST bypass the cross-system guard — got None. "
+            "The guard should be scoped to PROCESS_MESSAGE only."
+        )
+        assert claimed.id == report_task.id
+        assert claimed.status == TaskStatus.RUNNING.value
+        assert claimed.task_type == TaskType.PROCESS_REPORT.value
+        assert claimed.worker_id == "worker-1"
+
+    def test_process_message_blocked_by_cross_system_guard(self, engine, task_repo):
+        """PROCESS_MESSAGE with a non-matching message_id IS blocked — guard fires.
+
+        Contrast test for the same setup: the parent's MESSAGE job is
+        PROCESSING with ``metadata.message_id = "msg-user-123"``. A
+        PROCESS_MESSAGE task exists for the same parent with
+        ``message_id = "msg-other-789"`` (does NOT match the job's
+        message_id).
+
+        Invariant: ``claim_pending_task`` MUST return None. This proves
+        the guard is still active for PROCESS_MESSAGE — the bypass is
+        scoped to PROCESS_REPORT only, not all tasks.
+        """
+        parent_id = _seed_instance(engine)
+        _seed_job(
+            engine,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+            job_metadata={"message_id": "msg-user-123"},
+        )
+        # A PROCESS_MESSAGE task with a non-matching message_id (not
+        # the unified-dispatcher admission for the job above).
+        msg_task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=parent_id,
+            message_id="msg-other-789",
+        )
+        assert msg_task.status == TaskStatus.PENDING.value
+
+        # The cross-system guard MUST block this — the MESSAGE job is
+        # actively PROCESSING and no Task row exists for the matching
+        # message_id (the unified-dispatcher admission carve-out does
+        # not apply).
+        claimed = task_repo.claim_pending_task(worker_id="worker-1")
+        assert claimed is None, (
+            f"PROCESS_MESSAGE with non-matching message_id MUST be blocked "
+            f"by the cross-system guard (got {claimed})"
+        )
+
+        # The PROCESS_MESSAGE task must still be PENDING (not claimed).
+        with Session(engine) as s:
+            t = s.get(Task, msg_task.id)
+            assert t.status == TaskStatus.PENDING.value
+            assert t.worker_id is None
+
+    def test_process_message_unblocked_when_message_id_matches(
+        self, engine, task_repo
+    ):
+        """PROCESS_MESSAGE with matching message_id IS claimed — admission carve-out.
+
+        Third axis of the contract: the unified-dispatcher admission
+        carve-out. A PROCESS_MESSAGE task whose message_id matches the
+        job's metadata.message_id IS claimed (the MESSAGE job is the
+        FIFO placeholder for the admission, not driving graph.astream).
+
+        This pins the ``status IN ('pending', 'running')`` filter on the
+        Task-side carve-out and ensures the bypass for reports does not
+        accidentally extend to all PROCESS_MESSAGE tasks.
+        """
+        parent_id = _seed_instance(engine)
+        _seed_job(
+            engine,
+            instance_id=parent_id,
+            status=JobStatus.PROCESSING.value,
+            job_metadata={"message_id": "msg-matching-001"},
+        )
+        # PROCESS_MESSAGE task with the SAME message_id as the job —
+        # this is the unified-dispatcher admission signal.
+        admitted_task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=parent_id,
+            message_id="msg-matching-001",
+        )
+
+        claimed = task_repo.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == admitted_task.id
+        assert claimed.task_type == TaskType.PROCESS_MESSAGE.value
+
+
+# =============================================================================
+# Suite 2.5 — Edge cases for per-instance serialization
+# =============================================================================
+
+
+class TestEdgeCases:
+    """Edge-case scenarios for per-instance serialization and report ordering.
+
+    Covers:
+      Edge 1: Report Task PENDING + paused → blocked, then resume → claim.
+              (Covered by ``TestPauseSafety.test_resume_allows_report_task_claim``.)
+      Edge 2: Two children complete simultaneously → both report Tasks get
+              processed (per-instance serialization: max 1 RUNNING at a time).
+      Edge 3: Report Task claimed while a user message Task is RUNNING for
+              the same instance → blocked, then unblocked after message ends.
+      Edge 4: Crash after bus fire but before stamp → recovered on restart.
+              (Covered by ``TestCrashRecovery.test_fired_unstamped_watcher_recovered_on_restart``.)
+    """
+
+    def test_two_simultaneous_reports_serialized_per_instance(
+        self, engine, task_repo
+    ):
+        """Edge 2: two children complete → both reports processed (serialized).
+
+        The per-instance serialization guard (one RUNNING task per
+        instance) ensures report tasks for the same parent run in
+        separate turns, not in parallel. This is what gives the report
+        lane its "independent turn" property: each child completion
+        produces its own parent graph turn, sequenced rather than
+        racing.
+        """
+        parent_id = _seed_instance(engine)
+        child1_id = _seed_instance(engine, parent_id=parent_id)
+        child2_id = _seed_instance(engine, parent_id=parent_id)
+
+        # Create 2 PROCESS_REPORT tasks for the same parent (simulating
+        # 2 child completions).
+        report1 = task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent_id,
+            message_id="msg-report-A",
+        )
+        report2 = task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent_id,
+            message_id="msg-report-B",
+        )
+        assert report1.status == TaskStatus.PENDING.value
+        assert report2.status == TaskStatus.PENDING.value
+
+        # First claim: one of the two reports is claimed (RUNNING).
+        # The other is PENDING, blocked by the per-instance serialization
+        # guard (instance_id IN (SELECT instance_id FROM task WHERE
+        # status = 'running')).
+        first_claim = task_repo.claim_pending_task(worker_id="worker-1")
+        assert first_claim is not None
+        assert first_claim.status == TaskStatus.RUNNING.value
+        first_id = first_claim.id
+
+        # Second claim: returns None — the per-instance serialization
+        # guard blocks it (the other report is now RUNNING for the same
+        # instance). The guard is a hard guarantee, not an optimization.
+        second_claim = task_repo.claim_pending_task(worker_id="worker-2")
+        assert second_claim is None, (
+            f"Second claim should be blocked by per-instance serialization "
+            f"(got {second_claim})"
+        )
+
+        # Complete the first report.
+        completed = task_repo.complete_task(first_id, result={"ok": True})
+        assert completed is not None
+        assert completed.status == TaskStatus.COMPLETED.value
+
+        # Third claim: the second report is now claimable.
+        third_claim = task_repo.claim_pending_task(worker_id="worker-3")
+        assert third_claim is not None, (
+            "Second report should be claimable after first completes"
+        )
+        assert third_claim.id != first_id
+        assert {first_id, third_claim.id} == {report1.id, report2.id}
+
+    def test_report_waits_for_running_message_task_to_finish(
+        self, engine, task_repo
+    ):
+        """Edge 3: report Task waits for a RUNNING PROCESS_MESSAGE task.
+
+        Verifies the per-instance serialization invariant for the mixed
+        case: a PROCESS_REPORT task must NOT claim while a
+        PROCESS_MESSAGE task for the same instance is RUNNING. Reports
+        serialize behind any running turn — they don't race the user
+        message's graph.astream.
+
+        Setup: a PROCESS_MESSAGE task is claimed and RUNNING for the
+        parent. A PROCESS_REPORT task is then created for the same
+        parent. The report must NOT be claimable until the message task
+        completes.
+        """
+        parent_id = _seed_instance(engine)
+
+        # Step 1: Create and claim a PROCESS_MESSAGE task. It is now
+        # RUNNING for the parent.
+        msg_task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=parent_id,
+            message_id="msg-user-001",
+        )
+        claimed_msg = task_repo.claim_pending_task(worker_id="msg-worker")
+        assert claimed_msg is not None
+        assert claimed_msg.id == msg_task.id
+        assert claimed_msg.status == TaskStatus.RUNNING.value
+
+        # Step 2: Create a PROCESS_REPORT task for the same parent.
+        report_task = task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=parent_id,
+            message_id="msg-report-001",
+        )
+        assert report_task.status == TaskStatus.PENDING.value
+
+        # Step 3: The report is BLOCKED by per-instance serialization —
+        # the message task is RUNNING for this instance.
+        blocked = task_repo.claim_pending_task(worker_id="report-worker")
+        assert blocked is None, (
+            f"PROCESS_REPORT must be blocked while a PROCESS_MESSAGE task "
+            f"is RUNNING for the same instance (got {blocked})"
+        )
+
+        # The report task is still PENDING.
+        with Session(engine) as s:
+            t = s.get(Task, report_task.id)
+            assert t.status == TaskStatus.PENDING.value
+
+        # Step 4: Complete the message task.
+        completed = task_repo.complete_task(msg_task.id, result={"ok": True})
+        assert completed is not None
+        assert completed.status == TaskStatus.COMPLETED.value
+
+        # Step 5: The report is now claimable.
+        claimed_report = task_repo.claim_pending_task(worker_id="report-worker")
+        assert claimed_report is not None, (
+            "PROCESS_REPORT should be claimable after the PROCESS_MESSAGE "
+            "task completes (per-instance serialization released)"
+        )
+        assert claimed_report.id == report_task.id
+        assert claimed_report.status == TaskStatus.RUNNING.value
+        assert claimed_report.task_type == TaskType.PROCESS_REPORT.value
 
 
 # =============================================================================
@@ -594,7 +903,7 @@ class TestCrashRecovery:
             await bus2.stop()
 
     @pytest.mark.asyncio
-    async def test_pending_watcher_not_in_recovery(self, engine, bus_repo):
+    async     def test_pending_watcher_not_in_recovery(self, engine, bus_repo):
         """PENDING watchers are NOT in the recovery set (they haven't fired yet)."""
         from daemon.repositories.dependency_bus.models import (
             DependencyWatcher,
