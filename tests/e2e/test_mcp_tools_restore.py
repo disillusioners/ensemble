@@ -29,6 +29,8 @@ import socket
 from pathlib import Path
 from typing import Optional
 
+import pytest
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +38,12 @@ logging.basicConfig(
     datefmt='%H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+# Marked as integration: starts the daemon via ./dev.sh, makes real LLM calls,
+# and exercises the MCP tools restore path across a daemon restart cycle.
+# Excluded from the default non-integration test gate via the `integration`
+# marker defined in pyproject.toml.
+pytestmark = pytest.mark.integration
 
 # Configuration
 PROJECT_ROOT = Path(__file__).parent.parent.parent
