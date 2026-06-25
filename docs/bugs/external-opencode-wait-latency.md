@@ -189,7 +189,7 @@ This is the simplest fix. The in-memory `get_snapshot()` is a sync read of Pytho
 
 ## Why This Matters
 
-For a coder agent doing iterative work (e.g. "write code → wait → test → wait → fix → wait"), each `wait_for_result` call adds an average of 15s of dead time. A session with 10 iterations loses 2.5 minutes to polling latency alone. For interactive use, this is noticeably slow.
+For a developer agent doing iterative work (e.g. "write code → wait → test → wait → fix → wait"), each `wait_for_result` call adds an average of 15s of dead time. A session with 10 iterations loses 2.5 minutes to polling latency alone. For interactive use, this is noticeably slow.
 
 The original design explicitly intended to avoid this — the sync API returns the result, the wait should observe it immediately. Polling was supposed to be a backup, not the primary mechanism.
 

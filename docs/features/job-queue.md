@@ -186,7 +186,7 @@ POST /api/tasks
 Content-Type: application/json
 
 {
-    "agent_dir": "/agents/coder",
+    "agent_dir": "/agents/developer",
     "message": "Fix the login bug in auth.py",
     "project_id": "optional-project-uuid",  // Optional: if provided, goes to queue
     "priority": 7,                          // Optional: 1-10, default 5

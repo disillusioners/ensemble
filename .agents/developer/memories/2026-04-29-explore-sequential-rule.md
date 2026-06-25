@@ -2,7 +2,7 @@
 
 ## What was done
 Added "Explore Tool Workflow" section to knowledge.md files for all 11 agents with `knowledge` tool access:
-- coder, reviewer, tester, planner, tidier, giter, jober, approver, leader, _mother, _baby_template
+- developer, reviewer, tester, planner, tidier, giter, jober, approver, leader, _mother, _baby_template
 
 ## Rule enforced
 **explore() must always be called ALONE in a turn — never parallel with other tools.**

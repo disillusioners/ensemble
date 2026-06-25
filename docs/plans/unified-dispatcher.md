@@ -261,7 +261,7 @@ await dependency_bus.watch(
 
 The `waiting_for` column on `Instance` is dropped (migration). The `instance_hierarchy` junction table is also dropped in the same migration — the parent→child relationship is recoverable from "parent's spawn-instance call recorded child as a watcher source" or, more simply, from the `parent_id` column on `Instance` (which is already there). The denormalized `children` JSON cache on `Instance` is dropped.
 
-`_create_completion_report` in `child_reports.py` is deleted. The completion report content (the "Coder agent (id=xxx) has done …" string) is built *once* at `watch()` time and stored on the `FollowUp` record. `_should_send_completion_report` (the idempotency check) is preserved as a check on the `FollowUp` table (one row per `source_task_id`).
+`_create_completion_report` in `child_reports.py` is deleted. The completion report content (the "Developer agent (id=xxx) has done …" string) is built *once* at `watch()` time and stored on the `FollowUp` record. `_should_send_completion_report` (the idempotency check) is preserved as a check on the `FollowUp` table (one row per `source_task_id`).
 
 `JobFeedbackObserver` is significantly simplified. The "instance handoff" case (where a child instance completing in this daemon triggers a Task in another daemon, identified by `parent_id`'s node identity) is the only place that needs cross-instance coordination. The Dependency Bus emits a "follow-up needs to run in another node" event, and a small relay service does the bounce.
 
@@ -459,7 +459,7 @@ The plan above is silent on several user-visible features that the **current** c
 - A user pauses a project, then sends a Telegram message: the message is processed (WorkPool is unenforced). The "pause" UI lies.
 - A user pauses an instance via the instance-pause API, then sends a Telegram message to it: the message is enqueued, the instance is still paused, the Task is never claimed. The user sees nothing happen.
 - A scheduled job fires for a TERMINATED child instance: the child stays terminated; the scheduler's task is silently dropped.
-- A user terminates a long-running coder instance and then messages it from Telegram: the message is enqueued, the instance stays terminated, the message is lost. This is a real production scenario (user rage-quits, then re-engages).
+- A user terminates a long-running developer instance and then messages it from Telegram: the message is enqueued, the instance stays terminated, the message is lost. This is a real production scenario (user rage-quits, then re-engages).
 
 **Target behavior in the unified dispatcher:**
 

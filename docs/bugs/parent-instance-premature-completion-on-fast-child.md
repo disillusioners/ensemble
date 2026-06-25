@@ -22,7 +22,7 @@ When a child instance completes very quickly (before the parent's LLM finishes i
 22:54:11 - daemon.services.child_reports - WARNING - Instance cd7a9cd8 has pending_count=1 but waiting_for=0 — proceeding to COMPLETED (not waiting_children)
 22:54:11 - daemon.services.child_reports - INFO - Instance cd7a9cd8... no parent, skipping notification
 22:54:11 - daemon.services.child_reports - INFO - Instance cd7a9cd8... completed (no parent, no children), status=COMPLETED
-22:54:12 - daemon.graph - INFO - [LLM] Response: Coder said hello back! 👋
+22:54:12 - daemon.graph - INFO - [LLM] Response: Developer said hello back! 👋
 ```
 
 The warning `"Instance cd7a9cd8 has pending_count=1 but waiting_for=0 — proceeding to COMPLETED"` indicates that despite having a pending message, the instance was marked COMPLETED.
@@ -34,13 +34,13 @@ The warning `"Instance cd7a9cd8 has pending_count=1 but waiting_for=0 — procee
 ### Race Condition Flow
 
 1. **Parent LLM generates response** and calls tools (`spawn_instance`, `send_message`)
-2. **LLM output is partially generated** (e.g., "Waiting for the coder...")
+2. **LLM output is partially generated** (e.g., "Waiting for the developer...")
 3. **Child completes very quickly** and sends completion report to parent
 4. **`_process_child_completion_and_notify_parent`** is called
 5. **Parent is marked COMPLETED** even though:
    - Parent's LLM is still running
    - There's a pending completion report message in the queue
-6. **Parent's complete response** ("Waiting for the coder...") is lost from checkpoint
+6. **Parent's complete response** ("Waiting for the developer...") is lost from checkpoint
 
 ### Code Position
 
@@ -179,7 +179,7 @@ elif pending_count > 0 and instance.waiting_for == 0:
 
 ## Test Case
 
-The existing test `test_leader_spawns_coder_and_receives_report` in `tests/integration/test_completion_report.py` should be enhanced to verify:
+The existing test `test_leader_spawns_developer_and_receives_report` in `tests/integration/test_completion_report.py` should be enhanced to verify:
 1. Parent's complete response is captured in checkpoint
 2. `result_summary` in job feedback is correct
 3. Instance is not marked COMPLETED while there are pending messages

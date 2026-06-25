@@ -342,7 +342,7 @@ describe('JobsComponent Logic', () => {
     },
   ];
   const mockAgents = [
-    { agent_id: 'coder', name: 'Coder', icon: '💻' },
+    { agent_id: 'developer', name: 'Developer', icon: '💻' },
   ];
 
   beforeEach(() => {
@@ -386,21 +386,21 @@ describe('JobsComponent Logic', () => {
 
     it('should filter by agent_id', () => {
       component.jobs.set([
-        createMockJob({ job_id: '1', agent_id: 'coder' }),
+        createMockJob({ job_id: '1', agent_id: 'developer' }),
         createMockJob({ job_id: '2', agent_id: 'tester' }),
       ]);
       
-      component.onAgentFilterChange('coder');
+      component.onAgentFilterChange('developer');
 
       const filtered = component.filteredJobs();
-      expect(filtered.every(j => j.agent_id === 'coder')).toBe(true);
+      expect(filtered.every(j => j.agent_id === 'developer')).toBe(true);
     });
 
     it('should filter by multiple criteria', () => {
       component.jobs.set([
-        createMockJob({ job_id: '1', status: 'pending', source: 'api', agent_id: 'coder' }),
-        createMockJob({ job_id: '2', status: 'completed', source: 'api', agent_id: 'coder' }),
-        createMockJob({ job_id: '3', status: 'pending', source: 'telegram', agent_id: 'coder' }),
+        createMockJob({ job_id: '1', status: 'pending', source: 'api', agent_id: 'developer' }),
+        createMockJob({ job_id: '2', status: 'completed', source: 'api', agent_id: 'developer' }),
+        createMockJob({ job_id: '3', status: 'pending', source: 'telegram', agent_id: 'developer' }),
       ]);
       
       component.onStatusFilterChange('pending');
@@ -471,12 +471,12 @@ describe('JobsComponent Logic', () => {
 
   describe('onAgentFilterChange', () => {
     it('should update filters with agent_id', () => {
-      component.onAgentFilterChange('coder');
-      expect(component.filters().agent_id).toBe('coder');
+      component.onAgentFilterChange('developer');
+      expect(component.filters().agent_id).toBe('developer');
     });
 
     it('should set agent_id to undefined when selecting "all"', () => {
-      component.onAgentFilterChange('coder');
+      component.onAgentFilterChange('developer');
       component.onAgentFilterChange('all');
       expect(component.filters().agent_id).toBeUndefined();
     });
@@ -486,7 +486,7 @@ describe('JobsComponent Logic', () => {
     it('should clear all filters', () => {
       component.onStatusFilterChange('pending');
       component.onSourceFilterChange('api');
-      component.onAgentFilterChange('coder');
+      component.onAgentFilterChange('developer');
 
       component.onClearFilters();
 
@@ -614,20 +614,20 @@ describe('JobsComponent Logic', () => {
     });
 
     it('should return true when agent filter is set', () => {
-      component.onAgentFilterChange('coder');
+      component.onAgentFilterChange('developer');
       expect(component.hasActiveFilters()).toBe(true);
     });
   });
 
   describe('getAgentDisplayName', () => {
     it('should return formatted name for known agent', () => {
-      component.agents.set([{ agent_id: 'coder', name: 'Coder', icon: '💻' }]);
-      const displayName = component.getAgentDisplayName('coder');
-      expect(displayName).toBe('💻 Coder');
+      component.agents.set([{ agent_id: 'developer', name: 'Developer', icon: '💻' }]);
+      const displayName = component.getAgentDisplayName('developer');
+      expect(displayName).toBe('💻 Developer');
     });
 
     it('should return agent_id for unknown agent', () => {
-      component.agents.set([{ agent_id: 'coder', name: 'Coder', icon: '💻' }]);
+      component.agents.set([{ agent_id: 'developer', name: 'Developer', icon: '💻' }]);
       const displayName = component.getAgentDisplayName('unknown-agent');
       expect(displayName).toBe('unknown-agent');
     });

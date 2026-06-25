@@ -87,7 +87,7 @@ Observations:
 
 ## Why This Matters
 
-Agents (especially `coder` and `gaia`) **natively** run shell commands like:
+Agents (especially `developer` and `gaia`) **natively** run shell commands like:
 - `nohup ./dev.sh > /tmp/log 2>&1 & echo $!`
 - `python server.py &` to start a long-running dev server and continue working
 - `(long_running_command &) && echo started`
@@ -103,8 +103,8 @@ The lack of any feedback (no timeout, no error, no log) makes this especially ha
 
 Minimal repro:
 
-1. Start the daemon (any mode that uses the `coder` agent).
-2. Ask the coder agent to start the dev server in the background.
+1. Start the daemon (any mode that uses the `developer` agent).
+2. Ask the developer agent to start the dev server in the background.
 3. Watch the logs.
 
 **Expected:** bash tool returns in ~5s with the output, agent continues.

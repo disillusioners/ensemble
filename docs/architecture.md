@@ -102,7 +102,7 @@ The agent framework manages lifecycle, scheduling, and persistence. Agents are p
 ├────────────────────────────────────────────────────────────────────┤
 │                                                                     │
 │  1. Parent spawns child                                             │
-│     spawn_instance("coder") → returns instance_id                  │
+│     spawn_instance("developer") → returns instance_id                  │
 │                                                                     │
 │  2. Parent sends task                                               │
 │     send_message(child_id, "implement login")                       │
@@ -305,7 +305,7 @@ def resume_child(child_id: str, input: str) -> str:
 ```python
 # Config per instance or per spawn
 spawn_instance(
-    agent_id="coder",
+    agent_id="developer",
     timeout_seconds=3600,  # 1 hour
     timeout_action="report_progress"  # or "cancel", "continue"
 )

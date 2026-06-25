@@ -10,4 +10,4 @@
   - Before/after text specified for all tasks
   - Success criteria are testable via grep
   - terminate_instance tool retained as emergency — safety preserved
-- **Notes:** Minor pre-existing giter/coder naming inconsistency in rule.md:79 (non-blocking)
+- **Notes:** Minor pre-existing giter/developer naming inconsistency in rule.md:79 (non-blocking)

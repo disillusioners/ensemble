@@ -33,7 +33,7 @@ The daemon is infrastructure. Intelligence lives in `agents/` directories.
 │         ▼             ▼             ▼                      │
 │    ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
 │    │Instance 1│  │Instance 2│  │Instance N│                  │
-│    │(leader) │  │ (coder) │  │(reviewer)│                 │
+│    │(leader) │  │ (developer) │  │(reviewer)│                 │
 │    └────┬────┘  └────┬────┘  └────┬────┘                  │
 │         │            │            │                        │
 │         └────────────┼────────────┘                        │
@@ -52,7 +52,7 @@ The daemon is infrastructure. Intelligence lives in `agents/` directories.
 ┌─────────────────────────────────────────────────────────────┐
 │                      AGENTS (disk)                          │
 │                                                             │
-│  agents/leader/         agents/coder/        agents/reviewer│
+│  agents/leader/         agents/developer/        agents/reviewer│
 │  ├── skill.md           ├── skill.md         ├── skill.md  │
 │  ├── workflow.md        ├── workflow.md      ├── workflow.md│
 │  ├── rule.md            ├── rule.md          ├── rule.md   │
@@ -183,7 +183,7 @@ These tools are available to all instances:
 ```python
 # Spawn a new instance
 spawn_instance(
-    agent_dir: str,      # e.g., "agents/coder"
+    agent_dir: str,      # e.g., "agents/developer"
     instance_id: str      # optional, auto-generated if omitted
 ) -> str                 # returns instance_id
 
@@ -291,7 +291,7 @@ ensemble/
 │   │   ├── workflow.md
 │   │   ├── rule.md
 │   │   └── memory.md
-│   ├── coder/
+│   ├── developer/
 │   │   ├── skill.md
 │   │   ├── workflow.md
 │   │   ├── rule.md

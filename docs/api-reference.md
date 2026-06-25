@@ -138,13 +138,13 @@ Agent management endpoints for listing, creating, and deleting agents.
 {
   "agents": [
     {
-      "id": "coder",
-      "name": "Coder Agent",
+      "id": "developer",
+      "name": "Developer Agent",
       "description": "Software development agent",
       "icon": "💻",
       "color": "accent-blue",
       "version": "1.0.0",
-      "agent_dir": "./agents/coder",
+      "agent_dir": "./agents/developer",
       "system": false
     }
   ]
@@ -198,7 +198,7 @@ Instance management for agent instances (sessions).
 **Request:**
 ```json
 {
-  "agent_id": "coder",
+  "agent_id": "developer",
   "instance_id": null,
   "project_id": null
 }
@@ -208,8 +208,8 @@ Instance management for agent instances (sessions).
 ```json
 {
   "instance_id": "uuid",
-  "agent_id": "coder",
-  "agent_dir": "./agents/coder",
+  "agent_id": "developer",
+  "agent_dir": "./agents/developer",
   "status": "RUNNING",
   "title": "Help with login bug",
   "parent_id": null,
@@ -451,7 +451,7 @@ Creates instance and maps external user.
 ```json
 {
   "external_user_id": "telegram:123456",
-  "agent_id": "coder",
+  "agent_id": "developer",
   "metadata": {}
 }
 ```
@@ -463,8 +463,8 @@ Creates instance and maps external user.
   "source_id": "my-telegram",
   "external_user_id": "telegram:123456",
   "agent_instance_id": "instance-uuid",
-  "agent_id": "coder",
-  "agent_dir": "./agents/coder",
+  "agent_id": "developer",
+  "agent_dir": "./agents/developer",
   "metadata": {},
   "last_message_at": "2025-03-15T10:00:00Z",
   "created_at": "2025-03-15T10:00:00Z"
@@ -602,7 +602,7 @@ Job queue management for async task processing.
 **Request:**
 ```json
 {
-  "agent_id": "coder",
+  "agent_id": "developer",
   "message": "Fix the login bug",
   "project_id": "project-uuid",
   "queue_id": null,
@@ -621,8 +621,8 @@ Job queue management for async task processing.
   "job_id": "job-uuid",
   "status": "pending",
   "priority": 7,
-  "agent_id": "coder",
-  "agent_dir": "./agents/coder",
+  "agent_id": "developer",
+  "agent_dir": "./agents/developer",
   "project_id": "project-uuid",
   "queue_id": "queue-uuid",
   "instance_id": null,
@@ -926,8 +926,8 @@ Failed job management within projects.
     {
       "dlq_id": "dlq-uuid",
       "job_id": "job-uuid",
-      "agent_id": "coder",
-      "agent_dir": "./agents/coder",
+      "agent_id": "developer",
+      "agent_dir": "./agents/developer",
       "message": "Fix the login bug",
       "source": "api",
       "project_id": "project-uuid",
@@ -1189,8 +1189,8 @@ Global SSE stream for notification events.
 ```json
 {
   "instance_id": "uuid",
-  "agent_id": "coder",
-  "name": "Coder Agent",
+  "agent_id": "developer",
+  "name": "Developer Agent",
   "status": "completed",
   "timestamp": "2025-03-15T10:00:00Z"
 }

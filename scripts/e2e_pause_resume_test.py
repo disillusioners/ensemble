@@ -3,7 +3,7 @@
 E2E Simulation Test: Pause/Resume Bug
 
 Tests the scenario where:
-1. Leader spawns a child (coder) via send_message
+1. Leader spawns a child (developer) via send_message
 2. Parent (leader) is paused - cascades to child
 3. Child is resumed first, parent stays paused
 4. Parent is then resumed
@@ -258,7 +258,7 @@ def find_child_completion_report(parent_id: str, child_id: str) -> dict | None:
         # Fallback: check content patterns (for backwards compatibility)
         if child_id[:8] in str(msg.get("content", "")):
             return msg
-        if "completed" in content and "coder" in content:
+        if "completed" in content and "developer" in content:
             return msg
         if "child" in content and "complete" in content:
             return msg
@@ -343,9 +343,9 @@ def main():
     log("-" * 40)
 
     message_content = (
-        "IMPORTANT: Spawn a coder instance and send it this exact message: "
+        "IMPORTANT: Spawn a developer instance and send it this exact message: "
         "'Just reply with the word HELLO. Do NOT use any tools. Do NOT call any functions. "
-        "Just say HELLO and nothing else.' Wait for the coder to respond."
+        "Just say HELLO and nothing else.' Wait for the developer to respond."
     )
     msg_result = send_message(leader_id, message_content)
     if not msg_result:
@@ -462,7 +462,7 @@ def main():
     child_status = child_state.get("status") if child_state else "unknown"
 
     log(f"Parent (leader) final status: {parent_status}")
-    log(f"Child (coder) final status: {child_status}")
+    log(f"Child (developer) final status: {child_status}")
     log(f"Parent waiting_for: {leader_state.get('waiting_for') if leader_state else '?'}")
 
     # Look for child completion report

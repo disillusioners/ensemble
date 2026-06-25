@@ -117,7 +117,7 @@ agents/
 │   ├── workflow.md     # Methodology and processes
 │   ├── memory.md       # Long-term knowledge
 │   └── memories/       # Additional knowledge files
-└── coder/
+└── developer/
     └── ...
 ```
 
@@ -136,7 +136,7 @@ When an agent is loaded, files are composed in this priority order:
 | Agent | Purpose |
 |-------|---------|
 | `leader` | Orchestrates other agents, coordinates workflows |
-| `coder` | Writes and modifies code |
+| `developer` | Writes and modifies code |
 | `reviewer` | Reviews code and provides feedback |
 | `tester` | Creates and runs tests |
 | `planner` | Creates project plans and roadmaps |

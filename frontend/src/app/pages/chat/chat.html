@@ -130,7 +130,7 @@
         <app-message-input
           (sendMessage)="onSendMessage($event)"
           [disabled]="isSending()"
-          [agentColor]="instanceAgent()?.id || 'coder'"
+          [agentColor]="instanceAgent()?.id || 'developer'"
           [instanceStatus]="currentInstance()?.status ?? null"
           (pauseInstance)="onPauseInstance()"
           (resumeInstance)="onResumeInstance($event)"

@@ -175,8 +175,8 @@ class TestJobService {
               {
                 dlq_id: 'dlq-1',
                 job_id: 'job-1',
-                agent_id: 'coder',
-                agent_dir: '/agents/coder',
+                agent_id: 'developer',
+                agent_dir: '/agents/developer',
                 message: 'Failed job',
                 source: 'api',
                 project_id: projectId,
@@ -271,7 +271,7 @@ describe('JobService', () => {
 
     it('should build correct URL with agent_id filter', () => {
       const subscribeSpy = jest.fn();
-      service.listJobs({ agent_id: 'coder' }).pipe().subscribe(subscribeSpy);
+      service.listJobs({ agent_id: 'developer' }).pipe().subscribe(subscribeSpy);
       expect(subscribeSpy).toHaveBeenCalled();
     });
 
@@ -286,7 +286,7 @@ describe('JobService', () => {
       service.listJobs({
         status: 'pending',
         source: 'api',
-        agent_id: 'coder'
+        agent_id: 'developer'
       }).pipe().subscribe(subscribeSpy);
       expect(subscribeSpy).toHaveBeenCalled();
     });
@@ -309,10 +309,10 @@ describe('JobService', () => {
   describe('createJob', () => {
     it('should add new job to start of jobs array', () => {
       const initialCount = service.jobs().length;
-      const newJob = { agent_id: 'coder', message: 'New job' };
+      const newJob = { agent_id: 'developer', message: 'New job' };
       service.createJob(newJob).pipe().subscribe(() => {});
       expect(service.jobs().length).toBe(initialCount + 1);
-      expect(service.jobs()[0].agent_id).toBe('coder');
+      expect(service.jobs()[0].agent_id).toBe('developer');
     });
 
     it('should update jobs signal', () => {
@@ -324,7 +324,7 @@ describe('JobService', () => {
   describe('cancelJob', () => {
     it('should update job status to cancelled', () => {
       // First add a job
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.cancelJob(jobId).pipe().subscribe(() => {});
@@ -334,7 +334,7 @@ describe('JobService', () => {
     });
 
     it('should set cancelled_at timestamp', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.cancelJob(jobId).pipe().subscribe(() => {});
@@ -346,7 +346,7 @@ describe('JobService', () => {
 
   describe('retryJob', () => {
     it('should update job status to pending', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test', status: 'failed' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test', status: 'failed' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.retryJob(jobId).pipe().subscribe(() => {});
@@ -381,7 +381,7 @@ describe('JobService', () => {
 
   describe('softDeleteJob', () => {
     it('should set deleted_at on the job', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.softDeleteJob(jobId).pipe().subscribe(() => {});
@@ -391,7 +391,7 @@ describe('JobService', () => {
     });
 
     it('should update jobs signal', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.softDeleteJob(jobId).pipe().subscribe(() => {});
@@ -400,7 +400,7 @@ describe('JobService', () => {
     });
 
     it('should return the deleted job', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       let result: any = null;
@@ -411,11 +411,11 @@ describe('JobService', () => {
     });
 
     it('should only mark the specified job as deleted', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test 1' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test 1' }).pipe().subscribe(() => {});
       const jobIdToDelete = service.jobs()[0].job_id;
       
       // Create a second job with a unique ID
-      service.createJob({ agent_id: 'coder', message: 'Test 2' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test 2' }).pipe().subscribe(() => {});
       const jobIdToKeep = service.jobs()[0].job_id;
       
       // Ensure they are different
@@ -432,7 +432,7 @@ describe('JobService', () => {
 
   describe('restoreJob', () => {
     it('should clear deleted_at on the job', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.softDeleteJob(jobId).pipe().subscribe(() => {});
@@ -445,7 +445,7 @@ describe('JobService', () => {
     });
 
     it('should update jobs signal', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.softDeleteJob(jobId).pipe().subscribe(() => {});
@@ -455,7 +455,7 @@ describe('JobService', () => {
     });
 
     it('should return the restored job', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test' }).pipe().subscribe(() => {});
       const jobId = service.jobs()[0].job_id;
       
       service.softDeleteJob(jobId).pipe().subscribe(() => {});
@@ -468,10 +468,10 @@ describe('JobService', () => {
     });
 
     it('should only restore the specified job', () => {
-      service.createJob({ agent_id: 'coder', message: 'Test 1' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test 1' }).pipe().subscribe(() => {});
       const jobId1 = service.jobs()[0].job_id;
       
-      service.createJob({ agent_id: 'coder', message: 'Test 2' }).pipe().subscribe(() => {});
+      service.createJob({ agent_id: 'developer', message: 'Test 2' }).pipe().subscribe(() => {});
       const jobId2 = service.jobs()[0].job_id;
       
       // Ensure they are different
@@ -517,7 +517,7 @@ describe('JobService', () => {
       service.listDeadLetterItems('project-123').pipe().subscribe(items => { result = items; });
       expect(result.length).toBe(1);
       expect(result[0].dlq_id).toBe('dlq-1');
-      expect(result[0].agent_dir).toBe('/agents/coder');
+      expect(result[0].agent_dir).toBe('/agents/developer');
     });
 
     it('should include all DLQ item fields', () => {
@@ -525,7 +525,7 @@ describe('JobService', () => {
       service.listDeadLetterItems('project-123').pipe().subscribe(items => { result = items; });
       const item = result[0];
       expect(item.job_id).toBe('job-1');
-      expect(item.agent_id).toBe('coder');
+      expect(item.agent_id).toBe('developer');
       expect(item.error_message).toBe('Timeout error');
       expect(item.retry_count).toBe(3);
       expect(item.reason).toBe('timeout');

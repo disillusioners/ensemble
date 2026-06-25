@@ -20,7 +20,7 @@ class TestMessageInputComponent {
   @ViewChild('textarea') textareaRef!: ElementRef<HTMLTextAreaElement>;
   
   @Input() disabled = false;
-  @Input() agentColor = 'coder';
+  @Input() agentColor = 'developer';
   @Input() instanceStatus: InstanceStatus | null = null;
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() pauseInstance = new EventEmitter<void>();
@@ -32,7 +32,8 @@ class TestMessageInputComponent {
 
   agentColorMap: Record<string, string> = {
     'leader': '#f59e0b',
-    'coder': '#10a7f7',
+    'developer': '#10a7f7',
+    'coder': '#10a7f7',  // backward compat for cached responses
     'reviewer': '#8b5cf6',
   };
 

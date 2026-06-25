@@ -321,7 +321,7 @@ describe('SseService', () => {
       service.getEventSource()?.simulateEvent('status_change', {
         instance_id: 'test-inst',
         status: 'running',
-        agent_id: 'coder'
+        agent_id: 'developer'
       });
 
       expect(service.statusChange()).not.toBeNull();
@@ -348,13 +348,13 @@ describe('SseService', () => {
       service.getEventSource()?.simulateEvent('status_change', {
         instance_id: 'test-inst-123',
         status: 'running',
-        agent_id: 'coder'
+        agent_id: 'developer'
       });
 
       expect(service.statusChange()).not.toBeNull();
       expect(service.statusChange()?.instance_id).toBe('test-inst-123');
       expect(service.statusChange()?.status).toBe('running');
-      expect(service.statusChange()?.agent_id).toBe('coder');
+      expect(service.statusChange()?.agent_id).toBe('developer');
     });
 
     it('should handle status_change event without agent_id', () => {

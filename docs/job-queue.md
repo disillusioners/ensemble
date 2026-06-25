@@ -87,7 +87,7 @@ Submit a new job for processing.
 curl -X POST http://localhost:8079/api/jobs \
   -H "Content-Type: application/json" \
   -d '{
-    "agent_id": "coder",
+    "agent_id": "developer",
     "message": "Fix the login bug in auth.py",
     "project_id": "my-project-uuid",
     "priority": 7,
@@ -107,8 +107,8 @@ curl -X POST http://localhost:8079/api/jobs \
   "job_id": "job-abc123",
   "status": "pending",
   "priority": 7,
-  "agent_id": "coder",
-  "agent_dir": "/path/to/agents/coder",
+  "agent_id": "developer",
+  "agent_dir": "/path/to/agents/developer",
   "project_id": "my-project-uuid",
   "queue_id": "queue-xyz",
   "instance_id": null,
@@ -137,7 +137,7 @@ curl -X POST http://localhost:8079/api/jobs \
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `agent_id` | string | Yes | - | Agent ID (e.g., "coder", "leader") |
+| `agent_id` | string | Yes | - | Agent ID (e.g., "developer", "leader") |
 | `message` | string | Yes | - | Job message/content for the agent |
 | `project_id` | string | No | null | Project ID for job serialization |
 | `queue_id` | string | No | auto | Queue ID to assign job to a specific queue |
@@ -370,8 +370,8 @@ curl "http://localhost:8079/api/projects/my-project/dlq?limit=20&offset=0"
     {
       "dlq_id": "dlq-abc123",
       "job_id": "job-failed-456",
-      "agent_id": "coder",
-      "agent_dir": "/path/to/agents/coder",
+      "agent_id": "developer",
+      "agent_dir": "/path/to/agents/developer",
       "message": "Process large dataset",
       "source": "api",
       "project_id": "my-project",
@@ -405,8 +405,8 @@ curl "http://localhost:8079/api/projects/my-project/dlq/dlq-abc123"
 {
   "dlq_id": "dlq-abc123",
   "job_id": "job-failed-456",
-  "agent_id": "coder",
-  "agent_dir": "/path/to/agents/coder",
+  "agent_id": "developer",
+  "agent_dir": "/path/to/agents/developer",
   "message": "Process large dataset",
   "source": "api",
   "project_id": "my-project",
@@ -593,7 +593,7 @@ The scheduler adapter supports three schedule types:
   "config": {
     "type": "one_time",
     "run_at": "2026-06-01T10:00:00Z",
-    "agent": "./agents/coder",
+    "agent": "./agents/developer",
     "message": "Deploy to production"
   }
 }

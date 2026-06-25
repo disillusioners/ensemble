@@ -213,9 +213,9 @@ def build_session_graph(tools, checkpointer):
 
 ### Manual Testing
 - [ ] Spawn leader session
-- [ ] Leader spawns coder session
-- [ ] Leader sends task to coder
-- [ ] Coder responds
+- [ ] Leader spawns developer session
+- [ ] Leader sends task to developer
+- [ ] Developer responds
 - [ ] Kill daemon, restart, verify recovery
 
 ---

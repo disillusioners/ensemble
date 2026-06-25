@@ -18,7 +18,7 @@ This document describes the agent system for agents-ensemble — how agents are 
 
 Agents are **markdown-defined AI personas** that power the multi-agent daemon. Each agent has:
 
-- **Specific role** — What the agent does (coder, reviewer, leader, etc.)
+- **Specific role** — What the agent does (developer, reviewer, leader, etc.)
 - **Personality** — How it thinks and communicates
 - **Skills** — Specialized instructions for specific tasks
 - **Tools** — What the agent can do (file operations, spawning other agents, etc.)
@@ -34,7 +34,7 @@ The following agents are available:
 | ID | Name | Icon | Role | Key Skills | Tools Access |
 |----|------|------|------|------------|--------------|
 | `leader` | Leader | 👑 | Coordinates tasks and manages workflow delegation | coordination | time, instance, self, project, help, knowledge, mcp, critical_notes, project_history |
-| `coder` | Coder | 💻 | Code generation and debugging via opencode sessions | opencode | bash, filesystem, time, self, help, knowledge, mcp |
+| `developer` | Developer | 💻 | Code generation and debugging via opencode sessions | opencode | bash, filesystem, time, self, help, knowledge, mcp |
 | `explorer` | Explorer | 🔍 | Queries RAG knowledge base and synthesizes project knowledge | — | rag, filesystem, help, time, mcp |
 | `reviewer` | Reviewer | 🔍 | Reviews plans, architecture, and code for quality | opencode | bash, filesystem, time, self, help, knowledge, mcp |
 | `tester` | Tester | 🧪 | Writes and runs tests, reports results | opencode, test-pack | bash, filesystem, time, self, help, knowledge, mcp |
@@ -91,8 +91,8 @@ agents/
 
 ```json
 {
-  "id": "coder",
-  "name": "Coder",
+  "id": "developer",
+  "name": "Developer",
   "description": "Specializes in code generation and debugging",
   "icon": "💻",
   "color": "accent-cyan",
@@ -364,7 +364,7 @@ Agents focused on code work:
 
 | Agent | Tools |
 |-------|-------|
-| `coder` | bash, filesystem, time, self, help, knowledge, mcp |
+| `developer` | bash, filesystem, time, self, help, knowledge, mcp |
 | `reviewer` | bash, filesystem, time, self, help, knowledge, mcp |
 | `tester` | bash, filesystem, time, self, help, knowledge, mcp |
 | `tidier` | bash, filesystem, time, self, help, knowledge, mcp |
@@ -411,7 +411,7 @@ Innate skills are **shared prompt modules** stored in `agents/_prompt_system/inn
 
 | Skill | Agents Using | Description |
 |-------|--------------|-------------|
-| `opencode` | coder, planner, reviewer, tester, tidier, approver | Controls opencode sessions for code operations |
+| `opencode` | developer, planner, reviewer, tester, tidier, approver | Controls opencode sessions for code operations |
 | `coordination` | leader | Coordinates work across specialized agents |
 | `job-orchestration` | jober | Creates, watches, and reacts to jobs |
 | `test-pack` | tester | Creates self-contained test scripts with subprocess timeout |

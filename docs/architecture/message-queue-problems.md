@@ -18,7 +18,7 @@ The current message queue system has **three confirmed bugs** that manifest when
 
 | # | Symptom | Root Cause | Severity |
 |---|---------|------------|----------|
-| 1 | Child (coder) completes but report doesn't reach leader | Race: queue empty check vs new message arrival | Critical |
+| 1 | Child (developer) completes but report doesn't reach leader | Race: queue empty check vs new message arrival | Critical |
 | 2 | Human message ignored but triggers child report dequeue | Frontend optimistic update + checkpoint timing | Medium |
 | 3 | Planner report received twice by parent | Missing idempotency in completion report | High |
 
@@ -114,7 +114,7 @@ The current message queue system has **three confirmed bugs** that manifest when
 ### Parent-Child Communication Flow
 
 ```
-LEADER INSTANCE                          CODER INSTANCE
+LEADER INSTANCE                          DEVELOPER INSTANCE
      │                                        │
      │  1. spawn_instance()                   │
      │ ───────────────────────────────────────▶ Creates child with parent_id
@@ -124,7 +124,7 @@ LEADER INSTANCE                          CODER INSTANCE
      │                                        │ 4. Queue becomes empty
      │                                        │ 5. _send_completion_report()
      │ ◀──────────────────────────────────────
-     │  Report enqueued to leader queue       source="internal_report:{coder_id}"
+     │  Report enqueued to leader queue       source="internal_report:{developer_id}"
      │                                        │
      │  6. Leader dequeues report             │
      │  7. Leader processes report             │
@@ -138,7 +138,7 @@ LEADER INSTANCE                          CODER INSTANCE
 
 **File**: `daemon/manager.py:943-1150`
 
-**Symptom**: Child instance (coder) completes work but report never reaches parent (leader). User has to manually send "check coder result" message.
+**Symptom**: Child instance (developer) completes work but report never reaches parent (leader). User has to manually send "check developer result" message.
 
 #### Root Cause
 
@@ -171,7 +171,7 @@ Timeline:
 ─────────────────────────────────────────────────────────────────────────────────
                           │
                           │ NEW MESSAGE ARRIVES
-                          │ (parent sends "check coder result")
+                          │ (parent sends "check developer result")
                           ▼
 ─────────────────────────────────────────────────────────────────────────────────
 │ CHILD │  dequeue(msg3)  │ process(msg3) │  dequeue(msg4) │ is_empty=FALSE│
@@ -181,7 +181,7 @@ Timeline:
 
 **What Happens**:
 1. Child dequeues and processes its last message
-2. Before `is_empty` check runs, parent sends "check coder result"
+2. Before `is_empty` check runs, parent sends "check developer result"
 3. Child's `dequeue_by_instance` returns the NEW message (not NULL)
 4. Loop continues, `is_empty` check is never reached
 5. Child is now busy processing parent's message

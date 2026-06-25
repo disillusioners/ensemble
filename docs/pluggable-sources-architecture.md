@@ -993,7 +993,7 @@ sources:
   telegram:
     enabled: true
     bot_token: ${TELEGRAM_BOT_TOKEN}
-    default_agent: coder
+    default_agent: developer
     
   webhook:
     enabled: true

@@ -29,7 +29,7 @@ The **reverse direction remains open**: `MessageJobHandler.handle` only checks f
 
 ## Why It Hasn't Fired Yet
 
-The child-completion report path is the dominant producer of `Task` rows. The reverse path requires a **user message arriving while a child report is mid-flight**, which is the same condition the original bug report described ("coder finishes too fast"). The original observation was the task claiming before the job, but the timing window also admits a user message arriving in the same window — both are race-eligible. We only closed one of them.
+The child-completion report path is the dominant producer of `Task` rows. The reverse path requires a **user message arriving while a child report is mid-flight**, which is the same condition the original bug report described ("developer finishes too fast"). The original observation was the task claiming before the job, but the timing window also admits a user message arriving in the same window — both are race-eligible. We only closed one of them.
 
 The other path that produces a `Task` against an active `message` job is the resume-after-restart path (`MessageJobHandler` calls `_process_message_with_tracking` with `is_retry=True` for retried jobs). That path also doesn't check the `task` table.
 

@@ -25,7 +25,7 @@ export interface Job {
 export function createMockJob(overrides?: Partial<Job>): Job {
   return {
     job_id: 'test-job-123',
-    agent_id: 'coder',
+    agent_id: 'developer',
     message: 'Fix the login bug',
     source: 'api',
     project_id: 'project-123',

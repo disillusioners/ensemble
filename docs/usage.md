@@ -47,7 +47,7 @@ Create a new agent instance. An instance is an isolated execution environment wi
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `agent_id` | string | Yes | Agent identifier (e.g., `leader`, `coder`, `reviewer`, `tester`) |
+| `agent_id` | string | Yes | Agent identifier (e.g., `leader`, `developer`, `reviewer`, `tester`) |
 | `project_id` | string | No | UUID of an existing project to associate with this instance |
 | `instance_id` | string | No | UUID to assign; auto-generated if omitted |
 
@@ -357,7 +357,7 @@ Agents can spawn child instances using the `spawn_instance` tool. The parent-chi
 
 ### How It Works
 
-1. **Spawning**: A parent agent calls `spawn_instance(agent_id="coder", ...)` to create a child
+1. **Spawning**: A parent agent calls `spawn_instance(agent_id="developer", ...)` to create a child
 2. **Work**: The child processes its assigned task independently
 3. **Completion**: When the child finishes, it sends a `COMPLETION_REPORT` to its parent
 4. **Waiting**: The parent's `waiting_for` counter tracks pending children
@@ -791,7 +791,7 @@ The job queue manages long-running tasks with persistence, retries, and dead-let
 
 ```json
 {
-  "agent_id": "coder",
+  "agent_id": "developer",
   "message": "Fix the login bug in auth.py",
   "project_id": "550e8400-e29b-41d4-a716-446655440000",
   "priority": 7,
@@ -808,8 +808,8 @@ The job queue manages long-running tasks with persistence, retries, and dead-let
   "job_id": "job-uuid",
   "status": "pending",
   "priority": 7,
-  "agent_id": "coder",
-  "agent_dir": "./agents/coder",
+  "agent_id": "developer",
+  "agent_dir": "./agents/developer",
   "project_id": "550e8400-...",
   "queue_id": null,
   "instance_id": null,
@@ -1500,7 +1500,7 @@ curl -X POST http://localhost:8079/api/instances/$INSTANCE_ID/resume \
 curl -X POST http://localhost:8079/api/jobs \
   -H "Content-Type: application/json" \
   -d '{
-    "agent_id": "coder",
+    "agent_id": "developer",
     "message": "Write tests for user service",
     "project_id": "PROJECT_ID",
     "priority": 5

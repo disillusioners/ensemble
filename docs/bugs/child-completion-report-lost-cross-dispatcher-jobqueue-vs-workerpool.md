@@ -40,12 +40,12 @@ The architecture doc `docs/architecture/unified-dispatch-architecture.md` calls 
 |---|---|
 | 12:52:46 | API user message → `enqueue_message_via_jq` → `job_type=message` job created in `job_queue_items` for `dbaeec51`. **MessageJobHandler** picks it up. |
 | 12:52:47 | Parent's first LLM turn (2 messages) |
-| 12:53:13 | Tool call `spawn_instance` (coder `215b0bab`) |
+| 12:53:13 | Tool call `spawn_instance` (developer `215b0bab`) |
 | 12:53:13 | Tool call `spawn_instance` (giter `70f8d93a`) — both children attached to parent |
 | 12:53:14 | Parent's LLM turn (5 messages) |
-| 12:53:26 | Tool call `send_message` to coder → `waiting_for: 0→1` |
+| 12:53:26 | Tool call `send_message` to developer → `waiting_for: 0→1` |
 | 12:53:26 | Tool call `send_message` to giter → `waiting_for: 1→2` |
-| 12:53:26 | Parent's LLM turn (8 messages) — coder and giter in flight |
+| 12:53:26 | Parent's LLM turn (8 messages) — developer and giter in flight |
 | 12:53:36 | Tool call `explore` → tool-invoked explorer `b64b6374` (synchronous via `invoke_agent_and_wait`) |
 | 12:54:14 | Parent's LLM turn (10 messages) |
 | 12:54:23 | Tool call `explore` → tool-invoked explorer `843d9df8` |
@@ -55,9 +55,9 @@ The architecture doc `docs/architecture/unified-dispatch-architecture.md` calls 
 | 12:54:26 | `child_reports._create_completion_report` runs: creates `MessageQueue` row + **`Task` row** (priority 0, `status=pending`) — **WorkerPool path** |
 | 12:54:26 | `waiting_for` decremented: 2→1 |
 | 12:54:26 | `worker_pool.notify_work()` → wakes a worker |
-| 12:54:41 | Coder's last child finishes |
-| 12:54:42 | `MessageJobHandler` (parent's JobQueue worker) is invoked again, this time for the **coder's completion report** path. **But the coder's report also goes through the WorkerPool path** because all `child_reports` use `enqueue_message` (Task table), not `enqueue_message_via_jq` (JobQueue table). |
-| 12:54:42 | Coder's report task also created. |
+| 12:54:41 | Developer's last child finishes |
+| 12:54:42 | `MessageJobHandler` (parent's JobQueue worker) is invoked again, this time for the **developer's completion report** path. **But the developer's report also goes through the WorkerPool path** because all `child_reports` use `enqueue_message` (Task table), not `enqueue_message_via_jq` (JobQueue table). |
+| 12:54:42 | Developer's report task also created. |
 | 12:54:41 | Parent's LLM turn (12 messages) |
 
 ### Database state — `message_queue` (parent `dbaeec51`)
@@ -67,14 +67,14 @@ The architecture doc `docs/architecture/unified-dispatch-architecture.md` calls 
 --------------------------------------+-------------------------------------------------+-----------+-------------------
  99bf78a4-...                         | api                                             | completed | human
  7fac201d-1b5b-4ea9-9d19-4d79a49f66f8 | internal_report:70f8d93a:b710056d (GITER)       | completed | completion_report
- 6d9a6dfc-03cf-4d97-90df-30c8c8f00aad | internal_report:215b0bab:48f15410 (CODER)       | completed | completion_report
+ 6d9a6dfc-03cf-4d97-90df-30c8c8f00aad | internal_report:215b0bab:48f15410 (DEVELOPER)       | completed | completion_report
 ```
 
 All three messages: `status=completed`. From the DB's perspective nothing is missing.
 
 ### LangGraph checkpoint state — final (step=18, `1f167b80-7852-666c-8012-58e680e923fe`)
 
-The 20-message final state contains the **coder's** report (msg[18] = "Coder agent (name=explorer-experience-arch…")) **but NOT the giter's report**. Full reconstruction of the 20-msg state at the final LLM call:
+The 20-message final state contains the **developer's** report (msg[18] = "Developer agent (name=explorer-experience-arch…")) **but NOT the giter's report**. Full reconstruction of the 20-msg state at the final LLM call:
 
 | # | Type | Content |
 |---|---|---|
@@ -96,17 +96,17 @@ The 20-message final state contains the **coder's** report (msg[18] = "Coder age
 | 15 | ai | "I now have a thorough understanding…" |
 | 16 | tool | "Explorer agent (name=explore-context preloaded…)" |
 | 17 | ai | "I have thorough understanding now from the explore…" |
-| **18** | **human** | **"Coder agent (name=explorer-experience-arch, id=215b0bab…)"** ← CODER report |
-| 19 | ai | "Excellent — the coder's report is extremely thorough…" |
+| **18** | **human** | **"Developer agent (name=explorer-experience-arch, id=215b0bab…)"** ← DEVELOPER report |
+| 19 | ai | "Excellent — the developer's report is extremely thorough…" |
 
 **There is no "Giter agent" HumanMessage anywhere in the final 20-msg state.**
 
 ### Proof of concurrent writes (lost-update evidence)
 
-Many checkpoint blobs exist with `checkpoint_id=1f167b80-7852-666c-8012-58e680e923fe, step=18, source=loop`. They have wildly different message counts and different giter/coder presence:
+Many checkpoint blobs exist with `checkpoint_id=1f167b80-7852-666c-8012-58e680e923fe, step=18, source=loop`. They have wildly different message counts and different giter/developer presence:
 
 ```
-msgs | giter_present | alldone_present | coder_present
+msgs | giter_present | alldone_present | developer_present
 -----+---------------+-----------------+---------------
   1  |       -       |        -        |       -
   2  |       -       |        -        |       -
@@ -130,7 +130,7 @@ msgs | giter_present | alldone_present | coder_present
  16  |       -       |        -        |       -
  17  |       -       |        -        |       -
  18  |       -       |        -        |       -
- 19  |       -       |        -        |    TRUE     <- coder's report lands without giter
+ 19  |       -       |        -        |    TRUE     <- developer's report lands without giter
  20  |       -       |        -        |    TRUE     <- final state — giter LOST
 ```
 
@@ -199,7 +199,7 @@ If `_create_completion_report` were instead to use `enqueue_message_via_jq` (cre
 
 The Postgres checkpointer keys each write by `(thread_id, checkpoint_ns, task_id, channel)`. When two concurrent `graph.astream` calls (one via JobQueue, one via WorkerPool) both load the same base state and both produce writes, the writes are *append-only by message ID via the `add_messages` reducer*. In theory this is safe: a HumanMessage with id=`7fac201d-…` should be added exactly once, regardless of how many writers emit it.
 
-In practice, the issue is that **each writer is reading from a *different* `parent_checkpoint_id` and producing a *new* `checkpoint_id` for its own write**. The reducer merges channel values by message ID, but the channel read for an LLM call happens at a different checkpoint base than the channel read for another LLM call. The LLM at the final call (message 19) reads from a base that didn't include the giter's report — the giter's report was successfully *written* to the channel at one point, but a subsequent write replaced the channel state with a snapshot that did not include it (because the coder-report processing overwrote the channel value with a snapshot from a different base).
+In practice, the issue is that **each writer is reading from a *different* `parent_checkpoint_id` and producing a *new* `checkpoint_id` for its own write**. The reducer merges channel values by message ID, but the channel read for an LLM call happens at a different checkpoint base than the channel read for another LLM call. The LLM at the final call (message 19) reads from a base that didn't include the giter's report — the giter's report was successfully *written* to the channel at one point, but a subsequent write replaced the channel state with a snapshot that did not include it (because the developer-report processing overwrote the channel value with a snapshot from a different base).
 
 This is the same shape as the 2026-06-06 bug, but the concurrency source is *external* (cross-dispatcher) rather than *internal* (two workers of the same dispatcher).
 
@@ -217,14 +217,14 @@ This is the same shape as the 2026-06-06 bug, but the concurrency source is *ext
 
 ---
 
-## Why the Giter Report Specifically Was Lost (and Not the Coder Report)
+## Why the Giter Report Specifically Was Lost (and Not the Developer Report)
 
 Both reports are equally vulnerable. What differs is timing:
 
 - Giter finished at **12:54:25** — the parent was still in its first long LLM turn (tool-invoked explorer `b64b6374` and `843d9df8` were in flight, all via synchronous `invoke_agent_and_wait` from the parent's tool calls). The giter's report task got claimed and started while the parent's other LLM stream was still emitting writes.
-- Coder finished at **12:54:42** — the parent's previous stream had long since committed. The coder's report task was claimed after the parent's state was stable. The coder's report was the *last* write, so it was the one that ended up in the final 20-msg state.
+- Developer finished at **12:54:42** — the parent's previous stream had long since committed. The developer's report task was claimed after the parent's state was stable. The developer's report was the *last* write, so it was the one that ended up in the final 20-msg state.
 
-If the giter had been slower (finished after the coder), the giter's report would have been the survivor and the coder's would have been lost. The bug is symmetric; giter was unlucky in this run.
+If the giter had been slower (finished after the developer), the giter's report would have been the survivor and the developer's would have been lost. The bug is symmetric; giter was unlucky in this run.
 
 ---
 
@@ -297,7 +297,7 @@ After running `graph.astream`, read the resulting `parent_checkpoint_id` and the
 1. Start the daemon (prod or dev) with default 4 workers.
 2. From a user, send a long-running request to a parent agent (e.g., `leader`).
 3. The parent should, in one LLM turn:
-   - `send_message` to two children (e.g., `giter` and `coder`)
+   - `send_message` to two children (e.g., `giter` and `developer`)
    - Also call `explore` or another tool that triggers `invoke_agent_and_wait` (so the parent is mid-stream for ≥10s)
 4. Have one child (giter) finish quickly (≤30s) so its completion-report task lands in `task` while the parent is still mid-stream.
 5. Force the giter's report task to be claimed by a worker before the parent's main MessageJobHandler work commits.
@@ -342,8 +342,8 @@ Files touched: `daemon/manager.py`, `daemon/routers/messages.py`, `daemon/router
 ## Investigation Trail
 
 - 2026-06-14 12:55 — User noticed the log showed "giter report not reach parent" while the DB had the report marked `completed`.
-- 2026-06-14 13:00 — Queried `message_queue` for parent `dbaeec51`. Found 3 rows: human, giter, coder — all `completed`.
-- 2026-06-14 13:05 — Decoded parent's LangGraph checkpoint blobs. Found 20 distinct blob versions for the same `checkpoint_id=1f167b80-…` with message counts 1, 2, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20. Identified that blobs 11–16 had `giter=True` and blobs 19–20 had `coder=True, giter=False`. Concluded the giter's report was lost.
+- 2026-06-14 13:00 — Queried `message_queue` for parent `dbaeec51`. Found 3 rows: human, giter, developer — all `completed`.
+- 2026-06-14 13:05 — Decoded parent's LangGraph checkpoint blobs. Found 20 distinct blob versions for the same `checkpoint_id=1f167b80-…` with message counts 1, 2, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20. Identified that blobs 11–16 had `giter=True` and blobs 19–20 had `developer=True, giter=False`. Concluded the giter's report was lost.
 - 2026-06-14 13:10 — Reconstructed the 20-msg final state. Confirmed giter's "All done" content was *not* in the LLM's input context.
 - 2026-06-14 13:15 — Identified that the parent's first message used `enqueue_message_via_jq` (JobQueue), while the giter's report used `enqueue_message` (Task/WorkerPool). These two dispatchers both call `_process_message_with_tracking` → `graph.astream` for the same `thread_id` and neither checks the other.
 - 2026-06-14 13:20 — Searched for prior bug reports. Found `docs/bugs/child-completion-report-lost-under-concurrent-task-processing.md` (2026-06-06) which documents a worker-pool-only variant. This is the cross-dispatcher variant.

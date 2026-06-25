@@ -82,7 +82,7 @@ agents/
 │   ├── memories/             # Event storage
 │   └── history/              # Soul change proposals
 │
-├── coder/                    # Example: code implementation agent
+├── developer/                    # Example: code implementation agent
 │   ├── growth.md
 │   ├── soul.md               # Identity only (no history table)
 │   ├── workflow.md

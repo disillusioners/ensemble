@@ -3,7 +3,7 @@
 
 Usage:
     python scripts/migrate_memory_to_rag.py --all
-    python scripts/migrate_memory_to_rag.py --agent coder
+    python scripts/migrate_memory_to_rag.py --agent developer
     python scripts/migrate_memory_to_rag.py --dry-run --all
     python scripts/migrate_memory_to_rag.py --force --all
     python scripts/migrate_memory_to_rag.py --project-dir /path/to/project --all

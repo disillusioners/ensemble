@@ -37,17 +37,17 @@ From `logs/premature-job-complete.log`:
 17:28:17 - daemon.services.child_reports   - Instance 8d71f05f... completed (no parent, no children), status=COMPLETED
 17:28:17 - daemon.repositories.job_queue   - Job transition: 58b9f77c-... | processing -> completed (complete)
 17:28:17 - daemon.services.instance_messaging - Reactivating completed instance 8d71f05f... for new message (WorkerPool)
-17:28:31 - daemon.services.instance_lifecycle - Spawning instance 51485f89-cc8e-495c-9744-fb06073ade92 (agent=coder, parent=8d71f05f...)
+17:28:31 - daemon.services.instance_lifecycle - Spawning instance 51485f89-cc8e-495c-9744-fb06073ade92 (agent=developer, parent=8d71f05f...)
 17:28:52 - daemon.tools.instance           - waiting_for incremented -> 1 (parent=8d71f05f..., child=51485f89...)
 ```
 
 **Timeline:**
 - 17:28:17 — Job `58b9f77c` marked `completed` in `job_queue_items` (DB confirmed: `completed_at=2026-06-16T10:28:17.806031+00:00`)
-- 17:28:31 — Coder `51485f89` spawned (still running as of this bug report)
-- 17:28:52 — `send_message` to coder increments `waiting_for` to 1
+- 17:28:31 — Developer `51485f89` spawned (still running as of this bug report)
+- 17:28:52 — `send_message` to developer increments `waiting_for` to 1
 - 17:29:22 — Leader notices the discrepancy: "Result Mismatch Detected" (line 288 of log)
 
-The leader had issued `watch_job` on `58b9f77c` expecting to be notified when the entire orchestration (including the coder's work) completed. The premature job completion caused the leader to detach before the coder finished.
+The leader had issued `watch_job` on `58b9f77c` expecting to be notified when the entire orchestration (including the developer's work) completed. The premature job completion caused the leader to detach before the developer finished.
 
 ---
 
@@ -125,7 +125,7 @@ The race:
 5. 17:28:17 — Inside the function, `instance.waiting_for == 0` (correctly decremented at 17:28:00). `pending_count == 1` (correctly counting `806da3d3` which is still `READY` — its LLM processing has not yet completed). The asymmetric `elif` branch fires, logs the warning, and **falls through to COMPLETED**.
 6. 17:28:17 — Jobber marked `COMPLETED`. `JobFeedbackObserver` propagates to `job_queue_items: 58b9f77c` → marked `completed`.
 7. 17:28:17 — A new message arrives for `8d71f05f` (a `job_continue` from the leader, via `WorkerPool`), reactivating the "completed" instance.
-8. 17:28:31–17:28:52 — Jobber spawns coder `51485f89` and sends it a task. `waiting_for` increments to 1. But the job is already `completed` in `job_queue_items` — any `watch_job` / `job_get` from the leader sees the premature completion.
+8. 17:28:31–17:28:52 — Jobber spawns developer `51485f89` and sends it a task. `waiting_for` increments to 1. But the job is already `completed` in `job_queue_items` — any `watch_job` / `job_get` from the leader sees the premature completion.
 
 ### Why No Test Caught It
 

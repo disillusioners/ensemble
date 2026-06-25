@@ -13,21 +13,21 @@ User requested 3 critical E2E test cases simulating the most frequent user workf
 ## The 3 E2E Tests
 
 ### 1. `test_parent_child_workflow_happy_path`
-- Spawns leader, sends "ask coder to say hello" message
-- Waits for coder child to spawn (polls GET /api/instances/{id} for `children` field)
+- Spawns leader, sends "ask developer to say hello" message
+- Waits for developer child to spawn (polls GET /api/instances/{id} for `children` field)
 - Waits for leader to reach terminal status
 - Verifies assistant message exists in history
 - Cleanup in finally block
 
 ### 2. `test_pause_after_spawn_then_resume`
-- Same workflow but pauses after coder child spawns
-- Verifies both leader and coder are "paused"
+- Same workflow but pauses after developer child spawns
+- Verifies both leader and developer are "paused"
 - Waits 5s to verify no processing happens
 - Resumes, verifies workflow completes
 - Cleanup in finally block
 
 ### 3. `test_terminate_after_spawn_then_revive`
-- Same workflow but terminates after coder child spawns
+- Same workflow but terminates after developer child spawns
 - Verifies termination succeeds (hard assertion)
 - Sends "continue" message — documents actual behavior (soft assertion)
 - Polls 30s to observe status changes
@@ -63,6 +63,6 @@ python -m pytest tests/e2e/test_e2e_workflows.py -v -m integration
 
 ## Gotchas
 - These tests use REAL LLM calls — not mocked. The leader actually processes the message with an LLM.
-- The test message "ask coder to say hello, this is a test workflow, coder dont need do anything" is specifically designed to trigger the leader→coder spawn workflow.
+- The test message "ask developer to say hello, this is a test workflow, developer dont need do anything" is specifically designed to trigger the leader→developer spawn workflow.
 - All cleanup must be in finally blocks — never leave instances running.
 - The daemon MUST be running before these tests execute (skipped otherwise via skipif marker).

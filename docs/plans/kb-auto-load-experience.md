@@ -343,7 +343,7 @@ soul → rule → skill(s) → dynamic_tools → tools_note → workflow → mem
 
 | Approach | Pros | Cons | Verdict |
 |----------|------|------|---------|
-| **Agent-role pre-queries** (e.g., coder always gets "build commands") | Simple implementation | Too rigid; misses task-specific context; doesn't adapt to different projects | ❌ Rejected — not flexible enough |
+| **Agent-role pre-queries** (e.g., developer always gets "build commands") | Simple implementation | Too rigid; misses task-specific context; doesn't adapt to different projects | ❌ Rejected — not flexible enough |
 | **LLM-based message analysis** for topic detection | Most accurate topic detection | 200-500ms extra latency per message; adds cost | ⏳ Deferred — consider for future enhancement over keyword matching |
 | **Full KB dump into system prompt** | Maximum context | Too many tokens; stale data; impractical for any non-trivial KB | ❌ Rejected — token budget blowout |
 | **Middleware intercepting all messages** | Complete coverage | Complex; latency on every message; over-engineered | ❌ Rejected — first-message-only is sufficient |

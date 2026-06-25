@@ -399,12 +399,12 @@ describe('Job Model', () => {
       const filters: JobFilters = {
         status: 'completed',
         source: 'api',
-        agent_id: 'coder',
+        agent_id: 'developer',
         project_id: 'project-123',
       };
       expect(filters.status).toBe('completed');
       expect(filters.source).toBe('api');
-      expect(filters.agent_id).toBe('coder');
+      expect(filters.agent_id).toBe('developer');
       expect(filters.project_id).toBe('project-123');
     });
   });
@@ -469,8 +469,8 @@ describe('Job Model', () => {
       const item: DeadLetterItem = {
         dlq_id: 'dlq-1',
         job_id: 'job-1',
-        agent_id: 'coder',
-        agent_dir: '/agents/coder',
+        agent_id: 'developer',
+        agent_dir: '/agents/developer',
         message: 'Test message',
         source: 'api',
         project_id: 'project-1',
@@ -483,8 +483,8 @@ describe('Job Model', () => {
       };
       expect(item.dlq_id).toBe('dlq-1');
       expect(item.job_id).toBe('job-1');
-      expect(item.agent_id).toBe('coder');
-      expect(item.agent_dir).toBe('/agents/coder');
+      expect(item.agent_id).toBe('developer');
+      expect(item.agent_dir).toBe('/agents/developer');
       expect(item.message).toBe('Test message');
       expect(item.source).toBe('api');
       expect(item.project_id).toBe('project-1');
@@ -582,8 +582,8 @@ describe('Job Model', () => {
       const item: DeadLetterItem = {
         dlq_id: 'dlq-1',
         job_id: 'job-1',
-        agent_id: 'coder',
-        agent_dir: '/agents/coder',
+        agent_id: 'developer',
+        agent_dir: '/agents/developer',
         message: 'Test',
         source: 'api',
         project_id: 'project-1',

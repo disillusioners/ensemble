@@ -27,7 +27,7 @@ export class MessageInputComponent {
 
   // Use input() for reactive signal-based inputs
   readonly disabled = input(false);
-  readonly agentColor = input('coder');
+  readonly agentColor = input('developer');
   readonly instanceStatus = input<InstanceStatus | null>(null);
   @Output() sendMessage = new EventEmitter<MessagePayload>();
   @Output() pauseInstance = new EventEmitter<void>();
@@ -68,7 +68,8 @@ export class MessageInputComponent {
 
   agentColorMap: Record<string, string> = {
     'leader': '#f59e0b',
-    'coder': '#10a7f7',
+    'developer': '#10a7f7',
+    'coder': '#10a7f7',  // backward compat for cached responses
     'reviewer': '#8b5cf6',
   };
 

@@ -28,7 +28,8 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
 
   agentColorMap: Record<string, string> = {
     'leader': '#f59e0b',
-    'coder': '#10a7f7',
+    'developer': '#10a7f7',
+    'coder': '#10a7f7',  // backward compat for cached responses
     'reviewer': '#8b5cf6',
   };
 

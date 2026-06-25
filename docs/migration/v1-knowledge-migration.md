@@ -95,7 +95,7 @@ When RAG is not configured:
    ```bash
    python scripts/migrate_memory_to_rag.py --all
    # or for a specific agent:
-   python scripts/migrate_memory_to_rag.py --agent coder
+   python scripts/migrate_memory_to_rag.py --agent developer
    # dry-run first to preview:
    python scripts/migrate_memory_to_rag.py --dry-run --all
    # force re-migration (ignore state file):

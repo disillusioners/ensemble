@@ -24,7 +24,7 @@ An agent is created by loading a directory:
 ```
 agents/
  ├── leader/
- ├── coder/
+ ├── developer/
  ├── reviewer/
 ```
 
@@ -92,7 +92,7 @@ Example flow:
 2. Leader emits structured action:
 
    ```
-   { "action": "spawn_session", "agent": "agents/coder", "id": "task_42" }
+   { "action": "spawn_session", "agent": "agents/developer", "id": "task_42" }
    ```
 3. Daemon creates a new independent session.
 4. Leader sends instructions via:

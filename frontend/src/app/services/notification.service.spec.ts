@@ -949,15 +949,15 @@ describe('NotificationService Sound Exclusion', () => {
     expect(mockAudio.playCallCount).toBe(0);
   });
 
-  it('should play sound for coder agent', () => {
+  it('should play sound for developer agent', () => {
     const mockAudio = new MockAudio();
     const service = new TestableNotificationService(mockAudio);
     service['audioUnlocked'] = true;
 
     service.addNotification({
       instance_id: 'instance-3',
-      agent_id: 'coder',
-      name: 'Coder Notification',
+      agent_id: 'developer',
+      name: 'Developer Notification',
       status: 'COMPLETED' as const,
       timestamp: new Date().toISOString(),
     });
@@ -1018,7 +1018,7 @@ describe('NotificationService Sound Exclusion', () => {
     const service = new TestableNotificationService(mockAudio);
     service['audioUnlocked'] = true;
 
-    // Add notifications for kb-import (excluded), coder (not excluded),
+    // Add notifications for kb-import (excluded), developer (not excluded),
     // experiencer (excluded), leader (not excluded)
     service.addNotification({
       instance_id: 'instance-1',
@@ -1030,8 +1030,8 @@ describe('NotificationService Sound Exclusion', () => {
 
     service.addNotification({
       instance_id: 'instance-2',
-      agent_id: 'coder',
-      name: 'Coder',
+      agent_id: 'developer',
+      name: 'Developer',
       status: 'COMPLETED' as const,
       timestamp: new Date().toISOString(),
     });
@@ -1052,7 +1052,7 @@ describe('NotificationService Sound Exclusion', () => {
       timestamp: new Date().toISOString(),
     });
 
-    // Only coder and leader should trigger sound (2 total)
+    // Only developer and leader should trigger sound (2 total)
     expect(mockAudio.playCallCount).toBe(2);
   });
 });

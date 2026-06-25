@@ -6,7 +6,7 @@ Comprehensive architectural analysis of the agent definition and skills system, 
 ## Key Findings
 
 ### 1. Agent Definition Structure
-- **9 active agents**: leader, coder, reviewer, tester, planner, tidier, approver, jober, giter
+- **9 active agents**: leader, developer, reviewer, tester, planner, tidier, approver, jober, giter
 - **2 system agents**: _mother, _inner_soul
 - **1 template**: _baby_template
 - Each agent has: meta.json, soul.md, rule.md, workflow.md, and optional memory.md, tools_note.md, growth.md, knowledge.md, user.md
@@ -14,7 +14,7 @@ Comprehensive architectural analysis of the agent definition and skills system, 
 ### 2. Skills System
 - Skills live in `agents/<name>/skills/<skill-name>/skill.md`
 - **4 unique skills**: opencode (220 lines), coordination (54), job-orchestration (232), test-pack (86)
-- **CRITICAL DUPLICATION**: opencode skill copied identically across 6 agents (coder, reviewer, tester, planner, tidier, approver) = 1,320 duplicated lines
+- **CRITICAL DUPLICATION**: opencode skill copied identically across 6 agents (developer, reviewer, tester, planner, tidier, approver) = 1,320 duplicated lines
 - All 6 copies are byte-for-byte IDENTICAL
 
 ### 3. Prompt Composition (daemon/loader.py)

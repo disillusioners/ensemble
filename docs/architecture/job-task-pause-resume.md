@@ -12,7 +12,7 @@ The Job-Task-Pause-Resume feature enables users to pause running agent instances
 
 | Concept | Description |
 |---------|-------------|
-| **Instance** | An agent instance (e.g., "coder", "leader") running in the system. Has a status lifecycle: `idle` → `running` ↔ `paused` → `completed`. |
+| **Instance** | An agent instance (e.g., "developer", "leader") running in the system. Has a status lifecycle: `idle` → `running` ↔ `paused` → `completed`. |
 | **Job** | A unit of work in the JobQueue system (`daemon/repositories/job_queue/`). Jobs wrap agent tasks with persistence for crash recovery. |
 | **Task** | A unit of work in the WorkerPool system (`daemon/services/worker_pool.py`). Tasks are database-backed and processed by worker threads. |
 | **Message** | A user input or system notification to an instance. Messages are persisted in `message_queue` table. |
@@ -691,7 +691,7 @@ class Task(SQLModel, table=True):
 class Instance(SQLModel, table=True):
     """Agent instance."""
     instance_id: str              # Primary key (UUID)
-    agent_id: str                 # Agent type (e.g., "coder")
+    agent_id: str                 # Agent type (e.g., "developer")
     agent_dir: str                # Path to agent files
     parent_id: str | None         # Parent instance ID
     status: str                   # idle | running | paused | completed | error | terminated | waiting_children

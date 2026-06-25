@@ -96,7 +96,7 @@ Sprint 1 delivered the foundational Job Queue infrastructure for agents-ensemble
 curl -X POST http://localhost:8079/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "agent_dir": "agents/coder",
+    "agent_dir": "agents/developer",
     "message": "Fix the login bug in auth.py"
   }'
 ```
@@ -117,7 +117,7 @@ curl -X POST http://localhost:8079/api/tasks \
 curl -X POST http://localhost:8079/api/tasks \
   -H "Content-Type: application/json" \
   -d '{
-    "agent_dir": "agents/coder",
+    "agent_dir": "agents/developer",
     "message": "Add new feature",
     "project_id": "project-uuid",
     "priority": 8

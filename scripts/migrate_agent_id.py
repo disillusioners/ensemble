@@ -12,7 +12,7 @@ Tables processed:
     - task_queue_items
 
 Examples:
-    - ./agents/coder → coder
+    - ./agents/developer → developer
     - agents/leader → leader
     - /full/path/to/agents/tester → tester
 
@@ -49,10 +49,10 @@ def parse_agent_id(agent_dir: str) -> str:
     """Parse agent_id from agent_dir path.
     
     Args:
-        agent_dir: Path to agent directory (e.g., './agents/coder')
+        agent_dir: Path to agent directory (e.g., './agents/developer')
     
     Returns:
-        The agent_id (last path component, e.g., 'coder')
+        The agent_id (last path component, e.g., 'developer')
     """
     if not agent_dir:
         return ""

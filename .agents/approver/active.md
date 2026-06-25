@@ -1,5 +1,5 @@
-Current Plan: Pause/Resume Feature Redesign
-Tracking File: pause-resume-redesign-tracking.md
-Iteration: 002
+Current Plan: Rename coder agent to developer
+Tracking File: rename-coder-to-developer-tracking.md
+Iteration: 001
 Status: APPROVED
-Last Updated: 2026-06-25 05:58
+Last Updated: 2026-06-25 17:57

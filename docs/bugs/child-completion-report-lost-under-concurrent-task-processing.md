@@ -18,7 +18,7 @@ In the observed production case, the parent (4f5cc5fd) produced the final respon
 
 > *"Excellent exploration report. Now I'm waiting for the giter to confirm the branch creation before starting the planning workflow..."*
 
-…even though the giter's completion report had been written to the channel **35 minutes earlier** and was acknowledged by an intermediate LLM turn (*"Good, git is set up. Now waiting for the exploration report from the coder."*). The LLM at the final call did not see the giter's report.
+…even though the giter's completion report had been written to the channel **35 minutes earlier** and was acknowledged by an intermediate LLM turn (*"Good, git is set up. Now waiting for the exploration report from the developer."*). The LLM at the final call did not see the giter's report.
 
 The bug is **rare** because it requires:
 1. A parent to have ≥2 pending `process_message` tasks at once
@@ -42,7 +42,7 @@ In normal operation, the parent's `process_message` task is in flight while its 
 |---|---|
 | 12:52:30 | Task 108 created (human message `d963568b`), worker-1 starts |
 | 12:52:44–12:53:21 | 3 tool invocations complete synchronously (explorers, `invoked_as_tool=true`) |
-| 12:53:26 | `send_message` to 69b6a850 (coder) → `waiting_for=0→1` |
+| 12:53:26 | `send_message` to 69b6a850 (developer) → `waiting_for=0→1` |
 | 12:53:40 | `send_message` to e349b270 (giter) → `waiting_for=1→2` |
 | 12:54:22 | Tool invocation 12d2b495 starts |
 | 12:54:24 | Giter completes → `waiting_for=2→1`, **report enqueued** as message `bacf6f31`, task 119 created |
@@ -54,7 +54,7 @@ In normal operation, the parent's `process_message` task is in flight while its 
 | 12:57:06 | 12d2b495 tool invocation completes |
 | 12:57:26 | Task 119 completes (giter's report processed) |
 | 12:57:38 | Task 108 finally completes (parent's original human message) |
-| 13:29:04 | Coder completes → `waiting_for=1→0`, report enqueued as `2c312178`, task 122 created |
+| 13:29:04 | Developer completes → `waiting_for=1→0`, report enqueued as `2c312178`, task 122 created |
 | 13:29:04 | worker-3 claims task 122, LLM invoked |
 | 13:29:29 | **Final LLM response written to checkpoint:** *"Excellent exploration report. Now I'm waiting for the giter to confirm the branch creation…"* |
 | 13:29:29 | Parent transitions to `COMPLETED`, waiting_for=0 |
@@ -90,7 +90,7 @@ The giter's report write exists at:
 | 1 | ai | — | "I'll start by exploring…" |
 | 2–4 | tool | — | 3 explorer tool-invocation results |
 | 5 | ai | — | "Good context. Now I need to understand…" |
-| 6 | tool | `a5514f96` | spawn 69b6a850 (coder) |
+| 6 | tool | `a5514f96` | spawn 69b6a850 (developer) |
 | 7 | ai | — | (empty) |
 | 8 | tool | `df48ce40` | "Message queued and sent to 69b6a850" |
 | 9 | ai | — | "Now let me also get the git flow started…" |
@@ -100,13 +100,13 @@ The giter's report write exists at:
 | 13 | ai | — | "Waiting for the git setup and codebase exploration…" |
 | 14 | tool | — | Explorer 12d2b495 result |
 | **15** | **human** | **`bacf6f31`** | **GITER REPORT (e349b270)** ← in channel |
-| 16 | ai | — | **"Good, git is set up. Now waiting for the exploration report from the coder."** ← ack |
+| 16 | ai | — | **"Good, git is set up. Now waiting for the exploration report from the developer."** ← ack |
 | 17 | tool | `238c5498` | Explorer 5284edd0 result |
 | 18 | ai | — | "Good. Now I have a good understanding…" |
 | 19 | tool | `c922dce9` | Explorer d2c29828 result |
 | 20 | ai | — | "Good context. The current opencode skill uses…" |
-| 21 | ai | — | "I'll wait for the coder and giter completion reports…" |
-| 22 | human | `2c312178` | Coder report |
+| 21 | ai | — | "I'll wait for the developer and giter completion reports…" |
+| 22 | human | `2c312178` | Developer report |
 | 23 | ai | — | **"Excellent exploration report. Now I'm waiting for the giter…"** ← LOST CONTEXT |
 
 Message 15 (giter's report) is present in the channel, but the final LLM call (producing message 23) didn't see it.
@@ -205,7 +205,7 @@ The bug is timing-sensitive. The `claim_pending_task` ordering (`ORDER BY create
 
 If worker-2's processing of task 119 happens **after** worker-1 has committed more checkpoint writes, the state is consistent. If it happens during a window where worker-1 has just read but not yet committed, the giter's report may be lost from worker-2's view.
 
-The coder's report arriving 35 minutes later (13:29:04) means the parent's task 108 had long since completed and the state was stable. That LLM call (message 23) ran on worker-3 with no concurrent contention — but its state reconstruction was based on the *intermediate* checkpoint written by worker-1/worker-2, which had the giter's report shadowed.
+The developer's report arriving 35 minutes later (13:29:04) means the parent's task 108 had long since completed and the state was stable. That LLM call (message 23) ran on worker-3 with no concurrent contention — but its state reconstruction was based on the *intermediate* checkpoint written by worker-1/worker-2, which had the giter's report shadowed.
 
 ---
 
@@ -311,7 +311,7 @@ The `message_job_handler` already has the right idea (line 66-97) but operates o
 ## Reproduction Recipe (for future verification)
 
 1. Start daemon with multiple workers (default: 4).
-2. From a parent, in one LLM turn: call `send_message` to two children (giter + coder) and call `explore` for a third (tool-invocation).
+2. From a parent, in one LLM turn: call `send_message` to two children (giter + developer) and call `explore` for a third (tool-invocation).
 3. Have the giter complete quickly (< 30s) so the report task is enqueued while the parent is still mid-stream.
 4. Force the giter's completion `process_message` task to be claimed **before** the parent's main task finishes.
 5. After both tasks complete, query the parent instance's `task` table — should see two `completed` rows from different `worker_id`s with overlapping `started_at`/`completed_at`.

@@ -1,5 +1,10 @@
 # Project Context — agents-ensemble
 
+## Agent Rename: coder → developer (2026-06-25)
+The "coder" agent was renamed to "developer". Historical docs in
+.agents/ and docs/bugs/ may still reference "coder" — these are
+intentional historical records.
+
 ## Current State (2026-06-20)
 
 ### Decouple Architecture Migration
