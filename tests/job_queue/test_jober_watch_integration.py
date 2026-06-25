@@ -679,23 +679,90 @@ class TestJoberWatchIntegration:
 
     def test_ensure_dev_sh_still_works(self):
         """ensure.md requirement: dev.sh should be runnable."""
+        import os
+        import signal
         import subprocess
-        import time
+
+        proc: subprocess.Popen | None = None
+        project_root = "/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble"
+
+        def _kill_process_group() -> None:
+            """Tear down dev.sh + any grandchildren (uvicorn worker, reloader)."""
+            nonlocal proc
+            if proc is None or proc.poll() is not None:
+                return
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                return
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+
+        def _sweep_port_8079() -> None:
+            """Belt-and-braces: kill anything still bound to the dev port."""
+            try:
+                result = subprocess.run(
+                    ["lsof", "-ti:8079"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return
+            for pid_str in result.stdout.split():
+                pid = pid_str.strip()
+                if not pid.isdigit():
+                    continue
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    continue
 
         try:
-            # Run dev.sh with timeout (30s as per ensure.md)
-            result = subprocess.run(
-                ["timeout", "30s", "bash", "./dev.sh"],
-                capture_output=True,
+            # Run dev.sh in its own session/process group so we can kill the
+            # entire tree (bash + uvicorn + reloader worker) on exit. The
+            # external `timeout` only kills the direct child, leaking uvicorn.
+            proc = subprocess.Popen(
+                ["bash", "./dev.sh"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                cwd="/Users/nguyenminhkha/All/Code/opensource-projects/agents-ensemble"
+                cwd=project_root,
+                start_new_session=True,
             )
-            # If it runs for 30s without crashing, it's good (timeout will return 124)
-            # We expect it to either run or timeout - both are acceptable per ensure.md
-            assert result.returncode in [0, 124]  # 0=success, 124=timeout
-            print("dev.sh ran successfully for 30s or completed without crash")
+            try:
+                stdout, stderr = proc.communicate(timeout=12)
+            except subprocess.TimeoutExpired:
+                # 12s is enough for dev.sh to print its banner + uvicorn to
+                # reach "Application startup complete." Longer = leaks port.
+                _kill_process_group()
+                stdout, stderr = proc.communicate()
+
+            # PASS criteria: dev.sh is runnable. It either exited cleanly (0),
+            # was terminated by the legacy external `timeout` (124), or was
+            # killed by us on purpose (negative rc = signal N). What we must
+            # NOT see is an immediate Python/import crash.
+            assert "Starting Ensemble Daemon" in stdout, (
+                f"dev.sh did not produce expected startup banner. stdout:\n{stdout}\n"
+                f"stderr:\n{stderr}"
+            )
+            assert proc.returncode in [0, 124] or proc.returncode < 0, (
+                f"dev.sh crashed unexpectedly (returncode={proc.returncode}). "
+                f"stderr:\n{stderr}"
+            )
+            print(f"dev.sh ran successfully (returncode={proc.returncode})")
         except Exception as e:
             pytest.fail(f"dev.sh failed to run: {e}")
+        finally:
+            # Always tear down the process group, even on assertion failure or
+            # pytest-timeout interruption, then sweep anything bound to 8079.
+            _kill_process_group()
+            _sweep_port_8079()
 
 
 class TestJobWatcherRepository:
