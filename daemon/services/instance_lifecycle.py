@@ -1648,8 +1648,15 @@ class InstanceLifecycleService:
                         if j.project_id:
                             cancelled_project_ids.add(j.project_id)
 
-                # PENDING / FAILED → CANCELLED (idempotent — these
-                # statuses can also flip to CANCELLED directly).
+                # PENDING / FAILED / PAUSED → CANCELLED (idempotent —
+                # these statuses can also flip to CANCELLED directly).
+                # PAUSED is included per Phase 1 W1 contract: a paused
+                # instance's job is non-terminal and must be cleaned up
+                # on termination, otherwise it survives the cascade and
+                # is orphaned against the dead instance. The matching
+                # ``non_terminal_statuses`` set at the top of this block
+                # (line ~1595) also includes ``paused`` for the same
+                # reason — this UPDATE keeps the two in sync.
                 if non_processing_job_ids:
                     session.execute(
                         text(
@@ -1658,7 +1665,7 @@ class InstanceLifecycleService:
                             "    cancelled_at = :cancelled_at, "
                             "    error_message = COALESCE(error_message, :err) "
                             "WHERE job_id IN :job_ids "
-                            "  AND status IN ('pending', 'failed')"
+                            "  AND status IN ('pending', 'failed', 'paused')"
                         ).bindparams(
                             bindparam("job_ids", expanding=True),
                         ),
