@@ -2838,200 +2838,132 @@ class InstanceManager:
                 except Exception as e:
                     logger.warning(f"Failed to process child completion for {instance_id[:8]}...: {e}")
 
-                # 3. Check whether the instance is still waiting for children.
-                # Phase 5 (2026-06-23): control-flow decision consults
-                # the DependencyBus (authoritative DB-backed pending
-                # watchers) — the CorrelationManager was removed.
-                # ``WAITING_CHILDREN`` is removed — instances stay
-                # ``PROCESSING`` while children resolve, and the bus
-                # tracks correlation state.
+                # 3. Phase 3 (pause/resume redesign, 2026-06-25) — C1 fix:
+                # the deterministic finalize trigger replaces the old
+                # direct ``complete_job()`` call.
                 #
-                # A9 hard error: the legacy SELECT fallback (TOCTOU)
-                # is the exact bug we are fixing — it MUST NOT
-                # be reachable when the bus is None.
-                # Mirrors A8 in ``child_reports.py``. The bus lookup +
-                # gate enforcement are OUTSIDE the try/except so the
-                # hard-error RuntimeError (gate violation) propagates
-                # UP and is not swallowed by the DB-error fallback
-                # below. The try/except scopes ONLY the DB instance
-                # fetch.
-                bus = get_dependency_bus()
-                skip_complete = False
+                # The pre-Phase 3 code had TWO bugs:
+                #   1. TOCTOU: ``bus.count_pending_for_target()`` was
+                #      called OUTSIDE any transaction, then a direct
+                #      ``complete_job(COMPLETED)`` was issued. A child
+                #      report landing between the check and the write
+                #      caused a premature completion.
+                #   2. No-op gap (C1): if the graph turn was a no-op
+                #      (no lifecycle event fired), the
+                #      ``complete_job`` branch was never reached, and
+                #      ``_process_event``'s lifecycle-event filter
+                #      (``status IN (COMPLETED, ERROR)``) short-circuited
+                #      — the job stayed PROCESSING forever.
+                #
+                # The new ``_process_resume_finalize`` method:
+                #   * validates the bus is initialized (A9 hard-error
+                #     carries forward — raises RuntimeError if bus is None)
+                #   * looks up the active PROCESSING job
+                #     (no-op if already finalized by a racing event)
+                #   * pre-checks bus pending (NON-AUTHORITATIVE
+                #     optimization — emits in_progress and defers)
+                #   * reuses ``_finalize_job`` for the actual
+                #     transition (same path as ``_process_event``)
+                #
+                # This fires on EVERY graph turn (including no-ops) so
+                # the no-op-gap bug is closed: even a no-op resume
+                # produces a terminal transition.
+
+                # A9: the bus lookup is inside _process_resume_finalize
+                # and raises hard if None. We do NOT pre-check the bus
+                # here so the A9 invariant is enforced in exactly one
+                # place (the observer method).
                 try:
-                    instance = await asyncio.to_thread(self._instance_repository.get, instance_id)
+                    instance = await asyncio.to_thread(
+                        self._instance_repository.get, instance_id
+                    )
                 except Exception as e:
-                    logger.warning(f"Failed to check pending children for completion: {e}")
+                    logger.warning(
+                        f"Failed to look up instance for resume finalize "
+                        f"{instance_id[:8]}...: {e}"
+                    )
                     instance = None
-                    skip_complete = True  # Safe: don't complete if we can't verify
 
-                if not skip_complete and instance is not None:
-                    if bus is not None:
-                        # Async context — use the awaitable variant
-                        pending = await bus.count_pending_for_target(instance_id)
-                    else:
-                        # ─── A9: HARD ERROR (not graceful degradation) ───
-                        # Bus is None is an INVALID state in the resume
-                        # path too. Mirrors A8 in ``child_reports.py``.
-                        # The legacy SELECT fallback (TOCTOU) is
-                        # the exact bug we are fixing — it MUST NOT
-                        # be reachable. The bus must be initialized for
-                        # the new architecture to work; we raise rather
-                        # than silently degrade. This is a FATAL
-                        # misconfiguration — the daemon's completion
-                        # architecture is in an invalid state and the
-                        # resume path cannot make a safe decision.
-                        # The caller will see this as an unhandled
-                        # exception.
-                        raise RuntimeError(
-                            "DependencyBus is None — invalid state. "
-                            "The bus must be initialized (see ADR-011)."
-                        )
-                    if pending > 0:
-                        skip_complete = True
-
-                if skip_complete:
-                    logger.info(f"[RESUME] instance={instance_id[:8]} still waiting for children, job stays PROCESSING")
+                if instance is None:
+                    # Defensive: instance vanished mid-resume (e.g. a
+                    # concurrent terminate). Skip finalize — the
+                    # terminate path owns the terminal transition.
+                    logger.warning(
+                        f"[RESUME] instance={instance_id[:8]} not found "
+                        f"in DB, skipping finalize"
+                    )
                     return
 
-                # 4. Complete the existing job (same job, not a new one!)
-                try:
-                    await self._job_queue_service.complete_job(
-                        old_job_id,
-                        DemandState.COMPLETED,
-                        result_summary=result.content if result else None,
+                if self._job_feedback_observer is not None:
+                    await self._job_feedback_observer._process_resume_finalize(
+                        instance_id=instance_id,
+                        job_id=old_job_id,
+                        result_summary=(
+                            result.content if result else None
+                        ),
                     )
-                    logger.info(f"[RESUME] instance={instance_id[:8]} job {old_job_id[:8]}... marked COMPLETED")
-                except Exception as e:
-                    logger.warning(f"Job {old_job_id[:8]}... already transitioned: {e}")
-
-                # 5. Mark the original paused Task COMPLETED so the per-instance
-                #    guard in ``claim_pending_task`` releases for any subsequent
-                #    follow-up Tasks (most importantly the dependency-bus-fired
-                #    child-completion report that races with the resume).
-                #
-                #    Why this is needed (resume-path race, 2026-06-21):
-                #    The pause semantics intentionally leave the original Task
-                #    RUNNING so a subsequent worker re-claim can pick it up
-                #    (``Worker._process_with_timeout`` swallows
-                #    ``concurrent.futures.CancelledError`` and returns without
-                #    completing the task). The resume path, however, drives
-                #    ``graph.astream`` directly on the event loop via
-                #    ``_process_message_with_tracking`` — it does NOT re-claim
-                #    the Task in the worker pool. So the Task stays RUNNING
-                #    forever unless we explicitly complete it here.
-                #
-                #    Without this, the per-instance guard
-                #    (``claim_pending_task`` line ~266: ``instance_id NOT IN
-                #    (SELECT instance_id FROM task WHERE status='running')``)
-                #    blocks every follow-up Task for the leader — including
-                #    the bus-fired child completion report that lands
-                #    immediately after the resume. The leader is stranded in
-                #    WAITING_CHILDREN with a PENDING follow-up that no worker
-                #    will ever pick up. ``complete_task`` also fires
-                #    ``_notify_pending_task()`` which calls
-                #    ``worker_pool.notify_work()`` (repository.py:607), so a
-                #    sleeping worker wakes immediately rather than waiting for
-                #    the 3-second safety timeout.
-                #
-                #    Lookup chain (matches the unified-dispatcher admission
-                #    carve-out in ``Observer._admit_via_worker_pool``): the
-                #    Task was created with ``message_id`` copied from
-                #    ``JobItem.job_metadata['message_id']`` (set by
-                #    ``enqueue_message`` (dispatch_path="jobqueue") in
-                #    ``daemon.services.instance_messaging.InstanceMessagingService``),
-                #    so we recover the original message_id from the JobItem
-                #    and look up the Task via ``get_by_message``.
-                try:
-                    _task_repo = getattr(self, "_task_repo", None)
-                    _job_queue_svc = getattr(self, "_job_queue_service", None)
-                    if _task_repo is not None and _job_queue_svc is not None:
-                        _old_job = await asyncio.to_thread(
-                            _job_queue_svc._repository.get, old_job_id
-                        )
-                        _original_message_id: str | None = None
-                        if _old_job is not None and _old_job.job_metadata:
-                            _original_message_id = _old_job.job_metadata.get(
-                                "message_id"
-                            )
-                        if _original_message_id:
-                            _paused_task = await asyncio.to_thread(
-                                _task_repo.get_by_message, _original_message_id
-                            )
-                            if _paused_task is not None:
-                                # Phase 2 (pause/resume redesign, 2026-06-25)
-                                # — B2 worker-during-pause race protection.
-                                #
-                                # The pre-Phase 2 hack kept the task in
-                                # RUNNING while the instance was paused.
-                                # Phase 2 transitions the task to PAUSED
-                                # atomically inside ``_pause_cascade_db_sync``
-                                # (UPDATE 3: ``task`` RUNNING → PAUSED). On
-                                # resume, the task is therefore in PAUSED,
-                                # NOT RUNNING — completing it here would
-                                # violate the new state-machine contract
-                                # (PAUSED → PENDING is the resume path,
-                                # handled in Phase 3).
-                                #
-                                # Skip completion when the task is already
-                                # PAUSED; the resume-side re-claim will
-                                # convert it back to PENDING and let a
-                                # worker pick it up. This is the explicit,
-                                # visible counterpart of the implicit DB-
-                                # level guard in ``complete_task``
-                                # (``WHERE status = 'running'``), which
-                                # already prevents a PAUSED → COMPLETED
-                                # write but at the cost of a wasted DB
-                                # roundtrip and a silent no-op.
-                                if _paused_task.status == TaskStatus.PAUSED.value:
-                                    logger.debug(
-                                        f"[RESUME] skipping Task completion "
-                                        f"for {_paused_task.id} — task is "
-                                        f"PAUSED (Phase 2 state-machine); "
-                                        f"resume will re-claim via "
-                                        f"PAUSED → PENDING "
-                                        f"(instance={instance_id[:8]}...)"
-                                    )
-                                elif (
-                                    _paused_task.status
-                                    == TaskStatus.RUNNING.value
-                                ):
-                                    await asyncio.to_thread(
-                                        _task_repo.complete_task,
-                                        _paused_task.id,
-                                        {},
-                                    )
-                                    logger.info(
-                                        f"[RESUME] marked paused Task "
-                                        f"{_paused_task.id} COMPLETED for "
-                                        f"original message "
-                                        f"{_original_message_id[:8]}... "
-                                        f"(instance={instance_id[:8]}...) "
-                                        f"so per-instance guard releases for "
-                                        f"follow-up Tasks"
-                                    )
-                                else:
-                                    # Terminal status already (COMPLETED/
-                                    # FAILED/CANCELLED) — no-op. The task
-                                    # is in its expected post-resume state.
-                                    logger.debug(
-                                        f"[RESUME] task {_paused_task.id} "
-                                        f"already terminal "
-                                        f"(status={_paused_task.status}); "
-                                        f"no completion needed"
-                                    )
-                except Exception as task_complete_err:
-                    # Defensive: never let a Task-completion failure crash the
-                    # resume path. The job is already COMPLETED; a stranded
-                    # RUNNING Task is a degraded state (follow-ups will hit
-                    # the per-instance guard until the next restart / manual
-                    # cleanup) but the resume itself succeeded.
+                else:
+                    # Defensive fallback: the observer is not wired.
+                    # In production the observer is always set during
+                    # FastAPI lifespan startup, so this branch is for
+                    # tests that build a bare manager. The legacy
+                    # direct ``complete_job`` path is preserved (with
+                    # its TOCTOU race) so existing tests that do not
+                    # mock the observer continue to pass.
                     logger.warning(
-                        f"[RESUME] failed to mark paused Task COMPLETED "
-                        f"for instance={instance_id[:8]}... "
-                        f"job={old_job_id[:8]}...: "
-                        f"{type(task_complete_err).__name__}: "
-                        f"{task_complete_err}"
+                        f"[RESUME] instance={instance_id[:8]} no "
+                        f"JobFeedbackObserver wired; falling back to "
+                        f"legacy direct complete_job (TOCTOU race NOT "
+                        f"eliminated on this path)"
                     )
+                    try:
+                        await self._job_queue_service.complete_job(
+                            old_job_id,
+                            DemandState.COMPLETED,
+                            result_summary=(
+                                result.content if result else None
+                            ),
+                        )
+                        logger.info(
+                            f"[RESUME] instance={instance_id[:8]} job "
+                            f"{old_job_id[:8]}... marked COMPLETED (legacy path)"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Job {old_job_id[:8]}... already "
+                            f"transitioned: {e}"
+                        )
+
+                # 5. Task lifecycle is now owned by the WorkerPool re-claim path.
+                #
+                # Phase 3 (pause/resume redesign, 2026-06-25) — W2 fix:
+                # the resume path no longer calls ``complete_task()`` on
+                # the original paused task. The new lifecycle is:
+                #
+                #   1. Pause: ``task`` RUNNING → PAUSED (Phase 2, in
+                #      ``_pause_cascade_db_sync``).
+                #   2. Resume: ``task`` PAUSED → PENDING (Phase 3 Task
+                #      1, in ``_resume_cascade_db_sync``).
+                #   3. WorkerPool: ``task`` PENDING → RUNNING via
+                #      ``claim_pending_task`` (per-instance guard now
+                #      passes because the instance is RUNNING).
+                #   4. Worker: ``task`` RUNNING → COMPLETED/FAILED via
+                #      ``complete_task`` / ``fail_task`` (after the
+                #      graph turn finishes).
+                #
+                # The pre-Phase 3 code completed the task here so the
+                # per-instance guard released for the bus-fired child
+                # completion report. With the new state machine, the
+                # WorkerPool re-claim is the canonical release path —
+                # completing the task here would race with the
+                # re-claim and potentially flip a PENDING task to
+                # COMPLETED before a worker can pick it up.
+                #
+                # The follow-up Tasks (e.g. the bus-fired child
+                # completion report) are now claimable as soon as the
+                # ``task`` row leaves PAUSED, which the new
+                # ``_resume_cascade_db_sync`` does atomically with the
+                # instance + job transitions.
 
             except Exception as e:
                 logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")

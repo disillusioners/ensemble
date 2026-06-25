@@ -2162,20 +2162,32 @@ status=InstanceStatus.IDLE.value,
         ancestor_ids: set[str],
         is_root_resume: bool,
     ) -> _CascadeUpdateResult:
-        """Sync DB half of ``resume_instance_cascade`` (L14 fix).
+        """Sync DB half of ``resume_instance_cascade`` (L14 fix + Phase 3 W2).
 
         Runs in the caller's thread (sync). Performs the per-tree-node
         resume updates in ONE batched ``UPDATE ... WHERE instance_id IN
         (...)`` statement instead of N+1 per-node updates.
 
-        The batched UPDATE sets:
+        Phase 3 (pause/resume redesign, 2026-06-25) — W2 atomicity:
+        the same ``WriteGuardSession`` transaction now performs THREE
+        batched UPDATEs so a single crash leaves no half-resumed state
+        across tables (mirrors Phase 2's ``_pause_cascade_db_sync``):
 
-          * ``status='running'``
-          * ``paused_at=NULL`` (clears the paused timestamp)
+          1. ``instances`` (PAUSED → RUNNING) — clears ``paused_at``.
+          2. ``job_queue_items`` (PAUSED → PROCESSING) — re-arms the
+             job so ``JobProcessor``'s queue sweep (``start_job``) sees
+             it on the next tick. The ``WHERE status = 'paused'``
+             guard makes the UPDATE idempotent.
+          3. ``task`` (PAUSED → PENDING) — re-arms the task so
+             ``claim_pending_task`` can pick it up. We transition to
+             ``PENDING`` (NOT ``RUNNING``) so the unified re-claim
+             path (WorkerPool → ``claim_pending_task``) takes over —
+             the worker that picks it up flips PENDING → RUNNING →
+             terminal. Bypassing the claim mechanism would race with
+             the per-instance guard and the Worker's lifecycle.
 
-        Phase 4: column dropped; nothing else
-        is mutated here. Parent-waits-for-children is owned by the
-        CorrelationManager / Dependency Bus (see ADR-011).
+        The three UPDATEs share ONE ``WriteGuardSession`` so the
+        commit is atomic (all-or-nothing).
 
         Returns ``_CascadeUpdateResult`` with the updated IDs.
         """
@@ -2191,6 +2203,7 @@ status=InstanceStatus.IDLE.value,
 
         now_iso = datetime.now(timezone.utc).isoformat()
         with WriteGuardSession(Session(engine), write_guard) as session:
+            # ─── UPDATE 1: instances → RUNNING (existing L14 behaviour) ───
             # Single batched UPDATE: status + paused_at for all nodes
             # that are currently paused. The ``status = 'paused'``
             # predicate is the guard so a concurrent pause/resume that
@@ -2220,6 +2233,75 @@ status=InstanceStatus.IDLE.value,
                     "tree_ids": tree_ids,
                 },
             )
+
+            # ─── UPDATE 2: job_queue_items → PROCESSING (Phase 3 / W2) ────
+            # At the same transaction boundary as UPDATE 1, transition
+            # any PAUSED job for a resumed instance back to PROCESSING.
+            # The ``WHERE status = 'paused'`` guard makes the UPDATE
+            # idempotent and racy-safe: a row that flipped to a
+            # terminal status in a concurrent transition is left
+            # alone.
+            #
+            # Effect: the JobProcessor's queue sweep can re-discover
+            # the job on the next tick (``start_job`` requires
+            # ``status = 'pending'`` so the worker race in the
+            # resume path stays inside the existing claim contract).
+            # The job's ``started_at`` is preserved from the original
+            # transition — we only flip status, not lifecycle columns.
+            session.execute(
+                text(
+                    "UPDATE job_queue_items "
+                    "SET status = :processing_status "
+                    "WHERE instance_id IN :tree_ids "
+                    "  AND status = :paused_status "
+                    "  AND deleted_at IS NULL"
+                ).bindparams(
+                    bindparam("tree_ids", expanding=True),
+                ),
+                {
+                    "processing_status": JobStatus.PROCESSING.value,
+                    "paused_status": JobStatus.PAUSED.value,
+                    "tree_ids": tree_ids,
+                },
+            )
+
+            # ─── UPDATE 3: task → PENDING (Phase 3 / W2) ──────────────
+            # At the same transaction boundary as UPDATE 1, transition
+            # any PAUSED task for a resumed instance to PENDING. The
+            # ``WHERE status = 'paused'`` guard makes the UPDATE
+            # mutually exclusive with any concurrent task lifecycle
+            # writes (e.g. a worker that just observed the task can
+            # only flip PENDING → RUNNING or terminal; PAUSED is the
+            # exclusive transition point on resume).
+            #
+            # We transition to PENDING, NOT RUNNING, because the
+            # WorkerPool's ``claim_pending_task`` is the unified
+            # re-claim path — it re-evaluates the per-instance guard
+            # (which now passes, since the instance is RUNNING) and
+            # flips PENDING → RUNNING atomically via
+            # ``atomic_transition``. Bypassing the claim path would
+            # double-acquire the per-instance lock and race with the
+            # ``_resume_processing_background``'s ExecutionGate.
+            session.execute(
+                text(
+                    "UPDATE task "
+                    "SET status = :pending_status "
+                    "WHERE instance_id IN :tree_ids "
+                    "  AND status = :paused_status"
+                ).bindparams(
+                    bindparam("tree_ids", expanding=True),
+                ),
+                {
+                    "pending_status": TaskStatus.PENDING.value,
+                    "paused_status": TaskStatus.PAUSED.value,
+                    "tree_ids": tree_ids,
+                },
+            )
+
+            # Single commit for ALL three DB writes (Phase 3 / W2
+            # atomicity). If any UPDATE raises, none of them commit —
+            # the ``WriteGuardSession.__exit__`` rolls back via the
+            # underlying ``Session.close``.
             session.commit()
 
         return _CascadeUpdateResult(

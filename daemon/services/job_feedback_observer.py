@@ -826,6 +826,16 @@ class JobFeedbackObserver:
         # parent's own report turn completed cleanly. Sticky
         # ``_parent_errored`` is cleared after finalize so a
         # revived instance does not inherit the flag.
+        # Phase 3 (2026-06-25, pause/resume redesign): the
+        # ``_process_resume_finalize`` method also calls
+        # ``_finalize_job`` from the resume path. Both paths converge
+        # on this single line — the ``_finalize_job_db_sync`` atomic
+        # transition ``WHERE status = 'processing'`` ensures only the
+        # first writer wins, so a racing lifecycle event + resume
+        # finalize cannot double-transition. The second caller's
+        # ``atomic_transition`` raises ``InvalidTransitionError`` and
+        # the helper short-circuits via the existing
+        # ``except InvalidTransitionError`` branch below.
         status_to_finalize, error_for_finalize = _resolve_finalize_status(
             bus, instance_id, status, error
         )
@@ -1359,6 +1369,111 @@ class JobFeedbackObserver:
             except Exception:
                 pass  # atomic_transition itself failed — nothing more we can do
             return
+
+    async def _process_resume_finalize(
+        self,
+        instance_id: str,
+        job_id: str,
+        result_summary: str | None = None,
+    ) -> None:
+        """Deterministic finalize trigger called after every resume graph turn.
+
+        Phase 3 (2026-06-25, pause/resume redesign) — C1 fix. Replaces
+        the old direct ``complete_job()`` call in the resume path
+        (manager.py:2858-2905 pre-Phase 3). Routes through the SAME
+        transactional bus gate as :meth:`_process_event`, eliminating
+        the TOCTOU race (the pre-Phase 3 code did a non-transactional
+        bus check followed by a direct ``complete_job`` call). Fires
+        even on no-op graph turns (fixing C1 — the previous "let
+        ``_process_event`` handle it" design never fired finalize for
+        no-op turns because the lifecycle event filter
+        ``status IN (COMPLETED, ERROR)`` short-circuited, leaving the
+        job stuck in PROCESSING forever).
+
+        The authoritative gate is ``_finalize_job_db_sync``'s
+        in-session ``COUNT`` (a re-check of
+        ``bus.count_pending_for_target`` immediately before the
+        atomic transition). The pre-check here is an optimization
+        (skip the sync helper if children are obviously pending) —
+        it is NOT authoritative; the in-session gate in
+        ``_finalize_job_db_sync`` makes the final call.
+
+        Double-finalize prevention: both this method and
+        :meth:`_process_event` call :meth:`_finalize_job`, which
+        delegates to ``_finalize_job_db_sync`` whose atomic
+        transition uses ``WHERE status = 'processing'``. If a
+        lifecycle event-driven finalize lands first, the second
+        caller's transition rowcount drops to 0 and the helper
+        returns ``skip=True`` — only the first writer wins.
+
+        A9 hard-error carries forward: when ``get_dependency_bus()``
+        returns ``None``, this method raises ``RuntimeError`` (same
+        invariant as :meth:`_process_event` and the resume path's
+        pre-Phase 3 bus check). The bus must be initialized for
+        finalization to make a safe decision.
+
+        Args:
+            instance_id: The instance whose resume graph turn just
+                completed.
+            job_id: The job_id (for logging/fallback; the
+                authoritative job is looked up via
+                :meth:`_get_processing_job_for_instance`).
+            result_summary: Optional result text from the graph turn.
+                The current ``_finalize_job`` API does not accept
+                ``result_summary`` from the caller (it does its own
+                LLM fetch via ``_get_last_assistant_message_raw``),
+                so this parameter is accepted for forward-compatibility
+                and ignored today. The pause/resume Phase 4 plan may
+                thread it through.
+        """
+        # A9 hard-error: bus must be initialized. The legacy SELECT
+        # fallback (TOCTOU) is the exact bug Phase 3 is fixing — it
+        # MUST NOT be reachable when the bus is None.
+        bus = get_dependency_bus()
+        if bus is None:
+            raise RuntimeError(
+                "DependencyBus is None during resume finalize — invalid state. "
+                "The bus must be initialized (see ADR-011)."
+            )
+
+        # Look up the active PROCESSING job. If None, the job is
+        # already finalized by a racing event-driven finalize (or a
+        # terminate). Return silently — that is the correct
+        # observable behaviour.
+        job = await self._get_processing_job_for_instance(instance_id)
+        if job is None:
+            logger.debug(
+                f"_process_resume_finalize: no PROCESSING job for instance "
+                f"{instance_id[:8]}... — already finalized by racing event"
+            )
+            return
+
+        # Pre-check (NON-AUTHORITATIVE optimization): if children are
+        # obviously pending, emit in_progress and defer. The
+        # authoritative gate is _finalize_job_db_sync's in-session
+        # COUNT — the pre-check is just an optimization that lets us
+        # skip the thread-hop when the result is obvious. Even if a
+        # race makes this count stale by the time the sync helper
+        # runs, the in-session re-check closes the gap.
+        bus_pending = await bus.count_pending_for_target(instance_id)
+        if bus_pending > 0:
+            await self._emit_in_progress(job, instance_id)
+            return
+
+        # REUSE _finalize_job — do NOT reimplement finalize logic.
+        # The method delegates to _finalize_job_db_sync which runs the
+        # authoritative in-session bus gate. If children race in
+        # between this pre-check and the sync helper, the in-session
+        # gate transitions the job to terminal anyway — and the
+        # bus's late-child resolve (which fires a watcher) re-arms
+        # the job via the generation-counter check in
+        # _finalize_job.
+        #
+        # We pass "completed" (string) matching the existing
+        # _process_event path which also passes the string form via
+        # _resolve_finalize_status → _finalize_job. The method maps
+        # the string to InstanceStatus.COMPLETED.value internally.
+        await self._finalize_job(job, instance_id, "completed", error=None)
 
     async def _finalize_instance(
         self,
