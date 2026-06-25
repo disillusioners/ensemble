@@ -837,7 +837,12 @@ class TestLoadToolsDocForAgent:
         
         self.mock_registry = MagicMock()
         self.mock_registry.get.return_value = self.mock_agent_meta
-        
+        # loader.load_tools_doc_for_agent() now uses alias-aware methods
+        # (registry.get_resolved / registry.resolve_pure_id) since the
+        # coder→developer rename; stub them so the filter lookup succeeds.
+        self.mock_registry.get_resolved.return_value = self.mock_agent_meta
+        self.mock_registry.resolve_pure_id.return_value = "test_agent"
+
         # Patch the registry getter at the module level where it's imported
         self.registry_patcher = patch("daemon.registry.get_registry", return_value=self.mock_registry)
         self.registry_patcher.start()
