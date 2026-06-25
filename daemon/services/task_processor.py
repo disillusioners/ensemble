@@ -16,6 +16,7 @@ from .message_processing_pipeline import (
     ProcessingResult,
 )
 from daemon.cancellation import CancellationToken, OperationCancelledError
+from daemon.repositories.message_queue.models import MessageStatus
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
@@ -184,6 +185,35 @@ class ProcessMessageProcessor(BaseProcessor):
                 f"Message {task.message_id} not found in message_queue "
                 f"for task {task.id}"
             )
+
+        # ---- Idempotency guard: skip already-completed messages ----
+        # On resume of a paused root instance, two graph-driving paths
+        # converge on the same thread:
+        #   1. ``resume_processing_job`` → ``_resume_processing_background``
+        #      drives the graph from checkpoint and marks the message
+        #      COMPLETED synchronously *before* its background turn.
+        #   2. ``_resume_cascade_db_sync`` re-arms the paused
+        #      ``process_message`` task (PAUSED→PENDING), so the
+        #      WorkerPool re-claims it and would re-process the same
+        #      message as a *fresh* turn (is_retry=False).
+        # Without this guard, path #2 re-injects the original message
+        # with its existing ID; LangGraph's ``add_messages`` reducer
+        # then replaces the project-context-wrapped message with the
+        # bare text, corrupting history (lost project context, broken
+        # LLM context, duplicate SSE output).
+        # A COMPLETED message has nothing left to process, so we treat
+        # the task as a successful no-op and let the worker complete it.
+        if message.status == MessageStatus.COMPLETED.value:
+            logger.info(
+                f"Task {task.id}: message {task.message_id[:8]}... already "
+                f"COMPLETED — skipping graph turn (resume re-claim no-op)"
+            )
+            return {
+                "success": True,
+                "content": None,
+                "message_id": task.message_id,
+                "skipped": True,
+            }
 
         message_content = message.content if message else ""
         message_source = message.source if message else None

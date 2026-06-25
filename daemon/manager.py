@@ -2699,6 +2699,38 @@ class InstanceManager:
                         logger.info(f"Completed stale message entry {msg.message_id[:8]}... for resume")
                     except Exception as e:
                         logger.warning(f"Failed to complete stale message {msg.message_id[:8]}...: {e}")
+                    # Cancel the WorkerPool task that drives this message so it
+                    # is NOT re-armed/re-claimed on resume. ``_resume_cascade_db_sync``
+                    # transitions paused tasks PAUSED→PENDING; without cancelling
+                    # here, the re-claimed ``process_message`` task would re-drive
+                    # the graph a SECOND time (a duplicate turn that races with
+                    # ``_resume_processing_background`` and corrupts the checkpoint
+                    # — the add_messages reducer replaces the project-context
+                    # message with a bare re-injection of the same ID).
+                    try:
+                        stale_task = await asyncio.to_thread(
+                            self._task_repo.get_by_message, msg.message_id
+                        )
+                        if stale_task is not None and stale_task.status in (
+                            TaskStatus.PENDING.value,
+                            TaskStatus.RUNNING.value,
+                            TaskStatus.PAUSED.value,
+                        ):
+                            await asyncio.to_thread(
+                                self._task_repo.cancel_task,
+                                stale_task.id,
+                                "Superseded by resume_processing_job graph driver",
+                            )
+                            logger.info(
+                                f"[RESUME] cancelled stale task {stale_task.id} "
+                                f"(message {msg.message_id[:8]}...) — graph driving "
+                                f"owned by resume_processing_job"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to cancel stale task for message "
+                            f"{msg.message_id[:8]}...: {e}"
+                        )
                 elif msg.status == MessageStatus.PENDING.value:
                     logger.info(f"Preserving PENDING message {msg.message_id[:8]}... for post-resume delivery")
             completed_count = sum(1 for msg in pending_messages if msg.status in (MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value))
