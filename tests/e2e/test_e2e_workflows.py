@@ -1064,6 +1064,25 @@ def test_parent_child_workflow_happy_path():
 def test_pause_after_spawn_then_resume():
     """E2E Test 2: Pause after spawn, then resume.
 
+    Phase 5 (pause/resume redesign) expectations:
+      * Pause the leader → instance status → ``paused`` (cascade
+        SQL transitions instance + job + task atomically; ``paused``
+        is the new ``JobStatus`` value introduced in Phase 2, replacing
+        the pre-Phase 2 behavior where the job stayed ``processing``
+        during pause).
+      * Cascade pause: child instance also transitions to ``paused``
+        (the cascade uses ``get_tree_ids`` BFS to batch-update all
+        descendants in a single transaction).
+      * Hold window: the leader's status stays ``paused`` for 5s
+        (no rogue processing leaks through).
+      * Resume → instance leaves ``paused`` and reaches a terminal
+        status. The resume path uses ``_process_resume_finalize`` to
+        drive ``COMPLETED`` via the same transactional bus gate as
+        the lifecycle-event path (Phase 3 C1 fix — replaces the
+        pre-Phase 3 direct ``complete_job`` call with the
+        TOCTOU-safe observer method).
+      * No bus message leaks into the leader's message history.
+
     Same workflow as Test 1, but pauses the leader as soon as the coder
     child is observed, verifies both leader and child reach ``paused``,
     holds for a few seconds to confirm no further processing, then

@@ -183,6 +183,31 @@ def _make_manager():
         bus_patcher.start()
         patchers.append(bus_patcher)
         manager._bus_mock = bus_mock
+
+        # Phase 5: wire ``_job_feedback_observer`` mock. The resume
+        # path's happy-finalize branch calls
+        # ``self._job_feedback_observer._process_resume_finalize(...)``
+        # (Phase 3 C1 fix). When the observer is ``None``, the
+        # production code raises RuntimeError to preserve the A9
+        # invariant — without this mock the happy-path test would
+        # short-circuit to the except block and the job would be
+        # marked FAILED instead of COMPLETED.
+        #
+        # We make ``_process_resume_finalize`` a no-op AsyncMock so
+        # the resume path returns cleanly. The ``complete_job`` call
+        # it would normally drive is exercised by the production
+        # ``_finalize_job`` chain — under the mock manager, no DB
+        # state changes happen and ``complete_job`` is NOT called via
+        # this path. Tests that need to verify ``complete_job``
+        # transitions now assert against
+        # ``_job_feedback_observer._process_resume_finalize`` instead
+        # (see updated assertions below).
+        job_feedback_observer = MagicMock()
+        job_feedback_observer._process_resume_finalize = AsyncMock(
+            return_value=None
+        )
+        manager._job_feedback_observer = job_feedback_observer
+
         return manager
 
     yield _factory
@@ -234,14 +259,23 @@ class TestResumeGateWrapping:
         assert kwargs["holder_kind"] == "message_job"
         assert callable(kwargs["work_fn"])
 
-        # Job completed, instance NOT errored.
-        manager._job_queue_service.complete_job.assert_awaited_once()
-        # ``complete_job(job_id, demand_state, ...)`` is called with
-        # positional args; check via .args[1] for the DemandState.
-        assert (
-            manager._job_queue_service.complete_job.await_args.args[1]
-            == DemandState.COMPLETED
-        )
+        # Phase 5: job finalization goes through
+        # ``_job_feedback_observer._process_resume_finalize`` (C1
+        # fix — was direct ``complete_job(COMPLETED)`` pre-Phase 3).
+        # The observer mock records the call so we can verify the
+        # resume path drove finalization. ``complete_job`` is NOT
+        # invoked by this mocked manager because the observer's
+        # ``_process_resume_finalize`` is a no-op AsyncMock.
+        manager._job_feedback_observer._process_resume_finalize.assert_awaited_once()
+        finalize_kwargs = manager._job_feedback_observer._process_resume_finalize.await_args.kwargs
+        assert finalize_kwargs["instance_id"] == instance_id
+        assert finalize_kwargs["job_id"] == old_job_id
+        assert finalize_kwargs["result_summary"] == "Resume completed"
+
+        # ``complete_job`` is only called via the exception path
+        # (tested below) — the happy path delegates finalization to
+        # the observer.
+        manager._job_queue_service.complete_job.assert_not_called()
         manager._instance_repository.update_instance.assert_not_called()
 
     @pytest.mark.asyncio

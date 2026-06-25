@@ -800,6 +800,152 @@ class TestPauseSafety:
 
 
 # =============================================================================
+# Suite 2.2.1 — Phase 5: pause-gate edge cases
+# =============================================================================
+
+
+class TestPauseGateEdgeCases:
+    """Phase 5 edge cases for the claim_pending_task pause gate.
+
+    S3: serialization guard edge case — a RUNNING instance with a
+    mix of PAUSED + PENDING tasks must still allow the PENDING task
+    to claim. The per-instance serialization guard excludes only
+    RUNNING tasks (not PAUSED), so a PAUSED task left over from a
+    partial pause should NOT block its sibling PENDING task.
+
+    W5: new-message-during-pause — a message arrives while the
+    instance is PAUSED → Task is created PENDING → claim is blocked
+    by the pause gate → on resume the PENDING task becomes
+    claimable. This is the user-visible "send a message while
+    paused" workflow: the message is buffered, then processed after
+    resume.
+    """
+
+    def test_s3_paused_task_does_not_block_sibling_pending_claim(
+        self, engine, task_repo
+    ):
+        """S3: a RUNNING instance with one PAUSED task and one
+        PENDING task → the PENDING task is claimable.
+
+        The per-instance serialization guard in ``claim_pending_task``
+        uses ``status = 'running'`` to find blockers, NOT ``status IN
+        ('running', 'paused')``. A PAUSED task on a RUNNING instance
+        is a transitional state (e.g. a partially paused instance
+        where the cascade reached this task) and must NOT block
+        sibling PENDING tasks from being claimed.
+
+        Without this invariant, a parent instance that has any
+        PAUSED task would be unable to claim any new PENDING task
+        (e.g. a child completion report) until the PAUSED task is
+        manually transitioned — an operational deadlock.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
+        # PAUSED task: this simulates a partially-paused instance
+        # where the cascade reached this task but did not reach its
+        # sibling. The instance is back to RUNNING (resume happened)
+        # but the task is still PAUSED in the DB.
+        paused_task = task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=iid,
+            message_id=str(uuid.uuid4()),
+        )
+        with Session(engine) as s:
+            from sqlmodel import select as sel
+
+            t = s.get(Task, paused_task.id)
+            t.status = TaskStatus.PAUSED.value
+            s.commit()
+            s.refresh(t)
+
+        # PENDING task: a child completion arriving now.
+        pending_task = task_repo.create(
+            task_type=TaskType.PROCESS_REPORT.value,
+            instance_id=iid,
+            message_id=str(uuid.uuid4()),
+        )
+        assert pending_task.status == TaskStatus.PENDING.value
+
+        # The PENDING task is claimable — the PAUSED sibling does
+        # NOT block (the serialization guard excludes only RUNNING).
+        claimed = task_repo.claim_pending_task(worker_id="worker-s3")
+        assert claimed is not None, (
+            "claim_pending_task should claim the PENDING task "
+            "even when a sibling PAUSED task exists on the same "
+            "RUNNING instance"
+        )
+        assert claimed.id == pending_task.id
+        assert claimed.status == TaskStatus.RUNNING.value
+
+    def test_w5_new_message_during_pause_blocked_then_unblocked_on_resume(
+        self, engine, task_repo
+    ):
+        """W5: a message arriving for a PAUSED instance is
+        buffered as a PENDING task, blocked by the pause gate,
+        and becomes claimable after resume.
+
+        The end-to-end flow:
+          1. Instance is PAUSED.
+          2. A new message arrives (e.g. user sends "continue"
+             while the instance is paused).
+          3. The enqueue path creates a PENDING task (the
+             message is NOT dropped).
+          4. ``claim_pending_task`` returns None — the pause
+             gate blocks the claim.
+          5. The instance resumes (status RUNNING).
+          6. ``claim_pending_task`` now returns the buffered
+             PENDING task.
+
+        This is the user-facing "message-during-pause" workflow.
+        The pre-Phase 2 design had ``enqueue_message`` auto-resume
+        the instance, which violated the pause contract. The
+        post-Phase 2 design buffers the message and the resume
+        path drives the catch-up claim.
+        """
+        iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
+
+        # 1+2: instance is PAUSED; a new message arrives.
+        # 3: enqueue creates a PENDING task (gate is independent
+        # of task creation).
+        new_message_task = task_repo.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=iid,
+            message_id=str(uuid.uuid4()),
+        )
+        assert new_message_task.status == TaskStatus.PENDING.value
+
+        # 4: claim is blocked by the pause gate.
+        assert task_repo.claim_pending_task(worker_id="worker-w5") is None, (
+            "claim_pending_task must be blocked by the pause gate "
+            "for a PAUSED instance even if a PENDING task exists"
+        )
+
+        # Task row is still PENDING (claim failed, not deleted).
+        with Session(engine) as s:
+            from sqlmodel import select as sel
+
+            rows = list(s.exec(
+                sel(Task).where(Task.instance_id == iid)
+            ))
+        assert len(rows) == 1
+        assert rows[0].status == TaskStatus.PENDING.value
+
+        # 5: resume the instance.
+        with Session(engine) as s:
+            inst = s.get(Instance, iid)
+            assert inst is not None
+            inst.status = InstanceStatus.RUNNING.value
+            s.commit()
+
+        # 6: claim now succeeds.
+        claimed = task_repo.claim_pending_task(worker_id="worker-w5")
+        assert claimed is not None, (
+            "claim_pending_task should succeed after parent resumes"
+        )
+        assert claimed.id == new_message_task.id
+        assert claimed.status == TaskStatus.RUNNING.value
+
+
+# =============================================================================
 # Suite 2.3 — Crash recovery
 # =============================================================================
 
