@@ -2903,36 +2903,18 @@ class InstanceManager:
                         ),
                     )
                 else:
-                    # Defensive fallback: the observer is not wired.
-                    # In production the observer is always set during
-                    # FastAPI lifespan startup, so this branch is for
-                    # tests that build a bare manager. The legacy
-                    # direct ``complete_job`` path is preserved (with
-                    # its TOCTOU race) so existing tests that do not
-                    # mock the observer continue to pass.
-                    logger.warning(
-                        f"[RESUME] instance={instance_id[:8]} no "
-                        f"JobFeedbackObserver wired; falling back to "
-                        f"legacy direct complete_job (TOCTOU race NOT "
-                        f"eliminated on this path)"
+                    # Hard-error fallback (Phase 3 review, W3 fix): the
+                    # observer must be wired before resume processing.
+                    # The legacy direct ``complete_job`` path was the
+                    # exact TOCTOU bug Phase 3 eliminates — silently
+                    # regressing to it on a misconfigured fixture would
+                    # re-open the premature-finalization window. Fail
+                    # loudly so the wiring is fixed rather than
+                    # masked.
+                    raise RuntimeError(
+                        "JobFeedbackObserver required for resume finalize — "
+                        "observer must be wired before resume processing"
                     )
-                    try:
-                        await self._job_queue_service.complete_job(
-                            old_job_id,
-                            DemandState.COMPLETED,
-                            result_summary=(
-                                result.content if result else None
-                            ),
-                        )
-                        logger.info(
-                            f"[RESUME] instance={instance_id[:8]} job "
-                            f"{old_job_id[:8]}... marked COMPLETED (legacy path)"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"Job {old_job_id[:8]}... already "
-                            f"transitioned: {e}"
-                        )
 
                 # 5. Task lifecycle is now owned by the WorkerPool re-claim path.
                 #

@@ -1949,37 +1949,6 @@ class JobFeedbackObserver:
             # whose resolves arrive before their registers still find
             # a PROCESSING job — C2-PartA fix.
             #
-            # ─── Bus pending-children gate (Phase 5 — CM removed) ───
-            # Phase 5: the CM's ``is_complete()`` / ``get_pending_count()``
-            # are REMOVED. The bus is the SOLE completion authority.
-            # The in-session bus gate (below, immediately before the
-            # UPDATE) is the authoritative check; this early-exit
-            # ``_bus_count_pending_for_target_sync`` is a defense-
-            # in-depth pre-check that catches obvious "children
-            # still running" cases before the function does more
-            # work. Both share the same DB-backed source of truth
-            # (``dependency_watchers`` PENDING rows).
-            if self._bus_count_pending_for_target_sync(instance_id) > 0:
-                _bus_pending_gate = self._bus_count_pending_for_target_sync(instance_id)
-                logger.info(
-                    f"Observer: aborting terminal transition for "
-                    f"{instance_id[:8]}... — bus pending="
-                    f"{_bus_pending_gate} > 0 (orchestrator has active "
-                    f"children, deferring finalization)"
-                )
-                return _FinalizeJobResult(
-                    skip=True,
-                    terminal_status=None,
-                    job_id=None,
-                    instance_id=None,
-                    parent_id=None,
-                    agent_id=None,
-                    result_summary=None,
-                    error_message=None,
-                    locks_released=0,
-                    instance_was_terminal=False,
-                    gate_deferred=True,
-                )
             # ─── Bus gate (in-session) ───────────────────────
             # The bus DB is the authoritative source of pending-
             # children truth — we MUST consult it here, INSIDE the
@@ -2019,55 +1988,68 @@ class JobFeedbackObserver:
             # inside the lock is guaranteed visible to the COUNT
             # here, regardless of who wins the race.
             #
-            # Defensive wiring check: only consult the bus when
-            # the bus singleton is wired. Mirrors the original
-            # ``_bus_count_pending_for_target_sync`` helper
-            # semantics — when the singleton is None (testing,
-            # missing init, config drift), the gate is dormant
-            # so we don't defer a finalization that should
-            # proceed. Without this guard, a config that doesn't
-            # wire the bus singleton would still execute the
-            # inline COUNT against an empty table — usually
-            # harmless, but in degraded states (mock MagicMock
-            # truthiness, partial migrations) it could defer a
-            # finalization that should proceed.
+            # Defensive wiring check (A9 invariant, Phase 3 review W2):
+            # the bus singleton MUST be wired before this gate runs —
+            # we raise ``RuntimeError`` rather than silently skipping
+            # the gate when the singleton is None. A dormant gate would
+            # reintroduce the premature-finalization bug Phase 3 is
+            # eliminating (a config that forgets to wire the bus would
+            # pass every gate without consulting any pending-children
+            # authority). The W3 fail-safe in ``_finalize_job`` catches
+            # this RuntimeError and transitions the job to FAILED — the
+            # correct observable behavior for a configuration bug.
             from daemon.services.dependency_bus import (
                 get_dependency_bus as _get_bus_for_gate,
             )
-            if _get_bus_for_gate() is not None:
-                _bus_pending_stmt = (
-                    select(func.count())
-                    .select_from(DependencyWatcher)
-                    .where(
-                        DependencyWatcher.target_instance_id == instance_id
-                    )
-                    .where(
-                        DependencyWatcher.state
-                        == DependencyWatcherState.PENDING.value
-                    )
+            # A9 hard-error: bus must be initialized. Extending the A9
+            # invariant to the in-session gate: when the singleton is
+            # None (testing, missing init, config drift), we MUST NOT
+            # silently pass the gate — that would reintroduce the
+            # premature-finalization bug Phase 3 eliminates. The W3
+            # fail-safe in ``_finalize_job`` catches this and
+            # transitions the job to FAILED, which is the correct
+            # observable behavior (fail-safe rather than silently
+            # proceeding without a bus check).
+            _bus = _get_bus_for_gate()
+            if _bus is None:
+                raise RuntimeError(
+                    "DependencyBus is None during _finalize_job_db_sync "
+                    "gate — invalid state. The bus must be initialized "
+                    "(see ADR-011)."
                 )
-                _bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
-                if _bus_pending > 0:
-                    logger.info(
-                        f"Observer: aborting terminal transition for "
-                        f"{instance_id[:8]}... — instance marked complete but "
-                        f"bus has {_bus_pending} PENDING watchers "
-                        f"(in-session gate), "
-                        f"deferring finalization"
-                    )
-                    return _FinalizeJobResult(
-                        skip=True,
-                        terminal_status=None,
-                        job_id=None,
-                        instance_id=None,
-                        parent_id=None,
-                        agent_id=None,
-                        result_summary=None,
-                        error_message=None,
-                        locks_released=0,
-                        instance_was_terminal=False,
-                        gate_deferred=True,
-                    )
+            _bus_pending_stmt = (
+                select(func.count())
+                .select_from(DependencyWatcher)
+                .where(
+                    DependencyWatcher.target_instance_id == instance_id
+                )
+                .where(
+                    DependencyWatcher.state
+                    == DependencyWatcherState.PENDING.value
+                )
+            )
+            _bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
+            if _bus_pending > 0:
+                logger.info(
+                    f"Observer: aborting terminal transition for "
+                    f"{instance_id[:8]}... — instance marked complete but "
+                    f"bus has {_bus_pending} PENDING watchers "
+                    f"(in-session gate), "
+                    f"deferring finalization"
+                )
+                return _FinalizeJobResult(
+                    skip=True,
+                    terminal_status=None,
+                    job_id=None,
+                    instance_id=None,
+                    parent_id=None,
+                    agent_id=None,
+                    result_summary=None,
+                    error_message=None,
+                    locks_released=0,
+                    instance_was_terminal=False,
+                    gate_deferred=True,
+                )
             # Gate passed cleanly under CM authority — fall through
             # to the UPDATE / Step 1 / Step 2 / Step 3 / commit path.
             # Reset the bounded defer counter so any future transient
