@@ -197,8 +197,19 @@ class TestJobRecoveryStartup:
         mock_job_repo.atomic_transition.assert_not_called(), "Job should not be transitioned"
 
     @pytest.mark.asyncio
-    async def test_alive_job_with_paused_instance(self, mock_repositories, service):
-        """Job whose instance is paused should remain PROCESSING."""
+    async def test_paused_instance_reconciles_processing_job_to_paused(self, mock_repositories, service):
+        """C2 fix (Phase 6): PROCESSING job on a PAUSED instance is reconciled
+        to PAUSED (not left as PROCESSING).
+
+        This handles two scenarios:
+          (a) pre-Phase-2 hack state where pause did not touch the job,
+          (b) crash during the pause transition window (instance → PAUSED
+              committed but job → PAUSED did not).
+
+        The job must transition PROCESSING → PAUSED via atomic_transition
+        so its status matches the instance. The (PROCESSING, PAUSED)
+        "pause" entry in TRANSITIONS allows this.
+        """
         mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
 
         mock_job = create_mock_job()
@@ -208,9 +219,46 @@ class TestJobRecoveryStartup:
 
         stats = await service.recover_on_startup()
 
-        assert stats == {"recovered": 0, "alive": 1, "total": 1}, "Expected job to remain alive"
-        mock_lock_repo.release_by_instance.assert_not_called(), "Lock should not be released"
-        mock_job_repo.atomic_transition.assert_not_called(), "Job should not be transitioned"
+        assert stats == {"recovered": 1, "alive": 0, "total": 1}, (
+            "PAUSED + PROCESSING should reconcile (counted as recovered)"
+        )
+        mock_lock_repo.release_by_instance.assert_not_called(), (
+            "PAUSED reconciliation should NOT release the lock (job stays "
+            "associated with the instance — it will be released on "
+            "terminate/complete, not on PAUSED reconcile)"
+        )
+        mock_job_repo.atomic_transition.assert_called_once()
+        call_args = mock_job_repo.atomic_transition.call_args
+        assert call_args[0][0] == "job-123", "Expected job_id to match"
+        assert call_args.kwargs["from_status"] == "processing", (
+            "Expected from_status to be processing"
+        )
+        assert call_args.kwargs["to_status"] == "paused", (
+            "Expected to_status to be paused (PROCESSING → PAUSED reconcile)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_paused_instance_already_paused_job_is_skipped(
+        self, mock_repositories, service
+    ):
+        """C2 fix (Phase 6): If the job is already PAUSED (not PROCESSING),
+        it won't appear in find_processing_jobs() and is therefore not
+        visible to recover_on_startup. This test documents that contract —
+        the recovery service only handles PROCESSING jobs.
+        """
+        mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
+
+        # find_processing_jobs only returns PROCESSING jobs. A PAUSED
+        # job on a PAUSED instance would not be returned.
+        mock_job_repo.find_processing_jobs.return_value = []
+
+        stats = await service.recover_on_startup()
+
+        assert stats == {"recovered": 0, "alive": 0, "total": 0}, (
+            "No jobs to recover (PAUSED jobs are filtered upstream)"
+        )
+        mock_instance_repo.get.assert_not_called()
+        mock_job_repo.atomic_transition.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_alive_job_with_queued_instance(self, mock_repositories, service):

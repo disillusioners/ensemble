@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.repositories.job_queue.models import JobStatus
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -95,34 +96,35 @@ class JobRecoveryService:
 
     async def recover_on_startup(self) -> dict:
         """Recover orphaned PROCESSING jobs on startup.
-        
+
         Called once at daemon startup to handle jobs that were PROCESSING
         when the daemon crashed or was killed.
-        
+
         For each PROCESSING job:
         - Check if its instance is still alive
         - If instance not found or terminal → mark job FAILED, release lock
-        - If instance alive → leave as PROCESSING (observer will handle)
-        
+        - If instance PAUSED → reconcile job PROCESSING → PAUSED (C2 fix)
+        - If instance alive (RUNNING, IDLE, etc.) → leave as PROCESSING (observer handles)
+
         Returns:
             Dict with recovery stats: {"recovered": int, "alive": int, "total": int}
         """
         logger.info("Starting job recovery — checking PROCESSING jobs...")
-        
+
         processing_jobs = await asyncio.to_thread(self._job_repository.find_processing_jobs)
-        
+
         stats = {"recovered": 0, "alive": 0, "total": len(processing_jobs)}
-        
+
         for job in processing_jobs:
             if not job.instance_id:
                 # Job has no instance — orphaned, mark as failed
                 logger.warning(f"Job {job.job_id[:8]}... has no instance_id, marking FAILED")
                 await self._fail_orphaned_job(job, "Recovered: no instance assigned", stats)
                 continue
-            
+
             # Check instance liveness
             instance = await asyncio.to_thread(self._instance_repository.get, job.instance_id)
-            
+
             if instance is None:
                 # Instance not found — orphaned
                 logger.warning(
@@ -141,14 +143,43 @@ class JobRecoveryService:
                     f"is terminal ({instance.status}), marking FAILED"
                 )
                 await self._fail_orphaned_job(job, f"Recovered: instance is {instance.status}", stats)
+            elif instance.status == InstanceStatus.PAUSED.value:
+                # C2 fix (Phase 6): instance is PAUSED but job is still PROCESSING.
+                # This state arises from (a) the pre-Phase-2 hack where pause did
+                # not touch jobs, or (b) a crash during the pause transition window
+                # (after instance → PAUSED but before job → PAUSED committed).
+                # Reconcile by transitioning the job to PAUSED so its status
+                # matches the instance. The (PROCESSING, PAUSED) "pause" entry
+                # is in the TRANSITIONS dict (Phase 1).
+                logger.info(
+                    f"Job {job.job_id[:8]}... instance {job.instance_id[:8]}... "
+                    f"is PAUSED — reconciling job PROCESSING → PAUSED"
+                )
+                try:
+                    await asyncio.to_thread(
+                        self._job_repository.atomic_transition,
+                        job.job_id,
+                        from_status=JobStatus.PROCESSING.value,
+                        to_status=JobStatus.PAUSED.value,
+                    )
+                    stats["recovered"] += 1
+                except InvalidTransitionError:
+                    # Job was already transitioned by another actor — expected
+                    # during concurrent recovery (e.g., another node). The job
+                    # is no longer PROCESSING so we leave it alone.
+                    logger.debug(
+                        f"Job {job.job_id[:8]}... already transitioned during "
+                        f"PAUSED recovery, skipping"
+                    )
             else:
-                # Instance is alive — observer will handle
+                # Instance is truly alive (RUNNING, IDLE, QUEUED, WAITING_CHILDREN)
+                # — leave as PROCESSING, the observer will resume pickup.
                 logger.info(
                     f"Job {job.job_id[:8]}... instance {job.instance_id[:8]}... "
                     f"is alive ({instance.status}), leaving as PROCESSING"
                 )
                 stats["alive"] += 1
-        
+
         logger.info(
             f"Job recovery complete: {stats['recovered']} recovered, "
             f"{stats['alive']} alive, {stats['total']} total"

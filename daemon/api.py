@@ -566,6 +566,43 @@ async def init_dependency_bus(app, manager) -> None:
             _retriggered_targets: set[str] = set()
             for watch_id, fu in recovered:
                 target_id = fu.target_instance_id
+
+                # C4 fix (Phase 6): if the target instance is PAUSED, the
+                # crash window straddled a pause transition — the
+                # child's job is in PAUSED state (not PROCESSING), so
+                # the heavy work below would either find no PROCESSING
+                # job (→ stamp + drop, the bug) or succeed in
+                # finalizing a paused job (wrongly completing it).
+                # Preserve the watcher for resume — do NOT stamp
+                # (``enqueued_at`` stays NULL, so a future restart
+                # will re-pick it via ``bus.start()``).
+                _instance_repo = getattr(manager, "_instance_repository", None)
+                if _instance_repo is not None:
+                    try:
+                        _target_instance = await asyncio.to_thread(
+                            _instance_repo.get, target_id
+                        )
+                        if (
+                            _target_instance is not None
+                            and _target_instance.status
+                            == InstanceStatus.PAUSED.value
+                        ):
+                            logger.info(
+                                f"bus crash recovery: target="
+                                f"{target_id[:8]}... is PAUSED — "
+                                f"preserving watcher "
+                                f"{watch_id[:8]}... for resume"
+                            )
+                            continue
+                    except Exception as paused_check_err:
+                        # Don't fail recovery on a transient lookup
+                        # error — fall through to the normal path.
+                        logger.warning(
+                            f"bus crash recovery: PAUSED check "
+                            f"failed target={target_id[:8]}...: "
+                            f"{paused_check_err}"
+                        )
+
                 if target_id in _retriggered_targets:
                     # Already retried this target in this recovery
                     # pass; just stamp and move on.

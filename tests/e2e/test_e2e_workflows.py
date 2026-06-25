@@ -747,6 +747,102 @@ def _cancel_job(job_id: str) -> bool:
         return False
 
 
+def _find_active_job_for_instance(
+    instance_id: str,
+    project_id: str | None = None,
+    max_attempts: int = 3,
+) -> str | None:
+    """Find the most recent active job for an instance via the API.
+
+    Phase 6 E2E helper: lists jobs in the project and picks the one
+    bound to ``instance_id``. Returns the ``job_id`` or ``None`` if
+    the API isn't reachable / the job isn't yet visible.
+
+    This deliberately uses the public API (``GET /api/jobs``) rather
+    than direct DB access so the test stays decoupled from the
+    on-disk DB path (which differs between SQLite dev and PostgreSQL
+    production). The list endpoint also enforces the same auth/RLS
+    path as the rest of the test, so the assertion exercises the
+    same shape a real client would see.
+
+    Args:
+        instance_id: The instance whose job we want to find.
+        project_id: Project scope for the listing; if ``None``, the
+            first project returned by ``/api/projects`` is used.
+        max_attempts: How many polls to retry before giving up. The
+            job is created asynchronously after the message is sent
+            and may take a few seconds to appear in the listing.
+
+    Returns:
+        The ``job_id`` of the most recent active (non-terminal) job
+        for the instance, or ``None`` if not found within
+        ``max_attempts * POLL_INTERVAL`` seconds.
+    """
+    if project_id is None:
+        project_id = _get_first_project_id() or PROJECT_ID
+
+    for attempt in range(max_attempts):
+        try:
+            response = requests.get(
+                f"{API_BASE}/jobs",
+                params={
+                    "project_id": project_id,
+                    "limit": 200,
+                    "include_deleted": "false",
+                },
+                timeout=10,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            jobs = payload.get("jobs", payload) if isinstance(payload, dict) else payload
+            if not isinstance(jobs, list):
+                jobs = []
+
+            # Pick the most recent non-terminal job for the instance.
+            # Order: prefer non-terminal statuses (matches the "active"
+            # semantics the test cares about).
+            non_terminal_statuses = {"pending", "processing", "paused"}
+            candidates: list[dict] = []
+            for job in jobs:
+                if not isinstance(job, dict):
+                    continue
+                job_inst = str(job.get("instance_id", ""))
+                if job_inst != instance_id:
+                    continue
+                candidates.append(job)
+
+            if not candidates:
+                logger.info(
+                    f"[FIND_JOB] attempt {attempt + 1}/{max_attempts}: no "
+                    f"jobs yet for instance {instance_id[:8]}..."
+                )
+            else:
+                # Prefer active (non-terminal) jobs; fall back to most recent.
+                active = [
+                    j for j in candidates
+                    if str(j.get("status", "")).lower() in non_terminal_statuses
+                ]
+                pick = active[0] if active else candidates[0]
+                job_id = pick.get("job_id") or pick.get("id")
+                if job_id:
+                    logger.info(
+                        f"[FIND_JOB] -> job_id={job_id[:8]}... "
+                        f"status={pick.get('status')}"
+                    )
+                    return str(job_id)
+
+        except requests.exceptions.RequestException as exc:
+            logger.warning(
+                f"[FIND_JOB] attempt {attempt + 1}/{max_attempts} failed: {exc}"
+            )
+        time.sleep(POLL_INTERVAL)
+
+    logger.warning(
+        f"[FIND_JOB] gave up — no active job found for {instance_id[:8]}..."
+    )
+    return None
+
+
 def _get_first_project_id() -> str | None:
     """Discover the first available ``project_id`` via ``GET /api/projects``.
 
@@ -1117,6 +1213,32 @@ def test_pause_after_spawn_then_resume():
             f"within 30s"
         )
 
+        # Step 4b (Phase 6): verify the leader's job is PAUSED.
+        # The job transitions PROCESSING → PAUSED atomically with the
+        # instance status flip (Phase 2 ``_pause_cascade_db_sync``).
+        # If the assertion fails, the pause cascade is broken — jobs
+        # would keep running against a paused instance.
+        leader_job_id = _find_active_job_for_instance(leader_id)
+        if leader_job_id is not None:
+            job_paused_ok, job_status_at_pause = _wait_for_job_status(
+                leader_job_id, "paused", timeout=15
+            )
+            assert job_paused_ok, (
+                f"Leader's job {leader_job_id[:8]}... did not reach "
+                f"'paused' within 15s (status={job_status_at_pause}). "
+                f"Pause cascade is broken — the job kept running after "
+                f"the instance was paused."
+            )
+            logger.info(
+                f"[ASSERT] leader job {leader_job_id[:8]}... is PAUSED"
+            )
+        else:
+            logger.warning(
+                "[ASSERT-SKIP] could not discover leader's job_id — "
+                "job status assertion skipped (daemon reachable but job "
+                "not visible via /api/jobs)"
+            )
+
         # Step 5: verify child is also paused (best-effort; pause is
         # supposed to cascade, but we don't want to fail the test if
         # a particular child was already terminal).
@@ -1135,6 +1257,22 @@ def test_pause_after_spawn_then_resume():
                         f"[WARN] child {child_id[:8]}... did not reach "
                         f"'paused' within 15s (status={child_status})"
                     )
+                else:
+                    # Step 5b (Phase 6): child's job is PAUSED too.
+                    child_job_id = _find_active_job_for_instance(child_id)
+                    if child_job_id is not None:
+                        child_job_paused_ok, _ = _wait_for_job_status(
+                            child_job_id, "paused", timeout=10
+                        )
+                        assert child_job_paused_ok, (
+                            f"Child's job {child_job_id[:8]}... did "
+                            f"not reach 'paused' within 10s — pause "
+                            f"cascade did not propagate to jobs."
+                        )
+                        logger.info(
+                            f"[ASSERT] child job {child_job_id[:8]}... "
+                            f"is PAUSED"
+                        )
         except requests.exceptions.RequestException as exc:
             logger.warning(f"[WARN] could not check child status: {exc}")
 
@@ -1151,11 +1289,44 @@ def test_pause_after_spawn_then_resume():
             logger.info(
                 f"[ASSERT] leader held 'paused' status for 5s window"
             )
+
+            # Step 6b (Phase 6): the job must also still be PAUSED
+            # during the hold window — verifies the new PAUSED state
+            # is sticky (no rogue processing leaks through).
+            if leader_job_id is not None:
+                job_data = _get_job(leader_job_id)
+                job_status_in_hold = str(job_data.get("status", "")).lower()
+                assert job_status_in_hold == "paused", (
+                    f"Leader's job {leader_job_id[:8]}... left 'paused' "
+                    f"during the 5s hold window (status={job_status_in_hold}). "
+                    f"Pause is not sticky — this is the premature-completion "
+                    f"bug class Phase 1 was designed to prevent."
+                )
+                logger.info(
+                    f"[ASSERT] leader job held 'paused' for 5s window"
+                )
         except requests.exceptions.RequestException as exc:
             logger.warning(f"[WARN] could not re-check leader status: {exc}")
 
         # Step 7: resume the leader with an optional continuation prompt.
         _resume_instance(leader_id, message="continue")
+
+        # Step 7b (Phase 6): after resume, the leader's job must
+        # transition PAUSED → PROCESSING (the resume cascade's
+        # UPDATE 2 in ``_resume_cascade_db_sync``).
+        if leader_job_id is not None:
+            resumed_ok, post_resume_status = _wait_for_job_status(
+                leader_job_id, {"processing", "completed"}, timeout=30
+            )
+            assert resumed_ok, (
+                f"Leader's job {leader_job_id[:8]}... did not leave "
+                f"'paused' within 30s of resume "
+                f"(status={post_resume_status})"
+            )
+            logger.info(
+                f"[ASSERT] leader job left 'paused' after resume "
+                f"(status={post_resume_status})"
+            )
 
         # Step 8: verify leader left 'paused'. We allow a generous window
         # because resume + job pickup has some startup latency.
@@ -1187,6 +1358,25 @@ def test_pause_after_spawn_then_resume():
         logger.info(
             f"[ASSERT] leader reached terminal status after resume: {final_status}"
         )
+
+        # Step 9b (Phase 6): the leader's job must reach COMPLETED
+        # (not just the instance). A workflow completion without a
+        # job completion would mean the job tracker is out of sync
+        # with the lifecycle — a bug class the redesign was built
+        # to close.
+        if leader_job_id is not None:
+            completed_ok, job_final_status = _wait_for_job_status(
+                leader_job_id, "completed", timeout=60
+            )
+            assert completed_ok, (
+                f"Leader's job {leader_job_id[:8]}... did not reach "
+                f"'completed' after the workflow finished "
+                f"(status={job_final_status})"
+            )
+            logger.info(
+                f"[ASSERT] leader job reached 'completed' "
+                f"(status={job_final_status})"
+            )
 
         # ── Verify no bus message leaks ───────────────────────────────────
         leak_found, leaked = _check_bus_message_leak(leader_id, label="Test 2")
