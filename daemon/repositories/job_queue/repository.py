@@ -1071,10 +1071,20 @@ class JobRepository:
                 state (e.g. COMPLETED, CANCELLED).
         """
         now = datetime.now(timezone.utc).isoformat()
+        # Cancellable set includes PAUSED so the atomic UPDATE-WHERE-IN
+        # covers the PAUSED→CANCELLED transition defined in
+        # ``daemon/services/job_state_machine.py`` TRANSITIONS (the
+        # ``"cancel_after_pause"`` transition added in Phase 1 of the
+        # pause/resume redesign, 2026-06-25). Without ``PAUSED`` here,
+        # calling ``cancel_job`` on a paused job would no-op (rowcount=0)
+        # and raise ``ValueError`` even though the state machine marks
+        # the transition as legal. PAUSED is non-terminal, so it belongs
+        # in this set alongside PENDING / PROCESSING / FAILED.
         cancellable_states = (
             JobStatus.PENDING.value,
             JobStatus.PROCESSING.value,
             JobStatus.FAILED.value,
+            JobStatus.PAUSED.value,
         )
 
         with SQLModelSession(self.engine) as session:

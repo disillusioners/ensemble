@@ -47,6 +47,9 @@ TERMINAL_CANCEL_STATUSES = frozenset([
 # Natural-language aliases → canonical job status.
 # Applied in normalize_statuses() so that agents/LLMs that pass
 # "running" (meaning "processing") get correct results instead of empty lists.
+# ``paused`` is an identity mapping so natural-language queries like
+# ``status="paused"`` resolve to the canonical enum value; pause is
+# non-terminal (see JobStatus.PAUSED docs at models.py:25-28).
 STATUS_ALIASES: dict[str, str] = {
     "running": "processing",
     "active": "processing",
@@ -62,6 +65,7 @@ STATUS_ALIASES: dict[str, str] = {
     "canceled": "cancelled",  # common misspelling
     "dlq": "dead_letter",
     "dead": "dead_letter",
+    "paused": "paused",  # identity — see comment above
 }
 
 
@@ -231,6 +235,11 @@ class JobQueueService:
                     status_display = "failed ✗"
                 elif status == "in_progress":
                     status_display = "in progress ⟳"
+                elif status == "paused":
+                    # Pause is a non-terminal state — display with a
+                    # distinguishing icon so watcher notifications don't
+                    # look identical to terminal/active statuses.
+                    status_display = "paused ⏸"
 
                 notification_parts = [f"[JOB_EVENT] Job {job_id[:8]}... {status_display}"]
                 notification_parts.append(f"  Agent: {job.agent_id}")

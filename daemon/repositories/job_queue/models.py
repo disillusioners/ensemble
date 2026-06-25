@@ -22,6 +22,10 @@ class JobStatus(str, enum.Enum):
     """Job queue status enum."""
     PENDING = "pending"
     PROCESSING = "processing"
+    # PAUSED is the first-class pause state added in Phase 1 of the
+    # pause/resume redesign. Non-terminal: a paused job can be resumed
+    # back to PROCESSING. See feature/pause-resume-redesign.
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

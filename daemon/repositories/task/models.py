@@ -34,9 +34,18 @@ class TaskType(str, enum.Enum):
 
 
 class TaskStatus(str, enum.Enum):
-    """Task status enum."""
+    """Task status enum.
+
+    Phase 1 (2026-06-25) pause/resume redesign: ``PAUSED`` is added as
+    a first-class task state so that pausing an instance can transition
+    its in-flight task out of ``RUNNING`` instead of relying on the
+    prior workaround of keeping the row running while the instance is
+    paused. Terminal states (``COMPLETED`` / ``FAILED`` / ``CANCELLED``)
+    remain unchanged.
+    """
     PENDING = "pending"
     RUNNING = "running"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"

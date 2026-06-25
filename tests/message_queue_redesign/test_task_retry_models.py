@@ -24,9 +24,26 @@ class TestTaskStatusEnum:
         assert TaskStatus.FAILED.value == "failed"
         assert TaskStatus.CANCELLED.value == "cancelled"
 
+    def test_task_status_paused_exists(self):
+        """Verify PAUSED status exists in enum.
+
+        Phase 1 (2026-06-25) of the pause/resume redesign added
+        ``PAUSED`` as a non-terminal task state so that pausing an
+        instance can transition its in-flight task out of ``RUNNING``
+        instead of relying on the prior workaround of keeping the
+        row running while the instance is paused.
+        """
+        assert hasattr(TaskStatus, "PAUSED")
+        assert TaskStatus.PAUSED.value == "paused"
+
     def test_task_status_count(self):
-        """Verify correct number of statuses."""
-        assert len(TaskStatus) == 5
+        """Verify correct number of statuses.
+
+        History:
+          * 5 — PENDING / RUNNING / COMPLETED / FAILED / CANCELLED.
+          * 6 — Phase 1 of pause/resume redesign (2026-06-25) added PAUSED.
+        """
+        assert len(TaskStatus) == 6
 
 
 class TestTaskModelDefaults:

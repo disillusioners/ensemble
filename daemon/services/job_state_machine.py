@@ -14,6 +14,7 @@ _STATUS_COMPLETED = "completed"
 _STATUS_FAILED = "failed"
 _STATUS_CANCELLED = "cancelled"
 _STATUS_DEAD_LETTER = "dead_letter"
+_STATUS_PAUSED = "paused"
 
 # State transition table: (from_state, to_state) -> transition_name
 # Using string literals directly to avoid circular imports
@@ -29,6 +30,13 @@ TRANSITIONS: Dict[Tuple[str | None, str], str] = {
     (_STATUS_FAILED, _STATUS_DEAD_LETTER): "dead_letter",
     (_STATUS_FAILED, _STATUS_CANCELLED): "cancel_after_fail",
     (_STATUS_DEAD_LETTER, _STATUS_PENDING): "replay",
+    # Pause/resume transitions (Phase 1 of pause/resume redesign, 2026-06-25):
+    # Allow a running job to be suspended (PROCESSING→PAUSED), resumed back to
+    # PROCESSING (PAUSED→PROCESSING), or terminated while paused
+    # (PAUSED→CANCELLED). JobStatus.PAUSED enum is added in a parallel task.
+    (_STATUS_PROCESSING, _STATUS_PAUSED): "pause",
+    (_STATUS_PAUSED, _STATUS_PROCESSING): "resume",
+    (_STATUS_PAUSED, _STATUS_CANCELLED): "cancel_after_pause",
     # Orphan-race re-arm (2026-06-20): after a job is committed to COMPLETED
     # the post-commit re-check in JobFeedbackObserver._finalize_job may detect
     # a concurrent ``register_message_send`` that bumped the CM generation

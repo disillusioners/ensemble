@@ -1519,7 +1519,14 @@ class InstanceLifecycleService:
             from ..repositories.job_queue.models import JobItem
 
             # Find all non-terminal jobs for this instance.
-            non_terminal_statuses = ("processing", "pending", "failed")
+            # ``paused`` is included so PAUSED jobs (Phase 1 of
+            # pause/resume redesign, 2026-06-25) are cleaned up on
+            # instance termination — without it the termination cascade
+            # would skip paused jobs and leave them in PAUSED forever,
+            # orphaned against the dead instance. PAUSED is non-terminal
+            # (see JobStatus.PAUSED docs at models.py:25-28) so it
+            # belongs in this cleanup set.
+            non_terminal_statuses = ("processing", "pending", "failed", "paused")
             jobs = list(
                 session.exec(
                     select(JobItem.job_id, JobItem.status, JobItem.project_id)

@@ -192,7 +192,11 @@ class TestStateMachineGetValidTransitions:
         assert len(result) == 2
 
     def test_get_valid_transitions_from_processing(self):
-        """Test valid transitions from PROCESSING state."""
+        """Test valid transitions from PROCESSING state.
+
+        Phase 1 of the pause/resume redesign (2026-06-25) added the
+        PROCESSING → PAUSED ``pause`` transition, so the count is now 5.
+        """
         sm = JobStateMachine()
         result = sm.get_valid_transitions("processing")
         targets = {target for target, name in result}
@@ -200,7 +204,8 @@ class TestStateMachineGetValidTransitions:
         assert "failed" in targets      # fail
         assert "cancelled" in targets  # abort
         assert "pending" in targets  # requeue
-        assert len(result) == 4
+        assert "paused" in targets  # pause (Phase 1, 2026-06-25)
+        assert len(result) == 5
 
     def test_get_valid_transitions_from_failed(self):
         """Test valid transitions from FAILED state."""
@@ -234,6 +239,23 @@ class TestStateMachineGetValidTransitions:
         sm = JobStateMachine()
         result = sm.get_valid_transitions("cancelled")
         assert result == []
+
+    def test_get_valid_transitions_from_paused(self):
+        """Test valid transitions from PAUSED state.
+
+        Phase 1 of the pause/resume redesign (2026-06-25) added PAUSED as
+        a non-terminal job state with two outbound transitions:
+        resume (PAUSED → PROCESSING) and cancel_after_pause
+        (PAUSED → CANCELLED). PAUSED has no inbound transitions other
+        than PROCESSING → PAUSED (covered in
+        ``test_get_valid_transitions_from_processing``).
+        """
+        sm = JobStateMachine()
+        result = sm.get_valid_transitions("paused")
+        targets = {target for target, name in result}
+        assert "processing" in targets  # resume
+        assert "cancelled" in targets   # cancel_after_pause
+        assert len(result) == 2
 
 
 class TestStateMachineValidateTransition:
@@ -297,13 +319,48 @@ class TestInvalidTransitionError:
 class TestTransitionsConstant:
     """Tests for TRANSITIONS constant."""
 
-    def test_transitions_has_twelve_entries(self):
-        """Test TRANSITIONS dict has 12 entries (added rearm_after_complete for
-        the orphan-race fix in 2026-06-20: COMPLETED → PROCESSING is now a
-        legal transition for jobs that need to be re-armed when a late
-        ``register_message_send`` was in-flight during finalization).
+    def test_transitions_has_fifteen_entries(self):
+        """Test TRANSITIONS dict has 15 entries.
+
+        History:
+          * 12 — original count after the orphan-race fix in 2026-06-20
+            (COMPLETED → PROCESSING ``rearm_after_complete`` was added).
+          * 15 — Phase 1 of the pause/resume redesign (2026-06-25)
+            added three PAUSED transitions:
+              - PROCESSING → PAUSED (``pause``)
+              - PAUSED → PROCESSING (``resume``)
+              - PAUSED → CANCELLED (``cancel_after_pause``)
         """
-        assert len(TRANSITIONS) == 12
+        assert len(TRANSITIONS) == 15
+
+    def test_transitions_contains_pause(self):
+        """Test TRANSITIONS contains the PROCESSING → PAUSED ``pause`` transition.
+
+        Added in Phase 1 of the pause/resume redesign (2026-06-25).
+        """
+        assert ("processing", "paused") in TRANSITIONS
+        assert TRANSITIONS[("processing", "paused")] == "pause"
+
+    def test_transitions_contains_resume(self):
+        """Test TRANSITIONS contains the PAUSED → PROCESSING ``resume`` transition.
+
+        Added in Phase 1 of the pause/resume redesign (2026-06-25).
+        """
+        assert ("paused", "processing") in TRANSITIONS
+        assert TRANSITIONS[("paused", "processing")] == "resume"
+
+    def test_transitions_contains_cancel_after_pause(self):
+        """Test TRANSITIONS contains the PAUSED → CANCELLED ``cancel_after_pause`` transition.
+
+        Added in Phase 1 of the pause/resume redesign (2026-06-25) so a
+        user can cancel a paused job via the existing ``cancel_job``
+        path. The state-machine entry is the legal transition; the
+        repository's atomic ``cancellable_states`` SQL guard (see
+        ``JobRepository.cancel_job``) also includes ``PAUSED.value``
+        so the UPDATE-WHERE-IN guard matches.
+        """
+        assert ("paused", "cancelled") in TRANSITIONS
+        assert TRANSITIONS[("paused", "cancelled")] == "cancel_after_pause"
 
     def test_transitions_contains_create(self):
         """Test TRANSITIONS contains create transition."""
