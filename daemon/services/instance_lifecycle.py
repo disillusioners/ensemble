@@ -2272,35 +2272,60 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # ─── UPDATE 3: task → PENDING (Phase 3 / W2) ──────────────
+            # ─── UPDATE 3: task → CANCELLED (resume re-claim bug fix) ────
             # At the same transaction boundary as UPDATE 1, transition
-            # any PAUSED task for a resumed instance to PENDING. The
-            # ``WHERE status = 'paused'`` guard makes the UPDATE
-            # mutually exclusive with any concurrent task lifecycle
-            # writes (e.g. a worker that just observed the task can
-            # only flip PENDING → RUNNING or terminal; PAUSED is the
-            # exclusive transition point on resume).
+            # any PAUSED task for a resumed instance to CANCELLED (NOT
+            # PENDING). The ``WHERE status = 'paused'`` guard makes the
+            # UPDATE mutually exclusive with any concurrent task
+            # lifecycle writes.
             #
-            # We transition to PENDING, NOT RUNNING, because the
-            # WorkerPool's ``claim_pending_task`` is the unified
-            # re-claim path — it re-evaluates the per-instance guard
-            # (which now passes, since the instance is RUNNING) and
-            # flips PENDING → RUNNING atomically via
-            # ``atomic_transition``. Bypassing the claim path would
-            # double-acquire the per-instance lock and race with the
-            # ``_resume_processing_background``'s ExecutionGate.
+            # Why CANCELLED and not PENDING (previous Phase 3 / W2
+            # behaviour):
+            # On resume, ``resume_processing_job`` owns the graph turn
+            # for the root instance (driving ``graph.astream`` from the
+            # checkpoint). The previously paused task was the WORKER's
+            # ``process_message`` task that was driving the SAME turn
+            # before pause. Re-arming it to PENDING allowed the
+            # WorkerPool to re-claim and re-process the message as a
+            # FRESH turn (``is_retry=False``), racing with
+            # ``resume_processing_job`` under the ExecutionGate and
+            # corrupting the checkpoint (add_messages reducer replaced
+            # the project-context-wrapped HumanMessage with a bare
+            # re-injection of the same ID — lost project context,
+            # duplicate SSE output, lost injected resume message).
+            # Setting to CANCELLED makes the task non-claimable
+            # (``claim_pending_task`` filters ``status='pending'``) and
+            # lets the worker that may have already entered the
+            # pipeline short-circuit on the load-time idempotency guard
+            # in ``ProcessMessageProcessor``.
+            #
+            # ``retry_scheduled=true`` prevents the retry engine from
+            # scheduling a retry child for the cancelled task
+            # (``find_orphaned_cancelled_tasks`` filters on
+            # ``retry_scheduled=false``). The resume driver owns the
+            # outcome; no retry is desired.
             session.execute(
                 text(
                     "UPDATE task "
-                    "SET status = :pending_status "
+                    "SET status = :cancelled_status, "
+                    "    cancel_requested = :cancel_requested_true, "
+                    "    cancel_requested_at = :now_varchar, "
+                    "    completed_at = CAST(:now_ts AS TIMESTAMP), "
+                    "    retry_scheduled = :retry_scheduled_true, "
+                    "    error = :error_msg "
                     "WHERE instance_id IN :tree_ids "
                     "  AND status = :paused_status"
                 ).bindparams(
                     bindparam("tree_ids", expanding=True),
                 ),
                 {
-                    "pending_status": TaskStatus.PENDING.value,
+                    "cancelled_status": TaskStatus.CANCELLED.value,
+                    "cancel_requested_true": True,
+                    "retry_scheduled_true": True,
                     "paused_status": TaskStatus.PAUSED.value,
+                    "now_varchar": now_iso,
+                    "now_ts": now_iso,
+                    "error_msg": "Superseded by resume cascade — resume_processing_job owns graph driving",
                     "tree_ids": tree_ids,
                 },
             )
