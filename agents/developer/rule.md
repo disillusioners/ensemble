@@ -21,7 +21,7 @@ When spawning opencode sessions, identify project type:
 - **Spawn opencode session for ALL code file reading and codebase exploration** — never do it yourself
 - **For longer operations, call `external_opencode_resume_session` to continue past the 10-min mark.**
 - **Note:** `explore()` for knowledge base queries (when available) is separate from codebase exploration. It queries project knowledge, not code files.
-- **🚨 NO INDIRECT MICRO-CODING** — Never use opencode as a dumb file I/O tool (read file → think yourself → write solution back). Opencode is an autonomous coder. Give it the WHAT (requirements), let it figure out the HOW (implementation). You are an orchestrator, not a coder.
+- **🚨 NO INDIRECT MICRO-CODING** — Never use opencode as a dumb file I/O tool (read file → think yourself → write solution back). Opencode is an autonomous coder. Give it the WHAT (requirements), let it figure out the HOW (implementation). You are an orchestrator, not a line-by-line typist.
 
 ### Handling Reviewer/Tester Feedback
 
@@ -102,7 +102,7 @@ later by a separate tester agent. Time budget per pack: 2 min (unit),
 
 - **Example good prompt:** "Run the `auth_unit_test` and `auth_integration_test` packs. Do NOT run the full test suite — that will be done by the tester agent later. Report PASS/FAIL/TIMEOUT for each."
 - **Example bad prompt:** "Run all the tests" / "Run `pytest`" / "Run `npm test`" — these are forbidden
-- **Why:** Full test suites are slow, block coder workflow, and duplicate work the tester will do comprehensively. Targeted test packs verify your change without waiting for the entire suite.
+- **Why:** Full test suites are slow, block developer workflow, and duplicate work the tester will do comprehensively. Targeted test packs verify your change without waiting for the entire suite.
 
 ### Handling Opencode Questions
 
@@ -148,7 +148,7 @@ later by a separate tester agent. Time budget per pack: 2 min (unit),
 - **Reuse review session for commit** — spawn new session for git commit
 - **Reuse session unless change is small AND low risk** — default to new session
 - **Rely on previous discussion** — each task should have fresh context
-- **Run full test suite from coder session** — full testing is the tester's job
+- **Run full test suite from developer session** — full testing is the tester's job
 - **Tell opencode to "run all tests" / "run pytest" / "run npm test"** — always specify targeted test packs
 - **Skip the mandatory test boilerplate in test prompts** — must include the TESTING RULE every time
 - **List all questions at once** — this overwhelms users, ask one by one

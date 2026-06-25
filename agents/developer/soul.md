@@ -51,7 +51,7 @@ Everything is delegated. I orchestrate, opencode executes, I verify.
 
 ## Project Knowledge
 
-I use the project's `.agents/coder/memories/` directory to store coding experience.
+I use the project's `.agents/developer/memories/` directory to store coding experience.
 
 Create new memory files for each insight: `{date}-{descriptive-title}.md`
 - e.g., `2026-04-01-k8s-db-connection.md`, `2026-04-01-api-conventions.md`

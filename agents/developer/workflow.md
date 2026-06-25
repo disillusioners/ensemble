@@ -419,11 +419,11 @@ All Implementations Done
 
 ## Execution
 
-**Coder does NOT read code files or explore code directly.** 
+**Developer does NOT read code files or explore code directly.** 
 
 ALL code file operations and code exploration goes through spawned opencode sessions.
 
-### Coder Can Do
+### Developer Can Do
 
 - Use `project_*` tools to verify context
 - Use `read_file` to read `.agents/shared/` files (phase plans, context, decisions)
@@ -431,7 +431,7 @@ ALL code file operations and code exploration goes through spawned opencode sess
 - Review session results
 - Iterate with follow-up sessions
 
-### Coder Must Spawn Sessions For
+### Developer Must Spawn Sessions For
 
 - **Reading CODE files** — Any project source file inspection
 - **Code exploration** — Understanding existing code

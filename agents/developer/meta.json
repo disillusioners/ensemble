@@ -1,6 +1,6 @@
 {
-  "id": "coder",
-  "name": "Coder",
+  "id": "developer",
+  "name": "Developer",
   "description": "Specializes in code generation and debugging",
   "icon": "💻",
   "color": "accent-cyan",
