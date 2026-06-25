@@ -135,7 +135,7 @@ class NotificationBroadcaster:
 
         Args:
             instance_id: The completed instance ID.
-            agent_id: The agent ID (e.g., "coder").
+            agent_id: The agent ID (e.g., "developer").
             agent_name: Optional agent display name.
             status: The terminal status (COMPLETED, ERROR, TERMINATED, FAILED).
 

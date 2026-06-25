@@ -551,7 +551,7 @@ def create_inner_soul_tool(
     
     Args:
         manager: InstanceManager for cache invalidation
-        agent_id: The agent identifier (e.g., "coder")
+        agent_id: The agent identifier (e.g., "developer")
         instance_id: Current instance ID for logging
     
     Returns:

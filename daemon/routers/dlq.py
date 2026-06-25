@@ -76,8 +76,8 @@ class DLQItemResponse(BaseModel):
             "example": {
                 "dlq_id": "dlq-uuid",
                 "job_id": "job-uuid",
-                "agent_id": "coder",
-                "agent_dir": "/agents/coder",
+                "agent_id": "developer",
+                "agent_dir": "/agents/developer",
                 "message": "Fix the login bug",
                 "source": "api",
                 "project_id": "project-uuid",
@@ -107,8 +107,8 @@ class DLQListResponse(BaseModel):
                     {
                         "dlq_id": "dlq-uuid-1",
                         "job_id": "job-uuid-1",
-                        "agent_id": "coder",
-                        "agent_dir": "/agents/coder",
+                        "agent_id": "developer",
+                        "agent_dir": "/agents/developer",
                         "message": "Fix the login bug",
                         "source": "api",
                         "project_id": "project-uuid",

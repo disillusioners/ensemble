@@ -2006,7 +2006,7 @@ class InstanceManager:
         """Create a new agent instance.
 
         Args:
-            agent_id: Agent ID (e.g., "coder").
+            agent_id: Agent ID (e.g., "developer").
             instance_id: Optional instance ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent instance ID for hierarchical instances.
             project_id: Optional project ID for project context. Use `None` to explicitly
@@ -2216,7 +2216,7 @@ class InstanceManager:
         
         Args:
             instance_id: The instance ID to summarize.
-            agent_id: The agent ID (e.g., "coder", "leader").
+            agent_id: The agent ID (e.g., "developer", "leader").
             
         Returns:
             Formatted summary string with instance info.
@@ -2378,7 +2378,7 @@ class InstanceManager:
         
         Args:
             instance_id: The instance ID to get message from.
-            agent_id: The agent ID (e.g., "coder", "leader").
+            agent_id: The agent ID (e.g., "developer", "leader").
             
         Returns:
             Formatted string with instance info and last message.

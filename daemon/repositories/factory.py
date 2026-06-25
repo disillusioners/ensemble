@@ -231,7 +231,7 @@ def _add_agent_id_column(conn, table_name: str, logger) -> None:
     
     for row in rows:
         pk_value, agent_dir = row
-        # Extract last path component (e.g., 'coder' from './agents/coder')
+        # Extract last path component (e.g., 'developer' from './agents/developer')
         agent_id = agent_dir.rstrip('/').rsplit('/', 1)[-1] if '/' in agent_dir else agent_dir
         agent_id = agent_id.rsplit('\\', 1)[-1] if '\\' in agent_id else agent_id
         conn.execute(text(f"UPDATE {table_name} SET agent_id = :agent_id WHERE {pk_column} = :pk_value"), 

@@ -529,7 +529,7 @@ class PromptCache:
         """Get cached prompt for agent.
         
         Args:
-            agent_id: The agent identifier (e.g., "coder").
+            agent_id: The agent identifier (e.g., "developer").
             mcp_tool_names: Optional list of MCP tool names.
             
         Returns:
@@ -545,7 +545,7 @@ class PromptCache:
         """Store prompt in cache.
         
         Args:
-            agent_id: The agent identifier (e.g., "coder").
+            agent_id: The agent identifier (e.g., "developer").
             prompt: Compiled system prompt.
             tokens: Token count.
             mtimes: Dict of filename to modification time.
@@ -558,7 +558,7 @@ class PromptCache:
         """Remove agent from cache.
         
         Args:
-            agent_id: The agent identifier (e.g., "coder").
+            agent_id: The agent identifier (e.g., "developer").
             mcp_tool_names: Optional list of MCP tool names.
         """
         key = self._make_key(agent_id, mcp_tool_names)
@@ -569,7 +569,7 @@ def load_and_cache_prompt(agent_id: str, agent_dir: Path, cache: PromptCache, mc
     """Load and cache agent prompts including multiple skills.
     
     Args:
-        agent_id: The agent identifier (e.g., "coder").
+        agent_id: The agent identifier (e.g., "developer").
         agent_dir: Path to the agent directory.
         cache: PromptCache instance.
         mcp_tool_names: Optional list of MCP tool names for "mcp" category expansion.

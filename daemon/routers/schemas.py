@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 class JobCreateRequest(BaseModel):
     """Request body for creating a new job."""
     
-    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
     message: str = Field(..., description="Job message/content")
     project_id: str | None = Field(default=None, description="Optional project ID for job serialization")
     queue_id: str | None = Field(default=None, description="Optional queue ID to assign job to a specific queue")
@@ -39,7 +39,7 @@ class JobCreateRequest(BaseModel):
     model_config = {
         "json_schema_extra": {
             "example": {
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Fix the login bug in auth.py",
                 "project_id": "optional-project-uuid",
                 "priority": 7,
@@ -56,7 +56,7 @@ class JobResponse(BaseModel):
     job_id: str = Field(..., description="Unique job identifier")
     status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled, dead_letter)")
     priority: int = Field(..., description="Job priority (1-10)")
-    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
     agent_dir: str = Field(..., description="Path to the agent directory")
     project_id: str | None = Field(default=None, description="Project ID if job is serialized")
     queue_id: str | None = Field(default=None, description="Queue ID this job is assigned to")
@@ -84,8 +84,8 @@ class JobResponse(BaseModel):
                 "job_id": "job-uuid",
                 "status": "completed",
                 "priority": 7,
-                "agent_id": "coder",
-                "agent_dir": "/agents/coder",
+                "agent_id": "developer",
+                "agent_dir": "/agents/developer",
                 "project_id": "project-uuid",
                 "instance_id": "session-uuid",
                 "created_at": "2025-03-15T10:00:00Z",
@@ -114,7 +114,7 @@ class JobListResponse(BaseModel):
                         "job_id": "job-uuid-1",
                         "status": "pending",
                         "priority": 8,
-                        "agent_dir": "/agents/coder",
+                        "agent_dir": "/agents/developer",
                         "project_id": "project-uuid",
                         "created_at": "2025-03-15T10:00:00Z",
                         "position": 1
@@ -412,7 +412,7 @@ class ProjectResponse(BaseModel):
                 "metadata": {},
                 "relationships": {},
                 "creator_instance_id": "session-uuid",
-                "creator_agent_id": "coder",
+                "creator_agent_id": "developer",
                 "created_at": "2025-03-15T10:00:00",
                 "updated_at": "2025-03-15T10:00:00",
                 "is_system": False
@@ -510,7 +510,7 @@ class ProjectHistoryEntryResponse(BaseModel):
                 "entry_type": "milestone",
                 "summary": "Completed Phase 1 implementation",
                 "details": "Data layer and repository implementation",
-                "source_agent": "coder",
+                "source_agent": "developer",
                 "source_instance_id": "session-uuid",
                 "entry_metadata": {"phase": 1},
                 "created_at": "2025-03-15T10:00:00+00:00"

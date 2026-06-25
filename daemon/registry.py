@@ -58,7 +58,7 @@ class ToolFilter(BaseModel):
 class AgentMetadata(BaseModel):
     """Complete agent metadata."""
 
-    id: str = Field(..., description="Unique agent identifier (e.g., 'coder')")
+    id: str = Field(..., description="Unique agent identifier (e.g., 'developer')")
     name: str = Field(..., description="Display name")
     description: str = Field(default="", description="Agent description")
     icon: str = Field(default="🤖", description="Emoji icon")
@@ -79,13 +79,13 @@ class AgentMetadata(BaseModel):
         extra="ignore",
         json_schema_extra={
             "example": {
-                "id": "coder",
+                "id": "developer",
                 "name": "Coder",
                 "description": "Specializes in code generation and debugging",
                 "icon": "💻",
                 "color": "accent-cyan",
                 "version": "1.0.0",
-                "path": "/path/to/agents/coder",
+                "path": "/path/to/agents/developer",
                 "system": False,
                 "capabilities": ["code_generation", "debugging"],
                 "tags": ["coding", "development"],
@@ -205,10 +205,10 @@ class AgentRegistry:
         """Resolve agent_dir or agent_id to canonical agent_id.
 
         Handles various path formats:
-          - "coder" → "coder"
-          - "./agents/coder" → "coder"
-          - "agents/coder" → "coder"
-          - "/absolute/path/to/agents/coder" → "coder"
+          - "developer" → "developer"
+          - "./agents/developer" → "developer"
+          - "agents/developer" → "developer"
+          - "/absolute/path/to/agents/developer" → "developer"
 
         Args:
             agent_dir_or_id: Agent ID or path to agent directory
@@ -258,7 +258,7 @@ class AgentRegistry:
         # Try to extract agent_id from various path formats
         parts = normalized.replace("\\", "/").split("/")
 
-        # Handle: agents/coder, ./agents/coder, agents/coder/
+        # Handle: agents/developer, ./agents/developer, agents/developer/
         # We need to find 'agents' segment and take the next one
         agent_parts_idx = -1
         for i, part in enumerate(parts):

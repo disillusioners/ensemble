@@ -328,7 +328,7 @@ class JobQueueService:
         returns the existing job instead of creating a duplicate.
 
         Args:
-            agent_id: Agent ID (e.g., 'coder').
+            agent_id: Agent ID (e.g., 'developer').
             message: Job message/content.
             source: Source of the job ("api", "telegram", "scheduler", "webhook").
             project_id: Optional project ID for job serialization.

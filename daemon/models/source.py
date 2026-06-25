@@ -51,7 +51,7 @@ class SourceCreate(BaseModel):
                 "config": {
                     "polling_enabled": True,
                     "polling_timeout": 30,
-                    "default_agent": "coder"
+                    "default_agent": "developer"
                 },
                 "credentials": {
                     "bot_token": "123456:ABC-DEF"
@@ -104,7 +104,7 @@ class SourceInfo(BaseModel):
                 "source_id": "telegram-main",
                 "source_type": "telegram",
                 "name": "Customer Support Bot",
-                "config": {"polling_enabled": True, "default_agent": "coder"},
+                "config": {"polling_enabled": True, "default_agent": "developer"},
                 "enabled": True,
                 "autostart": True,
                 "status": "running",

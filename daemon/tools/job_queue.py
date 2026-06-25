@@ -34,7 +34,7 @@ Jobs are processed by agents asynchronously. The job will be queued
 and picked up by the job processor when capacity is available.
 
 Args:
-    agent_id: Agent ID to run the job (e.g., "coder", "leader"). Required.
+    agent_id: Agent ID to run the job (e.g., "developer", "leader"). Required.
     message: The instruction/message for the agent. Required.
     project_id: Project ID for isolation and routing. Optional.
     priority: Job priority 1-10 (1=lowest, 10=highest). Default: 5.
@@ -48,7 +48,7 @@ Returns:
 
 Example:
     job_create(
-        agent_id="coder",
+        agent_id="developer",
         message="Fix the login bug in auth.py",
         project_id="proj_123",
         priority=7
@@ -250,7 +250,7 @@ def create_job_tools(
 
     class JobCreateInput(BaseModel):
         """Input schema for job_create tool."""
-        agent_id: Annotated[str, Field(description="Agent ID to run the job (e.g., 'coder', 'leader')")]
+        agent_id: Annotated[str, Field(description="Agent ID to run the job (e.g., 'developer', 'leader')")]
         message: Annotated[str, Field(description="The instruction/message for the agent")]
         project_id: Annotated[str | None, Field(default=None, description="Project ID for isolation and routing")]
         priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10 (1=lowest, 10=highest)")]
@@ -263,7 +263,7 @@ def create_job_tools(
     @register_tool_category("job")
     @tool(args_schema=JobCreateInput)
     async def job_create(
-        agent_id: Annotated[str, Field(description="Agent ID to run the job (e.g., 'coder', 'leader')")],
+        agent_id: Annotated[str, Field(description="Agent ID to run the job (e.g., 'developer', 'leader')")],
         message: Annotated[str, Field(description="The instruction/message for the agent")],
         project_id: Annotated[str | None, Field(default=None, description="Project ID for isolation and routing")] = None,
         priority: Annotated[int, Field(default=5, ge=1, le=10, description="Job priority 1-10")] = 5,

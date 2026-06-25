@@ -82,7 +82,7 @@ class JobRepository:
         """Create a new job queue item.
 
         Args:
-            agent_id: Agent ID (e.g., 'coder').
+            agent_id: Agent ID (e.g., 'developer').
             agent_dir: Path to the agent directory.
             message: Job message/content.
             source: Source of the job ("api", "telegram", "scheduler", "webhook").

@@ -102,7 +102,7 @@ class SQLModelInstanceRepository:
         
         Args:
             instance_id: Unique instance identifier.
-            agent_id: Agent ID (e.g., 'coder').
+            agent_id: Agent ID (e.g., 'developer').
             agent_dir: Path to the agent directory.
             parent_id: Optional parent instance ID for hierarchical instances.
             metadata: Optional metadata dictionary.
@@ -159,7 +159,7 @@ class SQLModelInstanceRepository:
         """Get all instances for a given agent ID.
         
         Args:
-            agent_id: The agent identifier (e.g., 'coder', 'leader').
+            agent_id: The agent identifier (e.g., 'developer', 'leader').
             
         Returns:
             List of Instance objects for the specified agent.

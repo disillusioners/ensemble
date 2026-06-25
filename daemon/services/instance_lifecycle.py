@@ -345,7 +345,7 @@ class InstanceLifecycleService:
         """Create a new agent instance.
 
         Args:
-            agent_id: Agent ID (e.g., "coder").
+            agent_id: Agent ID (e.g., "developer").
             instance_id: Optional instance ID. Auto-generated if not provided or invalid.
             parent_id: Optional parent instance ID for hierarchical instances.
             project_id: Optional project ID for project context.

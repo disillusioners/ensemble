@@ -16,13 +16,13 @@ class AgentInfo(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "id": "coder",
+                "id": "developer",
                 "name": "Coder",
                 "description": "Specializes in code generation and debugging",
                 "icon": "💻",
                 "color": "accent-cyan",
                 "version": "1.0.0",
-                "agent_dir": "./agents/coder",
+                "agent_dir": "./agents/developer",
                 "system": False
             }
         }
@@ -39,13 +39,13 @@ class AgentListResponse(BaseModel):
             "example": {
                 "agents": [
                     {
-                        "id": "coder",
+                        "id": "developer",
                         "name": "Coder",
                         "description": "Specializes in code generation and debugging",
                         "icon": "💻",
                         "color": "accent-cyan",
                         "version": "1.0.0",
-                        "agent_dir": "./agents/coder"
+                        "agent_dir": "./agents/developer"
                     }
                 ]
             }

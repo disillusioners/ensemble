@@ -12,7 +12,7 @@ from daemon.repositories.instance.models import InstanceStatus  # re-export for 
 class InstanceCreate(BaseModel):
     """Request for spawning a new instance."""
 
-    agent_id: str = Field(..., description="Agent ID (e.g., 'coder')")
+    agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
     instance_id: str | None = Field(default=None, description="Optional instance ID")
     project_id: str | None = Field(default=None, description="Optional project ID for associating instance with a project")
 
@@ -25,7 +25,7 @@ class InstanceCreate(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "instance_id": "instance-123"
             }
         }
@@ -36,7 +36,7 @@ class InstanceInfo(BaseModel):
     """Response for instance information."""
 
     instance_id: str = Field(..., description="Unique instance identifier")
-    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'coder')")
+    agent_id: str | None = Field(default=None, description="Agent ID (e.g., 'developer')")
     project_id: str | None = Field(default=None, description="Optional project ID for associating instance with a project")
     agent_dir: str = Field(..., description="Path to the agent directory (derived from agent_id)")
     status: InstanceStatus = Field(..., description="Current instance status")
@@ -52,8 +52,8 @@ class InstanceInfo(BaseModel):
         json_schema_extra={
             "example": {
                 "instance_id": "instance-123",
-                "agent_id": "coder",
-                "agent_dir": "./agents/coder",
+                "agent_id": "developer",
+                "agent_dir": "./agents/developer",
                 "status": "running",
                 "title": "Help with Python debugging",
                 "parent_id": None,

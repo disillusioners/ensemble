@@ -494,7 +494,7 @@ class ChildReportsService:
         
         Args:
             instance_id: The instance ID to summarize.
-            agent_id: The agent ID (e.g., "coder", "leader").
+            agent_id: The agent ID (e.g., "developer", "leader").
             
         Returns:
             Formatted summary string with instance info.
@@ -1039,7 +1039,7 @@ Provide a concise summary:"""
         
         Args:
             instance_id: The instance ID to get message from.
-            agent_id: The agent ID (e.g., "coder", "leader").
+            agent_id: The agent ID (e.g., "developer", "leader").
             
         Returns:
             Formatted string with instance info and last message.

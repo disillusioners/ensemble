@@ -337,7 +337,7 @@ Returns:
     agent_read._full_doc_ = """Read an agent's file contents.
 
 Args:
-    agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
+    agent_name: The agent identifier (e.g., "developer", "leader", "_mother")
     file: The file to read (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
 
 Returns:
@@ -395,7 +395,7 @@ Returns:
     agent_modify._full_doc_ = """Modify an agent's file contents.
 
 Args:
-    agent_name: The agent identifier (e.g., "coder", "leader", "_mother")
+    agent_name: The agent identifier (e.g., "developer", "leader", "_mother")
     file: The file to modify (soul.md, workflow.md, rule.md, user.md, memory.md, tools.md)
     content: The new content for the file
 
