@@ -21,23 +21,29 @@ class TestInstanceCreate:
     def test_instance_create_required(self, sample_instance_create_data):
         """Test InstanceCreate with only required fields."""
         instance = InstanceCreate(**sample_instance_create_data)
-        
-        assert instance.agent_id == "coder"
+
+        # agent_id "coder" is normalized to canonical "developer" by the
+        # InstanceCreate validator (backward-compat alias for the rename).
+        assert instance.agent_id == "developer"
         assert instance.instance_id is None
 
     def test_instance_create_optional(self, sample_instance_create_with_instance_id):
         """Test InstanceCreate with optional instance_id."""
         instance = InstanceCreate(**sample_instance_create_with_instance_id)
-        
-        assert instance.agent_id == "coder"
+
+        # agent_id "coder" is normalized to canonical "developer" by the
+        # InstanceCreate validator (backward-compat alias for the rename).
+        assert instance.agent_id == "developer"
         assert instance.instance_id == "custom-instance-123"
 
     def test_instance_create_serialization(self, sample_instance_create_data):
         """Test InstanceCreate model_dump for serialization."""
         instance = InstanceCreate(**sample_instance_create_data)
         data = instance.model_dump()
-        
-        assert data["agent_id"] == "coder"
+
+        # agent_id "coder" is normalized to canonical "developer" by the
+        # InstanceCreate validator (backward-compat alias for the rename).
+        assert data["agent_id"] == "developer"
         assert data["instance_id"] is None
 
     def test_instance_create_validation_missing_agent_dir(self):
@@ -411,18 +417,22 @@ class TestModelValidation:
             "agent_id": "coder",
             "instance_id": "test-instance",
         }
-        
+
         instance = InstanceCreate.model_validate(data)
-        assert instance.agent_id == "coder"
+        # agent_id "coder" is normalized to canonical "developer" by the
+        # InstanceCreate validator (backward-compat alias for the rename).
+        assert instance.agent_id == "developer"
         assert instance.instance_id == "test-instance"
 
     def test_model_dump_json(self):
         """Test model_dump_json for JSON serialization."""
         instance = InstanceCreate(agent_id="coder")
         json_str = instance.model_dump_json()
-        
+
         assert "agent_id" in json_str
-        assert "coder" in json_str
+        # agent_id "coder" is normalized to canonical "developer" by the
+        # InstanceCreate validator (backward-compat alias for the rename).
+        assert "developer" in json_str
 
 
 class TestInstanceCreateProjectId:

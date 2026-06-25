@@ -22,6 +22,14 @@ SKIP_DIRS: frozenset[str] = frozenset({
     "_inner_soul",
 })
 
+# Backward-compatibility aliases for renamed agent IDs.
+# Maps old agent_id -> new canonical agent_id. Used by ``resolve_pure_id``
+# and (transitively) by ``resolve_path_to_id`` and ``exists`` so that
+# persisted references to the old ID continue to resolve after a rename.
+AGENT_ID_ALIASES: dict[str, str] = {
+    "coder": "developer",
+}
+
 
 class ToolFilter(BaseModel):
     """Tool filtering configuration for an agent.
@@ -227,14 +235,19 @@ class AgentRegistry:
         return self.resolve_path_to_id(agent_dir_or_id)
 
     def resolve_pure_id(self, agent_id: str) -> str | None:
-        """Check if a string is a valid agent ID.
+        """Check if a string is a valid agent ID (with alias support).
 
         Args:
             agent_id: The string to check
 
         Returns:
-            The agent_id if valid, None otherwise
+            The canonical agent_id if valid (resolving aliases), None otherwise
         """
+        # Check for alias first (backward compat for renamed agents)
+        canonical = AGENT_ID_ALIASES.get(agent_id, agent_id)
+        if canonical in self._agents:
+            return canonical
+        # Also check the original in case alias maps to something not yet loaded
         if agent_id in self._agents:
             return agent_id
         return None
@@ -268,12 +281,15 @@ class AgentRegistry:
 
         if agent_parts_idx >= 0:
             potential_id = parts[agent_parts_idx]
-            if potential_id in self._agents:
-                return potential_id
+            resolved = self.resolve_pure_id(potential_id)
+            if resolved is not None:
+                return resolved
 
         # Try treating the last part as an agent_id
-        if parts[-1] and parts[-1] in self._agents:
-            return parts[-1]
+        if parts[-1]:
+            resolved = self.resolve_pure_id(parts[-1])
+            if resolved is not None:
+                return resolved
 
         # Try treating full path as absolute path
         if Path(path_str).is_absolute():
@@ -287,8 +303,10 @@ class AgentRegistry:
                     abs_path.relative_to(self._agents_dir)
                 except ValueError:
                     return None  # Path traversal attempt - path outside agents dir
-                if abs_path.parent == self._agents_dir and abs_path.name in self._agents:
-                    return abs_path.name
+                if abs_path.parent == self._agents_dir:
+                    resolved = self.resolve_pure_id(abs_path.name)
+                    if resolved is not None:
+                        return resolved
             except (OSError, ValueError):
                 pass
 
@@ -407,15 +425,15 @@ class AgentRegistry:
         return warnings
 
     def exists(self, agent_id: str) -> bool:
-        """Check if agent exists.
+        """Check if agent exists (with alias support).
 
         Args:
             agent_id: The agent identifier
 
         Returns:
-            True if agent exists, False otherwise
+            True if agent exists (directly or via alias), False otherwise
         """
-        return agent_id in self._agents
+        return self.resolve_pure_id(agent_id) is not None
 
 
 # Global registry instance

@@ -212,9 +212,14 @@ async def test_create_instance_success(client, mock_manager):
     assert response.status_code == 201
     data = response.json()
     assert data["instance_id"] == "test-instance-id"
+    # Response echoes the mock manager's get_instance_info() payload, which
+    # is hardcoded with agent_id="coder" in the test fixture (mock data,
+    # unaffected by the validator alias).
     assert data["agent_id"] == "coder"
+    # InstanceCreate validator normalizes the request agent_id "coder" ->
+    # "developer" via the AGENT_ID_ALIASES alias before dispatch.
     mock_manager.spawn_instance_with_mcp.assert_called_once_with(
-        agent_id="coder",
+        agent_id="developer",
         instance_id="550e8400-e29b-41d4-a716-446655440000",
         project_id=None,
     )

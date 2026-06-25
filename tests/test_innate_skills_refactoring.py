@@ -8,7 +8,7 @@ These tests verify the complete end-to-end behavior of the refactored skill syst
 - Registry behavior (including find_skill)
 
 This specifically tests against the REAL agents/ directory to ensure:
-- coder, reviewer, tester, planner, tidier, approver all get opencode skill
+- developer, reviewer, tester, planner, tidier, approver all get opencode skill
 - leader gets coordination skill
 - jober gets job-orchestration skill
 - tester gets BOTH opencode AND test-pack
@@ -55,7 +55,7 @@ class TestInnateSkillsSystemPromptIdentity:
         # Test each agent
         # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
         test_cases = [
-            ("coder", ["opencode"], "OpenCode-Skill"),
+            ("developer", ["opencode"], "OpenCode-Skill"),
             ("reviewer", ["opencode"], "OpenCode-Skill"),
             ("tester", ["opencode", "test-pack"], "OpenCode-Skill"),  # tester gets BOTH
             ("tester", ["opencode", "test-pack"], "Test Pack Skill"),  # tester gets BOTH
@@ -65,7 +65,7 @@ class TestInnateSkillsSystemPromptIdentity:
             ("leader", ["coordination"], "Coordination Skill"),
             ("jober", ["job-orchestration"], "Job Orchestration"),
             ("giter", [], None),  # giter has NO innate_skills
-        ]
+        ] 
         
         for agent_id, expected_skills, expected_skill_content in test_cases:
             agent_meta = real_registry.get(agent_id)
@@ -196,7 +196,7 @@ class TestCacheInvalidation:
     def test_cache_hit_when_nothing_changed(self, real_agents_dir, real_registry):
         """Cache should return identical object when nothing changed."""
         cache = PromptCache()
-        agent_id = "coder"
+        agent_id = "developer"
         agent_meta = real_registry.get(agent_id)
         
         # First call populates cache
@@ -293,7 +293,7 @@ class TestRegistryInnateSkills:
         """find_skill() should check innate-skills first, then legacy."""
         # Test opencode skill - should find all agents that declare it via innate_skills
         agents_with_opencode = real_registry.find_skill("opencode")
-        expected = ["approver", "coder", "planner", "reviewer", "tester", "tidier"]
+        expected = ["approver", "developer", "planner", "reviewer", "tester", "tidier"]
         assert sorted(agents_with_opencode) == sorted(expected)
         
         # Test coordination skill
@@ -310,7 +310,7 @@ class TestRegistryInnateSkills:
     
     def test_find_skill_respects_innate_skills_in_metadata(self, real_registry):
         """Registry should correctly populate innate_skills in AgentMetadata."""
-        for agent_id in ["coder", "leader", "tester", "jober"]:
+        for agent_id in ["developer", "leader", "tester", "jober"]:
             meta = real_registry.get(agent_id)
             assert meta is not None
             assert hasattr(meta, "innate_skills")

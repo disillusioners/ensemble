@@ -1828,6 +1828,21 @@ class InstanceManager:
             # so the column is nullable TEXT — matches the existing .sql
             # migration which uses ``ALTER TABLE ... ADD COLUMN enqueued_at TEXT``.
             "ALTER TABLE dependency_watchers ADD COLUMN IF NOT EXISTS enqueued_at TEXT",
+            # ── Agent rename: coder → developer ──────────────────────────────
+            # Idempotent UPDATE: renames agent_id and agent_dir from the old
+            # 'coder' agent to 'developer'. Safe to re-run (WHERE clause is a
+            # no-op if no rows match). The .sql migration runner is a NO-OP on
+            # PostgreSQL, so data migrations of this kind must live here to
+            # take effect on existing production databases. Fresh databases
+            # never see 'coder' values because the new model definitions
+            # already reference 'developer'.
+            "UPDATE instances SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'",
+            "UPDATE instance_mappings SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'",
+            "UPDATE job_queue_items SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'",
+            "UPDATE dead_letter_items SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'",
+            "UPDATE projects SET creator_agent_id = 'developer' WHERE creator_agent_id = 'coder'",
+            # Legacy table (may not exist on fresh DBs — wrapped in exception handler)
+            "DO $$ BEGIN UPDATE jobqueue SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'; EXCEPTION WHEN undefined_table THEN NULL; END $$",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
