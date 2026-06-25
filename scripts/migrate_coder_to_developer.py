@@ -23,6 +23,10 @@ import sys
 
 from sqlalchemy import create_engine, text
 
+# NOTE: coder→developer migration is also handled in:
+#   daemon/manager.py:_ensure_postgres_columns() (PostgreSQL runtime)
+#   daemon/migrations/versions/20260626_000001_rename_coder_to_developer.sql (SQLite production)
+
 # Tables and their UPDATE SQL for the coder→developer rename.
 # Each entry: (table_name, column_with_coder, full_update_sql)
 MIGRATION_STATEMENTS = [

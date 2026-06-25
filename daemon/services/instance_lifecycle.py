@@ -1301,8 +1301,8 @@ class InstanceLifecycleService:
         # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
         # DB may still contain the old agent_id if migration was partial/skipped.
         registry = get_registry()
+        agent_meta = registry.get_resolved(meta.agent_id)
         resolved_agent_id = registry.resolve_pure_id(meta.agent_id) or meta.agent_id
-        agent_meta = registry.get(resolved_agent_id)
         if agent_meta is None:
             raise ValueError(f"Agent not found: {meta.agent_id}")
 

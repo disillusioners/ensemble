@@ -48,7 +48,7 @@ def _get_allowed_tools(agent_id: str, mcp_tool_names: list[str] | None = None) -
     from .instance import resolve_tool_filter, expand_allow_for_innate_skills
 
     registry = get_registry()
-    agent_meta = registry.get(agent_id)
+    agent_meta = registry.get_resolved(agent_id)
 
     if agent_meta is None or agent_meta.tools is None:
         return None

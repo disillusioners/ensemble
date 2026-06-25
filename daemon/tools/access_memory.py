@@ -34,7 +34,7 @@ def create_access_memory_tool(agent_id: str):
     from ..registry import get_registry
 
     registry = get_registry()
-    agent_meta = registry.get(agent_id)
+    agent_meta = registry.get_resolved(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
 
     @register_tool_category("self")

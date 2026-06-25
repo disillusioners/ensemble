@@ -1828,6 +1828,9 @@ class InstanceManager:
             # so the column is nullable TEXT — matches the existing .sql
             # migration which uses ``ALTER TABLE ... ADD COLUMN enqueued_at TEXT``.
             "ALTER TABLE dependency_watchers ADD COLUMN IF NOT EXISTS enqueued_at TEXT",
+            # NOTE: coder→developer migration is also handled in:
+            #   - daemon/migrations/versions/20260626_000001_rename_coder_to_developer.sql (SQLite production)
+            #   - scripts/migrate_coder_to_developer.py (standalone manual tool)
             # ── Agent rename: coder → developer ──────────────────────────────
             # Idempotent UPDATE: renames agent_id and agent_dir from the old
             # 'coder' agent to 'developer'. Safe to re-run (WHERE clause is a
@@ -2221,8 +2224,8 @@ class InstanceManager:
             agent_id: The agent ID.
         
         Returns:
-            Formatted prefix like "Coder agent (id=xxx) has done" or
-            "Coder agent (name=create-feature-a, id=xxx) has done"
+            Formatted prefix like "Developer agent (id=xxx) has done" or
+            "Developer agent (name=create-feature-a, id=xxx) has done"
         """
         return self._child_reports_service._get_instance_report_prefix(instance_id, agent_id)
 

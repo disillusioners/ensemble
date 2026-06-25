@@ -443,8 +443,8 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     # Resolve alias (e.g., "coder" -> "developer") before dict lookup.
     # registry.get() does NOT resolve aliases, so this step is required
     # to support backward-compatible references to renamed agents.
-    canonical_id = registry.resolve_pure_id(agent_id)
-    if canonical_id is None:
+    resolved_agent_id = registry.resolve_pure_id(agent_id)
+    if resolved_agent_id is None:
         raise HTTPException(
             status_code=404,
             detail=ErrorResponse(
@@ -453,7 +453,7 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
             ).model_dump()
         )
 
-    metadata = registry.get(canonical_id)
+    metadata = registry.get(resolved_agent_id)
     if metadata is None:
         raise HTTPException(
             status_code=404,

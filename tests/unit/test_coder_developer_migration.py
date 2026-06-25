@@ -7,9 +7,11 @@ rows continue to resolve to the renamed ``agents/developer/`` directory.
 
 The migration is dual-driver:
 
-* **SQLite**: ``daemon/repositories/factory.py:run_migrations()`` —
-  applies UPDATE statements to all five persisted tables. The legacy
-  ``jobqueue`` table is also updated defensively (try/except).
+* **SQLite**: ``MigrationRunner`` in ``daemon/migrations/runner.py``
+  consuming ``daemon/migrations/versions/20260626_000001_rename_coder_to_developer.sql``
+  — applies UPDATE statements to all five persisted tables.
+  ``daemon/repositories/factory.py:run_migrations()`` was the legacy
+  Python path; the coder→developer block was removed during phase 4.
 * **PostgreSQL**: ``EnsembleManager._ensure_postgres_columns()`` in
   ``daemon/manager.py`` — applies the same UPDATE statements via
   ``self._engine.begin()``. The ``.sql`` migration runner is a NO-OP
@@ -19,7 +21,7 @@ The migration is dual-driver:
 
 These tests verify:
 
-1. ``run_migrations()`` correctly renames ``coder`` -> ``developer``.
+1. The SQLite MigrationRunner correctly renames ``coder`` -> ``developer``.
 2. The migration is idempotent (safe to re-run on an already-ran DB).
 3. The migration handles empty databases (no rows to update, no error).
 4. The migration covers all five persisted tables.
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -56,8 +59,13 @@ from daemon.repositories.job_queue.models import (  # noqa: F401
 )
 from daemon.repositories.project.models import Project  # noqa: F401
 
-# Subject under test — the SQLite migration function.
-from daemon.repositories.factory import run_migrations
+# Subject under test — the SQLite migration is now applied via the SQL
+# migration runner over the .sql file in daemon/migrations/versions/.
+# ``daemon/repositories/factory.py:run_migrations()`` is no longer the
+# production path for the rename (the legacy Python UPDATE block was
+# removed during phase 4). The PostgreSQL dual-engine path is handled
+# by ``EnsembleManager._ensure_postgres_columns`` in ``daemon/manager.py``.
+from daemon.migrations.runner import MigrationRunner
 
 
 # Path to the production SQLite migration file. The PostgreSQL dual-engine
@@ -70,6 +78,14 @@ _MIGRATION_FILE = (
     / "versions"
     / "20260626_000001_rename_coder_to_developer.sql"
 )
+
+
+# Import SchemaMigration for the isolated-migration helper below. The
+# runner does not register it via SQLModel.metadata (it creates the
+# schema_migrations table via raw DDL in ``ensure_migrations_table``),
+# so the test must import it explicitly when pre-marking other
+# migrations as applied.
+from daemon.migrations.models import SchemaMigration  # noqa: E402
 
 
 # PostgreSQL connection defaults — mirrors ``tests/postgres/conftest.py``
@@ -239,8 +255,61 @@ def _read_migration_up_statements() -> list[str]:
 
 
 def _run_sqlite_migration(engine: Engine) -> None:
-    """Run the SQLite migration under test (production function)."""
-    run_migrations(engine)
+    """Run the SQLite coder→developer migration under test (production function).
+
+    Phase 4 of the rename moved the SQLite migration out of
+    ``daemon/repositories/factory.py:run_migrations()`` and into
+    ``daemon/migrations/versions/20260626_000001_rename_coder_to_developer.sql``
+    which is applied via ``MigrationRunner``. This helper mirrors that
+    production path BUT isolates the test to JUST the rename migration by
+    pre-marking all other migrations as already-applied. Running the full
+    chain would destroy test fixtures: the 20260402 session→instance
+    rename performs ``DROP TABLE … ; ALTER TABLE … RENAME`` patterns
+    whose ``INSERT INTO … SELECT … FROM old`` data copy no-ops when the
+    SQLModel-created test schema already has the new column names (the
+    runner treats ``no such column`` as idempotent), then drops the
+    original table and loses the seeded test rows.
+
+    Idempotency: the second call short-circuits because the rename
+    migration version is already recorded in ``schema_migrations``;
+    ``run_pending_migrations`` returns an empty list with no work
+    performed.
+    """
+    runner = MigrationRunner(engine)
+    runner.ensure_migrations_table()
+    target = next(
+        (
+            m for m in runner.discover_migrations()
+            if "rename" in m.name and "coder" in m.name
+        ),
+        None,
+    )
+    if target is None:
+        raise RuntimeError(
+            "coder→developer migration file not found in "
+            "daemon/migrations/versions/"
+        )
+
+    # Pre-mark all OTHER migrations as applied so ``run_pending_migrations``
+    # only picks up the rename migration. This isolates the test to the
+    # rename contract; running the full chain would clobber seeded rows.
+    applied = runner.get_applied_versions()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with Session(engine) as session:
+        for m in runner.discover_migrations():
+            if m.version != target.version and m.version not in applied:
+                session.add(
+                    SchemaMigration(
+                        version=m.version,
+                        name=m.name,
+                        applied_at=now_iso,
+                        execution_time_ms=0,
+                        checksum=m.checksum,
+                    )
+                )
+        session.commit()
+
+    runner.run_pending_migrations()
 
 
 def _run_pg_migration(engine: Engine) -> None:
@@ -291,7 +360,7 @@ class TestCoderDeveloperMigration:
         instance_id = _seed_coder_row(sqlite_engine, "instances")
         project_id = _seed_coder_row(sqlite_engine, "projects")
 
-        run_migrations(sqlite_engine)
+        _run_sqlite_migration(sqlite_engine)
 
         assert (
             _fetch_column(
@@ -314,8 +383,8 @@ class TestCoderDeveloperMigration:
         """Run migration twice -> no errors, correct final state."""
         instance_id = _seed_coder_row(sqlite_engine, "instances")
 
-        run_migrations(sqlite_engine)
-        run_migrations(sqlite_engine)  # second run must not raise
+        _run_sqlite_migration(sqlite_engine)
+        _run_sqlite_migration(sqlite_engine)  # second run must not raise
 
         assert (
             _fetch_column(
@@ -328,7 +397,7 @@ class TestCoderDeveloperMigration:
         """Migration on DB with no 'coder' rows -> no errors, tables still empty."""
         # Tables exist (created by fixture) but contain no rows.
 
-        run_migrations(sqlite_engine)  # must not raise
+        _run_sqlite_migration(sqlite_engine)  # must not raise
 
         with sqlite_engine.connect() as conn:
             assert conn.execute(text("SELECT COUNT(*) FROM instances")).scalar() == 0
@@ -359,7 +428,7 @@ class TestCoderDeveloperMigration:
             ),
         }
 
-        run_migrations(sqlite_engine)
+        _run_sqlite_migration(sqlite_engine)
 
         # Each table's rename target column must now read 'developer'.
         for table, (pk_col, pk_val) in seeded.items():
@@ -517,16 +586,15 @@ class TestRestoreInstanceWithAlias:
     calling registry.get(), so it doesn't raise ValueError.
     """
 
-    def test_restore_instance_with_coder_agent_id_does_not_raise(self):
-        """_restore_instance must not raise when DB row has agent_id='coder'.
+    @staticmethod
+    def _make_mock_manager() -> tuple[MagicMock, MagicMock]:
+        """Build the mock manager + cancellation service used by restore tests.
 
-        Reproducer: a partially-migrated DB where instances.agent_id still
-        reads 'coder' (migration was not yet run, or server restarted before
-        it could run). Before the fix, registry.get('coder') returned None
-        → ValueError("Agent not found: coder"). After the fix, resolve_pure_id
-        maps 'coder' → 'developer' and the restore succeeds.
+        Centralizes the boilerplate so the test methods can focus on the
+        alias resolution contract. Returns
+        ``(mock_manager, mock_cancellation_service)`` since
+        ``InstanceLifecycleService`` is constructed with both.
         """
-        # ── Mock manager ─────────────────────────────────────────────────────
         mock_manager = MagicMock()
         mock_cancellation_service = MagicMock()
 
@@ -552,6 +620,19 @@ class TestRestoreInstanceWithAlias:
         mock_config.limits.graph_recursion_limit = 1000
         mock_manager.config = mock_config
 
+        return mock_manager, mock_cancellation_service
+
+    def test_restore_instance_with_coder_agent_id_does_not_raise(self):
+        """_restore_instance must not raise when DB row has agent_id='coder'.
+
+        Reproducer: a partially-migrated DB where instances.agent_id still
+        reads 'coder' (migration was not yet run, or server restarted before
+        it could run). Before the fix, registry.get('coder') returned None
+        → ValueError("Agent not found: coder"). After the fix, resolve_pure_id
+        maps 'coder' → 'developer' and the restore succeeds.
+        """
+        # ── Mock manager ─────────────────────────────────────────────────────
+        mock_manager, mock_cancellation_service = self._make_mock_manager()
         service = InstanceLifecycleService(mock_manager, mock_cancellation_service)
 
         # ── Mock Instance row with stale 'coder' agent_id ────────────────────
@@ -573,14 +654,15 @@ class TestRestoreInstanceWithAlias:
             # Configure the mock registry so resolve_pure_id('coder') → 'developer'
             mock_registry = MagicMock()
             mock_registry.resolve_pure_id.return_value = "developer"  # alias resolution
-            mock_registry.get.return_value = None                    # coder not canonical
 
-            # Return valid metadata when asked for 'developer'
+            # Return valid metadata when asked for 'coder' (the alias-resolved
+            # lookup happens via ``get_resolved`` in production — see
+            # ``daemon/services/instance_lifecycle.py:1304``).
             mock_developer_meta = MagicMock()
             mock_developer_meta.path = Path("/agents/developer")
             mock_developer_meta.llm_model = None
-            mock_registry.get.side_effect = lambda aid: (
-                mock_developer_meta if aid == "developer" else None
+            mock_registry.get_resolved.side_effect = lambda aid: (
+                mock_developer_meta if aid == "coder" else None
             )
             mock_get_registry.return_value = mock_registry
 
@@ -597,8 +679,10 @@ class TestRestoreInstanceWithAlias:
             # ── Verify alias resolution was called ─────────────────────────
             # resolve_pure_id must be called with the stale 'coder' value
             mock_registry.resolve_pure_id.assert_called_with("coder")
-            # get() must be called with the resolved 'developer', not 'coder'
-            mock_registry.get.assert_called_with("developer")
+            # get_resolved() must be called with the stale 'coder' value so
+            # the alias resolution chain (coder → developer → metadata) is
+            # exercised end-to-end.
+            mock_registry.get_resolved.assert_called_with("coder")
             # The graph must be built and stored in instances dict
             assert result is not None
             mock_build_graph.assert_called_once()
@@ -609,31 +693,7 @@ class TestRestoreInstanceWithAlias:
 
         Sanity check: resolving an already-canonical ID should be a no-op.
         """
-        mock_manager = MagicMock()
-        mock_cancellation_service = MagicMock()
-
-        mock_manager._instance_repository = MagicMock()
-        mock_manager._project_repository = MagicMock()
-        mock_manager._engine = MagicMock()
-        mock_manager._live_hub = MagicMock()
-        mock_manager._checkpointer = None
-        mock_manager._compactor = None
-        mock_manager.instances = {}
-        mock_manager.prompt_cache = MagicMock()
-        mock_manager._mcp_service = None
-
-        mock_config = MagicMock()
-        mock_config.queue.llm_retry_transient_attempts = 3
-        mock_config.queue.llm_retry_timeout_attempts = 2
-        mock_config.llm.base_url = None
-        mock_config.llm.api_key = "test-key"
-        mock_config.llm.model = "gpt-4"
-        mock_config.llm.model_vision = False
-        mock_config.llm.temperature = 0.7
-        mock_config.llm.request_timeout = 60
-        mock_config.limits.graph_recursion_limit = 1000
-        mock_manager.config = mock_config
-
+        mock_manager, mock_cancellation_service = self._make_mock_manager()
         service = InstanceLifecycleService(mock_manager, mock_cancellation_service)
 
         mock_meta = MagicMock()
@@ -655,7 +715,9 @@ class TestRestoreInstanceWithAlias:
             mock_developer_meta = MagicMock()
             mock_developer_meta.path = Path("/agents/developer")
             mock_developer_meta.llm_model = None
-            mock_registry.get.return_value = mock_developer_meta
+            mock_registry.get_resolved.side_effect = lambda aid: (
+                mock_developer_meta if aid == "developer" else None
+            )
             mock_get_registry.return_value = mock_registry
 
             mock_load_prompt.return_value = ("You are a developer.", 10)
@@ -665,9 +727,9 @@ class TestRestoreInstanceWithAlias:
 
             result = service._restore_instance("fresh-instance-002", mock_meta)
 
-            # resolve_pure_id called with 'developer', get called with 'developer'
+            # resolve_pure_id called with 'developer', get_resolved called with 'developer'
             mock_registry.resolve_pure_id.assert_called_with("developer")
-            mock_registry.get.assert_called_with("developer")
+            mock_registry.get_resolved.assert_called_with("developer")
             assert result is not None
 
 
@@ -727,7 +789,14 @@ class TestJobQueueEnqueueWithAlias:
         )
 
     def _make_mock_registry_resolve_coder_to_developer(self):
-        """Registry mock: resolve_pure_id('coder')→'developer', get('developer')→valid."""
+        """Registry mock: resolve_pure_id('coder')→'developer', get_resolved()→valid metadata.
+
+        ``enqueue`` now uses ``registry.get_resolved(agent_id)`` (alias-aware,
+        see ``daemon/services/job_queue_service.py:369,489``) instead of bare
+        ``registry.get(agent_id)``. The mock therefore must stub the alias-aware
+        method so it returns the developer metadata for both the legacy alias
+        (``"coder"``) and the canonical id (``"developer"``).
+        """
         registry = MagicMock()
         registry.resolve_pure_id.side_effect = lambda aid: {
             "coder": "developer",
@@ -735,8 +804,8 @@ class TestJobQueueEnqueueWithAlias:
         }.get(aid, aid)
         mock_meta = MagicMock()
         mock_meta.path = "/agents/developer"
-        registry.get.side_effect = lambda aid: (
-            mock_meta if aid == "developer" else None
+        registry.get_resolved.side_effect = lambda aid: (
+            mock_meta if aid in ("coder", "developer") else None
         )
         return registry
 

@@ -897,7 +897,7 @@ def _apply_tool_filter(tools: list[Any], agent_id: str, mcp_tool_names: list[str
 
     # Get agent metadata
     registry = get_registry()
-    agent_meta = registry.get(agent_id)
+    agent_meta = registry.get_resolved(agent_id)
 
     if agent_meta is None or agent_meta.tools is None:
         # No tools config → all tools allowed (backward compatible)

@@ -366,8 +366,8 @@ class JobQueueService:
             # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
             # since agent_id may come from a DB row that still has the old value.
             registry = get_registry()
+            agent_meta = registry.get_resolved(agent_id)
             resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
-            agent_meta = registry.get(resolved_agent_id)
             if agent_meta is None:
                 raise ValueError(f"Agent not found: {agent_id}")
             agent_dir = str(agent_meta.path)
@@ -486,8 +486,8 @@ class JobQueueService:
         # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
         # since agent_id may come from a DB row that still has the old value.
         registry = get_registry()
+        agent_meta = registry.get_resolved(agent_id)
         resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
-        agent_meta = registry.get(resolved_agent_id)
         if agent_meta is None:
             raise ValueError(f"Agent not found: {agent_id}")
         agent_dir = str(agent_meta.path)

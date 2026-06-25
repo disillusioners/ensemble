@@ -560,7 +560,7 @@ def create_inner_soul_tool(
     # Resolve agent_id to path for internal use
     from ..registry import get_registry
     registry = get_registry()
-    agent_meta = registry.get(agent_id)
+    agent_meta = registry.get_resolved(agent_id)
     agent_path = agent_meta.path if agent_meta else Path(agent_id)
     
     # Run archival sweep if configured

@@ -88,7 +88,7 @@ class AgentMetadata(BaseModel):
         json_schema_extra={
             "example": {
                 "id": "developer",
-                "name": "Coder",
+                "name": "Developer",
                 "description": "Specializes in code generation and debugging",
                 "icon": "💻",
                 "color": "accent-cyan",
@@ -208,6 +208,25 @@ class AgentRegistry:
             AgentMetadata if found, None otherwise
         """
         return self._agents.get(agent_id)
+
+    def get_resolved(self, agent_id: str) -> AgentMetadata | None:
+        """Get agent metadata, resolving aliases first.
+
+        Use this when ``agent_id`` may come from an external source (DB row,
+        API param, persisted metadata) that could contain a legacy alias
+        such as ``"coder"``. Returns ``None`` if the ID is unknown even
+        after alias resolution.
+
+        Args:
+            agent_id: The agent identifier (may be an alias).
+
+        Returns:
+            AgentMetadata for the canonical agent if found, else ``None``.
+        """
+        resolved = self.resolve_pure_id(agent_id)
+        if resolved is None:
+            return None
+        return self._agents.get(resolved)
 
     def resolve_to_id(self, agent_dir_or_id: str) -> str | None:
         """Resolve agent_dir or agent_id to canonical agent_id.

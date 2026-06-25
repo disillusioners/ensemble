@@ -668,6 +668,25 @@ class TestAgentIdAliasBackwardCompatibility:
         registry = get_registry()
         assert registry.exists("coder") is True
 
+    def test_get_resolved_alias(self) -> None:
+        """get_resolved('coder') returns the canonical developer metadata via alias."""
+        registry = get_registry()
+        resolved = registry.get_resolved("coder")
+        assert resolved is not None
+        assert resolved.id == "developer"
+
+    def test_get_resolved_canonical(self) -> None:
+        """get_resolved('developer') returns the same metadata as get('developer')."""
+        registry = get_registry()
+        assert registry.get_resolved("developer") == registry.get("developer")
+
+    def test_get_resolved_unknown_returns_none(self) -> None:
+        """get_resolved for an unknown id returns None (alias-aware)."""
+        registry = get_registry()
+        assert registry.get_resolved("definitely-not-an-agent") is None
+        # Aliases to a non-existent canonical also resolve to None.
+        assert registry.get_resolved("ghost-alias") is None
+
     def test_instance_create_normalizes_alias(self) -> None:
         """InstanceCreate(agent_id='coder') normalizes to 'developer'."""
         from daemon.models.instance import InstanceCreate

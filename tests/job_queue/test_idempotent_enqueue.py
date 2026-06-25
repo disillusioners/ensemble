@@ -610,9 +610,12 @@ class TestIdempotentEnqueueEdgeCases:
         
         with patch("daemon.services.job_queue_service.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
-            mock_registry.get.return_value = None  # Agent not found
+            # ``enqueue`` now uses ``get_resolved`` (alias-aware) instead of bare
+            # ``get`` so the lookup must be mocked on the alias-aware method.
+            mock_registry.get_resolved.return_value = None  # Agent not found
+            mock_registry.get.return_value = None  # Legacy strict path
             mock_get_registry.return_value = mock_registry
-            
+
             with pytest.raises(ValueError, match="Agent not found"):
                 await service.enqueue(
                     agent_id="nonexistent-agent",

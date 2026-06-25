@@ -463,8 +463,8 @@ class ChildReportsService:
             agent_id: The agent ID.
         
         Returns:
-            Formatted prefix like "Coder agent (id=xxx) has done" or
-            "Coder agent (name=create-feature-a, id=xxx) has done"
+            Formatted prefix like "Developer agent (id=xxx) has done" or
+            "Developer agent (name=create-feature-a, id=xxx) has done"
         """
         # Get agent display name from meta.json
         # Resolve alias first (backward compat for renamed agents like 'coder'→'developer')
@@ -474,7 +474,7 @@ class ChildReportsService:
         agent_name = resolved_agent_id.capitalize()
 
         try:
-            metadata = registry.get(resolved_agent_id)
+            metadata = registry.get_resolved(agent_id)
             if metadata and metadata.name:
                 agent_name = metadata.name
         except Exception:

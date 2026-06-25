@@ -313,23 +313,14 @@ def run_migrations(engine: Engine) -> None:
         except Exception as e:
             logger.warning(f"Migration failed for job_queue_items table: {e}")
 
-        # ── Agent rename: coder → developer ──────────────────────────────
-        # Idempotent UPDATE for SQLite. Safe to re-run.
-        try:
-            conn.execute(text("UPDATE instances SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'"))
-            conn.execute(text("UPDATE instance_mappings SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'"))
-            conn.execute(text("UPDATE job_queue_items SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'"))
-            conn.execute(text("UPDATE dead_letter_items SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'"))
-            conn.execute(text("UPDATE projects SET creator_agent_id = 'developer' WHERE creator_agent_id = 'coder'"))
-            # Legacy table (may not exist)
-            try:
-                conn.execute(text("UPDATE jobqueue SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'"))
-            except Exception:
-                pass  # Table doesn't exist, skip
-            conn.commit()
-            logger.info("Migration: Renamed agent_id 'coder' → 'developer' in all tables")
-        except Exception as e:
-            logger.warning(f"Migration: coder→developer rename failed: {e}")
+        # NOTE: The agent_id rename 'coder' → 'developer' was previously handled
+        # here as a Python UPDATE block. This function is no longer called in
+        # production (factory creation paths rely on the SQLModel metadata +
+        # MigrationRunner pipeline). Production SQLite migrations are now
+        # applied via:
+        #   daemon/migrations/versions/20260626_000001_rename_coder_to_developer.sql
+        # and the corresponding PostgreSQL updates live in
+        # daemon/manager.py:_ensure_postgres_columns().
 
 
 def create_project_repository(

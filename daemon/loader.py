@@ -105,12 +105,12 @@ def load_tools_doc_for_agent(agent_id: str, mcp_tool_names: list[str] | None = N
     agent_innate_skills: list[str] | None = None
     try:
         registry = get_registry()
-        resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
-        agent_meta = registry.get(resolved_agent_id)
+        agent_meta = registry.get_resolved(agent_id)
         if agent_meta is not None:
             tool_filter = agent_meta.tools
             agent_innate_skills = agent_meta.innate_skills
             # Use resolved id for downstream tool filtering context
+            resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
             agent_id = resolved_agent_id
     except (KeyError, ValueError, RuntimeError) as e:
         logger.debug(f"Registry lookup failed for {agent_id}: {e}")

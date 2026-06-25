@@ -1,3 +1,7 @@
+-- NOTE: coder→developer migration is also handled in:
+--   daemon/manager.py:_ensure_postgres_columns() (PostgreSQL runtime)
+--   scripts/migrate_coder_to_developer.py (standalone manual tool)
+--
 -- Migration: rename agent_id 'coder' → 'developer' across all tables
 -- Created: 2026-06-26
 -- Author: system
