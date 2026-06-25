@@ -1211,7 +1211,7 @@ class TaskRepository:
                         completed_at = :completed_at,
                         error = :error
                     WHERE id = :id
-                      AND status IN (:status_running, :status_pending)
+                      AND status IN (:status_running, :status_pending, :status_paused)
                     RETURNING *
                     """
                 ),
@@ -1224,6 +1224,7 @@ class TaskRepository:
                     "id": task_id,
                     "status_running": TaskStatus.RUNNING.value,
                     "status_pending": TaskStatus.PENDING.value,
+                    "status_paused": TaskStatus.PAUSED.value,
                 },
             ).fetchone()
 
