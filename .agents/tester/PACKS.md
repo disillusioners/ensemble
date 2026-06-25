@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 136 packs
-- Unit: 117 | Integration: 2 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 140 packs
+- Unit: 119 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -120,6 +120,8 @@
 | checkpoint_migrator_unit_test | tests/unit/test_checkpoint_migrator.py | CheckpointMigrator: API-based alist→aput, channel_versions warning, pending writes grouping, cancel, failure tolerance | 2 min | 2026-06-04 | ✅ PASS (23/23, feature/database-migration Phase 3, 0 failures) |
 | migration_worker_unit_test | tests/unit/test_migration_worker.py | MigrationWorker: 5-state machine, asyncio.Lock, ensemble.json update, write pause/resume, SSE fan-out, validation | 2 min | 2026-06-04 | ✅ PASS (40/40, feature/database-migration Phase 3, 0 failures) |
 | migration_api_unit_test | tests/unit/test_migration_api.py | Migration API router: 5 endpoints (availability/start/status/cancel/events), status codes, SSE, worker-not-initialized | 2 min | 2026-06-04 | ✅ PASS (29/29, feature/database-migration Phase 3, 0 failures) |
+| pause_flow_redesign_unit_test | tests/unit/test_pause_flow_redesign.py | Phase 2 Pause Flow Redesign: atomic 3-table pause transition (W1), B2 worker race (complete_task PAUSED guard), C3 bus watcher preservation + compaction hook, SSE job_status, empty-data short-circuit | 2 min | 2026-06-25 | ✅ PASS (14/14, commit ab8447eb, gaps: no rollback-injection test, no PG mirror) |
+| resume_flow_redesign_unit_test | tests/unit/test_resume_flow_redesign.py | Phase 3 Resume Flow Redesign: atomic 3-table resume transition (PAUSED→RUNNING/PROCESSING/PENDING), W2 orphan fix (complete_task removed), `_process_resume_finalize()` dispatch (C1 fix), A9 bus=None RuntimeError, premature-completion defer when bus pending > 0 | 2 min | 2026-06-25 | ✅ PASS (12/12, commit 9fa7e8ed, gaps: no rollback/atomicity-failure test, double-finalize SQL guard not exercised in this file, no PG mirror) |
 
 ## Integration Test Packs
 
@@ -216,3 +218,5 @@ Update after each test run:
 - **Status**: PASS/FAIL/TIMEOUT
 - Add new entry for new packs
 - Mark deprecated packs as DEPRECATED
+| crash_recovery_paused_integration_test | tests/integration/test_crash_recovery_paused.py | Phase 6 crash recovery for PAUSED: C2 job reconciliation (PROCESSING→PAUSED), C4 bus watcher preservation (skip stamping for PAUSED), bus state across restart, terminal instance edge cases | 2 min | 2026-06-25 | ✅ PASS (10/10, commit f79ce558, real in-memory SQLite) |
+| cold_resume_ttl_integration_test | tests/integration/test_cold_resume_ttl.py | Phase 6 cold-resume after TTL eviction: 3-table resume atomicity, idempotent resume, empty tree, only-resumes-paused, task failure atomicity, simulated full cold-resume cycle | 2 min | 2026-06-25 | ✅ PASS (6/6, commit f79ce558, real in-memory SQLite) |
