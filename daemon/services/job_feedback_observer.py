@@ -490,6 +490,19 @@ class JobFeedbackObserver:
           4. Returns ``None`` when no PROCESSING job exists for the instance.
              Callers use this to skip finalization silently.
 
+        Phase 2 audit (2026-06-25, pause/resume redesign):
+          PAUSED jobs are EXCLUDED by construction — both the happy path
+          (``job.status == JobStatus.PROCESSING.value`` check on line 518
+          below) and the defense-in-depth re-query (``active_job.status ==
+          JobStatus.PROCESSING.value`` check on line 532) require the job
+          to be in PROCESSING status. PAUSED jobs (introduced in Phase 1)
+          are filtered out automatically: a paused instance has no
+          PROCESSING job visible to this helper, so ``_process_event``
+          short-circuits with ``job is None`` and never reaches
+          ``_finalize_job``. This is the correct observable behavior —
+          pausing an instance must NOT trigger premature job finalization
+          via the lifecycle-event path.
+
         The re-query is defense-in-depth only: in production, the
         ``ORDER BY created_at DESC, job_id`` ordering in
         :meth:`JobRepository.get_by_instance` (Fix 1 of the
@@ -1669,6 +1682,20 @@ class JobFeedbackObserver:
         If any step raises, none of them commit (the
         ``WriteGuardSession.__exit__`` rolls back via the underlying
         ``Session.close``).
+
+        Phase 2 audit (2026-06-25, pause/resume redesign):
+          PAUSED jobs are EXCLUDED by the ``WHERE JobItem.status ==
+          JobStatus.PROCESSING.value`` guard in Step 1 (see the
+          ``.where(JobItem.status == JobStatus.PROCESSING.value)`` clause
+          in the in-session UPDATE below). After the pause cascade
+          transitions a job PROCESSING → PAUSED, this UPDATE rowcount-
+          drops to 0 — the helper falls through to the
+          ``InvalidTransitionError`` branch, which the async caller
+          (``_finalize_job``) handles by logging at DEBUG and returning
+          silently (idempotency). Net effect: a paused job is NEVER
+          finalized by this path. This is the correct observable
+          behavior — pausing an instance must NOT trigger premature
+          job finalization via the lifecycle-event path.
 
         C1 TOCTOU invariant (Phase 2): ``get_pending_count`` is re-checked
         INSIDE this sync helper, immediately before the in-session UPDATE.

@@ -2957,25 +2957,68 @@ class InstanceManager:
                             _paused_task = await asyncio.to_thread(
                                 _task_repo.get_by_message, _original_message_id
                             )
-                            if (
-                                _paused_task is not None
-                                and _paused_task.status
-                                == TaskStatus.RUNNING.value
-                            ):
-                                await asyncio.to_thread(
-                                    _task_repo.complete_task,
-                                    _paused_task.id,
-                                    {},
-                                )
-                                logger.info(
-                                    f"[RESUME] marked paused Task "
-                                    f"{_paused_task.id} COMPLETED for "
-                                    f"original message "
-                                    f"{_original_message_id[:8]}... "
-                                    f"(instance={instance_id[:8]}...) "
-                                    f"so per-instance guard releases for "
-                                    f"follow-up Tasks"
-                                )
+                            if _paused_task is not None:
+                                # Phase 2 (pause/resume redesign, 2026-06-25)
+                                # — B2 worker-during-pause race protection.
+                                #
+                                # The pre-Phase 2 hack kept the task in
+                                # RUNNING while the instance was paused.
+                                # Phase 2 transitions the task to PAUSED
+                                # atomically inside ``_pause_cascade_db_sync``
+                                # (UPDATE 3: ``task`` RUNNING → PAUSED). On
+                                # resume, the task is therefore in PAUSED,
+                                # NOT RUNNING — completing it here would
+                                # violate the new state-machine contract
+                                # (PAUSED → PENDING is the resume path,
+                                # handled in Phase 3).
+                                #
+                                # Skip completion when the task is already
+                                # PAUSED; the resume-side re-claim will
+                                # convert it back to PENDING and let a
+                                # worker pick it up. This is the explicit,
+                                # visible counterpart of the implicit DB-
+                                # level guard in ``complete_task``
+                                # (``WHERE status = 'running'``), which
+                                # already prevents a PAUSED → COMPLETED
+                                # write but at the cost of a wasted DB
+                                # roundtrip and a silent no-op.
+                                if _paused_task.status == TaskStatus.PAUSED.value:
+                                    logger.debug(
+                                        f"[RESUME] skipping Task completion "
+                                        f"for {_paused_task.id} — task is "
+                                        f"PAUSED (Phase 2 state-machine); "
+                                        f"resume will re-claim via "
+                                        f"PAUSED → PENDING "
+                                        f"(instance={instance_id[:8]}...)"
+                                    )
+                                elif (
+                                    _paused_task.status
+                                    == TaskStatus.RUNNING.value
+                                ):
+                                    await asyncio.to_thread(
+                                        _task_repo.complete_task,
+                                        _paused_task.id,
+                                        {},
+                                    )
+                                    logger.info(
+                                        f"[RESUME] marked paused Task "
+                                        f"{_paused_task.id} COMPLETED for "
+                                        f"original message "
+                                        f"{_original_message_id[:8]}... "
+                                        f"(instance={instance_id[:8]}...) "
+                                        f"so per-instance guard releases for "
+                                        f"follow-up Tasks"
+                                    )
+                                else:
+                                    # Terminal status already (COMPLETED/
+                                    # FAILED/CANCELLED) — no-op. The task
+                                    # is in its expected post-resume state.
+                                    logger.debug(
+                                        f"[RESUME] task {_paused_task.id} "
+                                        f"already terminal "
+                                        f"(status={_paused_task.status}); "
+                                        f"no completion needed"
+                                    )
                 except Exception as task_complete_err:
                     # Defensive: never let a Task-completion failure crash the
                     # resume path. The job is already COMPLETED; a stranded

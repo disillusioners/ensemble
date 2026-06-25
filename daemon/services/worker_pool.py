@@ -348,10 +348,55 @@ class Worker(threading.Thread):
 
         except concurrent.futures.CancelledError:
             # Pause cancelled the coroutine through run_coroutine_threadsafe.
-            # Don't fail the task — leave it RUNNING for resume.
+            #
+            # Phase 2 (pause/resume redesign, 2026-06-25) — B2 contract:
+            #
+            #   DO NOT call ``task_repo.complete_task`` here. The pause
+            #   cascade (``pause_instance_cascade`` →
+            #   ``_pause_cascade_db_sync``) is the SOLE writer of the
+            #   task's PAUSED status; it has not yet run when this
+            #   ``except`` block fires (the DB sync executes AFTER the
+            #   graph task cancellation completes — see
+            #   ``pause_instance_cascade`` lines 986-1018).
+            #
+            #   If we called ``complete_task`` here, two outcomes are
+            #   possible:
+            #
+            #     1. DB sync runs AFTER ``complete_task`` → the task's
+            #        ``WHERE status = running`` guard in UPDATE 3 of
+            #        ``_pause_cascade_db_sync`` rowcount-drops (task
+            #        already terminal). Functionally correct but wastes
+            #        a DB write, generates an erroneous "task marked
+            #        PAUSED while COMPLETED" log, and may violate
+            #        invariant assertions downstream.
+            #     2. DB sync runs BEFORE ``complete_task`` → the task
+            #        is PAUSED, ``complete_task``'s ``WHERE status =
+            #        running`` guard rowcount-drops (silent no-op). The
+            #        task is correctly left in PAUSED for resume, but
+            #        the path took a wasted DB roundtrip.
+            #
+            #   In both orderings the correct observable state is
+            #   "task in PAUSED, ready for resume". Returning here
+            #   without calling ``complete_task`` is the cleanest
+            #   contract: the pause cascade owns the DB transition,
+            #   the worker pool owns the concurrency-slot release
+            #   (``finally`` block below), and resume owns the
+            #   PAUSED → PENDING → CLAIMED re-claim path (Phase 3).
+            #
+            # DO NOT fail the task either (``fail_task``) — the work
+            # was interrupted by user action, not by an error, and the
+            # task must be re-claimable on resume, not dead-lettered.
+            #
+            # Task stays in RUNNING briefly until the DB sync flips it
+            # to PAUSED — this is safe because the per-instance pause
+            # gate in ``claim_pending_task`` already excludes PAUSED
+            # instances, and the parallel UPDATE in
+            # ``_pause_cascade_db_sync`` flips RUNNING → PAUSED in the
+            # SAME WriteGuardSession as the instance status change.
             logger.info(
                 f"Worker {self.worker_id}: task {task.id} paused "
-                "(concurrent.futures.CancelledError)"
+                "(concurrent.futures.CancelledError — B2 contract: "
+                "do NOT complete_task; pause cascade owns PAUSED write)"
             )
             # Task stays in RUNNING state — no failure, no retry
             return

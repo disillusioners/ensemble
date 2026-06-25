@@ -919,6 +919,39 @@ class InstanceMessagingService:
         Returns:
             AsyncMessageResult with message_id and status. ``job_id`` is
             populated only for ``dispatch_path="jobqueue"``.
+
+        New-message-during-pause behaviour (Phase 2, pause/resume redesign,
+        2026-06-25):
+
+            When this method is called for a PAUSED instance, the
+            ``_prepare_enqueued_message`` helper writes a fresh ``Task``
+            row in PENDING status (regardless of dispatch_path), and
+            ``enqueue`` (for the jobqueue path) writes a JobItem in
+            PENDING status. Neither path inspects the instance's
+            pause state — enqueue is intentionally independent of pause
+            so messages accumulate naturally.
+
+            The pause-gate in ``TaskRepository.claim_pending_task``
+            (``daemon/repositories/task/repository.py``, the
+            ``WHERE instance_id NOT IN (SELECT instance_id FROM
+            instances WHERE status IN ('paused', 'terminated'))``
+            subquery) excludes PAUSED instances from worker claim.
+            WorkerPool's idle-claim loop therefore sees the Task as
+            "exists but not yet claimable" and waits. The JobItem
+            pause-gate is the equivalent clause in the
+            JobQueue service's start path.
+
+            INTENDED BEHAVIOUR: messages queue in PENDING and are
+            claimed the moment the instance resumes (Phase 3 —
+            ``_resume_cascade_db_sync`` transitions the instance
+            status back to RUNNING, the pause-gate lifts, and the
+            next worker poll picks up the pending Task). This is the
+            correct user-visible behaviour — pausing a long-running
+            conversation does NOT drop inbound messages.
+
+            If this ever needs to change (e.g. a "reject while paused"
+            policy), the gating belongs in
+            ``_prepare_enqueued_message`` / ``enqueue``, not here.
         """
         from ..manager import AsyncMessageResult
 

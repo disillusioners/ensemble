@@ -16,7 +16,13 @@ from sqlmodel import Session
 from ..cancellation import CancellationReason
 from ..compaction import ContextCompactor
 from ..registry import get_registry
+from ..repositories.dependency_bus.models import (
+    DependencyWatcher,
+    DependencyWatcherState,
+)
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
+from ..repositories.job_queue.models import JobStatus
+from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .dependency_bus import get_dependency_bus
@@ -1018,6 +1024,14 @@ class InstanceLifecycleService:
         )
 
         # Post-commit side effects: SSE status_change per paused node.
+        # Phase 2 (pause/resume redesign, 2026-06-25): the pause flow
+        # transitions BOTH the instance (UPDATE 1) AND the job
+        # (UPDATE 2 — PROCESSING → PAUSED) atomically. The SSE event
+        # payload therefore carries both ``status`` (instance) and
+        # ``job_status`` so the frontend can render the paused job
+        # without subscribing to a separate job-status stream. The
+        # ``job_status`` is included for every paused node so a tree
+        # cascade produces a consistent UI state.
         paused_ids = db_result.updated_ids
         agent_ids_by_instance = db_result.agent_ids_by_instance
         for node_id in paused_ids:
@@ -1026,6 +1040,7 @@ class InstanceLifecycleService:
                     node_id,
                     InstanceStatus.PAUSED.value,
                     agent_id=agent_ids_by_instance.get(node_id),
+                    job_status=JobStatus.PAUSED.value,
                 )
             except Exception as e:
                 logger.warning(
@@ -1043,14 +1058,33 @@ class InstanceLifecycleService:
         # skipped_ids the caller collected above (already-paused / not-found).
         result = {"paused_ids": paused_ids, "skipped_ids": skipped_ids}
 
-        # Cancel PENDING DependencyBus watchers targeting the paused
-        # root. Pausing a parent must not allow in-flight child tasks
-        # to deliver a FollowUp into a paused parent. Per-node
-        # cancellation would over-count (the same FollowUp may target
-        # multiple paused nodes — but in practice a FollowUp is
-        # keyed to a single parent), so we cancel once for the root.
-        await _cancel_bus_watchers_for(self._manager, root_id, "pause_instance_cascade")
-
+        # Phase 2 (pause/resume redesign, 2026-06-25) — Decision 2:
+        # DEPENDENCY-BUS WATCHERS ARE PRESERVED ON PAUSE.
+        #
+        # Pre-Phase 2 behaviour: ``_cancel_bus_watchers_for(root_id, ...)``
+        # was called here to cancel PENDING watchers targeting the paused
+        # root, so an in-flight child task could not deliver a FollowUp
+        # onto a paused parent.
+        #
+        # New behaviour: we KEEP PENDING watchers in PENDING state so the
+        # bus DB continues to track child→parent deliveries during pause.
+        # This is safe because:
+        #
+        #   * PROCESS_REPORT tasks (the only delivery channel for a
+        #     FollowUp) are still blocked by the per-instance pause gate
+        #     in ``claim_pending_task`` (``task/repository.py`` line ~338
+        #     — excludes ``status IN (paused, terminated)``). The
+        #     watchers accumulate state but no graph turn fires during
+        #     pause.
+        #   * On resume (Phase 3), the watchers naturally process their
+        #     FollowUp payloads via the normal claim path.
+        #   * The compaction hook ``_compact_fired_watchers_for_paused``
+        #     (added in Phase 2 / Decision 3) bounds the unbounded growth
+        #     that would otherwise occur during long partial-tree pauses.
+        #
+        # We retain the helper definition above for use by
+        # ``terminate_instance`` (where watcher cancellation IS the
+        # desired behaviour — the instance is going away permanently).
         return result
 
     async def resume_instance_cascade(self, instance_id: str) -> dict:
@@ -1815,7 +1849,7 @@ status=InstanceStatus.IDLE.value,
         paused_at_iso: str,
         paused_instances_data: list[tuple[str, str | None]],
     ) -> _CascadeUpdateResult:
-        """Sync DB half of ``pause_instance_cascade`` (L14 fix).
+        """Sync DB half of ``pause_instance_cascade`` (L14 fix + Phase 2 W1).
 
         Runs in the caller's thread (sync). Performs the per-tree-node
         pause updates in ONE batched ``UPDATE ... WHERE instance_id IN
@@ -1827,8 +1861,26 @@ status=InstanceStatus.IDLE.value,
         L14 collapses the N updates into a single ``UPDATE`` so a crash
         either pauses the entire tree or none of it.
 
-        is rebuild-only cache (ADR-011) and the CorrelationManager is the SOLE
-        completion authority.
+        Phase 2 (pause/resume redesign, 2026-06-25) — W1 atomicity:
+        the same ``WriteGuardSession`` transaction now performs THREE
+        batched UPDATEs so a single crash leaves no half-paused state
+        across tables:
+
+          1. ``instances`` (PAUSED)   — eligible non-terminal statuses
+          2. ``job_queue_items`` (PROCESSING → PAUSED)  — pause gate for
+             the per-project worker / job-processor (JobProcessor only
+             picks up PROCESSING rows)
+          3. ``task`` (RUNNING → PAUSED)  — pause gate for the per-task
+             worker (``claim_pending_task`` already excludes PAUSED
+             instances; the task row itself must also reflect PAUSED so
+             the worker's ``complete_task`` cannot flip PAUSED →
+             COMPLETED in the finally block — B2 race protection)
+
+        The three UPDATEs share ONE ``WriteGuardSession`` so the
+        commit is atomic (all-or-nothing). The pre-DB side effects
+        (graph task cancellation + ``request_registry.cancel_by_instance``)
+        remain in-memory and out-of-band — they fire BEFORE the helper
+        runs (see ``pause_instance_cascade``).
 
         Args:
             engine: The shared SQLAlchemy engine.
@@ -1858,6 +1910,7 @@ status=InstanceStatus.IDLE.value,
         }
 
         with WriteGuardSession(Session(engine), write_guard) as session:
+            # ─── UPDATE 1: instances → PAUSED ──────────────────────────
             # L14 fix: single batched UPDATE. The ``tree_ids`` list is
             # expanded into the ``IN`` clause via SQLAlchemy's
             # ``expanding=True`` parameter. SQLite and PostgreSQL both
@@ -1892,6 +1945,79 @@ status=InstanceStatus.IDLE.value,
                     "waiting_children_status": InstanceStatus.WAITING_CHILDREN.value,
                 },
             )
+
+            # ─── UPDATE 2: job_queue_items → PAUSED (Phase 2 / W1) ────
+            # At the same transaction boundary as UPDATE 1, transition
+            # any PROCESSING job for a paused instance to PAUSED. The
+            # ``WHERE status = processing`` guard makes the UPDATE
+            # idempotent and racy-safe (a row that flipped to a terminal
+            # status in a concurrent transition is left alone).
+            #
+            # Effect: a paused instance's job is no longer claimable by
+            # the JobProcessor's queue sweep (which only picks up
+            # PENDING rows for ``start_job``). The job remains in the
+            # DB row-locked state for resume to re-arm. Job locks are
+            # NOT released — Phase 3 owns the resume contract.
+            session.execute(
+                text(
+                    "UPDATE job_queue_items "
+                    "SET status = :paused_status "
+                    "WHERE instance_id IN :tree_ids "
+                    "  AND status = :processing_status "
+                    "  AND deleted_at IS NULL"
+                ).bindparams(
+                    bindparam("tree_ids", expanding=True),
+                ),
+                {
+                    "paused_status": JobStatus.PAUSED.value,
+                    "processing_status": JobStatus.PROCESSING.value,
+                    "tree_ids": updated_ids,
+                },
+            )
+
+            # ─── UPDATE 3: task → PAUSED (Phase 2 / W1) ───────────────
+            # At the same transaction boundary as UPDATE 1, transition
+            # any RUNNING task for a paused instance to PAUSED. The
+            # ``WHERE status = running`` guard mirrors ``complete_task``'s
+            # own guard — it makes this UPDATE mutually exclusive with
+            # the worker's terminal write (B2 race protection):
+            # if the worker's ``complete_task`` commits FIRST, this
+            # UPDATE rowcount drops to 0 (task already terminal); if
+            # THIS UPDATE commits FIRST, ``complete_task``'s
+            # ``WHERE status = running`` guard rowcount drops to 0
+            # and the worker falls through the ``return None`` branch.
+            # Either ordering produces the same observable state:
+            # PAUSED never gets flipped back to COMPLETED by a worker
+            # whose task was interrupted mid-flight.
+            #
+            # ``claim_pending_task`` already excludes PAUSED instances
+            # via its pause-gate ``WHERE status NOT IN (paused,
+            # terminated)`` subquery; this UPDATE protects PAUSED tasks
+            # from being claimed too (the per-instance guard excludes
+            # any instance with a RUNNING task; once RUNNING flips to
+            # PAUSED, the instance re-enters the eligible set, and any
+            # new PENDING tasks for it become claimable — which is the
+            # correct "queue in PENDING until resume" behaviour).
+            session.execute(
+                text(
+                    "UPDATE task "
+                    "SET status = :paused_status "
+                    "WHERE instance_id IN :tree_ids "
+                    "  AND status = :running_status"
+                ).bindparams(
+                    bindparam("tree_ids", expanding=True),
+                ),
+                {
+                    "paused_status": TaskStatus.PAUSED.value,
+                    "running_status": TaskStatus.RUNNING.value,
+                    "tree_ids": updated_ids,
+                },
+            )
+
+            # Single commit for ALL three DB writes (Phase 2 / W1
+            # atomicity). If any UPDATE raises, none of them commit —
+            # the ``WriteGuardSession.__exit__`` rolls back via the
+            # underlying ``Session.close``.
             session.commit()
 
         # Skipped = nodes that were already paused (filtered out by the
@@ -1904,6 +2030,96 @@ status=InstanceStatus.IDLE.value,
             skipped_ids=skipped_ids,
             agent_ids_by_instance=agent_ids_by_instance,
         )
+
+    def _compact_fired_watchers_for_paused(self, instance_id: str) -> int:
+        """Delete FIRED ``dependency_watchers`` rows for a paused instance.
+
+        Phase 2 (pause/resume redesign, 2026-06-25) — Decision 3 (C3):
+        bound the unbounded growth that would otherwise accumulate in
+        ``dependency_watchers`` during a long partial-tree pause.
+
+        Background — why we need this:
+
+          Phase 2's Decision 2 KEEPS PENDING watchers in PENDING state
+          when an instance pauses. While the parent is paused, child
+          tasks may still complete; their terminal events fire the
+          ``DependencyBus`` which atomically transitions PENDING rows
+          to FIRED (with ``fired_at`` set). PROCESS_REPORT delivery is
+          blocked by the per-instance pause gate in
+          ``claim_pending_task``, so the FIRED FollowUp payloads just
+          accumulate. A long pause (hours) on a parent with N children
+          can produce up to N FIRED rows per pause cycle — repeated
+          pauses compound the count.
+
+          On resume, the bus delivers the queued FollowUps. Once the
+          FollowUp has been enqueued (``enqueued_at`` stamped) and the
+          PROCESS_REPORT task has completed, the FIRED row is no longer
+          needed — keeping it serves only diagnostics.
+
+        Strategy — what this method does:
+
+          Conservative first cut: delete FIRED watchers whose
+          ``fired_at`` is older than a small grace window AND whose
+          ``enqueued_at`` is non-null (i.e., the FollowUp was already
+          delivered to the parent's message queue). The grace window
+          avoids racing a delivery that is still in flight.
+
+          This method is INTENDED to be wired into the resume path
+          (Phase 3) — it is registered here as part of Phase 2 so the
+          surface is stable. The default cutoff is 60 seconds since
+          ``fired_at`` (covers normal delivery latency + jittered
+          backoff) and the default ``enqueued_at IS NOT NULL`` clause
+          ensures we never compact a FollowUp that has not yet been
+          handed to ``manager.enqueue_message``.
+
+        Args:
+            instance_id: The instance whose FIRED watchers should be
+                compacted.
+
+        Returns:
+            Number of watcher rows deleted. Zero is a valid result
+            (no FIRED watchers, or all are within the grace window /
+            not yet enqueued).
+        """
+        # Compute the cutoff once on the caller's thread so the SQL
+        # uses a parameterised ISO timestamp (dialect-portable).
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        cutoff_iso = (_dt.now(_tz.utc) - _td(seconds=60)).isoformat()
+
+        try:
+            with self._manager.engine.begin() as conn:
+                result = conn.execute(
+                    text(
+                        "DELETE FROM dependency_watchers "
+                        "WHERE target_instance_id = :instance_id "
+                        "  AND state = :fired_state "
+                        "  AND enqueued_at IS NOT NULL "
+                        "  AND fired_at <= :cutoff_iso"
+                    ),
+                    {
+                        "instance_id": instance_id,
+                        "fired_state": DependencyWatcherState.FIRED.value,
+                        "cutoff_iso": cutoff_iso,
+                    },
+                )
+                deleted = int(getattr(result, "rowcount", 0) or 0)
+                if deleted > 0:
+                    logger.debug(
+                        f"_compact_fired_watchers_for_paused: deleted "
+                        f"{deleted} FIRED watcher(s) for paused instance "
+                        f"{instance_id[:8]}..."
+                    )
+                return deleted
+        except Exception as e:
+            # Compaction is a hygiene operation, never a correctness one.
+            # A failure here must not propagate (would crash resume).
+            logger.warning(
+                f"_compact_fired_watchers_for_paused: failed for "
+                f"{instance_id[:8]}... ({type(e).__name__}: {e}); "
+                f"leaving FIRED watchers in place"
+            )
+            return 0
 
     def _resume_cascade_db_sync(
         self,

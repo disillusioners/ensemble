@@ -217,13 +217,25 @@ class LiveEventHub:
         }
         await self._stream_to_connections(instance_id, event)
     
-    async def stream_status_change(self, instance_id: str, status: str, agent_id: str | None = None) -> None:
+    async def stream_status_change(
+        self,
+        instance_id: str,
+        status: str,
+        agent_id: str | None = None,
+        job_status: str | None = None,
+    ) -> None:
         """Stream status change event to all active connections.
 
         Args:
             instance_id: The instance ID.
             status: The new status value.
             agent_id: The agent ID (optional, for filtering KB instances on frontend).
+            job_status: Optional companion job status (e.g. ``"paused"``
+                after a cascade pause — see Phase 2 pause/resume
+                redesign, 2026-06-25). When present, the SSE payload
+                carries both ``status`` (instance) and ``job_status``
+                so the frontend can render them side-by-side without
+                waiting for a separate job-status event.
         """
         # Skip KB agents to avoid polluting SSE with internal agent events
         if agent_id is not None and agent_id in KB_AGENT_IDS:
@@ -236,6 +248,8 @@ class LiveEventHub:
         }
         if agent_id is not None:
             event["agent_id"] = agent_id
+        if job_status is not None:
+            event["job_status"] = job_status
         await self._stream_to_connections(instance_id, event)
 
     async def stream_context_usage(
