@@ -280,7 +280,9 @@ class SQLModelProjectRepository:
         """Get all projects linked to an instance."""
         with Session(self.engine) as session:
             # JSON containment is dialect-aware: PostgreSQL JSONB uses ``@>``,
-            # SQLite keeps the LIKE-based ``contains`` (with Python-side correction).
+            # SQLite skips the SQL filter entirely (SQLAlchemy double-escapes
+            # JSON ``contains()`` binds) and defers both matches to the Python
+            # post-filter below.
             if session.bind is not None and session.bind.dialect.name == "postgresql":
                 from sqlalchemy import cast
                 from sqlalchemy.dialects.postgresql import JSONB
@@ -290,10 +292,7 @@ class SQLModelProjectRepository:
                     | cast(Project.relationships, JSONB).contains({"instances": [instance_id]})
                 )
             else:
-                stmt = select(Project).where(
-                    (Project.creator_instance_id == instance_id)
-                    | col(Project.relationships).contains(f'"instances"')
-                )
+                stmt = select(Project)
             projects = list(session.exec(stmt))
             result = []
             for p in projects:
@@ -307,7 +306,9 @@ class SQLModelProjectRepository:
         """Get all projects that reference a directory."""
         with Session(self.engine) as session:
             # JSON containment is dialect-aware: PostgreSQL JSONB uses ``@>``,
-            # SQLite keeps the LIKE-based ``contains`` (with Python-side correction).
+            # SQLite skips the SQL filter entirely (SQLAlchemy double-escapes
+            # JSON ``contains()`` binds) and defers both matches to the Python
+            # post-filter below.
             if session.bind is not None and session.bind.dialect.name == "postgresql":
                 from sqlalchemy import cast
                 from sqlalchemy.dialects.postgresql import JSONB
@@ -317,10 +318,7 @@ class SQLModelProjectRepository:
                     | cast(Project.related_directories, JSONB).contains([directory])
                 )
             else:
-                stmt = select(Project).where(
-                    (Project.main_directory == directory)
-                    | col(Project.related_directories).contains(f'"{directory}"')
-                )
+                stmt = select(Project)
             projects = list(session.exec(stmt))
             result = []
             for p in projects:
