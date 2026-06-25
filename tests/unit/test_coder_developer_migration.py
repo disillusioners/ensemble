@@ -450,3 +450,385 @@ class TestCoderDeveloperMigration:
                         )
                     )
                 engine.dispose()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Part B: Alias-Resolution Crash-Recovery Tests
+# ═════════════════════════════════════════════════════════════════════════════
+# These tests verify that the backward-compat alias resolution works correctly
+# when DB rows still contain the old `agent_id='coder'` value (simulating a
+# partial/failed migration where the rename UPDATE never ran).
+#
+# Registry has AGENT_ID_ALIASES = {"coder": "developer"}, so:
+#   resolve_pure_id("coder") → "developer"
+#   resolve_pure_id("developer") → "developer"
+#   get("developer") → valid AgentMetadata
+#   get("coder") → None  (the canonical ID is "developer", not "coder")
+#
+# Bug that was fixed:
+#   instance_lifecycle._restore_instance() and job_queue_service.enqueue() used
+#   registry.get(meta.agent_id) DIRECTLY without alias resolution, so a DB row
+#   with agent_id='coder' would raise ValueError("Agent not found: coder").
+#
+# Fix: both call sites now do
+#   resolved = registry.resolve_pure_id(agent_id) or agent_id
+#   agent_meta = registry.get(resolved)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+import pytest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+from daemon import constants
+from daemon.services.instance_lifecycle import InstanceLifecycleService
+from daemon.services.job_queue_service import JobQueueService
+
+
+# Test system project ID — mirrors tests/job_queue/conftest.py so the
+# alias-resolution enqueue tests can run from tests/unit/ without depending
+# on that conftest's autouse fixture.
+_TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+
+@pytest.fixture(autouse=True)
+def _setup_system_default_project():
+    """Set SYSTEM_DEFAULT_PROJECT_ID so normalize_project_id() works.
+
+    job_queue_service.enqueue() calls normalize_project_id() internally
+    (see daemon/services/job_queue_service.py:351) which raises
+    RuntimeError if SYSTEM_DEFAULT_PROJECT_ID is None. The
+    tests/job_queue/conftest.py fixture that handles this is NOT
+    applied to tests/unit/, so we declare it locally.
+    """
+    original = constants.SYSTEM_DEFAULT_PROJECT_ID
+    constants.SYSTEM_DEFAULT_PROJECT_ID = _TEST_SYSTEM_PROJECT_ID
+    try:
+        yield
+    finally:
+        constants.SYSTEM_DEFAULT_PROJECT_ID = original
+
+
+class TestRestoreInstanceWithAlias:
+    """Verify _restore_instance() handles stale 'coder' agent_id from DB.
+
+    Simulates a DB row that still has agent_id='coder' (partial migration).
+    The fix makes _restore_instance resolve the alias to 'developer' before
+    calling registry.get(), so it doesn't raise ValueError.
+    """
+
+    def test_restore_instance_with_coder_agent_id_does_not_raise(self):
+        """_restore_instance must not raise when DB row has agent_id='coder'.
+
+        Reproducer: a partially-migrated DB where instances.agent_id still
+        reads 'coder' (migration was not yet run, or server restarted before
+        it could run). Before the fix, registry.get('coder') returned None
+        → ValueError("Agent not found: coder"). After the fix, resolve_pure_id
+        maps 'coder' → 'developer' and the restore succeeds.
+        """
+        # ── Mock manager ─────────────────────────────────────────────────────
+        mock_manager = MagicMock()
+        mock_cancellation_service = MagicMock()
+
+        mock_manager._instance_repository = MagicMock()
+        mock_manager._project_repository = MagicMock()
+        mock_manager._engine = MagicMock()
+        mock_manager._live_hub = MagicMock()
+        mock_manager._checkpointer = None
+        mock_manager._compactor = None
+        mock_manager.instances = {}
+        mock_manager.prompt_cache = MagicMock()
+        mock_manager._mcp_service = None
+
+        mock_config = MagicMock()
+        mock_config.queue.llm_retry_transient_attempts = 3
+        mock_config.queue.llm_retry_timeout_attempts = 2
+        mock_config.llm.base_url = None
+        mock_config.llm.api_key = "test-key"
+        mock_config.llm.model = "gpt-4"
+        mock_config.llm.model_vision = False
+        mock_config.llm.temperature = 0.7
+        mock_config.llm.request_timeout = 60
+        mock_config.limits.graph_recursion_limit = 1000
+        mock_manager.config = mock_config
+
+        service = InstanceLifecycleService(mock_manager, mock_cancellation_service)
+
+        # ── Mock Instance row with stale 'coder' agent_id ────────────────────
+        mock_meta = MagicMock()
+        mock_meta.instance_id = "stale-instance-001"
+        mock_meta.agent_id = "coder"           # ← stale value (not yet migrated)
+        mock_meta.agent_dir = "/agents/coder"   # ← stale path (not yet migrated)
+        mock_meta.parent_id = None
+        mock_meta.instance_metadata = {"mcp_tool_names": []}
+
+        # ── Patch registry and manager helpers ───────────────────────────────
+        with (
+            patch("daemon.services.instance_lifecycle.get_registry") as mock_get_registry,
+            patch("daemon.services.instance_lifecycle.append_context_key") as mock_append_ctx,
+            patch("daemon.manager.load_and_cache_prompt") as mock_load_prompt,
+            patch("daemon.manager.build_instance_graph") as mock_build_graph,
+            patch("daemon.manager.create_instance_tools") as mock_create_tools,
+        ):
+            # Configure the mock registry so resolve_pure_id('coder') → 'developer'
+            mock_registry = MagicMock()
+            mock_registry.resolve_pure_id.return_value = "developer"  # alias resolution
+            mock_registry.get.return_value = None                    # coder not canonical
+
+            # Return valid metadata when asked for 'developer'
+            mock_developer_meta = MagicMock()
+            mock_developer_meta.path = Path("/agents/developer")
+            mock_developer_meta.llm_model = None
+            mock_registry.get.side_effect = lambda aid: (
+                mock_developer_meta if aid == "developer" else None
+            )
+            mock_get_registry.return_value = mock_registry
+
+            mock_load_prompt.return_value = ("You are a developer.", 10)
+            mock_create_tools.return_value = []
+            mock_build_graph.return_value = MagicMock()
+            mock_append_ctx.return_value = "You are a developer."
+
+            # ── Execute ────────────────────────────────────────────────────
+            # Before the fix: raises ValueError("Agent not found: coder")
+            # After the fix: succeeds because 'coder' is resolved to 'developer'
+            result = service._restore_instance("stale-instance-001", mock_meta)
+
+            # ── Verify alias resolution was called ─────────────────────────
+            # resolve_pure_id must be called with the stale 'coder' value
+            mock_registry.resolve_pure_id.assert_called_with("coder")
+            # get() must be called with the resolved 'developer', not 'coder'
+            mock_registry.get.assert_called_with("developer")
+            # The graph must be built and stored in instances dict
+            assert result is not None
+            mock_build_graph.assert_called_once()
+            mock_create_tools.assert_called_once()
+
+    def test_restore_instance_with_developer_agent_id_still_works(self):
+        """_restore_instance with canonical 'developer' agent_id still works.
+
+        Sanity check: resolving an already-canonical ID should be a no-op.
+        """
+        mock_manager = MagicMock()
+        mock_cancellation_service = MagicMock()
+
+        mock_manager._instance_repository = MagicMock()
+        mock_manager._project_repository = MagicMock()
+        mock_manager._engine = MagicMock()
+        mock_manager._live_hub = MagicMock()
+        mock_manager._checkpointer = None
+        mock_manager._compactor = None
+        mock_manager.instances = {}
+        mock_manager.prompt_cache = MagicMock()
+        mock_manager._mcp_service = None
+
+        mock_config = MagicMock()
+        mock_config.queue.llm_retry_transient_attempts = 3
+        mock_config.queue.llm_retry_timeout_attempts = 2
+        mock_config.llm.base_url = None
+        mock_config.llm.api_key = "test-key"
+        mock_config.llm.model = "gpt-4"
+        mock_config.llm.model_vision = False
+        mock_config.llm.temperature = 0.7
+        mock_config.llm.request_timeout = 60
+        mock_config.limits.graph_recursion_limit = 1000
+        mock_manager.config = mock_config
+
+        service = InstanceLifecycleService(mock_manager, mock_cancellation_service)
+
+        mock_meta = MagicMock()
+        mock_meta.instance_id = "fresh-instance-002"
+        mock_meta.agent_id = "developer"  # ← already canonical
+        mock_meta.agent_dir = "/agents/developer"
+        mock_meta.parent_id = None
+        mock_meta.instance_metadata = {"mcp_tool_names": []}
+
+        with (
+            patch("daemon.services.instance_lifecycle.get_registry") as mock_get_registry,
+            patch("daemon.services.instance_lifecycle.append_context_key") as mock_append_ctx,
+            patch("daemon.manager.load_and_cache_prompt") as mock_load_prompt,
+            patch("daemon.manager.build_instance_graph") as mock_build_graph,
+            patch("daemon.manager.create_instance_tools") as mock_create_tools,
+        ):
+            mock_registry = MagicMock()
+            mock_registry.resolve_pure_id.return_value = "developer"
+            mock_developer_meta = MagicMock()
+            mock_developer_meta.path = Path("/agents/developer")
+            mock_developer_meta.llm_model = None
+            mock_registry.get.return_value = mock_developer_meta
+            mock_get_registry.return_value = mock_registry
+
+            mock_load_prompt.return_value = ("You are a developer.", 10)
+            mock_create_tools.return_value = []
+            mock_build_graph.return_value = MagicMock()
+            mock_append_ctx.return_value = "You are a developer."
+
+            result = service._restore_instance("fresh-instance-002", mock_meta)
+
+            # resolve_pure_id called with 'developer', get called with 'developer'
+            mock_registry.resolve_pure_id.assert_called_with("developer")
+            mock_registry.get.assert_called_with("developer")
+            assert result is not None
+
+
+class TestJobQueueEnqueueWithAlias:
+    """Verify job_queue_service.enqueue() handles stale 'coder' agent_id.
+
+    Both the idempotency path and the regular enqueue path must resolve
+    the 'coder' alias before calling registry.get(), otherwise
+    ValueError("Agent not found: coder") is raised.
+    """
+
+    @pytest.fixture
+    def mock_repository(self):
+        """Minimal mock JobRepository for enqueue()."""
+        repo = MagicMock()
+        repo.find_by_idempotency_key = MagicMock(return_value=None)
+        repo.create = MagicMock()
+
+        def _create_or_get_side_effect(**kwargs):
+            key = kwargs.get("idempotency_key")
+            existing = repo.find_by_idempotency_key(key)
+            if existing is not None:
+                return existing, False
+            new_job = repo.create(**kwargs)
+            return new_job, True
+
+        repo.create_or_get_by_idempotency_key = MagicMock(
+            side_effect=_create_or_get_side_effect
+        )
+        return repo
+
+    @pytest.fixture
+    def mock_lock_manager(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_queue_repo(self):
+        repo = MagicMock()
+        mock_queue = MagicMock()
+        mock_queue.queue_id = "system-fifo-queue-id"
+        mock_queue.project_id = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+        mock_queue.queue_name = "system_fifo_queue"
+
+        def get_by_name(project_id, queue_name):
+            return mock_queue
+
+        repo.get_by_name = MagicMock(side_effect=get_by_name)
+        repo.get = MagicMock(return_value=None)
+        return repo
+
+    @pytest.fixture
+    def service(self, mock_repository, mock_lock_manager, mock_queue_repo):
+        return JobQueueService(
+            repository=mock_repository,
+            lock_manager=mock_lock_manager,
+            queue_repo=mock_queue_repo,
+        )
+
+    def _make_mock_registry_resolve_coder_to_developer(self):
+        """Registry mock: resolve_pure_id('coder')→'developer', get('developer')→valid."""
+        registry = MagicMock()
+        registry.resolve_pure_id.side_effect = lambda aid: {
+            "coder": "developer",
+            "developer": "developer",
+        }.get(aid, aid)
+        mock_meta = MagicMock()
+        mock_meta.path = "/agents/developer"
+        registry.get.side_effect = lambda aid: (
+            mock_meta if aid == "developer" else None
+        )
+        return registry
+
+    @pytest.mark.asyncio
+    async def test_enqueue_with_coder_agent_id_succeeds(
+        self, service, mock_repository, mock_queue_repo
+    ):
+        """enqueue(agent_id='coder') must not raise ValueError.
+
+        Before the fix: registry.get('coder') returns None → ValueError.
+        After the fix: resolve_pure_id('coder')→'developer', get('developer')→valid metadata → succeeds.
+        """
+        expected_job = MagicMock()
+        expected_job.job_id = "new-job-from-coder"
+        mock_repository.create.return_value = expected_job
+
+        with patch(
+            "daemon.services.job_queue_service.get_registry",
+            return_value=self._make_mock_registry_resolve_coder_to_developer(),
+        ):
+            result = await service.enqueue(
+                agent_id="coder",          # ← stale value
+                message="test message",
+                source="api",
+            )
+
+        assert result.job_id == "new-job-from-coder"
+        mock_repository.create.assert_called_once()
+        # The job must be created with the resolved agent_id 'developer', not 'coder'
+        call_kwargs = mock_repository.create.call_args.kwargs
+        assert call_kwargs["agent_id"] == "developer", (
+            f"Expected agent_id='developer' in create(), got {call_kwargs['agent_id']!r}"
+        )
+        assert call_kwargs["agent_dir"] == "/agents/developer"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_with_coder_and_idempotency_key_succeeds(
+        self, service, mock_repository, mock_queue_repo
+    ):
+        """enqueue with idempotency_key and agent_id='coder' must not raise.
+
+        This tests the idempotency path (lines 362-482 in job_queue_service.py)
+        which has its own alias-resolution call site.
+        """
+        expected_job = MagicMock()
+        expected_job.job_id = "idempotent-job-from-coder"
+        mock_repository.create.return_value = expected_job
+
+        with patch(
+            "daemon.services.job_queue_service.get_registry",
+            return_value=self._make_mock_registry_resolve_coder_to_developer(),
+        ):
+            result = await service.enqueue(
+                agent_id="coder",              # ← stale value
+                message="test message",
+                source="api",
+                idempotency_key="unique-key-001",  # ← triggers idempotency path
+            )
+
+        assert result.job_id == "idempotent-job-from-coder"
+        mock_repository.create_or_get_by_idempotency_key.assert_called_once()
+        call_kwargs = mock_repository.create_or_get_by_idempotency_key.call_args.kwargs
+        assert call_kwargs["agent_id"] == "developer", (
+            f"Expected agent_id='developer' in create_or_get_by_idempotency_key(), "
+            f"got {call_kwargs['agent_id']!r}"
+        )
+        assert call_kwargs["agent_dir"] == "/agents/developer"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_with_developer_agent_id_still_works(
+        self, service, mock_repository, mock_queue_repo
+    ):
+        """enqueue(agent_id='developer') still works (sanity check).
+
+        Canonical agent_id must not regress — it should still resolve
+        correctly and create the job with the right values.
+        """
+        expected_job = MagicMock()
+        expected_job.job_id = "new-job-from-developer"
+        mock_repository.create.return_value = expected_job
+
+        with patch(
+            "daemon.services.job_queue_service.get_registry",
+            return_value=self._make_mock_registry_resolve_coder_to_developer(),
+        ):
+            result = await service.enqueue(
+                agent_id="developer",
+                message="test message",
+                source="api",
+            )
+
+        assert result.job_id == "new-job-from-developer"
+        call_kwargs = mock_repository.create.call_args.kwargs
+        assert call_kwargs["agent_id"] == "developer"
+        assert call_kwargs["agent_dir"] == "/agents/developer"

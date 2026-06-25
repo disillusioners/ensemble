@@ -88,6 +88,16 @@ UPDATE projects
 -- The migration runner splits statements on ';' and does not
 -- respect SQL comment syntax, so a ';' embedded in a -- comment
 -- would split the chunk mid-statement and produce a syntax error.
+--
+-- LIMITATION: the WHERE agent_id = 'developer' clause matches ALL
+-- developer rows. This is safe immediately after the UP block has
+-- run (no pre-existing 'developer' agent existed before the rename)
+-- but it is NOT future-proof for rollbacks performed after new
+-- developer instances/jobs have been created. Such rows would be
+-- incorrectly reverted to 'coder'. For safe rollbacks after
+-- production use, filter by a timestamp or migration marker, e.g.
+-- scope the rollback to rows persisted before the UP version was
+-- recorded in schema_migrations.
 
 UPDATE instances
    SET agent_id = 'coder',

@@ -467,11 +467,14 @@ class ChildReportsService:
             "Coder agent (name=create-feature-a, id=xxx) has done"
         """
         # Get agent display name from meta.json
-        agent_name = agent_id.capitalize()
-        
+        # Resolve alias first (backward compat for renamed agents like 'coder'→'developer')
+        # so fallback shows "Developer" instead of "Coder" if registry lookup misses.
+        registry = get_registry()
+        resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
+        agent_name = resolved_agent_id.capitalize()
+
         try:
-            registry = get_registry()
-            metadata = registry.get(agent_id)
+            metadata = registry.get(resolved_agent_id)
             if metadata and metadata.name:
                 agent_name = metadata.name
         except Exception:

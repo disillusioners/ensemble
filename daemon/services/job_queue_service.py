@@ -363,11 +363,15 @@ class JobQueueService:
             # Derive agent_dir from agent_id using registry before the
             # atomic insert — we still need it for both the insert path
             # and the registry validation below.
+            # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
+            # since agent_id may come from a DB row that still has the old value.
             registry = get_registry()
-            agent_meta = registry.get(agent_id)
+            resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
+            agent_meta = registry.get(resolved_agent_id)
             if agent_meta is None:
                 raise ValueError(f"Agent not found: {agent_id}")
             agent_dir = str(agent_meta.path)
+            agent_id = resolved_agent_id
 
             # Resolve queue_id for projects (needed for the INSERT row)
             resolved_queue_id = queue_id
@@ -479,11 +483,15 @@ class JobQueueService:
 
         # Non-idempotency path (or terminal-fallback path above).
         # Derive agent_dir from agent_id using registry.
+        # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
+        # since agent_id may come from a DB row that still has the old value.
         registry = get_registry()
-        agent_meta = registry.get(agent_id)
+        resolved_agent_id = registry.resolve_pure_id(agent_id) or agent_id
+        agent_meta = registry.get(resolved_agent_id)
         if agent_meta is None:
             raise ValueError(f"Agent not found: {agent_id}")
         agent_dir = str(agent_meta.path)
+        agent_id = resolved_agent_id
 
         # Resolve queue_id for projects
         resolved_queue_id = queue_id

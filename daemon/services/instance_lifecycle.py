@@ -1298,11 +1298,19 @@ class InstanceLifecycleService:
         stored_mcp = meta.instance_metadata.get("mcp_tool_names") if meta.instance_metadata else None
         mcp_tool_names = self._get_mcp_tool_names(instance_id, stored_mcp)
         
+        # Resolve alias (backward compat for renamed agents like 'coder'→'developer')
+        # DB may still contain the old agent_id if migration was partial/skipped.
+        registry = get_registry()
+        resolved_agent_id = registry.resolve_pure_id(meta.agent_id) or meta.agent_id
+        agent_meta = registry.get(resolved_agent_id)
+        if agent_meta is None:
+            raise ValueError(f"Agent not found: {meta.agent_id}")
+
         # Load and cache prompt using resolved path (pass MCP tool names for category expansion)
         # Import from manager to pick up test patches
         from ..manager import load_and_cache_prompt
-        agent_path = Path(meta.agent_dir)
-        system_prompt, token_count = load_and_cache_prompt(meta.agent_id, agent_path, prompt_cache, mcp_tool_names)
+        agent_path = Path(agent_meta.path)
+        system_prompt, token_count = load_and_cache_prompt(resolved_agent_id, agent_path, prompt_cache, mcp_tool_names)
 
         # Append CONTEXT_KEY (root parent instance ID) to system prompt
         system_prompt = append_context_key(system_prompt, instance_id, instance_repository, parent_id=meta.parent_id)
@@ -1313,14 +1321,10 @@ class InstanceLifecycleService:
         # Create tools with this manager reference
         # Import from manager to pick up test patches
         from ..manager import create_instance_tools
-        tools = create_instance_tools(self._manager, instance_id, meta.agent_id)
+        tools = create_instance_tools(self._manager, instance_id, resolved_agent_id)
 
         # Build LLM config
-        registry = get_registry()
-        metadata = registry.get(meta.agent_id)
-        if metadata is None:
-            raise ValueError(f"Agent not found: {meta.agent_id}")
-        llm_config = self._build_llm_config(metadata)
+        llm_config = self._build_llm_config(agent_meta)
 
         # Build retry config from queue settings
         retry_config = {
