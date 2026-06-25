@@ -6,7 +6,7 @@ The `.agents/shared/` directory at the project root stores cross-agent collabora
 
 ```
 <project-workdir>/.agents/shared/
-├── planning/                  # Feature plans (planner creates, coder reads)
+├── planning/                  # Feature plans (planner creates, developer reads)
 │   └── {feature-name}/        # One directory per feature
 │       ├── plan-overview.md   # Summary: objectives, phases, risks
 │       ├── phase1-plan.md

@@ -139,7 +139,7 @@
 **A well-sized phase:**
 - Covers ONE logical module or feature area
 - Contains 3-10 tasks
-- Can be completed by 1 coder instance (not 0.5 instances, not 3 instances)
+- Can be completed by 1 developer instance (not 0.5 instances, not 3 instances)
 - Is self-contained enough to review and test as a unit
 - Groups related components that belong together
 
@@ -147,12 +147,12 @@
 - Only 1-2 tasks
 - Single component/function
 - No meaningful review/testing boundary
-- Would take <30 min of coder work
+- Would take <30 min of developer work
 
 **Too big signals (split further):**
 - 15+ tasks
 - Spans multiple unrelated modules
-- Would take multiple coder instances
+- Would take multiple developer instances
 - No single coherent objective
 
 #### Required File Output Structure

@@ -10,7 +10,7 @@
 
 ```raw
 job_create(
-    agent_id="coder",           # Target agent
+    agent_id="developer",           # Target agent
     task="Fix the login bug",    # Task description
     watch=True,                 # CRITICAL: Watch immediately
     priority=5                  # Optional: 1-10, higher = more urgent
@@ -29,7 +29,7 @@ For independent jobs that can run simultaneously:
 
 ```raw
 # Create all jobs first
-job_create(agent_id="coder", task="Task A", watch=True)
+job_create(agent_id="developer", task="Task A", watch=True)
 → record job_id_1
 job_create(agent_id="reviewer", task="Task B", watch=True)
 → record job_id_2
@@ -303,11 +303,11 @@ job_continue(
 ### Atomic Create + Watch
 ```raw
 # PREFERRED - single call
-result = job_create(agent_id="coder", task="Fix bug", watch=True)
+result = job_create(agent_id="developer", task="Fix bug", watch=True)
 job_id = result["job_id"]
 
 # VS separate calls (avoid unless necessary)
-job_id = job_create(agent_id="coder", task="Fix bug")["job_id"]
+job_id = job_create(agent_id="developer", task="Fix bug")["job_id"]
 watch_job(job_id)  # Must call immediately!
 ```
 
@@ -323,7 +323,7 @@ watch_job(job_id)  # Must call immediately!
 
 ### Sequential Pipeline Pattern
 ```raw
-1. job_id = job_create(agent_id="coder", task="Step 1", watch=True)
+1. job_id = job_create(agent_id="developer", task="Step 1", watch=True)
 2. Wait for [JOB_EVENT] with status=COMPLETED
 3. Extract context from result
 4. job_id = job_create(agent_id="reviewer", task="Step 2", watch=True)
@@ -355,14 +355,14 @@ watch_job(job_id)  # Must call immediately!
 
 ```raw
 # WRONG - race condition
-job_create(agent_id="coder", task="...")  # No watch
+job_create(agent_id="developer", task="...")  # No watch
 # Job might complete before watch_job() is called
 watch_job(job_id)
 
 # RIGHT - atomic or immediate
-job_create(agent_id="coder", task="...", watch=True)
+job_create(agent_id="developer", task="...", watch=True)
 # OR
-job_id = job_create(agent_id="coder", task="...")["job_id"]
+job_id = job_create(agent_id="developer", task="...")["job_id"]
 watch_job(job_id)  # Called IMMEDIATELY
 ```
 

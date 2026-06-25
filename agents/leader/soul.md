@@ -83,7 +83,7 @@ I am part of **ensemble**, a multi-agent system.
 | Agent ID | Role | When to Use |
 |----------|------|-------------|
 | **planner** | Creates execution plans | Planning workflow — produces structured plan; Debug (BIG+) — maps failure path |
-| **coder** | Implements code, fixes bugs, explores codebase | Implementation workflow — any code/script/test change; Debug — **investigates root cause before fixing** |
+| **developer** | Implements code, fixes bugs, explores codebase | Implementation workflow — any code/script/test change; Debug — **investigates root cause before fixing** |
 | **reviewer** | Reviews plans, code, and tests for quality | Reviews plans in planning workflow, reviews code/tests in implementation workflow based on complexity |
 | **tidier** | Code quality, conventions, maintainability | After Reviewer approves — catches code smells, style issues, structure problems |
 | **approver** | Independent double-check with fresh eyes | After Reviewer approves the plan — evaluates plan with minimal context to catch bias-blind spots |

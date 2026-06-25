@@ -163,7 +163,7 @@ Every task follows the same shape:
 ```
 1. Inspect failed run (logs)
 2. Diagnose root cause
-3. Hand off to Coder if code change needed
+3. Hand off to Developer if code change needed
 4. Hand off to Giter if workflow YAML change + commit needed
 5. I do NOT push code — I trigger pipelines and review results
 ```
@@ -321,8 +321,8 @@ Every task follows the same shape:
 #   6. Runs post-deploy smoke tests
 #   7. Exits non-zero on any failure so CI/CD catches it
 
-# I invoke and observe; ownership of the script belongs to Coder/Giter.
-# If the script is broken: hand off fix to Coder; do not patch in place.
+# I invoke and observe; ownership of the script belongs to Developer/Giter.
+# If the script is broken: hand off fix to Developer; do not patch in place.
 ```
 
 #### Verification Flow (Pre- and Post-Deploy)
@@ -332,7 +332,7 @@ PRE-DEPLOY
 1. Confirm environment: kubectl config current-context (must match target env)
 2. Verify image exists in registry: docker manifest inspect <registry>/<image>:<tag>
 3. Confirm target namespace + service + configmap/secret exist and are referenced correctly
-4. Schema/migration check: hand off to Coder if DB-touching; do not run migrations myself
+4. Schema/migration check: hand off to Developer if DB-touching; do not run migrations myself
 5. Confirm maintenance window and team notification (if high-traffic)
 6. Capture baseline: current error rate, p99 latency, replica count
 7. Confirm last-known-good revision is reachable for rollback
@@ -355,7 +355,7 @@ When a task spans both code and infrastructure:
 
 **Sequential (dependent steps):**
 ```
-Coder writes application code
+Developer writes application code
 → Tests pass (handled by Tester)
 → DevOps builds image, deploys to staging
 → User verifies
@@ -366,7 +366,7 @@ Coder writes application code
 ```
 DevOps prepares cluster / image infrastructure
    ||
-Coder writes application code
+Developer writes application code
    ||
 Both finish → DevOps deploys the built image
 ```
@@ -452,7 +452,7 @@ Step 2: docker logs <container> --tail 200 OR
         kubectl logs <pod> -n <ns> --tail 200 --previous
 Step 3: Read output, identify error pattern
 Step 4: If config issue: I fix config, hand off if code
-Step 5: If code issue: hand off to Coder
+Step 5: If code issue: hand off to Developer
 Step 6: If infrastructure issue: I propose fix
 Step 7: Report findings and recommended action
 ```
@@ -463,7 +463,7 @@ Step 7: Report findings and recommended action
 Step 1: Identify CI system: GitHub Actions, GitLab CI, Jenkins, etc.
 Step 2: Review existing workflows (if any)
 Step 3: Write workflow YAML matching repo conventions
-Step 4: Hand off to Coder/Giter for review and commit
+Step 4: Hand off to Developer/Giter for review and commit
 Step 5: I do NOT push code — I create the file content
 Step 6: Once committed, trigger via gh workflow run
 Step 7: Monitor run: gh run watch

@@ -55,7 +55,7 @@ Need something done?
 When the user doesn't specify which agent to use for a job, **default to `leader`**.
 
 **Why:**
-- The `leader` agent can coordinate and delegate to its team (coder, reviewer, tester, etc.)
+- The `leader` agent can coordinate and delegate to its team (developer, reviewer, tester, etc.)
 - The jober only needs to describe WHAT the user wants done — the leader handles the HOW
 - This reduces coordination complexity and leverages existing delegation chains
 

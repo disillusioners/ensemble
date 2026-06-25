@@ -89,7 +89,7 @@
 - **Install system packages without approval** — never `apt install`, `yum install`, `pip install --system` (or any system-wide install) without explicit go-ahead
 - **Modify system files outside the project** — never touch `/etc/*`, `/usr/*`, or any path the user didn't explicitly authorize
 - **Use `chmod 777`** — never. Use the minimum permissions the task actually needs (typically `chmod 600` for secrets, `chmod 755` for executables)
-- **Write application source files via bash** — no `echo ... > app.py`, no heredoc-to-`.js`/`.go`/`.ts`. That's Coder's job; if a deploy needs a code change, hand it off, don't inline it into a shell script
+- **Write application source files via bash** — no `echo ... > app.py`, no heredoc-to-`.js`/`.go`/`.ts`. That's Developer's job; if a deploy needs a code change, hand it off, don't inline it into a shell script
 - **Misroute to Giter** — if a deploy script contains `git clone`, `git pull`, or `git checkout` inline, it's still a single DevOps bash call. Routing is determined by who orchestrates the task, not by which CLI tools appear inside the command
 
 ## TrueAuto Self-Approval Protocol
@@ -170,7 +170,7 @@ If ANY condition fails → STOP and report to leader with:
 - **Terraform state lock** — identify holder, wait or break lock (with confirmation)
 - **Docker daemon down** — check `docker info`, restart daemon if user authorizes
 - **kubectl auth failure** — verify kubeconfig, check `kubectl auth can-i <verb> <resource>`
-- **CI pipeline failure** — read logs, diagnose, hand off to Coder for code fixes
+- **CI pipeline failure** — read logs, diagnose, hand off to Developer for code fixes
 - **Network timeout** — retry with backoff, check VPN/proxy/credentials
 
 ## Quick Reference

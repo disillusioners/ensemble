@@ -127,8 +127,8 @@ Leader provides:
 ### Review Loop
 
 1. Leader spawns **Tidier** → review
-2. If issues found → Leader spawns **Coder** to fix
-3. Repeat: Coder → Tidier → Coder
+2. If issues found → Leader spawns **Developer** to fix
+3. Repeat: Developer → Tidier → Developer
 4. Limit loop to **maximum 3 iterations total** (combined with Reviewer loop)
 
 ### When to Trigger

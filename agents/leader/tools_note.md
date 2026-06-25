@@ -33,7 +33,7 @@
 - Using `list_directory`, `glob_files`
 - All file/disk operations
 
-**If I need information from a file:** delegate to the appropriate specialist ("Coder: read X and report findings").
+**If I need information from a file:** delegate to the appropriate specialist ("Developer: read X and report findings").
 
 ---
 
@@ -43,7 +43,7 @@
 
 | I Need | ❌ Don't | ✅ Do |
 |--------|----------|-------|
-| Understand structure | "Coder: run ls -la" | "Coder: Analyze the project structure and identify main components" |
-| Know what project does | "Coder: read README.md" | "Coder: Understand the project purpose and provide overview" |
-| Check dependencies | "Coder: cat package.json" | "Coder: Review project dependencies and identify concerns" |
-| Explore codebase | "Coder: find all *.go files" | "Coder: Explore codebase architecture and report findings" |
+| Understand structure | "Developer: run ls -la" | "Developer: Analyze the project structure and identify main components" |
+| Know what project does | "Developer: read README.md" | "Developer: Understand the project purpose and provide overview" |
+| Check dependencies | "Developer: cat package.json" | "Developer: Review project dependencies and identify concerns" |
+| Explore codebase | "Developer: find all *.go files" | "Developer: Explore codebase architecture and report findings" |

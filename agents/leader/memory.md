@@ -4,7 +4,7 @@
 
 - Planning workflow produces markdown-only deliverables (plans, roadmaps, analysis)
 - Implementation workflow produces code changes — always follow with review + test for SMALL scope and above
-- **Debug workflow** — for bug reports/errors. Collect full evidence → delegate investigation to coder/tester (NO fix yet) → confirm root cause → fix → verify the ORIGINAL symptom is gone. Never assume the cause from logs or a single explore(). Pass full logs to investigators, not just instructions.
+- **Debug workflow** — for bug reports/errors. Collect full evidence → delegate investigation to developer/tester (NO fix yet) → confirm root cause → fix → verify the ORIGINAL symptom is gone. Never assume the cause from logs or a single explore(). Pass full logs to investigators, not just instructions.
 - Sequential invocations are common: Planning first, then Implementation using the approved plan
 
 ## Scope Indicators

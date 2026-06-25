@@ -31,7 +31,7 @@ Modify an existing agent's files.
 
 ```python
 agent_modify(
-    agent_name="coder",
+    agent_name="developer",
     file="soul.md",            # soul.md, workflow.md, rule.md, user.md, memory.md
     content="new content..."   # new content for the file
 )
@@ -48,7 +48,7 @@ agent_delete(agent_name="old_agent")
 Read an agent's file contents.
 
 ```python
-agent_read(agent_name="coder", file="soul.md")
+agent_read(agent_name="developer", file="soul.md")
 ```
 
 ## Common Tools

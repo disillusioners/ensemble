@@ -485,7 +485,7 @@ RIGHT: Job failed → analyze error → retry if transient, report if persistent
 ### ❌ Direct Execution
 ```
 WRONG: "User wants a file read → I'll just read it"
-RIGHT: "User wants a file read → job_create(agent_id=coder, task=read file)"
+RIGHT: "User wants a file read → job_create(agent_id=developer, task=read file)"
 ```
 
 ### ❌ Not Tracking Jobs
