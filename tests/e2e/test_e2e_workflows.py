@@ -778,38 +778,54 @@ def _find_active_job_for_instance(
         for the instance, or ``None`` if not found within
         ``max_attempts * POLL_INTERVAL`` seconds.
     """
-    if project_id is None:
-        project_id = _get_first_project_id() or PROJECT_ID
+    # When no explicit project_id was passed, scan ALL projects rather
+    # than guessing the first one — leader instances spawned with
+    # ``project_id=None`` may end up under a different default project
+    # than what ``/api/projects`` returns first. Without this, the Phase 6
+    # PAUSED-job assertion is silently skipped.
+    scan_all_projects = project_id is None
 
     for attempt in range(max_attempts):
         try:
-            response = requests.get(
-                f"{API_BASE}/jobs",
-                params={
-                    "project_id": project_id,
-                    "limit": 200,
-                    "include_deleted": "false",
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
-            payload = response.json()
-            jobs = payload.get("jobs", payload) if isinstance(payload, dict) else payload
-            if not isinstance(jobs, list):
-                jobs = []
-
-            # Pick the most recent non-terminal job for the instance.
-            # Order: prefer non-terminal statuses (matches the "active"
-            # semantics the test cares about).
-            non_terminal_statuses = {"pending", "processing", "paused"}
             candidates: list[dict] = []
-            for job in jobs:
-                if not isinstance(job, dict):
-                    continue
-                job_inst = str(job.get("instance_id", ""))
-                if job_inst != instance_id:
-                    continue
-                candidates.append(job)
+
+            if scan_all_projects:
+                # Paginate through /api/jobs across all projects.
+                resp = requests.get(
+                    f"{API_BASE}/jobs",
+                    params={"limit": 200, "include_deleted": "false"},
+                    timeout=10,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+                jobs = payload.get("jobs", payload) if isinstance(payload, dict) else payload
+                if isinstance(jobs, list):
+                    for job in jobs:
+                        if (
+                            isinstance(job, dict)
+                            and str(job.get("instance_id", "")) == instance_id
+                        ):
+                            candidates.append(job)
+            else:
+                response = requests.get(
+                    f"{API_BASE}/jobs",
+                    params={
+                        "project_id": project_id,
+                        "limit": 200,
+                        "include_deleted": "false",
+                    },
+                    timeout=10,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                jobs = payload.get("jobs", payload) if isinstance(payload, dict) else payload
+                if isinstance(jobs, list):
+                    for job in jobs:
+                        if (
+                            isinstance(job, dict)
+                            and str(job.get("instance_id", "")) == instance_id
+                        ):
+                            candidates.append(job)
 
             if not candidates:
                 logger.info(
@@ -818,6 +834,7 @@ def _find_active_job_for_instance(
                 )
             else:
                 # Prefer active (non-terminal) jobs; fall back to most recent.
+                non_terminal_statuses = {"pending", "processing", "paused"}
                 active = [
                     j for j in candidates
                     if str(j.get("status", "")).lower() in non_terminal_statuses
