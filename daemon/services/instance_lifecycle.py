@@ -982,9 +982,19 @@ class InstanceLifecycleService:
                     skipped_ids.append(node_id)
                     continue
 
-                # Skip if already paused
-                if meta.status == InstanceStatus.PAUSED.value:
-                    logger.info(f"Instance {node_id[:8]}... is already paused, skipping")
+                # Skip if already paused, or in a terminal status
+                # (COMPLETED/ERROR/TERMINATED/FAILED). Pausing a terminal
+                # instance is nonsensical — the loop would otherwise log
+                # a misleading "Pausing instance..." line and feed the
+                # node into the batched UPDATE needlessly.
+                if (
+                    meta.status == InstanceStatus.PAUSED.value
+                    or meta.status in TERMINAL_STATUSES
+                ):
+                    logger.info(
+                        f"Instance {node_id[:8]}... is in non-pausable status "
+                        f"({meta.status}), skipping"
+                    )
                     skipped_ids.append(node_id)
                     continue
 
@@ -1201,6 +1211,28 @@ class InstanceLifecycleService:
         # ``getattr`` so tests that build a bare InstanceManager
         # without a worker pool do not crash.
         if resumed_ids:
+            # Phase 2 C3: compact FIRED watchers accumulated during pause
+            # so unbounded growth doesn't occur on long partial-tree
+            # pauses. The hook is idempotent and swallows its own
+            # exceptions; we still off-load to a thread because it
+            # performs sync SQL via ``self._manager.engine.begin()``.
+            for resumed_node_id in resumed_ids:
+                try:
+                    await asyncio.to_thread(
+                        self._compact_fired_watchers_for_paused,
+                        resumed_node_id,
+                    )
+                except Exception as compact_err:
+                    # Defensive: the helper already catches its own
+                    # exceptions, so reaching this branch means a
+                    # programming error (e.g. attribute lookup). Log and
+                    # continue — compaction is hygiene, not correctness.
+                    logger.warning(
+                        f"resume_instance_cascade: compaction hook raised "
+                        f"unexpected error for {resumed_node_id[:8]}... "
+                        f"({type(compact_err).__name__}: {compact_err})"
+                    )
+
             worker_pool = getattr(self._manager, "_worker_pool", None)
             if worker_pool is not None:
                 try:
