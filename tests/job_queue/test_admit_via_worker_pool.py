@@ -141,7 +141,7 @@ def _seed_instance(
     *,
     instance_id: str,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
 ) -> Instance:
     """Seed a real ``Instance`` row. Mirrors enqueue_message's contract.
 
@@ -150,7 +150,7 @@ def _seed_instance(
     inst = Instance(
         instance_id=instance_id,
         agent_id=agent_id,
-        agent_dir="/agents/coder",
+        agent_dir="/agents/developer",
         project_id="test-project",
         status=status,
         instance_metadata={},
@@ -180,8 +180,8 @@ def _make_job(
     """
     return JobItem(
         job_id=job_id or f"job-{uuid.uuid4().hex[:12]}",
-        agent_id="coder",
-        agent_dir="/agents/coder",
+        agent_id="developer",
+        agent_dir="/agents/developer",
         message=message,
         source=source,
         project_id="test-project",
@@ -463,7 +463,7 @@ class TestBasicAdmissionViaObserver:
                 job_id=job_id,
                 instance_id=inst_id,
                 parent_id=None,
-                agent_id="coder",
+                agent_id="developer",
                 result_summary=summary,
                 error_message=error,
                 locks_released=1,

@@ -106,7 +106,7 @@ def make_mock_job(
     mock.status = status
     mock.instance_id = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
     mock.project_id = project_id
-    mock.agent_id = "coder"
+    mock.agent_id = "developer"
     mock.message = "test"
     mock.source = "api"
     return mock
@@ -153,7 +153,7 @@ def make_fake_sync(
             job_id=job_id,
             instance_id=instance_id,
             parent_id=None,
-            agent_id="coder",
+            agent_id="developer",
             result_summary=result_summary,
             error_message=error_message,
             locks_released=locks_released,
@@ -840,7 +840,7 @@ class TestC2ConcurrentFinalize:
                     job_id=job_id_arg,
                     instance_id=instance_id_arg,
                     parent_id=None,
-                    agent_id="coder",
+                    agent_id="developer",
                     result_summary=result_summary,
                     error_message=error_message,
                     locks_released=0,

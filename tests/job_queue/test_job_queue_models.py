@@ -205,8 +205,8 @@ class TestJobItemWithQueueId:
         # Create job item with queue_id
         job = JobItem(
             job_id="test-job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -220,8 +220,8 @@ class TestJobItemWithQueueId:
         """Test creating JobItem without queue_id (should be None/default)."""
         job = JobItem(
             job_id="test-job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -234,8 +234,8 @@ class TestJobItemWithQueueId:
         """Test JobItem.to_dict() includes queue_id field."""
         job = JobItem(
             job_id="test-job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             queue_id="test-queue-123",

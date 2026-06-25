@@ -120,12 +120,12 @@ async def test_instance_title_generation_e2e(
     await manager.initialize()
 
     try:
-        # Spawn coder instance
+        # Spawn developer instance
         project_root = Path(__file__).parent.parent.parent
-        coder_agent_dir = str(project_root / "agents" / "coder")
-        logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
+        developer_agent_dir = str(project_root / "agents" / "developer")
+        logger.info(f"[TEST] Creating instance with agent: {developer_agent_dir}")
 
-        instance_id = manager.spawn_instance(agent_id="coder")
+        instance_id = manager.spawn_instance(agent_id="developer")
         logger.info(f"[TEST] Instance created: {instance_id}")
 
         # Verify initial state - no title
@@ -311,11 +311,11 @@ async def test_instance_title_not_regenerated(
     await manager.initialize()
 
     try:
-        # Spawn coder instance
+        # Spawn developer instance
         project_root = Path(__file__).parent.parent.parent
-        coder_agent_dir = str(project_root / "agents" / "coder")
+        developer_agent_dir = str(project_root / "agents" / "developer")
 
-        instance_id = manager.spawn_instance(agent_id="coder")
+        instance_id = manager.spawn_instance(agent_id="developer")
 
         # Pre-set a title before sending any messages
         manager._instance_repository.update_title(instance_id, "Pre-set Title")

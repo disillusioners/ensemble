@@ -866,7 +866,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         from tests.job_queue.conftest import TEST_SYSTEM_PROJECT_ID
         
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job without project",
             "source": "api",
             "project_id": None,
@@ -891,7 +891,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         # Just verify enqueue uses the system_fifo_queue
         
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job with project",
             "source": "api",
             "project_id": "test-project",
@@ -919,7 +919,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         )
 
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job with custom queue",
             "source": "api",
             "project_id": "test-project",
@@ -938,7 +938,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
     ):
         """Test enqueue with non-existent queue_id logs warning but creates job."""
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job with invalid queue",
             "source": "api",
             "project_id": "test-project",
@@ -969,7 +969,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
 
         # Try to use queue-2's queue_id with project-1
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job with cross-project queue",
             "source": "api",
             "project_id": "project-1",  # Different from queue's project
@@ -997,7 +997,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         )
 
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job",
             "source": "api",
             "project_id": "test-project",
@@ -1038,7 +1038,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         # Don't create any queue for project
         
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job without system queue",
             "source": "api",
             "project_id": "project-without-queue",
@@ -1064,7 +1064,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         )
 
         job_data = {
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "High priority job",
             "source": "api",
             "project_id": "test-project",

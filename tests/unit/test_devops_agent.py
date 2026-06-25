@@ -630,7 +630,7 @@ class TestDevopsLeaderIntegration:
         )
 
     def test_leader_workflow_routes_infra_to_devops(self) -> None:
-        """Leader workflow.md should route infra tasks to DevOps (not hardcoded to coder)."""
+        """Leader workflow.md should route infra tasks to DevOps (not hardcoded to developer)."""
         workflow_path = LEADER_AGENT_DIR / "workflow.md"
         content = workflow_path.read_text(encoding="utf-8")
 
@@ -638,7 +638,7 @@ class TestDevopsLeaderIntegration:
         assert "DevOps" in content or "devops" in content.lower(), (
             "Leader workflow.md should mention DevOps for routing"
         )
-        # Should NOT hardcode everything to Coder for infra
+        # Should NOT hardcode everything to Developer for infra
         # Check for infrastructure routing mentions
         infra_keywords = ["docker", "kubernetes", "terraform", "ci/cd", "deployment", "infrastructure"]
         has_infra_routing = any(kw in content.lower() for kw in infra_keywords)
@@ -665,7 +665,7 @@ class TestDevopsLeaderIntegration:
         workflow_path = LEADER_AGENT_DIR / "workflow.md"
         content = workflow_path.read_text(encoding="utf-8")
 
-        # Debug section should classify by domain (not just route to coder)
+        # Debug section should classify by domain (not just route to developer)
         assert "Debug" in content or "debug" in content.lower(), "Leader workflow should have debug section"
         # Should mention Phase 1.5 classification
         assert "1.5" in content or "CLASSIFY" in content or "classify" in content.lower(), (
@@ -697,16 +697,16 @@ class TestDevopsLeaderIntegration:
             "Leader rule.md should mention DevOps in decision tree"
         )
 
-    def test_leader_rule_devops_before_coder_catchall(self) -> None:
-        """Leader decision tree should check DevOps before Coder catchall."""
+    def test_leader_rule_devops_before_developer_catchall(self) -> None:
+        """Leader decision tree should check DevOps before Developer catchall."""
         rule_path = LEADER_AGENT_DIR / "rule.md"
         content = rule_path.read_text(encoding="utf-8")
 
-        # Check relative positions of devops and coder mentions
+        # Check relative positions of devops and developer mentions
         devops_pos = content.lower().find("devops")
-        coder_pos = content.lower().find("coder")
+        developer_pos = content.lower().find("developer")
 
-        if devops_pos != -1 and coder_pos != -1:
+        if devops_pos != -1 and developer_pos != -1:
             # DevOps should appear in the decision context
             # (The exact ordering depends on document structure, so we just check both exist)
             assert True

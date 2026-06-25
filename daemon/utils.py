@@ -422,22 +422,38 @@ def find_near_instance(instance_id: str, instances: list, max_distance: int = DE
 
 def validate_agent_id(agent_id: str) -> tuple[str, Path]:
     """Validate agent_id exists and return agent_id with path.
-    
+
     This is the preferred function for validating agent references.
-    
+    Resolves agent_id aliases (e.g., ``"coder"`` -> ``"developer"``) via
+    the registry before lookup so persisted/legacy references continue
+    to resolve after a rename. Returns the canonical agent_id from
+    the registry metadata, not the raw input.
+
     Args:
         agent_id: The agent identifier to validate.
-        
+
     Returns:
-        Tuple of (agent_id, resolved_absolute_path).
-        
+        Tuple of (canonical_agent_id, resolved_absolute_path).
+
     Raises:
         HTTPException: If agent is invalid or not found.
     """
     registry = get_registry()
-    
-    # Check agent exists
-    metadata = registry.get(agent_id)
+
+    # Resolve alias (e.g., "coder" -> "developer") before dict lookup.
+    # registry.get() does NOT resolve aliases, so this step is required
+    # to support backward-compatible references to renamed agents.
+    canonical_id = registry.resolve_pure_id(agent_id)
+    if canonical_id is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                code=ErrorCodes.INVALID_REQUEST,
+                message=f"Agent not found: {agent_id}"
+            ).model_dump()
+        )
+
+    metadata = registry.get(canonical_id)
     if metadata is None:
         raise HTTPException(
             status_code=404,
@@ -446,8 +462,8 @@ def validate_agent_id(agent_id: str) -> tuple[str, Path]:
                 message=f"Agent not found: {agent_id}"
             ).model_dump()
         )
-    
-    return agent_id, metadata.path
+
+    return metadata.id, metadata.path
 
 
 # ── Agent-as-Tool: Synchronous Invoke ────────────────────────────────────────

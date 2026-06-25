@@ -92,8 +92,8 @@ def create_dlq_items_for_project(engine, dlq_repository, project_id, count, reas
         # Create job in DEAD_LETTER status
         job = JobItem(
             job_id=job_id,
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message=f"Job {i} for {project_id}",
             source="api",
             project_id=project_id,
@@ -114,8 +114,8 @@ def create_dlq_items_for_project(engine, dlq_repository, project_id, count, reas
         dlq_item = DeadLetterItem(
             dlq_id=dlq_id,
             job_id=job_id,
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message=f"Job {i} for {project_id}",
             source="api",
             project_id=project_id,
@@ -413,8 +413,8 @@ class TestReplayAllResponseStructure:
             
             job = JobItem(
                 job_id=job_id,
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Job for queue-other",
                 source="api",
                 project_id=project_id,
@@ -429,8 +429,8 @@ class TestReplayAllResponseStructure:
             dlq_item = DeadLetterItem(
                 dlq_id=dlq_id,
                 job_id=job_id,
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Job for queue-other",
                 source="api",
                 project_id=project_id,
@@ -475,8 +475,8 @@ class TestReplayAllResponseStructure:
             
             job = JobItem(
                 job_id=job_id,
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"MAX_RETRIES job {i}",
                 source="api",
                 project_id=project_id,
@@ -491,8 +491,8 @@ class TestReplayAllResponseStructure:
             dlq_item = DeadLetterItem(
                 dlq_id=dlq_id,
                 job_id=job_id,
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"MAX_RETRIES job {i}",
                 source="api",
                 project_id=project_id,
@@ -514,8 +514,8 @@ class TestReplayAllResponseStructure:
             
             job = JobItem(
                 job_id=job_id,
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"MANUAL job {i}",
                 source="api",
                 project_id=project_id,
@@ -530,8 +530,8 @@ class TestReplayAllResponseStructure:
             dlq_item = DeadLetterItem(
                 dlq_id=dlq_id,
                 job_id=job_id,
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"MANUAL job {i}",
                 source="api",
                 project_id=project_id,

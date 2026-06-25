@@ -29,9 +29,9 @@ class TestSkillDetectionInErrorMessage:
         # Create mock registry
         mock_registry = MagicMock()
         mock_registry.get.return_value = None  # Agent not found
-        mock_registry.find_skill.return_value = ["coder", "tester", "reviewer"]  # It's a skill
+        mock_registry.find_skill.return_value = ["developer", "tester", "reviewer"]  # It's a skill
         mock_registry.list_all.return_value = [
-            MagicMock(id="coder", system=False),
+            MagicMock(id="developer", system=False),
             MagicMock(id="tester", system=False),
             MagicMock(id="reviewer", system=False),
             MagicMock(id="_mother", system=True),  # System agent - should be excluded
@@ -50,7 +50,7 @@ class TestSkillDetectionInErrorMessage:
             assert "opencode" in message
 
             # Should list agents with this skill
-            assert "coder" in message
+            assert "developer" in message
             assert "tester" in message
             assert "reviewer" in message
 
@@ -59,7 +59,7 @@ class TestSkillDetectionInErrorMessage:
 
             # Should show available agents section
             assert "Available agents:" in message
-            assert "coder" in message
+            assert "developer" in message
             assert "tester" in message
             assert "reviewer" in message
 
@@ -74,7 +74,7 @@ class TestUnknownAgentName:
         mock_registry.get.return_value = None  # Agent not found
         mock_registry.find_skill.return_value = []  # Not a skill either
         mock_registry.list_all.return_value = [
-            MagicMock(id="coder", system=False),
+            MagicMock(id="developer", system=False),
             MagicMock(id="leader", system=False),
         ]
 
@@ -92,7 +92,7 @@ class TestUnknownAgentName:
 
             # Should list available agents
             assert "Available agents:" in message
-            assert "coder" in message
+            assert "developer" in message
             assert "leader" in message
 
             # Should NOT mention skills
@@ -109,20 +109,20 @@ class TestTypoSuggestion:
         mock_registry.get.return_value = None  # Agent not found
         mock_registry.find_skill.return_value = []  # Not a skill
         mock_registry.list_all.return_value = [
-            MagicMock(id="coder", system=False),
+            MagicMock(id="developer", system=False),
             MagicMock(id="leader", system=False),
         ]
 
         with patch("daemon.utils.get_registry", return_value=mock_registry):
             with pytest.raises(HTTPException) as exc_info:
-                validate_agent_id("code")  # Typo for "coder"
+                validate_agent_id("code")  # Typo for "developer"
 
             assert exc_info.value.status_code == 404
             detail = exc_info.value.detail
             message = detail["message"]
 
             # Should contain typo suggestion
-            assert "Did you mean 'coder'?" in message
+            assert "Did you mean 'developer'?" in message
 
 
 class TestPathTraversalProtection:
@@ -150,16 +150,16 @@ class TestPathTraversalProtection:
         agents_dir.mkdir()
 
         # Create agent with a skill
-        agent_dir = agents_dir / "coder"
+        agent_dir = agents_dir / "developer"
         agent_dir.mkdir()
         skill_dir = agent_dir / "skills" / "coding"
         skill_dir.mkdir(parents=True)
         (skill_dir / "skill.md").write_text("# Coding skill")
 
         meta = {
-            "id": "coder",
+            "id": "developer",
             "name": "Coder",
-            "description": "Test coder",
+            "description": "Test developer",
             "icon": "🤖",
             "color": "accent-blue",
         }
@@ -171,7 +171,7 @@ class TestPathTraversalProtection:
 
         # Should find the skill
         result = registry.find_skill("coding")
-        assert "coder" in result
+        assert "developer" in result
 
     def test_find_skill_with_innate_skills(self, tmp_path: Path) -> None:
         """find_skill should find skills from innate-skills registry when agent references them."""
@@ -185,12 +185,12 @@ class TestPathTraversalProtection:
         (coding_skill_dir / "skill.md").write_text("# Coding skill from registry")
 
         # Create agent that uses the innate skill
-        agent_dir = agents_dir / "coder"
+        agent_dir = agents_dir / "developer"
         agent_dir.mkdir()
         meta = {
-            "id": "coder",
+            "id": "developer",
             "name": "Coder",
-            "description": "Test coder",
+            "description": "Test developer",
             "icon": "🤖",
             "color": "accent-blue",
             "innate_skills": ["coding"],  # Reference the centralized skill
@@ -203,7 +203,7 @@ class TestPathTraversalProtection:
 
         # Should find the skill via innate-skills registry
         result = registry.find_skill("coding")
-        assert "coder" in result
+        assert "developer" in result
 
     def test_find_skill_without_innate_skills_dir_falls_back_to_legacy(self, tmp_path: Path) -> None:
         """find_skill should fall back to legacy per-agent skills/ when innate-skills dir doesn't exist."""
@@ -213,16 +213,16 @@ class TestPathTraversalProtection:
         # NO innate-skills directory - only legacy per-agent skills
 
         # Create agent with legacy skill
-        agent_dir = agents_dir / "coder"
+        agent_dir = agents_dir / "developer"
         agent_dir.mkdir()
         skill_dir = agent_dir / "skills" / "coding"
         skill_dir.mkdir(parents=True)
         (skill_dir / "skill.md").write_text("# Coding skill from legacy dir")
 
         meta = {
-            "id": "coder",
+            "id": "developer",
             "name": "Coder",
-            "description": "Test coder",
+            "description": "Test developer",
             "icon": "🤖",
             "color": "accent-blue",
         }
@@ -234,7 +234,7 @@ class TestPathTraversalProtection:
 
         # Should find the skill via legacy per-agent skills/ directory
         result = registry.find_skill("coding")
-        assert "coder" in result
+        assert "developer" in result
 
     def test_find_skill_innate_skills_dir_missing_but_skill_in_legacy(self, tmp_path: Path) -> None:
         """find_skill should find skill in legacy dir even when innate-skills dir doesn't exist."""
@@ -300,17 +300,18 @@ class TestValidAgentId:
         """When agent exists, should return (agent_id, path) without raising."""
         mock_path = Path("/path/to/agent")
         mock_meta = MagicMock(spec=AgentMetadata)
-        mock_meta.id = "coder"
+        mock_meta.id = "developer"
         mock_meta.path = mock_path
 
         mock_registry = MagicMock()
+        mock_registry.resolve_pure_id.return_value = "developer"
         mock_registry.get.return_value = mock_meta
 
         with patch("daemon.utils.get_registry", return_value=mock_registry):
             result = validate_agent_id("coder")
 
-            assert result == ("coder", mock_path)
-            mock_registry.get.assert_called_once_with("coder")
+            assert result == ("developer", mock_path)
+            mock_registry.get.assert_called_once_with("developer")
 
 
 class TestManagerSpawnInstanceErrors:
@@ -345,9 +346,9 @@ class TestManagerSpawnInstanceErrors:
         mock_registry = MagicMock()
         mock_registry.resolve_to_id.return_value = None  # Not a valid agent ID
         mock_registry.get.return_value = None  # Agent not found
-        mock_registry.find_skill.return_value = ["coder", "tester"]  # It's a skill
+        mock_registry.find_skill.return_value = ["developer", "tester"]  # It's a skill
         mock_registry.list_all.return_value = [
-            MagicMock(id="coder", system=False),
+            MagicMock(id="developer", system=False),
             MagicMock(id="tester", system=False),
         ]
 
@@ -369,7 +370,7 @@ class TestManagerSpawnInstanceErrors:
                 assert "opencode" in message
 
                 # Should list agents with skill
-                assert "coder" in message
+                assert "developer" in message
                 assert "tester" in message
 
                 # Should list available agents
@@ -431,7 +432,7 @@ class TestManagerSpawnInstanceErrors:
         mock_registry.get.return_value = None
         mock_registry.find_skill.return_value = []
         mock_registry.list_all.return_value = [
-            MagicMock(id="coder", system=False),
+            MagicMock(id="developer", system=False),
         ]
 
         with patch("daemon.manager.get_registry", return_value=mock_registry):
@@ -443,12 +444,12 @@ class TestManagerSpawnInstanceErrors:
                 manager._loop = None
 
                 with pytest.raises(ValueError) as exc_info:
-                    manager.spawn_instance("code")  # Typo for coder
+                    manager.spawn_instance("code")  # Typo for developer
 
                 message = str(exc_info.value)
 
-                # Should suggest coder
-                assert "Did you mean 'coder'?" in message
+                # Should suggest developer
+                assert "Did you mean 'developer'?" in message
 
     @pytest.mark.skip(reason="Instructive error messages not yet implemented")
     def test_manager_empty_registry_value_error(self) -> None:

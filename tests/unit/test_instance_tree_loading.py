@@ -40,7 +40,7 @@ def _make_instance(
     repo: SQLModelInstanceRepository,
     instance_id: str,
     parent_id: str | None = None,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     status: str = "running",
     project_id: str = "proj-1",
 ) -> None:
@@ -103,8 +103,8 @@ class TestListIncludeDescendantsBFS:
 
     def test_exclude_kb_excludes_kb_descendants(self, repo):
         """exclude_kb=True excludes KB agent descendants from the loaded tree."""
-        _make_instance(repo, "root", agent_id="coder")
-        _make_instance(repo, "regular-child", parent_id="root", agent_id="coder")
+        _make_instance(repo, "root", agent_id="developer")
+        _make_instance(repo, "regular-child", parent_id="root", agent_id="developer")
         _make_instance(repo, "kb-child", parent_id="root", agent_id="experiencer")
         # Nested KB child (under regular child) should also be excluded
         _make_instance(repo, "nested-kb", parent_id="regular-child", agent_id="kb-importer")
@@ -263,7 +263,7 @@ class TestExcludeKBTraversesThroughKBParents:
     """
 
     def test_kb_parent_with_non_kb_child_grandchild_kept(self, repo):
-        """root (coder) → kb_child (experiencer) → non_kb_grandchild (coder).
+        """root (developer) → kb_child (experiencer) → non_kb_grandchild (developer).
 
         With ``exclude_kb=True``:
         - The KB child should be EXCLUDED from the final list.
@@ -271,10 +271,10 @@ class TestExcludeKBTraversesThroughKBParents:
           through the KB parent to reach it).
         - The total count is 1 (only the root counts).
         """
-        _make_instance(repo, "root", agent_id="coder")
+        _make_instance(repo, "root", agent_id="developer")
         _make_instance(repo, "kb_child", parent_id="root", agent_id="experiencer")
         _make_instance(
-            repo, "non_kb_grandchild", parent_id="kb_child", agent_id="coder"
+            repo, "non_kb_grandchild", parent_id="kb_child", agent_id="developer"
         )
 
         instances, total = repo.list(include_descendants=True, exclude_kb=True)
@@ -287,10 +287,10 @@ class TestExcludeKBTraversesThroughKBParents:
 
     def test_kb_parent_with_non_kb_child_exclude_kb_false_keeps_all(self, repo):
         """Same tree, but with ``exclude_kb=False``: all three are returned."""
-        _make_instance(repo, "root", agent_id="coder")
+        _make_instance(repo, "root", agent_id="developer")
         _make_instance(repo, "kb_child", parent_id="root", agent_id="experiencer")
         _make_instance(
-            repo, "non_kb_grandchild", parent_id="kb_child", agent_id="coder"
+            repo, "non_kb_grandchild", parent_id="kb_child", agent_id="developer"
         )
 
         instances, total = repo.list(include_descendants=True, exclude_kb=False)

@@ -81,7 +81,7 @@ def make_mock_job(
     job_id: str = "job-12345678-1234-1234-1234-123456789abc",
     status: str = "processing",
     instance_id: str = "instance-456",
-    agent_id: str = "coder",
+    agent_id: str = "developer",
 ) -> MagicMock:
     """Create a MagicMock(spec=JobItem) with the given attributes."""
     mock_job = MagicMock(spec=JobItem)
@@ -137,7 +137,7 @@ def make_fake_sync(
             job_id=job_id,
             instance_id=instance_id,
             parent_id=None,
-            agent_id="coder",
+            agent_id="developer",
             result_summary=result_summary,
             error_message=error_message,
             locks_released=locks_released,
@@ -445,7 +445,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
     def _make_proc_job(job_type: str = "message", instance_id: str = "instance-456"):
         job = MagicMock()
         job.job_id = "job-abc"
-        job.agent_id = "coder"
+        job.agent_id = "developer"
         job.message = "test"
         job.source = "api"
         job.project_id = "test-project"
@@ -874,7 +874,7 @@ class TestJobProcessorInProgressGuardReviewFixes:
         job = MagicMock()
         job.job_id = job_id
         job.job_type = "task"
-        job.agent_id = "coder"
+        job.agent_id = "developer"
         return job
 
     @pytest.mark.skip(reason="Phase 4: waiting_for guard removed; obsolete behavior")

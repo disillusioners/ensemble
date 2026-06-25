@@ -537,7 +537,7 @@ class TestLifecycleEvents:
         queue = asyncio.Queue()
         instance_data = {
             "instance_id": "child-123",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "parent_id": "parent-456",
             "status": "idle",
             "project_id": "proj-1",
@@ -553,13 +553,13 @@ class TestLifecycleEvents:
         assert event["instance_id"] == "parent-456"
         assert event["event_type"] == "instance_created"
         assert event["data"]["instance_id"] == "child-123"
-        assert event["data"]["agent_id"] == "coder"
+        assert event["data"]["agent_id"] == "developer"
 
     @pytest.mark.asyncio
     async def test_stream_instance_created_no_connections(self):
         """Instance created events are silently dropped when no connections exist."""
         hub = LiveEventHub()
-        instance_data = {"instance_id": "child-123", "agent_id": "coder"}
+        instance_data = {"instance_id": "child-123", "agent_id": "developer"}
 
         # Should not raise
         await hub.stream_instance_created("nonexistent-parent", instance_data)
@@ -570,7 +570,7 @@ class TestLifecycleEvents:
         hub = LiveEventHub()
         parent_queue = asyncio.Queue()
         other_queue = asyncio.Queue()
-        instance_data = {"instance_id": "child-123", "agent_id": "coder"}
+        instance_data = {"instance_id": "child-123", "agent_id": "developer"}
 
         await hub.add_connection("parent-456", parent_queue)
         await hub.add_connection("other-instance", other_queue)
@@ -589,7 +589,7 @@ class TestLifecycleEvents:
         hub = LiveEventHub()
         queue1 = asyncio.Queue()
         queue2 = asyncio.Queue()
-        instance_data = {"instance_id": "child-123", "agent_id": "coder"}
+        instance_data = {"instance_id": "child-123", "agent_id": "developer"}
 
         await hub.add_connection("parent-456", queue1)
         await hub.add_connection("parent-456", queue2)

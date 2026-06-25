@@ -44,12 +44,12 @@ def agent_system_prompt():
     from daemon.loader import load_agent_prompts, compose_system_prompt
     
     project_root = Path(__file__).parent.parent.parent
-    coder_agent_dir = project_root / "agents" / "coder"
+    developer_agent_dir = project_root / "agents" / "developer"
     
-    if not coder_agent_dir.exists():
-        pytest.skip(f"Coder agent not found at {coder_agent_dir}")
+    if not developer_agent_dir.exists():
+        pytest.skip(f"Developer agent not found at {developer_agent_dir}")
     
-    prompts = load_agent_prompts(coder_agent_dir)
+    prompts = load_agent_prompts(developer_agent_dir)
     system_prompt = compose_system_prompt(prompts)
     
     return system_prompt
@@ -60,7 +60,7 @@ def test_agent_bootstrap_and_hello(integration_config, agent_system_prompt):
     
     This test:
     1. Loads real config from .env via config.yaml
-    2. Builds a LangGraph agent with the coder agent's system prompt
+    2. Builds a LangGraph agent with the developer agent's system prompt
     3. Sends "Hello!" message
     4. Validates we receive a non-empty response from the LLM
     """
@@ -126,7 +126,7 @@ async def test_agent_bootstrap_with_instance_manager(integration_config, agent_s
     from daemon.loader import PromptCache
     
     project_root = Path(__file__).parent.parent.parent
-    coder_agent_dir = str(project_root / "agents" / "coder")
+    developer_agent_dir = str(project_root / "agents" / "developer")
     
     # Create persistence manager with in-memory database
     persistence = PersistenceManager(db_path=":memory:")
@@ -138,8 +138,8 @@ async def test_agent_bootstrap_with_instance_manager(integration_config, agent_s
         prompt_cache=PromptCache()
     )
     
-    # Spawn an instance with the coder agent
-    instance_id = manager.spawn_instance(agent_id="coder")
+    # Spawn an instance with the developer agent
+    instance_id = manager.spawn_instance(agent_id="developer")
     
     assert instance_id, "Should return an instance ID"
     assert instance_id in manager.instances, "Instance should be registered"

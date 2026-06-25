@@ -91,8 +91,8 @@ def _seed_instance(
 ) -> Instance:
     inst = Instance(
         instance_id=instance_id,
-        agent_id="coder",
-        agent_dir="/agents/coder",
+        agent_id="developer",
+        agent_dir="/agents/developer",
         project_id="test-project",
         status=status,
         version=version,

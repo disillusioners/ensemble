@@ -246,11 +246,11 @@ def run_test():
         leader_id = instance["instance_id"]
         log(f"STEP 2: PASS - Created leader instance {leader_id}")
 
-        # Step 3: Send message asking leader to spawn coder
+        # Step 3: Send message asking leader to spawn developer
         log("\n--- STEP 3: Send Spawn Request to Leader ---")
         spawn_request = (
-            "Hello! Please spawn a coder instance to do a simple task. "
-            "Use the spawn_instance tool to create a coder instance."
+            "Hello! Please spawn a developer instance to do a simple task. "
+            "Use the spawn_instance tool to create a developer instance."
         )
         if not send_message(leader_id, spawn_request):
             log("STEP 3: FAIL - Could not send spawn request")

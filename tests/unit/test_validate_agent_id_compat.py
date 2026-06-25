@@ -51,18 +51,20 @@ class TestValidateAgentIdCompat:
         from unittest.mock import patch
         from pathlib import Path
         from daemon.utils import validate_agent_id
-        
+
         mock_path = Path("/path/to/agent")
         mock_metadata = MagicMock()
+        mock_metadata.id = "valid-agent"
         mock_metadata.path = mock_path
-        
+
         with patch("daemon.utils.get_registry") as mock_get_registry:
             mock_registry = MagicMock()
+            mock_registry.resolve_pure_id.return_value = "valid-agent"
             mock_registry.get.return_value = mock_metadata
             mock_get_registry.return_value = mock_registry
-            
+
             result = validate_agent_id("valid-agent")
-        
+
         assert isinstance(result, tuple)
         assert len(result) == 2
         assert result[0] == "valid-agent"

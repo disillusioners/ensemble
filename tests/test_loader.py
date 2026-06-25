@@ -734,7 +734,7 @@ class TestSoulLoading:
     def test_compose_includes_soul_section_first(self):
         """Test that soul section comes first in composed prompt."""
         prompts = {
-            "soul": "# Who I Am\nI am a coder.",
+            "soul": "# Who I Am\nI am a developer.",
             "rule": "# Rules\nFollow rules",
             "tools": "# Tools\n- bash",
         }

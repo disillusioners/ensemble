@@ -22,7 +22,7 @@ class TestCronParsing:
         """Test that valid cron expressions are accepted."""
         config = make_config("test-cron", {
             "schedule": "0 9 * * 1-5",  # 9 AM on weekdays
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Good morning!",
         })
         
@@ -35,7 +35,7 @@ class TestCronParsing:
         """Test that 'every minute' cron expression is valid."""
         config = make_config("test-cron-minute", {
             "schedule": "* * * * *",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -48,7 +48,7 @@ class TestCronParsing:
         """Test cron expression with specific hour and minute."""
         config = make_config("test-cron-specific", {
             "schedule": "30 14 * * *",  # 2:30 PM every day
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Afternoon check",
         })
         
@@ -60,7 +60,7 @@ class TestCronParsing:
         """Test that invalid cron expressions raise ValueError."""
         config = make_config("test-invalid-cron", {
             "schedule": "invalid cron expression",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -71,7 +71,7 @@ class TestCronParsing:
         """Test that cron with too few fields raises error."""
         config = make_config("test-cron-short", {
             "schedule": "0 9 *",  # Only 3 fields instead of 5
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -89,7 +89,7 @@ class TestIntervalScheduling:
         """Test valid interval_seconds configuration."""
         config = make_config("test-interval", {
             "interval_seconds": 300,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Periodic check",
         })
         
@@ -102,7 +102,7 @@ class TestIntervalScheduling:
         """Test minimum valid interval (1 second)."""
         config = make_config("test-interval-min", {
             "interval_seconds": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Fast check",
         })
         
@@ -115,7 +115,7 @@ class TestIntervalScheduling:
         """Test large interval (24 hours)."""
         config = make_config("test-interval-large", {
             "interval_seconds": 86400,  # 24 hours
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Daily check",
         })
         
@@ -128,7 +128,7 @@ class TestIntervalScheduling:
         """Test that zero interval raises ValueError."""
         config = make_config("test-interval-zero", {
             "interval_seconds": 0,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -139,7 +139,7 @@ class TestIntervalScheduling:
         """Test that negative interval raises ValueError."""
         config = make_config("test-interval-neg", {
             "interval_seconds": -10,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -150,7 +150,7 @@ class TestIntervalScheduling:
         """Test that string interval raises ValueError."""
         config = make_config("test-interval-str", {
             "interval_seconds": "300",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -169,7 +169,7 @@ class TestOneTimeTrigger:
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-future", {
             "run_at": future_time,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "One-time check",
         })
         
@@ -182,7 +182,7 @@ class TestOneTimeTrigger:
         """Test run_at with Z suffix (Zulu time)."""
         config = make_config("test-onetime-z", {
             "run_at": "2025-12-25T10:00:00Z",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Christmas check",
         })
         
@@ -196,7 +196,7 @@ class TestOneTimeTrigger:
         """Test run_at with timezone offset."""
         config = make_config("test-onetime-offset", {
             "run_at": "2025-06-15T14:30:00+05:30",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "IST check",
         })
         
@@ -210,7 +210,7 @@ class TestOneTimeTrigger:
         past_time = "2020-01-01T00:00:00Z"
         config = make_config("test-onetime-past", {
             "run_at": past_time,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Past check",
         })
         
@@ -223,7 +223,7 @@ class TestOneTimeTrigger:
         """Test that invalid run_at format raises ValueError."""
         config = make_config("test-onetime-invalid", {
             "run_at": "not-a-date",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -234,7 +234,7 @@ class TestOneTimeTrigger:
         """Test that empty run_at string is ignored (falls through to no schedule error)."""
         config = make_config("test-onetime-empty", {
             "run_at": "",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -253,7 +253,7 @@ class TestTimezoneHandling:
         """Test that default timezone is UTC."""
         config = make_config("test-tz-default", {
             "schedule": "0 9 * * *",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -266,7 +266,7 @@ class TestTimezoneHandling:
         config = make_config("test-tz-ny", {
             "schedule": "0 9 * * *",
             "timezone": "America/New_York",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -279,7 +279,7 @@ class TestTimezoneHandling:
         config = make_config("test-tz-tokyo", {
             "schedule": "0 9 * * *",
             "timezone": "Asia/Tokyo",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -292,7 +292,7 @@ class TestTimezoneHandling:
         config = make_config("test-tz-london", {
             "schedule": "0 9 * * *",
             "timezone": "Europe/London",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -305,7 +305,7 @@ class TestTimezoneHandling:
         config = make_config("test-tz-unknown", {
             "schedule": "0 9 * * *",
             "timezone": "Invalid/Timezone",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -319,7 +319,7 @@ class TestTimezoneHandling:
         config = make_config("test-tz-calc", {
             "schedule": "0 9 * * *",  # 9 AM
             "timezone": "Asia/Tokyo",  # UTC+9
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -342,7 +342,7 @@ class TestMaxConcurrent:
         """Test that default max_concurrent is 1."""
         config = make_config("test-concurrent-default", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -355,7 +355,7 @@ class TestMaxConcurrent:
         config = make_config("test-concurrent-custom", {
             "interval_seconds": 60,
             "max_concurrent": 5,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -368,7 +368,7 @@ class TestMaxConcurrent:
         config = make_config("test-concurrent-high", {
             "interval_seconds": 60,
             "max_concurrent": 100,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -382,7 +382,7 @@ class TestMaxConcurrent:
         config = make_config("test-concurrent-sem", {
             "interval_seconds": 3600,  # Long interval to avoid triggering during test
             "max_concurrent": 3,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -411,7 +411,7 @@ class TestSchedulerLifecycle:
         """Test that start() sets status to RUNNING."""
         config = make_config("test-lifecycle-start", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -430,7 +430,7 @@ class TestSchedulerLifecycle:
         """Test that stop() sets status to STOPPED."""
         config = make_config("test-lifecycle-stop", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -445,7 +445,7 @@ class TestSchedulerLifecycle:
         """Test health_check returns True when running."""
         config = make_config("test-health-running", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -463,7 +463,7 @@ class TestSchedulerLifecycle:
         """Test health_check returns False when stopped."""
         config = make_config("test-health-stopped", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -478,7 +478,7 @@ class TestSchedulerLifecycle:
         """Test that calling start() twice is safe."""
         config = make_config("test-double-start", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -502,7 +502,7 @@ class TestManualTrigger:
         """Test that manual_trigger returns a valid execution_id."""
         config = make_config("test-manual-trigger", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -522,7 +522,7 @@ class TestManualTrigger:
         """Test that manual_trigger raises error when scheduler is stopped."""
         config = make_config("test-manual-stopped", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -536,7 +536,7 @@ class TestManualTrigger:
         """Test that manual_trigger emits a message via callback."""
         config = make_config("test-manual-emit", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Manual test message",
         })
         
@@ -569,7 +569,7 @@ class TestNextTriggerTime:
         """Test next trigger time calculation for cron schedule."""
         config = make_config("test-next-cron", {
             "schedule": "0 9 * * *",  # Every day at 9 AM
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -583,7 +583,7 @@ class TestNextTriggerTime:
         """Test next trigger time calculation for interval schedule."""
         config = make_config("test-next-interval", {
             "interval_seconds": 300,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -603,7 +603,7 @@ class TestNextTriggerTime:
         future_time = datetime.now(timezone.utc) + timedelta(hours=2)
         config = make_config("test-next-onetime", {
             "run_at": future_time.isoformat(),
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -616,7 +616,7 @@ class TestNextTriggerTime:
         """Test that past one-time schedule returns current time."""
         config = make_config("test-next-past", {
             "run_at": "2020-01-01T00:00:00Z",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -636,7 +636,7 @@ class TestNoScheduleConfiguration:
     def test_no_schedule_raises_error(self, mock_on_message):
         """Test that missing schedule configuration raises ValueError."""
         config = make_config("test-no-schedule", {
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -662,7 +662,7 @@ class TestExecutionCallback:
         """Test that execution callback is called during manual trigger."""
         config = make_config("test-callback-manual", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -692,7 +692,7 @@ class TestSemaphoreTimeout:
         config = make_config("test-sem-cap", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -723,7 +723,7 @@ class TestSemaphoreTimeout:
         config = make_config("test-sem-avail", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -747,7 +747,7 @@ class TestSemaphoreTimeout:
         config = make_config("test-sem-release", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -773,7 +773,7 @@ class TestSemaphoreTimeout:
         config = make_config("test-manual-timeout", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -825,7 +825,7 @@ class TestSemaphoreTimeout:
         config = make_config("test-skipped-msg", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -880,7 +880,7 @@ class TestJobQueueRouting:
         config = make_config("test-jq-scheduled", {
             "interval_seconds": 3600,
             "project_id": "test-project",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -905,7 +905,7 @@ class TestJobQueueRouting:
         """Test that scheduled triggers without project_id use immediate execution."""
         config = make_config("test-jq-no-project", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -936,7 +936,7 @@ class TestJobQueueRouting:
         config = make_config("test-jq-manual", {
             "interval_seconds": 3600,
             "project_id": "test-project",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -968,7 +968,7 @@ class TestJobQueueRouting:
         config = make_config("test-jq-fail", {
             "interval_seconds": 3600,
             "project_id": "test-project",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1015,7 +1015,7 @@ class TestAtomicCounter:
         config = make_config("test-counter", {
             "interval_seconds": 3600,
             "instance_mode": "reuse_instance",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1045,7 +1045,7 @@ class TestAtomicCounter:
         config = make_config("test-counter-none", {
             "interval_seconds": 3600,
             "instance_mode": "reuse_instance",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1072,7 +1072,7 @@ class TestAtomicCounter:
         config = make_config("test-counter-init", {
             "interval_seconds": 3600,
             "instance_mode": "reuse_instance",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1107,7 +1107,7 @@ class TestAtomicCounter:
         config = make_config("test-counter-persist", {
             "interval_seconds": 3600,
             "instance_mode": "reuse_instance",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1154,7 +1154,7 @@ class TestLastRunAtNextRunAt:
         """Test that execution callback is called with correct execution_id."""
         config = make_config("test-last-run", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1179,7 +1179,7 @@ class TestLastRunAtNextRunAt:
         """Test that next trigger time is computed for running scheduler."""
         config = make_config("test-next-running", {
             "schedule": "0 9 * * *",  # 9 AM cron
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1194,7 +1194,7 @@ class TestLastRunAtNextRunAt:
         """Test that next_run_at is None when one-time schedule has executed."""
         config = make_config("test-next-once", {
             "run_at": "2020-01-01T00:00:00Z",  # Past time
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1213,7 +1213,7 @@ class TestLastRunAtNextRunAt:
         """Test that next_run_at is correctly computed for interval schedule."""
         config = make_config("test-next-interval", {
             "interval_seconds": 300,  # 5 minutes
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1246,7 +1246,7 @@ class TestCancelledErrorSemaphoreLeak:
         config = make_config("test-cancel-exec", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1291,7 +1291,7 @@ class TestCancelledErrorSemaphoreLeak:
             "interval_seconds": 3600,
             "max_concurrent": 1,
             "instance_mode": "reuse_instance",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1336,7 +1336,7 @@ class TestCancelledErrorSemaphoreLeak:
         config = make_config("test-double-release", {
             "interval_seconds": 3600,
             "max_concurrent": 1,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1364,7 +1364,7 @@ class TestCancelledErrorSemaphoreLeak:
             "interval_seconds": 3600,
             "max_concurrent": 1,
             "instance_mode": "reuse_instance",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1420,7 +1420,7 @@ class TestErrorPaths:
         
         config = make_config("test-callback-fail", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1444,7 +1444,7 @@ class TestErrorPaths:
         """Test that message send failure is recorded in callback."""
         config = make_config("test-send-fail", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1477,7 +1477,7 @@ class TestErrorPaths:
         config = make_config("test-queue-fail", {
             "interval_seconds": 3600,
             "project_id": "test-project",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -1512,7 +1512,7 @@ class TestErrorPaths:
         """Test that adapter properly handles start and health check."""
         config = make_config("test-start-health", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         

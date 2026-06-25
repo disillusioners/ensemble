@@ -106,8 +106,8 @@ def _seed_instance(
     engine,
     *,
     instance_id: str = "inst-1",
-    agent_id: str = "coder",
-    agent_dir: str = "/agents/coder",
+    agent_id: str = "developer",
+    agent_dir: str = "/agents/developer",
     status: str = InstanceStatus.IDLE.value,
     project_id: str | None = "test-project",
     version: int = 1,
@@ -738,7 +738,7 @@ class TestPrepareEnqueuedMessageHelper:
         assert ctx.status_changed_to_running is True
         assert ctx.is_idle_to_running is True
         assert ctx.previous_status == InstanceStatus.IDLE.value
-        assert ctx.instance_agent_id == "coder"
+        assert ctx.instance_agent_id == "developer"
 
         # DB state: 1 message queue + 1 task + 1 event.
         assert len(_load_message_queues(engine, "inst-1")) == 1

@@ -13,8 +13,8 @@ def mock_instance_metadata():
     """Create mock instance metadata."""
     meta = Mock()
     meta.instance_id = "test-root-123"
-    meta.agent_id = "coder"
-    meta.agent_name = "Coder Agent"
+    meta.agent_id = "developer"
+    meta.agent_name = "Developer Agent"
     meta.status = "COMPLETED"
     return meta
 

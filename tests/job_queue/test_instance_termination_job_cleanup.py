@@ -48,7 +48,7 @@ class MockJob:
     def __init__(
         self,
         job_id: str,
-        agent_id: str = "coder",
+        agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
         status: str = JobStatus.PENDING.value,
@@ -943,7 +943,7 @@ class TestJobProcessorOrphanDetection:
         # PROCESSING TASK job with TERMINATED instance
         orphan_task = MagicMock()
         orphan_task.job_id = "orphan-task"
-        orphan_task.agent_id = "coder"
+        orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
         orphan_task.status = JobStatus.PROCESSING.value
@@ -999,7 +999,7 @@ class TestJobProcessorOrphanDetection:
 
         orphan_task = MagicMock()
         orphan_task.job_id = "orphan-task-completed"
-        orphan_task.agent_id = "coder"
+        orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
         orphan_task.status = JobStatus.PROCESSING.value
@@ -1052,7 +1052,7 @@ class TestJobProcessorOrphanDetection:
 
         orphan_task = MagicMock()
         orphan_task.job_id = "orphan-task-error"
-        orphan_task.agent_id = "coder"
+        orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
         orphan_task.status = JobStatus.PROCESSING.value
@@ -1105,7 +1105,7 @@ class TestJobProcessorOrphanDetection:
 
         orphan_task = MagicMock()
         orphan_task.job_id = "orphan-task-paused"
-        orphan_task.agent_id = "coder"
+        orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
         orphan_task.status = JobStatus.PROCESSING.value
@@ -1156,7 +1156,7 @@ class TestJobProcessorOrphanDetection:
 
         orphan_task = MagicMock()
         orphan_task.job_id = "genuine-orphan"
-        orphan_task.agent_id = "coder"
+        orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
         orphan_task.status = JobStatus.PROCESSING.value
@@ -1209,7 +1209,7 @@ class TestJobProcessorOrphanDetection:
         # PROCESSING MESSAGE job with COMPLETED instance
         message_job = MagicMock()
         message_job.job_id = "message-job-completed"
-        message_job.agent_id = "coder"
+        message_job.agent_id = "developer"
         message_job.project_id = "project-1"
         message_job.queue_id = "queue-1"
         message_job.status = JobStatus.PROCESSING.value
@@ -1268,7 +1268,7 @@ class TestJobProcessorOrphanDetection:
         # PROCESSING MESSAGE job with TERMINATED instance
         message_job = MagicMock()
         message_job.job_id = "message-job-terminated"
-        message_job.agent_id = "coder"
+        message_job.agent_id = "developer"
         message_job.project_id = "project-1"
         message_job.queue_id = "queue-1"
         message_job.status = JobStatus.PROCESSING.value
@@ -1325,7 +1325,7 @@ class TestJobProcessorOrphanDetection:
         # PROCESSING MESSAGE job with COMPLETED instance
         message_job = MagicMock()
         message_job.job_id = "message-job-completed-fail"
-        message_job.agent_id = "coder"
+        message_job.agent_id = "developer"
         message_job.project_id = "project-1"
         message_job.queue_id = "queue-1"
         message_job.status = JobStatus.PROCESSING.value

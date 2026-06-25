@@ -330,7 +330,7 @@ def sample_instance_info_data():
     """Sample InstanceInfo data for testing."""
     return {
         "instance_id": "test-instance-123",
-        "agent_id": "coder",
+        "agent_id": "developer",
         "agent_dir": "/path/to/agent",
         "status": "running",
         "parent_id": None,
@@ -383,7 +383,7 @@ def sample_health_response_data():
 
 @pytest.fixture
 def sample_instance_create_data():
-    """Sample InstanceCreate data for testing."""
+    """Sample InstanceCreate data for testing alias normalization (coder → developer)."""
     return {
         "agent_id": "coder",
     }
@@ -391,7 +391,7 @@ def sample_instance_create_data():
 
 @pytest.fixture
 def sample_instance_create_with_instance_id():
-    """Sample InstanceCreate data with custom instance_id."""
+    """Sample InstanceCreate data with custom instance_id (alias normalization test)."""
     return {
         "agent_id": "coder",
         "instance_id": "custom-instance-123",

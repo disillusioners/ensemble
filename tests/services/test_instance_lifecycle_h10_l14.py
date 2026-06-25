@@ -101,7 +101,7 @@ def seed_instance(
     *,
     instance_id: str | None = None,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     parent_id: str | None = None,
     waiting_for: int = 0,
     paused_at: str | None = None,
@@ -158,8 +158,8 @@ def seed_job(
         s.add(
             JobItem(
                 job_id=jid,
-                agent_id="coder",
-                agent_dir="/tmp/agents/coder",
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
                 message="test job",
                 source="api",
                 job_type=job_type,

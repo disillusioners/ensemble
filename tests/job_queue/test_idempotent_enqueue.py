@@ -23,7 +23,7 @@ TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
 
 def make_mock_job(
     job_id: str = "test-job-1",
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     project_id: str = "test-project",
     status: str = JobStatus.PENDING.value,
     idempotency_key: str | None = None,
@@ -58,7 +58,7 @@ def make_mock_job(
     return job
 
 
-def make_mock_registry(agent_id: str = "coder", agent_path: str = "/agents/coder") -> MagicMock:
+def make_mock_registry(agent_id: str = "developer", agent_path: str = "/agents/developer") -> MagicMock:
     """Create a mock registry that returns agent metadata.
     
     Args:
@@ -198,7 +198,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
             )
@@ -234,7 +234,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-123",
@@ -273,7 +273,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-123",
@@ -310,7 +310,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-456",
@@ -351,7 +351,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-789",
@@ -391,7 +391,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-failed",
@@ -432,7 +432,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-cancelled",
@@ -473,7 +473,7 @@ class TestIdempotentEnqueue:
             mock_get_registry.return_value = make_mock_registry()
             
             await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 project_id="test-project",
@@ -506,7 +506,7 @@ class TestIdempotentEnqueue:
             
             # Should not raise even without dispatch_bus
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
             )
@@ -586,7 +586,7 @@ class TestIdempotentEnqueueEdgeCases:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-dlq",
@@ -705,7 +705,7 @@ class TestIdempotentEnqueueTTL:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-ttl",
@@ -742,7 +742,7 @@ class TestIdempotentEnqueueTTL:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-ttl-recent",
@@ -789,7 +789,7 @@ class TestIdempotentEnqueueTTL:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-custom-ttl",
@@ -829,7 +829,7 @@ class TestIdempotentEnqueueTTL:
             mock_get_registry.return_value = make_mock_registry()
             
             result = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="test message",
                 source="api",
                 idempotency_key="key-boundary",

@@ -251,7 +251,7 @@ class TestMigrationBackfillsJobQueueItems:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                 VALUES
-                    ('job-null-1', 'coder', '/agents/coder', 'Test message', 'api', NULL, 5, 'pending', :now)
+                    ('job-null-1', 'developer', '/agents/developer', 'Test message', 'api', NULL, 5, 'pending', :now)
             """), {"now": now})
 
         # Verify NULL before migration
@@ -288,7 +288,7 @@ class TestMigrationBackfillsJobQueueItems:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                 VALUES
-                    ('job-empty-1', 'coder', '/agents/coder', 'Test message', 'api', '', 5, 'pending', :now)
+                    ('job-empty-1', 'developer', '/agents/developer', 'Test message', 'api', '', 5, 'pending', :now)
             """), {"now": now})
 
         # Verify empty string before migration
@@ -326,7 +326,7 @@ class TestMigrationBackfillsJobQueueItems:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                 VALUES
-                    ('job-valid-1', 'coder', '/agents/coder', 'Test message', 'api', :proj, 5, 'pending', :now)
+                    ('job-valid-1', 'developer', '/agents/developer', 'Test message', 'api', :proj, 5, 'pending', :now)
             """), {"proj": custom_project, "now": now})
 
         run_migration(db_engine)
@@ -349,7 +349,7 @@ class TestMigrationBackfillsJobQueueItems:
                     INSERT INTO job_queue_items
                         (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                     VALUES
-                        (:jid, 'coder', '/agents/coder', 'Test message', 'api', NULL, 5, 'pending', :now)
+                        (:jid, 'developer', '/agents/developer', 'Test message', 'api', NULL, 5, 'pending', :now)
                 """), {"jid": f"job-null-{i}", "now": now})
 
         run_migration(db_engine)
@@ -389,7 +389,7 @@ class TestMigrationBackfillsDeadLetterItems:
                     (dlq_id, job_id, agent_id, agent_dir, message, source, project_id,
                      priority, error_message, retry_count, failed_at, reason)
                 VALUES
-                    ('dlq-null-1', 'job-dlq-1', 'coder', '/agents/coder',
+                    ('dlq-null-1', 'job-dlq-1', 'developer', '/agents/developer',
                      'Failed message', 'api', NULL, 5, 'Timeout', 3, :now, 'MAX_RETRIES')
             """), {"now": now})
 
@@ -421,7 +421,7 @@ class TestMigrationBackfillsDeadLetterItems:
                     (dlq_id, job_id, agent_id, agent_dir, message, source, project_id,
                      priority, error_message, retry_count, failed_at, reason)
                 VALUES
-                    ('dlq-empty-1', 'job-dlq-2', 'coder', '/agents/coder',
+                    ('dlq-empty-1', 'job-dlq-2', 'developer', '/agents/developer',
                      'Failed message', 'api', '', 5, 'Timeout', 3, :now, 'MAX_RETRIES')
             """), {"now": now})
 
@@ -451,7 +451,7 @@ class TestMigrationBackfillsDeadLetterItems:
                     (dlq_id, job_id, agent_id, agent_dir, message, source, project_id,
                      priority, error_message, retry_count, failed_at, reason)
                 VALUES
-                    ('dlq-valid-1', 'job-dlq-3', 'coder', '/agents/coder',
+                    ('dlq-valid-1', 'job-dlq-3', 'developer', '/agents/developer',
                      'Failed message', 'api', :proj, 5, 'Timeout', 3, :now, 'MAX_RETRIES')
             """), {"proj": custom_project, "now": now})
 
@@ -481,7 +481,7 @@ class TestMigrationAssignsQueueId:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                 VALUES
-                    ('job-orphan-1', 'coder', '/agents/coder', 'Orphaned job', 'api',
+                    ('job-orphan-1', 'developer', '/agents/developer', 'Orphaned job', 'api',
                      :proj, 5, 'pending', :now)
             """), {"proj": SYSTEM_DEFAULT_PROJECT_ID, "now": now})
 
@@ -514,7 +514,7 @@ class TestMigrationAssignsQueueId:
                     (dlq_id, job_id, agent_id, agent_dir, message, source, project_id,
                      priority, error_message, retry_count, failed_at, reason)
                 VALUES
-                    ('dlq-orphan-1', 'job-dlq-orphan', 'coder', '/agents/coder',
+                    ('dlq-orphan-1', 'job-dlq-orphan', 'developer', '/agents/developer',
                      'Orphaned DLQ', 'api', :proj, 5, 'Timeout', 3, :now, 'MAX_RETRIES')
             """), {"proj": SYSTEM_DEFAULT_PROJECT_ID, "now": now})
 
@@ -539,7 +539,7 @@ class TestMigrationAssignsQueueId:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, queue_id, priority, status, created_at)
                 VALUES
-                    ('job-with-queue-1', 'coder', '/agents/coder', 'Job with queue',
+                    ('job-with-queue-1', 'developer', '/agents/developer', 'Job with queue',
                      'api', :proj, :queue, 5, 'pending', :now)
             """), {"proj": SYSTEM_DEFAULT_PROJECT_ID, "queue": existing_queue, "now": now})
 
@@ -572,7 +572,7 @@ class TestMigrationEndToEnd:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                 VALUES
-                    ('job-mixed-1', 'coder', '/agents/coder', 'NULL project', 'api', NULL, 5, 'pending', :now)
+                    ('job-mixed-1', 'developer', '/agents/developer', 'NULL project', 'api', NULL, 5, 'pending', :now)
             """), {"now": now})
 
             # Job with empty string project_id
@@ -580,7 +580,7 @@ class TestMigrationEndToEnd:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                 VALUES
-                    ('job-mixed-2', 'coder', '/agents/coder', 'Empty project', 'api', '', 5, 'pending', :now)
+                    ('job-mixed-2', 'developer', '/agents/developer', 'Empty project', 'api', '', 5, 'pending', :now)
             """), {"now": now})
 
             # Job with valid project_id
@@ -588,7 +588,7 @@ class TestMigrationEndToEnd:
                 INSERT INTO job_queue_items
                     (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                 VALUES
-                    ('job-mixed-3', 'coder', '/agents/coder', 'Valid project', 'api', :proj, 5, 'pending', :now)
+                    ('job-mixed-3', 'developer', '/agents/developer', 'Valid project', 'api', :proj, 5, 'pending', :now)
             """), {"proj": custom_project, "now": now})
 
         run_migration(db_engine)
@@ -633,7 +633,7 @@ class TestMigrationEndToEnd:
                     INSERT INTO job_queue_items
                         (job_id, agent_id, agent_dir, message, source, project_id, priority, status, created_at)
                     VALUES
-                        (:jid, 'coder', '/agents/coder', 'Orphan job', 'api', NULL, 5, 'pending', :now)
+                        (:jid, 'developer', '/agents/developer', 'Orphan job', 'api', NULL, 5, 'pending', :now)
                 """), {"jid": f"job-orphan-{i}", "now": now})
 
         run_migration(db_engine)

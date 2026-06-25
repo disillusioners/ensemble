@@ -112,8 +112,8 @@ class TestCreateOrGetByIdempotencyKey:
         key = f"key-{uuid.uuid4().hex[:8]}"
 
         job, created = repository.create_or_get_by_idempotency_key(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="hello",
             source="api",
             project_id="test-project",
@@ -133,8 +133,8 @@ class TestCreateOrGetByIdempotencyKey:
         key = f"key-{uuid.uuid4().hex[:8]}"
 
         first, first_created = repository.create_or_get_by_idempotency_key(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="first",
             source="api",
             project_id="test-project",
@@ -142,8 +142,8 @@ class TestCreateOrGetByIdempotencyKey:
             idempotency_key=key,
         )
         second, second_created = repository.create_or_get_by_idempotency_key(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="second",
             source="api",
             project_id="test-project",
@@ -190,8 +190,8 @@ class TestCreateOrGetByIdempotencyKey:
         def worker(payload: str) -> None:
             barrier.wait()  # Release both threads at the same time.
             job, created = repository.create_or_get_by_idempotency_key(
-                agent_id="coder",
-                agent_dir="/tmp/agents/coder",
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
                 message=payload,
                 source="api",
                 project_id="test-project",
@@ -244,8 +244,8 @@ class TestCreateOrGetByIdempotencyKey:
         def worker() -> None:
             barrier.wait()
             repository.create_or_get_by_idempotency_key(
-                agent_id="coder",
-                agent_dir="/tmp/agents/coder",
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
                 message="x",
                 source="api",
                 project_id="test-project",
@@ -279,8 +279,8 @@ class TestCreateOrGetByIdempotencyKey:
         key = f"no-raise-{uuid.uuid4().hex[:8]}"
 
         repository.create_or_get_by_idempotency_key(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="x",
             source="api",
             project_id="test-project",
@@ -290,8 +290,8 @@ class TestCreateOrGetByIdempotencyKey:
         # Second call must not raise.
         try:
             _, created = repository.create_or_get_by_idempotency_key(
-                agent_id="coder",
-                agent_dir="/tmp/agents/coder",
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
                 message="y",
                 source="api",
                 project_id="test-project",
@@ -311,8 +311,8 @@ class TestCreateOrGetByIdempotencyKey:
         """An empty idempotency_key raises ValueError (programming error)."""
         with pytest.raises(ValueError, match="non-empty idempotency_key"):
             repository.create_or_get_by_idempotency_key(
-                agent_id="coder",
-                agent_dir="/tmp/agents/coder",
+                agent_id="developer",
+                agent_dir="/tmp/agents/developer",
                 message="x",
                 source="api",
                 project_id="test-project",
@@ -328,8 +328,8 @@ class TestCreateOrGetByIdempotencyKey:
         key_b = f"b-{uuid.uuid4().hex[:8]}"
 
         job_a, created_a = repository.create_or_get_by_idempotency_key(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="A",
             source="api",
             project_id="test-project",
@@ -337,8 +337,8 @@ class TestCreateOrGetByIdempotencyKey:
             idempotency_key=key_a,
         )
         job_b, created_b = repository.create_or_get_by_idempotency_key(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="B",
             source="api",
             project_id="test-project",
@@ -359,8 +359,8 @@ class TestCreateOrGetByIdempotencyKey:
         key = f"meta-{uuid.uuid4().hex[:8]}"
 
         job, created = repository.create_or_get_by_idempotency_key(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="meta-test",
             source="scheduler",
             project_id="test-project",

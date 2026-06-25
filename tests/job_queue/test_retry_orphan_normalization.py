@@ -158,8 +158,8 @@ async def test_retry_orphan_job_gets_system_project_id():
             # Create a FAILED job with project_id=None (orphan job)
             # This simulates a job that was created before the system had a project
             orphan_job = repository.create(
-                agent_id="coder",
-                agent_dir="./agents/coder",
+                agent_id="developer",
+                agent_dir="./agents/developer",
                 message="Orphan job that failed",
                 source="test",
                 project_id=None,  # This is the orphan
@@ -241,7 +241,7 @@ async def test_enqueue_orphan_job_gets_system_project_id():
         ):
             # Enqueue a job with project_id=None (orphan)
             job = await service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message="Job with no project",
                 source="test",
                 project_id=None,  # This is the orphan

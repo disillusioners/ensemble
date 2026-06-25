@@ -199,7 +199,7 @@ class TestListSchedules:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Daily Report",
-            {"schedule": "0 9 * * *", "agent": "./agents/coder", "message": "Report"}
+            {"schedule": "0 9 * * *", "agent": "./agents/developer", "message": "Report"}
         )
         scheduler_source.status = "running"
         
@@ -220,17 +220,17 @@ class TestListSchedules:
         scheduler1 = create_scheduler_source(
             "cron-schedule",
             "Cron Job",
-            {"schedule": "0 9 * * 1-5", "agent": "./agents/coder", "message": "Weekday report"}
+            {"schedule": "0 9 * * 1-5", "agent": "./agents/developer", "message": "Weekday report"}
         )
         scheduler2 = create_scheduler_source(
             "interval-schedule",
             "Interval Job",
-            {"interval_seconds": 300, "agent": "./agents/coder", "message": "Every 5 min"}
+            {"interval_seconds": 300, "agent": "./agents/developer", "message": "Every 5 min"}
         )
         scheduler3 = create_scheduler_source(
             "onetime-schedule",
             "One-time Job",
-            {"run_at": "2025-12-25T10:00:00Z", "agent": "./agents/coder", "message": "Christmas"}
+            {"run_at": "2025-12-25T10:00:00Z", "agent": "./agents/developer", "message": "Christmas"}
         )
         
         mock_manager._source_repository.list_source_configs = Mock(
@@ -288,7 +288,7 @@ class TestTriggerSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -306,7 +306,7 @@ class TestTriggerSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -329,7 +329,7 @@ class TestTriggerSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -362,7 +362,7 @@ class TestTriggerSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -421,7 +421,7 @@ class TestGetScheduleExecutions:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -441,7 +441,7 @@ class TestGetScheduleExecutions:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -475,7 +475,7 @@ class TestGetScheduleExecutions:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -506,7 +506,7 @@ class TestGetScheduleExecutions:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -529,7 +529,7 @@ class TestGetScheduleExecutions:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -562,7 +562,7 @@ class TestGetScheduleExecutions:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -583,7 +583,7 @@ class TestGetScheduleExecutions:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -631,7 +631,7 @@ class TestUpdateSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Old Name",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
 
@@ -639,7 +639,7 @@ class TestUpdateSchedule:
         updated_source = create_scheduler_source(
             "scheduler-1",
             "New Name",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
 
@@ -659,7 +659,7 @@ class TestUpdateSchedule:
         """Test that partial config updates are merged with existing config."""
         existing_config = {
             "schedule": "0 9 * * *",
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Daily report",
             "max_concurrent": 3
         }
@@ -707,14 +707,14 @@ class TestUpdateSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
 
         # Mock updated source with instance_mode
         updated_config = {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance"
         }
@@ -741,7 +741,7 @@ class TestUpdateSchedule:
         """Test that max_concurrent is adjusted to 1 when instance_mode is reuse_instance."""
         existing_config = {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "max_concurrent": 5
         }
@@ -812,7 +812,7 @@ class TestUpdateSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
 
@@ -820,7 +820,7 @@ class TestUpdateSchedule:
         updated_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         mock_manager._source_repository.update_source_config = Mock(return_value=updated_source)
 
@@ -854,7 +854,7 @@ class TestStartSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
         
@@ -912,7 +912,7 @@ class TestStartSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
         
@@ -934,7 +934,7 @@ class TestStartSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         scheduler_source.status = "running"
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -969,7 +969,7 @@ class TestStopSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         scheduler_source.status = "running"
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -1023,7 +1023,7 @@ class TestStopSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         scheduler_source.status = "running"
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)
@@ -1046,7 +1046,7 @@ class TestStopSchedule:
         scheduler_source = create_scheduler_source(
             "scheduler-1",
             "Test Schedule",
-            {"interval_seconds": 3600, "agent": "./agents/coder", "message": "Test"}
+            {"interval_seconds": 3600, "agent": "./agents/developer", "message": "Test"}
         )
         scheduler_source.status = "stopped"
         mock_manager._source_repository.get_source_config = Mock(return_value=scheduler_source)

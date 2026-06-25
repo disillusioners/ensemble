@@ -99,7 +99,7 @@ def patch_spawn_instance_db_sync_with_inheritance(manager, mock_instance_repo):
         return _SpawnResult(
             created=True,
             parent_id=parent_id,
-            agent_id=kwargs.get("resolved_agent_id", "coder"),
+            agent_id=kwargs.get("resolved_agent_id", "developer"),
             project_id=None,
             created_at="2026-01-01T00:00:00+00:00",
             inherited_source=bool(parent_id),
@@ -451,9 +451,9 @@ async def test_manager_streaming_extracts_string_content(
         # Mock spawn_instance to avoid calling real lifecycle service
         manager.spawn_instance = Mock(return_value="test-instance")
         # Add mock graph to instances so get_instance can find it
-        manager.instances["test-instance"] = (mock_graph, "agents/coder")
+        manager.instances["test-instance"] = (mock_graph, "agents/developer")
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         result = await manager._process_message_with_tracking(
             instance_id=instance_id,
@@ -513,9 +513,9 @@ async def test_manager_streaming_extracts_list_content(
             # Mock spawn_instance to avoid calling real lifecycle service
             manager.spawn_instance = Mock(return_value="test-instance")
             # Add mock graph to instances so get_instance can find it
-            manager.instances["test-instance"] = (mock_graph, "agents/coder")
+            manager.instances["test-instance"] = (mock_graph, "agents/developer")
 
-            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
             result = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -574,9 +574,9 @@ async def test_manager_streaming_mixed_list_content_only_text_dispatched(
             # Mock spawn_instance to avoid calling real lifecycle service
             manager.spawn_instance = Mock(return_value="test-instance")
             # Add mock graph to instances so get_instance can find it
-            manager.instances["test-instance"] = (mock_graph, "agents/coder")
+            manager.instances["test-instance"] = (mock_graph, "agents/developer")
 
-            instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
             result = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -647,9 +647,9 @@ async def test_manager_streaming_deduplication_by_message_id(
         # Mock spawn_instance to avoid calling real lifecycle service
         manager.spawn_instance = Mock(return_value="test-instance")
         # Add mock graph to instances so get_instance can find it
-        manager.instances["test-instance"] = (mock_graph, "agents/coder")
+        manager.instances["test-instance"] = (mock_graph, "agents/developer")
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         result = await manager._process_message_with_tracking(
             instance_id=instance_id,
@@ -711,9 +711,9 @@ async def test_manager_streaming_multiple_messages_same_execution(
         # Mock spawn_instance to avoid calling real lifecycle service
         manager.spawn_instance = Mock(return_value="test-instance")
         # Add mock graph to instances so get_instance can find it
-        manager.instances["test-instance"] = (mock_graph, "agents/coder")
+        manager.instances["test-instance"] = (mock_graph, "agents/developer")
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         result = await manager._process_message_with_tracking(
             instance_id=instance_id,
@@ -790,9 +790,9 @@ async def test_manager_streaming_empty_content_not_dispatched(
         # Mock spawn_instance to avoid calling real lifecycle service
         manager.spawn_instance = Mock(return_value="test-instance")
         # Add mock graph to instances so get_instance can find it
-        manager.instances["test-instance"] = (mock_graph, "agents/coder")
+        manager.instances["test-instance"] = (mock_graph, "agents/developer")
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         result = await manager._process_message_with_tracking(
             instance_id=instance_id,
@@ -855,7 +855,7 @@ async def test_manager_stores_original_source_in_metadata(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         result = await manager._process_message_with_tracking(
             instance_id=instance_id,
@@ -919,7 +919,7 @@ async def test_manager_uses_original_source_for_internal_report(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_report source
         result = await manager._process_message_with_tracking(
@@ -983,7 +983,7 @@ async def test_manager_skips_dispatch_when_no_original_source(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_report source but no original_source stored
         result = await manager._process_message_with_tracking(
@@ -1046,7 +1046,7 @@ async def test_manager_uses_original_source_for_internal_error_report(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_error_report source
         result = await manager._process_message_with_tracking(
@@ -1119,12 +1119,12 @@ async def test_internal_agent_source_does_not_trigger_source_replacement(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_agent source (should NOT be treated as completion report)
         result = await manager._process_message_with_tracking(
             instance_id=instance_id,
-            message="Forward this to the coder agent",
+            message="Forward this to the developer agent",
             message_id="test-msg-agent",
             message_source="internal_agent:coder123"
         )
@@ -1192,7 +1192,7 @@ async def test_source_inheritance_parent_to_child(
 
         # Spawn child with valid parent UUID
         child_id = manager.spawn_instance(
-            agent_id="coder",
+            agent_id="developer",
             instance_id=child_uuid,
             parent_id=parent_uuid
         )
@@ -1266,7 +1266,7 @@ async def test_write_once_guard_original_source(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # First message from telegram:123 - should SET original_source
         await manager._process_message_with_tracking(
@@ -1377,7 +1377,7 @@ async def test_integration_external_source_child_report_dispatch(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Step 1: External message stores source
         await manager._process_message_with_tracking(
@@ -1532,7 +1532,7 @@ async def test_manager_warns_when_original_source_not_found(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="coder", instance_id="test-instance")
+        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_report but no original_source stored
         with caplog.at_level(logging.WARNING):
@@ -1668,7 +1668,7 @@ async def test_full_chain_external_msg_to_telegram_after_child_completion(
 
         # Step 2: Spawn child (simulating what happens in real flow)
         child_id = manager.spawn_instance(
-            agent_id="coder",
+            agent_id="developer",
             instance_id=child_uuid,
             parent_id=parent_uuid
         )
@@ -1783,14 +1783,14 @@ async def test_source_inheritance_grandchild_from_grandparent(
 
         # Parent spawns from grandparent
         manager.spawn_instance(
-            agent_id="coder",
+            agent_id="developer",
             instance_id=parent_uuid,
             parent_id=grandparent_uuid
         )
 
         # Grandchild spawns from parent
         manager.spawn_instance(
-            agent_id="coder",
+            agent_id="developer",
             instance_id=grandchild_uuid,
             parent_id=parent_uuid
         )

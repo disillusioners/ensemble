@@ -105,7 +105,7 @@ def _seed_instance(
     *,
     instance_id: str | None = None,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     parent_id: str | None = None,
 ) -> str:
     """Insert an Instance row. Returns the instance_id."""
@@ -141,8 +141,8 @@ def _seed_job(
     with Session(engine) as s:
         job = JobItem(
             job_id=jid,
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="hello",
             source="api",
             project_id="test-project",
@@ -280,7 +280,7 @@ def test_pause_transitions_job_to_paused(
         write_guard,
         tree_ids=[iid],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(iid, "coder")],
+        paused_instances_data=[(iid, "developer")],
     )
 
     # UPDATED — instance + job both transitioned
@@ -304,7 +304,7 @@ def test_pause_skips_non_processing_jobs(lifecycle_service, engine, write_guard)
         write_guard,
         tree_ids=[iid],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(iid, "coder")],
+        paused_instances_data=[(iid, "developer")],
     )
 
     jobs = _read_jobs(engine, iid)
@@ -336,7 +336,7 @@ def test_pause_transitions_task_to_paused(lifecycle_service, engine, write_guard
         write_guard,
         tree_ids=[iid],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(iid, "coder")],
+        paused_instances_data=[(iid, "developer")],
     )
 
     # Instance, job, and task all transitioned in ONE transaction
@@ -362,7 +362,7 @@ def test_pause_skips_non_running_tasks(lifecycle_service, engine, write_guard):
         write_guard,
         tree_ids=[iid],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(iid, "coder")],
+        paused_instances_data=[(iid, "developer")],
     )
 
     tasks = _read_tasks(engine, iid)
@@ -394,7 +394,7 @@ def test_pause_three_tables_single_transaction(
         write_guard,
         tree_ids=[iid],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(iid, "coder")],
+        paused_instances_data=[(iid, "developer")],
     )
 
     assert result.updated_ids == [iid]
@@ -474,7 +474,7 @@ def test_pause_does_not_cancel_bus_watchers(
         write_guard,
         tree_ids=[iid],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(iid, "coder")],
+        paused_instances_data=[(iid, "developer")],
     )
 
     # Both watchers still PENDING
@@ -620,7 +620,7 @@ def test_complete_task_skips_paused_task(engine, write_guard):
         write_guard,
         tree_ids=[iid],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(iid, "coder")],
+        paused_instances_data=[(iid, "developer")],
     )
 
     # Now the worker tries to complete the (now PAUSED) task
@@ -662,7 +662,7 @@ def test_pause_sse_event_carries_job_status():
         hub.stream_status_change(
             "inst-test",
             InstanceStatus.PAUSED.value,
-            agent_id="coder",
+            agent_id="developer",
             job_status=JobStatus.PAUSED.value,
         )
     )
@@ -671,7 +671,7 @@ def test_pause_sse_event_carries_job_status():
     evt = captured[0]
     assert evt["status"] == InstanceStatus.PAUSED.value
     assert evt["job_status"] == JobStatus.PAUSED.value
-    assert evt["agent_id"] == "coder"
+    assert evt["agent_id"] == "developer"
 
 
 def test_pause_sse_event_omits_job_status_when_none():
@@ -696,7 +696,7 @@ def test_pause_sse_event_omits_job_status_when_none():
         hub.stream_status_change(
             "inst-test",
             InstanceStatus.RUNNING.value,
-            agent_id="coder",
+            agent_id="developer",
         )
     )
 

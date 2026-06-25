@@ -96,7 +96,7 @@ def mock_graph():
 def mock_instance_repository():
     """Create a mock instance repository."""
     repo = MagicMock()
-    repo.get.return_value = MagicMock(instance_metadata={}, agent_id="coder")
+    repo.get.return_value = MagicMock(instance_metadata={}, agent_id="developer")
     repo.count_children.return_value = 0
     return repo
 
@@ -119,7 +119,7 @@ class TestSpawnLimitEdgeCases:
 
                 # This should NOT raise ValueError
                 instance_id = manager.spawn_instance(
-                    agent_id="coder",
+                    agent_id="developer",
                     parent_id=None,  # Root instance
                 )
 
@@ -149,7 +149,7 @@ class TestSpawnLimitEdgeCases:
                 # This should NOT raise ValueError even with empty string
                 # because empty string is falsy and bypasses the check
                 instance_id = manager.spawn_instance(
-                    agent_id="coder",
+                    agent_id="developer",
                     parent_id="",  # Root instance (empty string is falsy)
                 )
 
@@ -171,7 +171,7 @@ class TestSpawnLimitEdgeCases:
 
                 with pytest.raises(ValueError) as exc_info:
                     manager.spawn_instance(
-                        agent_id="coder",
+                        agent_id="developer",
                         parent_id="parent-instance",
                     )
 
@@ -193,7 +193,7 @@ class TestSpawnLimitEdgeCases:
 
                 # This should succeed
                 instance_id = manager.spawn_instance(
-                    agent_id="coder",
+                    agent_id="developer",
                     parent_id="parent-instance",
                 )
 
@@ -214,7 +214,7 @@ class TestSpawnLimitEdgeCases:
 
                 with pytest.raises(ValueError) as exc_info:
                     manager.spawn_instance(
-                        agent_id="coder",
+                        agent_id="developer",
                         parent_id="test-parent-123",
                     )
 
@@ -237,7 +237,7 @@ class TestSpawnLimitEdgeCases:
                  patch('daemon.manager.create_instance_tools', return_value=[]):
 
                 manager.spawn_instance(
-                    agent_id="coder",
+                    agent_id="developer",
                     parent_id="specific-parent-id",
                 )
 
@@ -260,7 +260,7 @@ class TestSpawnLimitEdgeCases:
 
                 # This should succeed (4 < 5)
                 instance_id = manager.spawn_instance(
-                    agent_id="coder",
+                    agent_id="developer",
                     parent_id="parent-instance",
                 )
 
@@ -281,7 +281,7 @@ class TestSpawnLimitEdgeCases:
 
                 with pytest.raises(ValueError) as exc_info:
                     manager.spawn_instance(
-                        agent_id="coder",
+                        agent_id="developer",
                         parent_id="parent-instance",
                     )
 
@@ -302,7 +302,7 @@ class TestSpawnLimitEdgeCases:
 
                 with pytest.raises(ValueError) as exc_info:
                     manager.spawn_instance(
-                        agent_id="coder",
+                        agent_id="developer",
                         parent_id="parent-instance",
                     )
 

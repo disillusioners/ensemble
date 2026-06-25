@@ -36,8 +36,8 @@ class TestNotificationBroadcasterSSEIntegration:
 
         notification = {
             "instance_id": "test-123",
-            "agent_id": "coder",
-            "name": "Coder Agent",
+            "agent_id": "developer",
+            "name": "Developer Agent",
             "status": "COMPLETED",
             "timestamp": "2024-01-01T00:00:00Z",
         }
@@ -123,8 +123,8 @@ class TestSSERouterIntegration:
         # Simulate root completion notification
         delivered = await broadcaster.emit_root_completion(
             instance_id="root-instance-123",
-            agent_id="coder",
-            agent_name="Coder Agent",
+            agent_id="developer",
+            agent_name="Developer Agent",
             status="COMPLETED",
         )
 
@@ -133,8 +133,8 @@ class TestSSERouterIntegration:
         # Verify queue received proper notification structure
         received = await asyncio.wait_for(queue.get(), timeout=1.0)
         assert received["instance_id"] == "root-instance-123"
-        assert received["agent_id"] == "coder"
-        assert received["name"] == "Coder Agent"
+        assert received["agent_id"] == "developer"
+        assert received["name"] == "Developer Agent"
         assert received["status"] == "COMPLETED"
         assert "timestamp" in received
 
@@ -179,7 +179,7 @@ class TestSSERouterIntegration:
 
         await broadcaster.emit_root_completion(
             instance_id="json-format-test",
-            agent_id="coder",
+            agent_id="developer",
             agent_name=None,  # Will use title()
             status="completed",  # Will be uppercased
         )
@@ -191,8 +191,8 @@ class TestSSERouterIntegration:
         parsed = json.loads(json_str)
 
         assert parsed["instance_id"] == "json-format-test"
-        assert parsed["agent_id"] == "coder"
-        assert parsed["name"] == "Coder"  # agent_id.title()
+        assert parsed["agent_id"] == "developer"
+        assert parsed["name"] == "Developer"  # agent_id.title()
         assert parsed["status"] == "COMPLETED"  # uppercased
         assert "timestamp" in parsed
 
@@ -238,8 +238,8 @@ class TestSSEEventFormat:
             },
             {
                 "instance_id": "full-test",
-                "agent_id": "coder",
-                "name": "Coder Agent",
+                "agent_id": "developer",
+                "name": "Developer Agent",
                 "status": "COMPLETED",
                 "timestamp": "2024-01-01T00:00:00Z",
             },

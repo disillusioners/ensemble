@@ -133,7 +133,7 @@ def seed_job(
     with Session(engine) as s:
         item = JobItem(
             job_id=jid,
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/tmp/agent",
             message="test job",
             source="api",
@@ -153,7 +153,7 @@ def seed_instance(
     *,
     instance_id: str | None = None,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     parent_id: str | None = None,
     version: int = 1,
 ) -> str:

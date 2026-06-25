@@ -94,8 +94,8 @@ class TestDLQEndpoints:
         sample_item = DeadLetterItem(
             dlq_id="dlq-123",
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Fix the login bug",
             source="api",
             project_id="project-abc",
@@ -143,8 +143,8 @@ class TestDLQEndpoints:
         sample_item = DeadLetterItem(
             dlq_id="dlq-123",
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Fix the login bug",
             source="api",
             project_id="project-abc",
@@ -181,8 +181,8 @@ class TestDLQEndpoints:
         sample_item = DeadLetterItem(
             dlq_id="dlq-123",
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Fix the login bug",
             source="api",
             project_id="project-abc",  # Different project
@@ -206,8 +206,8 @@ class TestDLQEndpoints:
         sample_item = DeadLetterItem(
             dlq_id="dlq-123",
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Fix the login bug",
             source="api",
             project_id="project-abc",
@@ -250,8 +250,8 @@ class TestDLQEndpoints:
         sample_item = DeadLetterItem(
             dlq_id="dlq-123",
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Fix the login bug",
             source="api",
             project_id="project-abc",
@@ -320,8 +320,8 @@ class TestListDLPagination:
             item = DeadLetterItem(
                 dlq_id=f"dlq-{i}",
                 job_id=f"job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Message {i}",
                 source="api",
                 project_id="project-abc",
@@ -390,8 +390,8 @@ class TestDLQSchemas:
         item = DLQItemResponse(
             dlq_id="dlq-123",
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Fix the login bug",
             source="api",
             project_id="project-abc",
@@ -416,8 +416,8 @@ class TestDLQSchemas:
         item = DLQItemResponse(
             dlq_id="dlq-123",
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test",
             source="api",
             project_id="project-abc",

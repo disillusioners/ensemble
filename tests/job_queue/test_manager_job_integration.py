@@ -22,7 +22,7 @@ def make_mock_job(
     instance_id="test-instance-1",
     project_id="test-project",
     status="processing",
-    agent_id="coder",
+    agent_id="developer",
     message="test message",
 ):
     """Create a mock JobItem for testing."""

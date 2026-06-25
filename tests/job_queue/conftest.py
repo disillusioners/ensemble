@@ -280,7 +280,7 @@ def sample_job_data():
 def sample_job_data_service():
     """Sample job creation data for service tests."""
     return {
-        "agent_id": "coder",  # Use existing agent
+        "agent_id": "developer",  # Use existing agent
         "message": "Test job message",
         "source": "api",
         "project_id": "test-project",
@@ -307,7 +307,7 @@ def sample_job_data_no_project():
 def sample_job_data_no_project_service():
     """Sample job creation data without project_id for service."""
     return {
-        "agent_id": "coder",  # Use existing agent
+        "agent_id": "developer",  # Use existing agent
         "message": "Test job without project",
         "source": "api",
         "project_id": None,
@@ -340,7 +340,7 @@ def high_priority_job_data():
 def high_priority_job_data_service():
     """High priority job data for service ordering tests."""
     return {
-        "agent_id": "coder",  # Use existing agent
+        "agent_id": "developer",  # Use existing agent
         "message": "High priority job",
         "source": "api",
         "project_id": "test-project",
@@ -367,7 +367,7 @@ def low_priority_job_data():
 def low_priority_job_data_service():
     """Low priority job data for service ordering tests."""
     return {
-        "agent_id": "coder",  # Use existing agent
+        "agent_id": "developer",  # Use existing agent
         "message": "Low priority job",
         "source": "api",
         "project_id": "test-project",

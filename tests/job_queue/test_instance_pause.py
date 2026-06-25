@@ -35,7 +35,7 @@ class MockJob:
     def __init__(
         self,
         job_id: str,
-        agent_id: str = "coder",
+        agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
         status: str = JobStatus.PENDING.value,
@@ -358,7 +358,7 @@ class TestJobProcessorInstancePause:
         instance_id = "paused-instance-123"
         job = MagicMock()
         job.job_id = "job-1"
-        job.agent_id = "coder"
+        job.agent_id = "developer"
         job.project_id = "project-1"
         job.queue_id = "queue-1"
         job.status = JobStatus.PENDING.value
@@ -418,7 +418,7 @@ class TestJobProcessorInstancePause:
         instance_id = "running-instance-123"
         job = MagicMock()
         job.job_id = "job-1"
-        job.agent_id = "coder"
+        job.agent_id = "developer"
         job.project_id = "project-1"
         job.queue_id = "queue-1"
         job.status = JobStatus.PENDING.value
@@ -429,7 +429,7 @@ class TestJobProcessorInstancePause:
 
         started_job = MagicMock()
         started_job.job_id = "job-1"
-        started_job.agent_id = "coder"
+        started_job.agent_id = "developer"
         started_job.project_id = "project-1"
         started_job.queue_id = "queue-1"
         started_job.status = JobStatus.PROCESSING.value

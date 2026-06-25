@@ -157,7 +157,7 @@ def _make_instance(
     parent_id: str | None = None,
     waiting_for: int = 0,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
 ) -> Instance:
     """Insert an Instance row into the test DB."""
     inst = Instance(
@@ -189,7 +189,7 @@ def _make_job(
     """Insert a JobItem row into the test DB."""
     job = JobItem(
         job_id=job_id,
-        agent_id="coder",
+        agent_id="developer",
         agent_dir="/tmp/agent",
         message="test job",
         source="api",

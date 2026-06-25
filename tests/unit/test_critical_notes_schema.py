@@ -110,7 +110,7 @@ class TestCriticalNotesModel:
             priority="critical",
             summary="Use adapter pattern",
             reference="https://example.com",
-            source_agent="coder"
+            source_agent="developer"
         )
         d = entry.to_dict()
 

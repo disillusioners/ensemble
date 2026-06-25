@@ -49,7 +49,7 @@ class MockJob:
     def __init__(
         self,
         job_id: str,
-        agent_id: str = "coder",
+        agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
         status: str = JobStatus.PENDING.value,

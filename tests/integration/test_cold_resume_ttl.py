@@ -103,9 +103,9 @@ def _seed_paused_instance(
     with Session(engine) as s:
         inst = Instance(
             instance_id=iid,
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
-            agent_name="coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
+            agent_name="developer",
             parent_id=parent_id,
             project_id="test-project",
             status=status,
@@ -126,8 +126,8 @@ def _seed_paused_job(engine: Engine, instance_id: str) -> str:
         job = JobItem(
             job_id=jid,
             instance_id=instance_id,
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="paused message",
             status=JobStatus.PAUSED.value,
             created_at=now_iso,

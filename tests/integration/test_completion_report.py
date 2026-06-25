@@ -3,8 +3,8 @@ End-to-end test for sub-agent completion reporting.
 
 This test:
 1. Creates a Leader instance
-2. Sends a message asking Leader to spawn Coder and say "hi"
-3. Waits for Coder to complete and send report back to Leader
+2. Sends a message asking Leader to spawn Developer and say "hi"
+3. Waits for Developer to complete and send report back to Leader
 4. Verifies Leader receives the completion report
 
 Run with:
@@ -72,21 +72,21 @@ def test_db_path():
 
 
 @pytest.mark.asyncio
-async def test_leader_spawns_coder_and_receives_report(
+async def test_leader_spawns_developer_and_receives_report(
     integration_config,
     test_db_path
 ):
     """
-    End-to-end test: Leader spawns Coder, Coder completes, report sent back.
+    End-to-end test: Leader spawns Developer, Developer completes, report sent back.
     
     Flow:
     1. Create Leader instance
-    2. Send message: "Spawn a Coder agent and tell it to say 'hi'"
-    3. Leader spawns Coder (child instance)
-    4. Leader sends "hi" to Coder via send_message
-    5. Coder processes message and queue becomes empty
-    6. Coder's completion triggers _send_completion_report()
-    7. Leader receives report in its queue: "Coder has done: ..."
+    2. Send message: "Spawn a Developer agent and tell it to say 'hi'"
+    3. Leader spawns Developer (child instance)
+    4. Leader sends "hi" to Developer via send_message
+    5. Developer processes message and queue becomes empty
+    6. Developer's completion triggers _send_completion_report()
+    7. Leader receives report in its queue: "Developer has done: ..."
     8. Leader processes the report message
     """
     from daemon.manager import InstanceManager
@@ -149,7 +149,7 @@ async def test_leader_spawns_coder_and_receives_report(
     logger.info("[TEST] STEP 1: Sending task to Leader...")
     logger.info("=" * 70)
     
-    task_message = """Spawn a Coder agent and send it a message saying "hi". 
+    task_message = """Spawn a Developer agent and send it a message saying "hi". 
 Wait for it to respond. Do not use any other tools."""
     
     start_time = time.time()
@@ -194,7 +194,7 @@ Wait for it to respond. Do not use any other tools."""
         messages = manager.get_messages(leader_instance_id)
         for msg in messages:
             content = msg.get("content", "")
-            if "has done:" in content.lower() or "coder" in content.lower():
+            if "has done:" in content.lower() or "developer" in content.lower():
                 if "report:" in msg.get("role", "").lower() or len(content) > 50:
                     logger.info(f"[TEST] Found potential report message: {content[:100]}...")
         
@@ -278,15 +278,15 @@ Wait for it to respond. Do not use any other tools."""
     
     # 2. Completion report should be received
     assert completion_report_received or report_in_messages or len(report_events) > 0, \
-        "Leader should have received a completion report from Coder"
+        "Leader should have received a completion report from Developer"
     logger.info("[TEST] ✅ Completion report received")
     
-    # 3. Report should mention Coder
+    # 3. Report should mention Developer
     if report_events:
         report_summary = report_events[0].data.get('summary', '')
-        assert 'Coder' in report_summary or 'coder' in report_summary.lower() or 'hi' in report_summary.lower(), \
-            f"Report should mention Coder or the task. Got: {report_summary}"
-        logger.info("[TEST] ✅ Report mentions Coder/task")
+        assert 'Developer' in report_summary or 'developer' in report_summary.lower() or 'hi' in report_summary.lower(), \
+            f"Report should mention Developer or the task. Got: {report_summary}"
+        logger.info("[TEST] ✅ Report mentions Developer/task")
     
     logger.info("")
     logger.info("=" * 70)
@@ -313,8 +313,8 @@ async def test_completion_report_message_format(
     """
     Test that completion report has correct format: "{AgentName} has done: {summary}"
     
-    This test directly spawns a Coder as a child of Leader, sends a message,
-    and verifies the report format when Coder completes.
+    This test directly spawns a Developer as a child of Leader, sends a message,
+    and verifies the report format when Developer completes.
     """
     from daemon.manager import InstanceManager
     from daemon.persistence import get_instance_metadata
@@ -330,20 +330,20 @@ async def test_completion_report_message_format(
     leader_agent_dir = str(project_root / "agents" / "leader")
     leader_instance_id = manager.spawn_instance(agent_id="leader")
     
-    # Create Coder as child of Leader
-    coder_agent_dir = str(project_root / "agents" / "coder")
-    coder_instance_id = manager.spawn_instance(
-        agent_id="coder",
+    # Create Developer as child of Leader
+    developer_agent_dir = str(project_root / "agents" / "developer")
+    developer_instance_id = manager.spawn_instance(
+        agent_id="developer",
         parent_id=leader_instance_id
     )
     
     logger.info(f"[TEST] Leader: {leader_instance_id[:8]}...")
-    logger.info(f"[TEST] Coder (child): {coder_instance_id[:8]}...")
+    logger.info(f"[TEST] Developer (child): {developer_instance_id[:8]}...")
     
     # Verify parent-child relationship
-    coder_meta = get_instance_metadata(manager.conn, coder_instance_id)
-    assert coder_meta['parent_id'] == leader_instance_id, "Coder should have Leader as parent"
-    assert coder_meta['agent_name'] == 'Coder', "Agent name should be 'Coder'"
+    developer_meta = get_instance_metadata(manager.conn, developer_instance_id)
+    assert developer_meta['parent_id'] == leader_instance_id, "Developer should have Leader as parent"
+    assert developer_meta['agent_name'] == 'Developer', "Agent name should be 'Developer'"
     logger.info("[TEST] ✅ Parent-child relationship verified")
     
     # Track events for completion report
@@ -371,23 +371,23 @@ async def test_completion_report_message_format(
     report_task = asyncio.create_task(wait_for_report())
     await asyncio.sleep(0.5)
     
-    # Send message to Coder
-    logger.info("[TEST] Sending message to Coder...")
+    # Send message to Developer
+    logger.info("[TEST] Sending message to Developer...")
     await manager.enqueue_message(
-        instance_id=coder_instance_id,
+        instance_id=developer_instance_id,
         message="Say hello and tell me what you can do.",
         source="test"
     )
     
-    # Wait for Coder to process and send report
-    logger.info("[TEST] Waiting for Coder to complete and send report...")
+    # Wait for Developer to process and send report
+    logger.info("[TEST] Waiting for Developer to complete and send report...")
     
     # Wait for queue to be empty (indicates completion)
     start_time = time.time()
     while time.time() - start_time < 60:
-        stats = await manager.get_queue_stats(coder_instance_id)
+        stats = await manager.get_queue_stats(developer_instance_id)
         if stats.pending_count == 0 and stats.processing_count == 0:
-            logger.info("[TEST] Coder queue is empty")
+            logger.info("[TEST] Developer queue is empty")
             # Give time for report to be sent
             await asyncio.sleep(3)
             break
@@ -419,7 +419,7 @@ async def test_completion_report_message_format(
             
             # Verify format
             assert "has done:" in content, f"Report should contain 'has done:', got: {content}"
-            assert "Coder" in content, f"Report should mention 'Coder', got: {content}"
+            assert "Developer" in content, f"Report should mention 'Developer', got: {content}"
             logger.info("[TEST] ✅ Report format verified")
     
     # Also check via event if we got it
@@ -431,7 +431,7 @@ async def test_completion_report_message_format(
         logger.info("[TEST] ✅ Event report format verified")
     
     # Cleanup
-    manager.terminate_instance(coder_instance_id)
+    manager.terminate_instance(developer_instance_id)
     manager.terminate_instance(leader_instance_id)
     logger.info("[TEST] ✅ Test completed")
 

@@ -72,8 +72,8 @@ class TestSpawnWritesJunctionTable:
         )
         repo.create(
             instance_id="child-1",
-            agent_id="coder",
-            agent_dir="./agents/coder",
+            agent_id="developer",
+            agent_dir="./agents/developer",
             parent_id="parent-1",
         )
 
@@ -109,8 +109,8 @@ class TestSpawnWritesJunctionTable:
         for cid in ("child-3a", "child-3b", "child-3c"):
             repo.create(
                 instance_id=cid,
-                agent_id="coder",
-                agent_dir="./agents/coder",
+                agent_id="developer",
+                agent_dir="./agents/developer",
                 parent_id="parent-3",
             )
 
@@ -143,14 +143,14 @@ class TestListChildIdsReadsJunctionTable:
         )
         repo.create(
             instance_id="child-4a",
-            agent_id="coder",
-            agent_dir="./agents/coder",
+            agent_id="developer",
+            agent_dir="./agents/developer",
             parent_id="parent-4",
         )
         repo.create(
             instance_id="child-4b",
-            agent_id="coder",
-            agent_dir="./agents/coder",
+            agent_id="developer",
+            agent_dir="./agents/developer",
             parent_id="parent-4",
         )
 
@@ -187,8 +187,8 @@ class TestCompletionDeletesJunctionRow:
         )
         repo.create(
             instance_id="child-6",
-            agent_id="coder",
-            agent_dir="./agents/coder",
+            agent_id="developer",
+            agent_dir="./agents/developer",
             parent_id="parent-6",
         )
 
@@ -222,8 +222,8 @@ class TestCompletionDeletesJunctionRow:
         for cid in ("child-7a", "child-7b"):
             repo.create(
                 instance_id=cid,
-                agent_id="coder",
-                agent_dir="./agents/coder",
+                agent_id="developer",
+                agent_dir="./agents/developer",
                 parent_id="parent-7",
             )
 
@@ -245,8 +245,8 @@ class TestCompletionDeletesJunctionRow:
         )
         repo.create(
             instance_id="child-8",
-            agent_id="coder",
-            agent_dir="./agents/coder",
+            agent_id="developer",
+            agent_dir="./agents/developer",
             parent_id="parent-8",
         )
 
@@ -284,8 +284,8 @@ class TestEndToEndSpawnThenComplete:
         # 2. Spawn child
         repo.create(
             instance_id="e2e-child",
-            agent_id="coder",
-            agent_dir="./agents/coder",
+            agent_id="developer",
+            agent_dir="./agents/developer",
             parent_id="e2e-parent",
         )
 

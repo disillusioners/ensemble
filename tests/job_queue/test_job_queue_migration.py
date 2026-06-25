@@ -509,8 +509,8 @@ class TestMigrationClearsExistingJobs:
             conn.execute(text("""
                 INSERT INTO job_queue_items (job_id, agent_id, agent_dir, message, source)
                 VALUES 
-                    ('old-job-1', 'coder', '/agents/coder', 'Old job 1', 'api'),
-                    ('old-job-2', 'coder', '/agents/coder', 'Old job 2', 'api')
+                    ('old-job-1', 'developer', '/agents/developer', 'Old job 1', 'api'),
+                    ('old-job-2', 'developer', '/agents/developer', 'Old job 2', 'api')
             """))
         
         # Verify jobs exist before migration

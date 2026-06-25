@@ -135,7 +135,7 @@ class TestIntegrationBasicWorkflow:
         """Test the complete enqueue -> process -> complete workflow."""
         # Step 1: Enqueue job (starts as PENDING)
         job = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Process this job",
             source="test",
             project_id="project-1",
@@ -176,7 +176,7 @@ class TestIntegrationBasicWorkflow:
     ):
         """Test that jobs without project_id are normalized to system project and work correctly."""
         job = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="No project job",
             source="test",
             project_id=None,
@@ -206,21 +206,21 @@ class TestIntegrationSameProjectSerialization:
         """Test that multiple jobs for the same project are serialized."""
         # Enqueue multiple jobs for the same project (all PENDING)
         job1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 1",
             project_id="project-1",
             priority=5
         )
         
         job2 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 2",
             project_id="project-1",
             priority=5
         )
         
         job3 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 3",
             project_id="project-1",
             priority=5
@@ -275,21 +275,21 @@ class TestIntegrationSameProjectSerialization:
         """Test that jobs are processed by priority for same project."""
         # Enqueue in reverse priority order (all PENDING)
         job_low = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Low priority",
             project_id="project-1",
             priority=1
         )
         
         job_high = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="High priority",
             project_id="project-1",
             priority=10
         )
         
         job_medium = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Medium priority",
             project_id="project-1",
             priority=5
@@ -331,19 +331,19 @@ class TestIntegrationSameProjectSerialization:
     ):
         """Test that cancelling a queued job allows next job to proceed."""
         job1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 1",
             project_id="project-1"
         )
         
         job2 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 2",
             project_id="project-1"
         )
         
         job3 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 3",
             project_id="project-1"
         )
@@ -385,19 +385,19 @@ class TestIntegrationDifferentProjectsParallel:
         queue3 = integration_queue_repository.get_by_name("project-3", "system_fifo_queue")
         
         job1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job for project 1",
             project_id="project-1"
         )
         
         job2 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job for project 2",
             project_id="project-2"
         )
         
         job3 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job for project 3",
             project_id="project-3"
         )
@@ -444,20 +444,20 @@ class TestIntegrationDifferentProjectsParallel:
         """Test mixing serialized and parallel jobs."""
         # Project 1 gets multiple jobs (serialized)
         job1_p1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="P1 Job 1",
             project_id="project-1"
         )
         
         job2_p1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="P1 Job 2",
             project_id="project-1"
         )
         
         # Project 2 gets one job (parallel)
         job_p2 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="P2 Job",
             project_id="project-2"
         )
@@ -518,7 +518,7 @@ class TestIntegrationCrashRecovery:
         
         # Enqueue and start a job
         job = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job before crash",
             project_id="project-1"
         )
@@ -545,7 +545,7 @@ class TestIntegrationCrashRecovery:
         
         # New job should be able to be enqueued (starts PENDING)
         new_job = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job after crash",
             project_id="project-1"
         )
@@ -563,7 +563,7 @@ class TestIntegrationCrashRecovery:
         # Create and complete some jobs
         for i in range(5):
             job = await integration_service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message=f"Job {i}",
                 project_id="project-1"
             )
@@ -592,7 +592,7 @@ class TestIntegrationCrashRecovery:
         """Test handling of jobs stuck in PROCESSING state."""
         # Start a job but don't complete it
         job = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Orphaned job",
             project_id="project-1"
         )
@@ -625,7 +625,7 @@ class TestIntegrationCrashRecovery:
         
         # Now a new job can be enqueued
         new_job = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="New job",
             project_id="project-1"
         )
@@ -643,19 +643,19 @@ class TestIntegrationCrashRecovery:
         """Test recovery when multiple jobs are queued."""
         # Create a queue
         job1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 1",
             project_id="project-1"
         )
         
         job2 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 2",
             project_id="project-1"
         )
         
         job3 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 3",
             project_id="project-1"
         )
@@ -698,7 +698,7 @@ class TestIntegrationConcurrentOperations:
         
         async def enqueue_job(i: int):
             return await integration_service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message=f"Concurrent job {i}",
                 project_id="project-1"
             )
@@ -749,7 +749,7 @@ class TestIntegrationConcurrentOperations:
         """
         async def enqueue_job(i: int):
             return await integration_service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message=f"Job for project {i}",
                 project_id=f"project-{i}"
             )
@@ -779,7 +779,7 @@ class TestIntegrationConcurrentOperations:
         jobs = []
         for i in range(5):
             job = await integration_service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message=f"Job {i}",
                 project_id=f"project-{i}"
             )
@@ -815,19 +815,19 @@ class TestIntegrationInstanceManagement:
         
         # Create jobs for different projects (each gets own instance)
         job1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 1",
             project_id="project-1"
         )
         
         job2 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 2",
             project_id="project-2"
         )
         
         job3 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job 3",
             project_id="project-3"
         )
@@ -882,7 +882,7 @@ class TestIntegrationInstanceManagement:
         queue1 = integration_queue_repository.get_by_name("project-1", "system_fifo_queue")
         
         job = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Job",
             project_id="project-1"
         )
@@ -917,7 +917,7 @@ class TestIntegrationPriorityQueue:
         
         for i, priority in enumerate(priorities):
             job = await integration_service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message=f"Priority {priority}",
                 project_id="project-1",
                 priority=priority
@@ -963,7 +963,7 @@ class TestIntegrationPriorityQueue:
         jobs = []
         for i in range(3):
             job = await integration_service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message=f"Job {i}",
                 project_id="project-1",
                 priority=5
@@ -999,7 +999,7 @@ class TestIntegrationEndToEnd:
         
         # 1. Submit initial jobs for different projects
         job1 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Build authentication module",
             source="api",
             project_id="backend-api",
@@ -1007,7 +1007,7 @@ class TestIntegrationEndToEnd:
         )
         
         job2 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Update API documentation",
             source="api",
             project_id="backend-api",
@@ -1015,7 +1015,7 @@ class TestIntegrationEndToEnd:
         )
         
         job3 = await integration_service.enqueue(
-            agent_id="coder",
+            agent_id="developer",
             message="Fix login form styling",
             source="webhook",
             project_id="frontend-web",
@@ -1072,7 +1072,7 @@ class TestIntegrationEndToEnd:
             project_jobs = []
             for i in range(jobs_per_project):
                 job = await integration_service.enqueue(
-                    agent_id="coder",
+                    agent_id="developer",
                     message=f"Job {i} for project {project_id}",
                     project_id=f"project-{project_id}",
                     priority=(i % 10) + 1
@@ -1129,7 +1129,7 @@ class TestIntegrationEndToEnd:
         jobs = []
         for i in range(5):
             job = await integration_service.enqueue(
-                agent_id="coder",
+                agent_id="developer",
                 message=f"Job {i}",
                 project_id="project-1"
             )

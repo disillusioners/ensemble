@@ -82,7 +82,7 @@ def check_health() -> bool:
         return False
 
 
-def create_instance(agent_id: str = "coder") -> Optional[dict]:
+def create_instance(agent_id: str = "developer") -> Optional[dict]:
     """Create a test instance."""
     try:
         response = requests.post(

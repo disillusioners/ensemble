@@ -214,7 +214,7 @@ class TestCreateJobWithNullProjectId:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Test job with null project_id",
                 "project_id": None,
                 "priority": 5,
@@ -244,7 +244,7 @@ class TestCreateJobWithNullProjectId:
         
         # Verify other fields
         assert job.status == "pending"
-        assert job.agent_id == "coder"
+        assert job.agent_id == "developer"
         assert job.message == "Test job with null project_id"
         assert job.priority == 5
 
@@ -266,7 +266,7 @@ class TestCreateJobWithMissingProjectId:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Test job without project_id field",
                 "priority": 7,
             },
@@ -324,7 +324,7 @@ class TestCreateJobWithExplicitProjectId:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Test job with explicit project_id",
                 "project_id": explicit_project_id,
                 "priority": 5,
@@ -370,7 +370,7 @@ class TestOrphanJobAssignedToSystemProject:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Orphan job test",
                 "project_id": None,
             },
@@ -407,7 +407,7 @@ class TestOrphanJobAssignedToSystemProject:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Orphan job queue assignment test",
                 "project_id": None,
             },
@@ -446,7 +446,7 @@ class TestOrphanJobAssignedToSystemProject:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Missing project_id field test",
             },
         )
@@ -476,7 +476,7 @@ class TestOrphanJobAssignedToSystemProject:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Response queue_id test",
                 "project_id": None,
             },
@@ -508,7 +508,7 @@ class TestOrphanJobAssignedToSystemProject:
             response = client.post(
                 "/jobs",
                 json={
-                    "agent_id": "coder",
+                    "agent_id": "developer",
                     "message": f"Orphan job {i}",
                     "project_id": None,
                 },

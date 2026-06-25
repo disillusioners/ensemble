@@ -637,7 +637,7 @@ class TestComposeSystemPrompt:
         """When recent_memories is non-empty, '## Recent Memories' section appears."""
         from daemon.loader import compose_system_prompt
 
-        prompts = {"soul": "I am a coder"}
+        prompts = {"soul": "I am a developer"}
         recent_memories = "- 20260401_1430-memory.md\n- 20260401_1400-another.md"
 
         result = compose_system_prompt(prompts, recent_memories=recent_memories)
@@ -650,7 +650,7 @@ class TestComposeSystemPrompt:
         """When recent_memories is empty string, no '## Recent Memories' section."""
         from daemon.loader import compose_system_prompt
 
-        prompts = {"soul": "I am a coder"}
+        prompts = {"soul": "I am a developer"}
 
         result = compose_system_prompt(prompts, recent_memories="")
 
@@ -660,7 +660,7 @@ class TestComposeSystemPrompt:
         """When recent_memories is None/empty, no '## Recent Memories' section."""
         from daemon.loader import compose_system_prompt
 
-        prompts = {"soul": "I am a coder"}
+        prompts = {"soul": "I am a developer"}
 
         result = compose_system_prompt(prompts)
 

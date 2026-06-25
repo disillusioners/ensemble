@@ -34,7 +34,7 @@ async def mock_manager():
     manager.list_instances = Mock(return_value=([
         {
             "instance_id": "instance-1",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "agent_dir": "/path/to/agent1",
             "status": "running",
             "parent_id": None,
@@ -45,7 +45,7 @@ async def mock_manager():
     ], 1))
     manager.get_instance_info = Mock(return_value={
         "instance_id": "test-instance-id",
-        "agent_id": "coder",
+        "agent_id": "developer",
         "agent_dir": "/path/to/agent",
         "status": "running",
         "parent_id": None,
@@ -208,14 +208,14 @@ async def test_create_instance_success(client, mock_manager):
             "instance_id": "550e8400-e29b-41d4-a716-446655440000"
         }
     )
-    
+
     assert response.status_code == 201
     data = response.json()
     assert data["instance_id"] == "test-instance-id"
     # Response echoes the mock manager's get_instance_info() payload, which
-    # is hardcoded with agent_id="coder" in the test fixture (mock data,
+    # is hardcoded with agent_id="developer" in the test fixture (mock data,
     # unaffected by the validator alias).
-    assert data["agent_id"] == "coder"
+    assert data["agent_id"] == "developer"
     # InstanceCreate validator normalizes the request agent_id "coder" ->
     # "developer" via the AGENT_ID_ALIASES alias before dispatch.
     mock_manager.spawn_instance_with_mcp.assert_called_once_with(
@@ -241,7 +241,7 @@ async def test_create_instance_with_project_id(client, mock_manager):
     assert data["instance_id"] == "test-instance-id"
     # Verify call: router generates instance_id when none provided
     call_kwargs = mock_manager.spawn_instance_with_mcp.call_args.kwargs
-    assert call_kwargs["agent_id"] == "coder"
+    assert call_kwargs["agent_id"] == "developer"
     assert call_kwargs["project_id"] == "test-project-123"
     assert call_kwargs["instance_id"] is not None  # Router generates UUID
 
@@ -252,7 +252,7 @@ async def test_get_instance_returns_project_id(client, mock_manager):
     # Configure mock to return project_id
     mock_manager.get_instance_info.return_value = {
         "instance_id": "test-instance-id",
-        "agent_id": "coder",
+        "agent_id": "developer",
         "agent_dir": "/path/to/agent",
         "status": "running",
         "parent_id": None,
@@ -284,7 +284,7 @@ async def test_project_id_roundtrip(client, mock_manager):
     def mock_get_info(instance_id):
         return {
             "instance_id": created_instance_id,
-            "agent_id": "coder",
+            "agent_id": "developer",
             "agent_dir": "/path/to/agent",
             "status": "running",
             "parent_id": None,
@@ -302,7 +302,7 @@ async def test_project_id_roundtrip(client, mock_manager):
     create_response = await client.post(
         "/instances",
         json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "project_id": "test-project-123"
         }
     )
@@ -333,7 +333,7 @@ async def test_create_instance_max_limit(client, mock_manager):
     response = await client.post(
         "/instances",
         json={
-            "agent_id": "coder"
+            "agent_id": "developer"
         }
     )
     
@@ -378,7 +378,7 @@ async def test_list_instances_filter_by_project_id(client, mock_manager):
     mock_manager.list_instances.return_value = ([
         {
             "instance_id": "instance-project-1",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "agent_dir": "/path/to/agent1",
             "status": "running",
             "parent_id": None,
@@ -427,7 +427,7 @@ async def test_list_instances_project_id_with_status_filter(client, mock_manager
     mock_manager.list_instances.return_value = ([
         {
             "instance_id": "instance-running-1",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "agent_dir": "/path/to/agent1",
             "status": "running",
             "parent_id": None,
@@ -1071,7 +1071,7 @@ async def test_delete_source_cascades_to_mappings(client, mock_manager):
         source_id="telegram-test",
         external_user_id="123456",
         agent_instance_id="instance-abc",
-        agent_dir="./agents/coder",
+        agent_dir="./agents/developer",
     )
     
     # Delete the source

@@ -62,7 +62,7 @@ def make_fake_sync(
             job_id=job_id,
             instance_id=instance_id,
             parent_id=None,
-            agent_id="coder",
+            agent_id="developer",
             result_summary=result_summary,
             error_message=error_message,
             locks_released=locks_released,

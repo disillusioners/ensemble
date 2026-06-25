@@ -107,7 +107,7 @@ def _seed_instance(
     *,
     instance_id: str | None = None,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     parent_id: str | None = None,
     paused_at: str | None = None,
 ) -> str:
@@ -162,8 +162,8 @@ def _seed_job(
     with Session(engine) as s:
         job = JobItem(
             job_id=jid,
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="hello",
             source="api",
             project_id="test-project",
@@ -354,9 +354,9 @@ def test_cascade_pause_3level_hierarchy(lifecycle_service, engine, write_guard):
     # Call the cascade helper directly with all tree IDs
     now_iso = datetime.now(timezone.utc).isoformat()
     paused_instances_data = [
-        (gp_id, "coder"),
-        (p_id, "coder"),
-        (c_id, "coder"),
+        (gp_id, "developer"),
+        (p_id, "developer"),
+        (c_id, "developer"),
     ]
 
     result = lifecycle_service._pause_cascade_db_sync(
@@ -500,7 +500,7 @@ def test_partial_tree_pause_only_subtree(lifecycle_service, engine, write_guard)
 
     # Simulate get_tree_ids(child1_id) → only [child1_id] (no grandchildren)
     tree_ids = [child1_id]
-    paused_instances_data = [(child1_id, "coder")]
+    paused_instances_data = [(child1_id, "developer")]
 
     lifecycle_service._pause_cascade_db_sync(
         engine,
@@ -764,8 +764,8 @@ def test_cascade_mixed_states_idempotent_pause(
     now_iso = datetime.now(timezone.utc).isoformat()
     # Only parent and child2 are eligible for pause; child1 is already PAUSED
     paused_instances_data = [
-        (parent_id, "coder"),
-        (child2_id, "coder"),
+        (parent_id, "developer"),
+        (child2_id, "developer"),
     ]
 
     result = lifecycle_service._pause_cascade_db_sync(
@@ -853,7 +853,7 @@ def test_partial_tree_bus_watchers_preserved_on_pause(
         write_guard,
         tree_ids=[child1_id],
         paused_at_iso=datetime.now(timezone.utc).isoformat(),
-        paused_instances_data=[(child1_id, "coder")],
+        paused_instances_data=[(child1_id, "developer")],
     )
 
     # Verify final state: parent STILL RUNNING, watcher STILL PENDING

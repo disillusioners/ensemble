@@ -114,7 +114,7 @@ class TestJoberWatchIntegration:
         """Create a mock JobItem for testing."""
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
-        job.agent_id = "coder"
+        job.agent_id = "developer"
         job.status = "processing"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
@@ -379,7 +379,7 @@ class TestJoberWatchIntegration:
         assert "reached status" not in message  # Old format should be gone
 
         # Verify Agent line with indentation
-        assert "  Agent: coder" in message
+        assert "  Agent: developer" in message
 
         # Verify Result line with indentation, content on next line
         assert "  Result:" in message
@@ -420,7 +420,7 @@ class TestJoberWatchIntegration:
         assert "reached status" not in message
 
         # Verify Agent line with indentation
-        assert "  Agent: coder" in message
+        assert "  Agent: developer" in message
 
         # No Result line since result_summary is None
         assert "  Result:" not in message
@@ -461,7 +461,7 @@ class TestJoberWatchIntegration:
         assert "reached status" not in message
 
         # Verify Agent line with indentation
-        assert "  Agent: coder" in message
+        assert "  Agent: developer" in message
 
         # Result line present
         assert "  Result:" in message
@@ -500,7 +500,7 @@ class TestJoberWatchIntegration:
         assert "reached status" not in message
 
         # Verify Agent line with indentation
-        assert "  Agent: coder" in message
+        assert "  Agent: developer" in message
 
         # No Result line since result_summary is None
         assert "  Result:" not in message
@@ -539,7 +539,7 @@ class TestJoberWatchIntegration:
         assert "reached status" not in message
 
         # Verify Agent line with indentation
-        assert "  Agent: coder" in message
+        assert "  Agent: developer" in message
 
         # Result line present
         assert "  Result:" in message
@@ -619,7 +619,7 @@ class TestJoberWatchIntegration:
 
         # Test with watch=True (use ainvoke since it's async)
         result = await job_create.ainvoke({
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test with watch",
             "watch": True
         })
@@ -668,7 +668,7 @@ class TestJoberWatchIntegration:
             job.job_id = job_id
             job.status = status
             job.error_message = error
-            job.agent_id = "coder"
+            job.agent_id = "developer"
             job.result_summary = "Test result"
             job_queue_service._repository.get = MagicMock(return_value=job)
 
@@ -884,7 +884,7 @@ class TestNotifyWatchersEdgeCases:
         """Create a mock JobItem for testing."""
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
-        job.agent_id = "coder"
+        job.agent_id = "developer"
         job.status = "processing"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
@@ -999,7 +999,7 @@ class TestReconcileTerminalWatches:
         """Create a mock JobItem for testing."""
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
-        job.agent_id = "coder"
+        job.agent_id = "developer"
         job.status = "processing"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
@@ -1044,7 +1044,7 @@ class TestReconcileTerminalWatches:
             job.job_id = job_id
             job.status = status
             job.error_message = error
-            job.agent_id = "coder"
+            job.agent_id = "developer"
             job.result_summary = "Test result"
             job_queue_service._repository.get = MagicMock(return_value=job)
             job_queue_service._watcher_repo = watcher_repo

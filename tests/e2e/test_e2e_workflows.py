@@ -4,7 +4,7 @@
 These tests hit the REAL running daemon HTTP API (no mocks). They exercise
 the three most frequent user workflows:
 
-  1. **Happy path** — leader receives a message, spawns a coder child,
+  1. **Happy path** — leader receives a message, spawns a developer child,
      the child runs, and the workflow reaches a terminal state.
 
   2. **Pause after spawn, then resume** — same workflow, but the leader
@@ -69,17 +69,17 @@ COMPLETION_TIMEOUT = 120    # seconds to wait for a terminal status
 POLL_INTERVAL = 3           # seconds between status polls
 
 # The message we send to the leader for all three tests. Asking the leader
-# to delegate a trivial task to a coder child gives us a deterministic
+# to delegate a trivial task to a developer child gives us a deterministic
 # spawn event to observe without depending on long-running behaviour.
 TEST_MESSAGE = (
-    "ask coder to say hello, this is a test workflow, coder dont need do anything"
+    "ask developer to say hello, this is a test workflow, developer dont need do anything"
 )
 
 # Phase 2 message — sent to the same (already-completed) leader to verify
-# that the leader instance is reused and the existing coder child is reused
+# that the leader instance is reused and the existing developer child is reused
 # rather than spawning a brand-new instance.
 PHASE2_MESSAGE = (
-    "continue our test, reuse the coder instance, say hi and ask him say another hello"
+    "continue our test, reuse the developer instance, say hi and ask him say another hello"
 )
 
 # Statuses that mean "the instance is done doing work" for our purposes.
@@ -128,7 +128,7 @@ def _spawn_instance(agent_id: str, project_id: str = PROJECT_ID) -> str:
     """POST ``/api/instances`` and return the new ``instance_id``.
 
     Args:
-        agent_id: The agent to spawn (e.g. ``"leader"`` or ``"coder"``).
+        agent_id: The agent to spawn (e.g. ``"leader"`` or ``"developer"``).
         project_id: Optional project scope for the instance.
 
     Returns:
@@ -943,14 +943,14 @@ def _get_system_defer_queue_id(project_id: str) -> str | None:
 def test_parent_child_workflow_happy_path():
     """E2E Test 1: Normal parent→child workflow (happy path).
 
-    **Phase 1** — Sends a message to the leader asking it to spawn a coder
-    to say hello. Verifies that the leader spawns a coder child, the
+    **Phase 1** — Sends a message to the leader asking it to spawn a developer
+    to say hello. Verifies that the leader spawns a developer child, the
     leader eventually completes (or otherwise reaches a terminal status),
     and the conversation history contains an assistant turn.
 
     **Phase 2** — After Phase 1 completes, sends a *second* message to the
     same already-completed leader and verifies that (a) the leader instance
-    is reused, (b) the same coder child is reused rather than a fresh spawn,
+    is reused, (b) the same developer child is reused rather than a fresh spawn,
     (c) the reused child runs the new message to terminal status, and
     (d) the leader produces at least one additional assistant turn.
 
@@ -971,10 +971,10 @@ def test_parent_child_workflow_happy_path():
         # Step 2: send the test message.
         _send_message(leader_id, TEST_MESSAGE)
 
-        # Step 3: wait for the coder child to be spawned.
+        # Step 3: wait for the developer child to be spawned.
         child_id = _wait_for_child_spawned(leader_id, timeout=SPAWN_TIMEOUT)
         assert child_id is not None, (
-            f"Leader {leader_id[:8]}... did not spawn a coder child "
+            f"Leader {leader_id[:8]}... did not spawn a developer child "
             f"within {SPAWN_TIMEOUT}s"
         )
 
@@ -1029,7 +1029,7 @@ def test_parent_child_workflow_happy_path():
 
         # =====================================================================
         # PHASE 2: Send a second message to the same (completed) leader.
-        # Verify that the leader instance is reused, the same coder child is
+        # Verify that the leader instance is reused, the same developer child is
         # reused, and the full parent → child → completion → parent cycle
         # works a second time on the same leader_id.
         # =====================================================================
@@ -1046,7 +1046,7 @@ def test_parent_child_workflow_happy_path():
         )
 
         # Step P2.2 — Record the leader's children list before the second
-        # message, so we can later verify whether the coder child was reused
+        # message, so we can later verify whether the developer child was reused
         # (expected) or whether a new child was spawned (warn-worthy).
         children_before_data = _get_instance(leader_id)
         children_before = children_before_data.get("children", [])
@@ -1196,7 +1196,7 @@ def test_pause_after_spawn_then_resume():
         TOCTOU-safe observer method).
       * No bus message leaks into the leader's message history.
 
-    Same workflow as Test 1, but pauses the leader as soon as the coder
+    Same workflow as Test 1, but pauses the leader as soon as the developer
     child is observed, verifies both leader and child reach ``paused``,
     holds for a few seconds to confirm no further processing, then
     resumes and confirms the workflow completes.
@@ -1213,10 +1213,10 @@ def test_pause_after_spawn_then_resume():
         assert leader_id, "Failed to spawn leader instance"
         _send_message(leader_id, TEST_MESSAGE)
 
-        # Step 2: wait for the coder child.
+        # Step 2: wait for the developer child.
         child_id = _wait_for_child_spawned(leader_id, timeout=SPAWN_TIMEOUT)
         assert child_id is not None, (
-            f"Leader {leader_id[:8]}... did not spawn a coder child "
+            f"Leader {leader_id[:8]}... did not spawn a developer child "
             f"within {SPAWN_TIMEOUT}s"
         )
 
@@ -1418,7 +1418,7 @@ def test_terminate_after_spawn_then_revive():
     """E2E Test 3: Terminate after spawn, then attempt to revive.
 
     Same workflow as Test 1, but terminates the leader immediately after
-    the coder child spawns. Verifies the leader reaches ``terminated``,
+    the developer child spawns. Verifies the leader reaches ``terminated``,
     then documents the actual behavior of sending a ``continue`` message
     to a terminated instance rather than asserting a specific outcome
     (because the current API contract for reviving a terminated instance
@@ -1436,10 +1436,10 @@ def test_terminate_after_spawn_then_revive():
         assert leader_id, "Failed to spawn leader instance"
         _send_message(leader_id, TEST_MESSAGE)
 
-        # Step 2: wait for the coder child.
+        # Step 2: wait for the developer child.
         child_id = _wait_for_child_spawned(leader_id, timeout=SPAWN_TIMEOUT)
         assert child_id is not None, (
-            f"Leader {leader_id[:8]}... did not spawn a coder child "
+            f"Leader {leader_id[:8]}... did not spawn a developer child "
             f"within {SPAWN_TIMEOUT}s"
         )
 
@@ -1545,7 +1545,7 @@ def test_wave_spawn_with_defer_queue():
     This is the most complex E2E test — it exercises three orthogonal
     systems in one run:
 
-    1. **Wave spawning** — the leader is asked to spawn two coder children
+    1. **Wave spawning** — the leader is asked to spawn two developer children
        in one message (the "wave"). The DependencyBus must track both,
        and the leader must stay ``waiting_children`` (or non-terminal)
        until BOTH children report back.
@@ -1611,16 +1611,16 @@ def test_wave_spawn_with_defer_queue():
         assert leader_id, "Failed to spawn leader instance"
         logger.info(f"[STEP1] leader spawned: {leader_id[:8]}...")
 
-        # ── Step 2: Send wave message — spawn 2 coders ────────────────────
-        # The first coder sleeps 10s, the second sleeps 20s. The wave is
+        # ── Step 2: Send wave message — spawn 2 developers ────────────────────
+        # The first developer sleeps 10s, the second sleeps 20s. The wave is
         # intentionally staggered so that one child is still running while
         # the other completes — this creates a window where a premature
         # completion bug would be detectable (leader terminal while a
         # child is still non-terminal). Both must complete before the
         # leader can report back.
         WAVE_MESSAGE = (
-            "Spawn 2 coder instances. The first coder should sleep for "
-            "10 seconds then say hello. The second coder should sleep for "
+            "Spawn 2 developer instances. The first developer should sleep for "
+            "10 seconds then say hello. The second developer should sleep for "
             "20 seconds then say hello. Wait for both to complete before "
             "reporting back."
         )
@@ -1688,7 +1688,7 @@ def test_wave_spawn_with_defer_queue():
         else:
             logger.warning(
                 f"[STEP4] ⚠️ only 1 child spawned ({child_ids[0][:8]}...); "
-                f"LLM may have interpreted '2 coders' as '1 reused'. "
+                f"LLM may have interpreted '2 developers' as '1 reused'. "
                 f"Continuing with available child."
             )
 

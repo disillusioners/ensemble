@@ -178,7 +178,7 @@ def _seed_instance(
     engine: Engine,
     *,
     instance_id: str | None = None,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     agent_name: str | None = None,
     agent_dir: str = "/tmp/agent",
     parent_id: str | None = None,
@@ -339,15 +339,15 @@ def _build_error_reporting_service(
     _seed_instance(
         engine,
         instance_id=parent_id,
-        agent_id="coder",
-        agent_name="coder",
+        agent_id="developer",
+        agent_name="developer",
         status=InstanceStatus.RUNNING.value,
     )
     _seed_instance(
         engine,
         instance_id=child_id,
-        agent_id="coder",
-        agent_name="coder",
+        agent_id="developer",
+        agent_name="developer",
         parent_id=parent_id,
         status=InstanceStatus.RUNNING.value,
     )

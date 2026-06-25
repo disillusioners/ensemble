@@ -223,7 +223,7 @@ async def test_add_history_entry_with_all_fields(client):
             "entry_type": "milestone",
             "summary": "Phase 1 completed",
             "details": "All requirements implemented and tested",
-            "entry_metadata": {"phase": 1, "completed_by": "coder"},
+            "entry_metadata": {"phase": 1, "completed_by": "developer"},
         },
     )
 
@@ -234,7 +234,7 @@ async def test_add_history_entry_with_all_fields(client):
     assert data["entry_type"] == "milestone"
     assert data["summary"] == "Phase 1 completed"
     assert data["details"] == "All requirements implemented and tested"
-    assert data["entry_metadata"] == {"phase": 1, "completed_by": "coder"}
+    assert data["entry_metadata"] == {"phase": 1, "completed_by": "developer"}
     assert data["source_agent"] is None
     assert data["source_instance_id"] is None
     assert data["created_at"] is not None

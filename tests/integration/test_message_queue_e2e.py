@@ -3,7 +3,7 @@ End-to-end test for the message queue system with debug logging.
 
 This test:
 1. Uses the InstanceManager directly with debug level logging
-2. Creates a coder instance
+2. Creates a developer instance
 3. Sends "hi" message via the async queue
 4. Listens to events to capture all responses
 5. Verifies only ONE LLM call happens (no duplicates)
@@ -235,12 +235,12 @@ async def test_single_message_no_duplicate_llm_calls(
     await manager.initialize()
 
     try:
-        # Spawn coder instance
+        # Spawn developer instance
         project_root = Path(__file__).parent.parent.parent
-        coder_agent_dir = str(project_root / "agents" / "coder")
-        logger.info(f"[TEST] Creating instance with agent: {coder_agent_dir}")
+        developer_agent_dir = str(project_root / "agents" / "developer")
+        logger.info(f"[TEST] Creating instance with agent: {developer_agent_dir}")
 
-        instance_id = manager.spawn_instance(agent_id="coder")
+        instance_id = manager.spawn_instance(agent_id="developer")
         logger.info(f"[TEST] ✅ Instance created: {instance_id}")
 
         # Track invocations before sending message
@@ -411,8 +411,8 @@ async def test_sse_events_count(
                     break
 
         project_root = Path(__file__).parent.parent.parent
-        coder_agent_dir = str(project_root / "agents" / "coder")
-        instance_id = manager.spawn_instance(agent_id="coder")
+        developer_agent_dir = str(project_root / "agents" / "developer")
+        instance_id = manager.spawn_instance(agent_id="developer")
 
         # Start collecting events
         collect_task = asyncio.create_task(collect_events(instance_id))
@@ -520,8 +520,8 @@ async def test_debug_llm_invocation_count(
         await manager.initialize()
 
         project_root = Path(__file__).parent.parent.parent
-        coder_agent_dir = str(project_root / "agents" / "coder")
-        instance_id = manager.spawn_instance(agent_id="coder")
+        developer_agent_dir = str(project_root / "agents" / "developer")
+        instance_id = manager.spawn_instance(agent_id="developer")
 
         logger.info(f"[DEBUG] Instance: {instance_id}")
 

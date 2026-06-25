@@ -60,7 +60,7 @@ class TestListExcludesKB:
         Call repo.list(). Assert only regular returned, total=1.
         """
         # Create instances
-        regular = _make_instance(repo, "coder", project_id="proj-1")
+        regular = _make_instance(repo, "developer", project_id="proj-1")
         experiencer = _make_instance(repo, "experiencer", project_id="proj-1")
         kb_importer = _make_instance(repo, "kb-importer", project_id="proj-1")
 
@@ -69,7 +69,7 @@ class TestListExcludesKB:
 
         assert total == 1
         assert len(instances) == 1
-        assert instances[0].agent_id == "coder"
+        assert instances[0].agent_id == "developer"
         assert regular.instance_id in [i.instance_id for i in instances]
         assert experiencer.instance_id not in [i.instance_id for i in instances]
         assert kb_importer.instance_id not in [i.instance_id for i in instances]
@@ -77,7 +77,7 @@ class TestListExcludesKB:
     def test_list_includes_kb_when_excluded_false(self, repo):
         """Same 3 instances. Call repo.list(exclude_kb=False). Assert all 3 returned."""
         # Create instances
-        _make_instance(repo, "coder", project_id="proj-1")
+        _make_instance(repo, "developer", project_id="proj-1")
         _make_instance(repo, "experiencer", project_id="proj-1")
         _make_instance(repo, "kb-importer", project_id="proj-1")
 
@@ -87,32 +87,32 @@ class TestListExcludesKB:
         assert total == 3
         assert len(instances) == 3
         agent_ids = {i.agent_id for i in instances}
-        assert agent_ids == {"coder", "experiencer", "kb-importer"}
+        assert agent_ids == {"developer", "experiencer", "kb-importer"}
 
     def test_list_kb_filter_with_project_id(self, repo):
         """Insert instances across 2 projects. Verify exclude_kb works with project_id filter."""
-        # Project 1: coder and experiencer
-        _make_instance(repo, "coder", project_id="proj-1")
+        # Project 1: developer and experiencer
+        _make_instance(repo, "developer", project_id="proj-1")
         _make_instance(repo, "experiencer", project_id="proj-1")
 
-        # Project 2: coder, kb-importer, and another regular agent
-        _make_instance(repo, "coder", project_id="proj-2")
+        # Project 2: developer, kb-importer, and another regular agent
+        _make_instance(repo, "developer", project_id="proj-2")
         _make_instance(repo, "kb-importer", project_id="proj-2")
         _make_instance(repo, "designer", project_id="proj-2")
 
-        # Filter by project_id=proj-1, exclude_kb=True -> should return only coder
+        # Filter by project_id=proj-1, exclude_kb=True -> should return only developer
         instances, total = repo.list(project_id="proj-1", exclude_kb=True)
         assert total == 1
         assert len(instances) == 1
-        assert instances[0].agent_id == "coder"
+        assert instances[0].agent_id == "developer"
         assert instances[0].project_id == "proj-1"
 
-        # Filter by project_id=proj-2, exclude_kb=True -> should return coder and designer
+        # Filter by project_id=proj-2, exclude_kb=True -> should return developer and designer
         instances, total = repo.list(project_id="proj-2", exclude_kb=True)
         assert total == 2
         assert len(instances) == 2
         agent_ids = {i.agent_id for i in instances}
-        assert agent_ids == {"coder", "designer"}
+        assert agent_ids == {"developer", "designer"}
 
         # Filter by project_id=proj-2, exclude_kb=False -> should return all 3
         instances, total = repo.list(project_id="proj-2", exclude_kb=False)
@@ -123,7 +123,7 @@ class TestListExcludesKB:
         """Insert 5 regular + 2 KB instances. Verify limit/offset work with exclude_kb=True."""
         # Create 5 regular instances
         for i in range(5):
-            _make_instance(repo, "coder", project_id="proj-1")
+            _make_instance(repo, "developer", project_id="proj-1")
 
         # Create 2 KB instances
         _make_instance(repo, "experiencer", project_id="proj-1")
@@ -156,18 +156,18 @@ class TestListExcludesKB:
     def test_list_kb_filter_status_combined(self, repo):
         """Verify exclude_kb works correctly with status filter combined."""
         # Create running and completed instances of each type
-        _make_instance(repo, "coder", status="running")
-        _make_instance(repo, "coder", status="completed")
+        _make_instance(repo, "developer", status="running")
+        _make_instance(repo, "developer", status="completed")
         _make_instance(repo, "experiencer", status="running")
         _make_instance(repo, "experiencer", status="completed")
         _make_instance(repo, "kb-importer", status="running")
         _make_instance(repo, "kb-importer", status="completed")
 
-        # With exclude_kb=True and status=running -> 1 coder running
+        # With exclude_kb=True and status=running -> 1 developer running
         instances, total = repo.list(status="running", exclude_kb=True)
         assert total == 1
         assert len(instances) == 1
-        assert instances[0].agent_id == "coder"
+        assert instances[0].agent_id == "developer"
         assert instances[0].status == "running"
 
         # With exclude_kb=False and status=running -> 3 running instances
@@ -192,7 +192,7 @@ async def mock_manager_with_kb():
     manager.list_instances = Mock(return_value=([], 0))
     manager.get_instance_info = Mock(return_value={
         "instance_id": "test-instance-id",
-        "agent_id": "coder",
+        "agent_id": "developer",
         "agent_dir": "/path/to/agent",
         "status": "running",
         "parent_id": None,
@@ -315,14 +315,14 @@ class TestStreamStatusChangeAgentId:
 
         hub._stream_to_connections = mock_stream
 
-        await hub.stream_status_change("inst-1", "completed", agent_id="coder")
+        await hub.stream_status_change("inst-1", "completed", agent_id="developer")
 
         assert captured_event is not None
         assert captured_event["instance_id"] == "inst-1"
         assert captured_event["event_type"] == "status_change"
         assert captured_event["status"] == "completed"
         assert "agent_id" in captured_event
-        assert captured_event["agent_id"] == "coder"
+        assert captured_event["agent_id"] == "developer"
 
     @pytest.mark.asyncio
     async def test_stream_status_change_without_agent_id(self):

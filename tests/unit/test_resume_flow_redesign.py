@@ -117,7 +117,7 @@ def _seed_instance(
     *,
     instance_id: str | None = None,
     status: str = InstanceStatus.PAUSED.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     parent_id: str | None = None,
 ) -> str:
     """Insert an Instance row in PAUSED status (the resume-from state). Returns the instance_id."""
@@ -154,8 +154,8 @@ def _seed_job(
     with Session(engine) as s:
         job = JobItem(
             job_id=jid,
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="hello",
             source="api",
             project_id="test-project",
@@ -514,7 +514,7 @@ def mock_job() -> MagicMock:
     job.job_id = f"job-{uuid.uuid4().hex[:8]}"
     job.status = JobStatus.PROCESSING.value
     job.instance_id = f"inst-{uuid.uuid4().hex[:8]}"
-    job.agent_id = "coder"
+    job.agent_id = "developer"
     job.message = "resume"
     job.source = "cascade_resume"
     job.project_id = "test-project"
@@ -567,7 +567,7 @@ def observer_with_bus_quiet(mock_job):
             job_id=job_id,
             instance_id=instance_id,
             parent_id=None,
-            agent_id="coder",
+            agent_id="developer",
             result_summary=result_summary,
             error_message=error_message,
             locks_released=0,

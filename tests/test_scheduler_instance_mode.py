@@ -30,7 +30,7 @@ class TestSchedulerInstanceModeConfig:
         """Test that default instance mode is new_instance when not specified."""
         config = make_config("test-default-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -42,7 +42,7 @@ class TestSchedulerInstanceModeConfig:
         """Test explicit new_instance mode configuration."""
         config = make_config("test-new-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "new_instance",
         })
@@ -55,7 +55,7 @@ class TestSchedulerInstanceModeConfig:
         """Test reuse_instance mode configuration."""
         config = make_config("test-reuse-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -68,7 +68,7 @@ class TestSchedulerInstanceModeConfig:
         """Test that invalid instance_mode value raises ValueError."""
         config = make_config("test-invalid-instance-mode", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "invalid_mode",
         })
@@ -81,7 +81,7 @@ class TestSchedulerInstanceModeConfig:
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-force", {
             "run_at": future_time,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",  # This should be ignored
         })
@@ -96,7 +96,7 @@ class TestSchedulerInstanceModeConfig:
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-log", {
             "run_at": future_time,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -120,7 +120,7 @@ class TestNewInstanceMode:
         """Test that new_instance mode sets force_new_instance=True in metadata."""
         config = make_config("test-new-inst-force", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "new_instance",
         })
@@ -146,7 +146,7 @@ class TestNewInstanceMode:
         """Test that new_instance mode has no run_number in metadata."""
         config = make_config("test-new-inst-no-run", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "new_instance",
         })
@@ -167,7 +167,7 @@ class TestNewInstanceMode:
         """Test that new_instance mode uses the original message without prefix."""
         config = make_config("test-new-inst-msg", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Original scheduled task",
             "instance_mode": "new_instance",
         })
@@ -188,7 +188,7 @@ class TestNewInstanceMode:
         """Test that instance_mode is correctly reported in metadata."""
         config = make_config("test-new-inst-meta", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "new_instance",
         })
@@ -216,7 +216,7 @@ class TestReuseInstanceMode:
         """Test that reuse_instance mode calls source_repo.increment_scheduler_run_counter."""
         config = make_config("test-reuse-repo", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -237,7 +237,7 @@ class TestReuseInstanceMode:
         """Test that reuse_instance mode sets force_new_instance=False in metadata."""
         config = make_config("test-reuse-force", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -260,7 +260,7 @@ class TestReuseInstanceMode:
         
         config = make_config("test-reuse-run-num", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -283,7 +283,7 @@ class TestReuseInstanceMode:
         
         config = make_config("test-reuse-prefix", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Original task content",
             "instance_mode": "reuse_instance",
         })
@@ -310,7 +310,7 @@ class TestReuseInstanceMode:
         
         config = make_config("test-reuse-increment", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -336,7 +336,7 @@ class TestReuseInstanceMode:
         """Test that reuse_instance without source_repo uses default run_number=1."""
         config = make_config("test-reuse-no-repo", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -359,7 +359,7 @@ class TestReuseInstanceMode:
         
         config = make_config("test-reuse-none", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -390,7 +390,7 @@ class TestRunCounterPersistence:
         
         config = make_config("test-counter-restart", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -419,7 +419,7 @@ class TestRunCounterPersistence:
         
         config = make_config("test-counter-persist", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -449,7 +449,7 @@ class TestContinuationMessageFormatting:
         """Test that _format_continuation_message includes run number."""
         config = make_config("test-format-run", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
         })
         
@@ -465,7 +465,7 @@ class TestContinuationMessageFormatting:
         """Test that continuation message contains incremental work instructions."""
         config = make_config("test-format-instructions", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Build feature X",
         })
         
@@ -483,7 +483,7 @@ class TestContinuationMessageFormatting:
         """Test continuation message formatting for first run."""
         config = make_config("test-format-one", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Start project",
         })
         
@@ -498,7 +498,7 @@ class TestContinuationMessageFormatting:
         """Test continuation message formatting with large run number."""
         config = make_config("test-format-large", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Continue work",
         })
         
@@ -522,7 +522,7 @@ class TestOneTimeScheduleInstanceMode:
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-new", {
             "run_at": future_time,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "One-time task",
             "instance_mode": "reuse_instance",  # Should be ignored
         })
@@ -554,7 +554,7 @@ class TestOneTimeScheduleInstanceMode:
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         config = make_config("test-onetime-no-run", {
             "run_at": future_time,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "One-time task",
             "instance_mode": "reuse_instance",  # Should be ignored
         })
@@ -582,7 +582,7 @@ class TestInstanceModeExecutionCallbacks:
         """Test that execution callback receives correct run_number for new_instance."""
         config = make_config("test-callback-new", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "new_instance",
         })
@@ -611,7 +611,7 @@ class TestInstanceModeExecutionCallbacks:
         
         config = make_config("test-callback-reuse", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -636,7 +636,7 @@ class TestInstanceModeExecutionCallbacks:
         
         config = make_config("test-callback-statuses", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -667,7 +667,7 @@ class TestInstanceModeErrorRecovery:
         """Test that new_instance mode always creates fresh instance even after failure."""
         config = make_config("test-recovery-new", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Recovery test",
             "instance_mode": "new_instance",
         })
@@ -697,7 +697,7 @@ class TestInstanceModeErrorRecovery:
         
         config = make_config("test-recovery-reuse", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Recovery test",
             "instance_mode": "reuse_instance",
         })
@@ -724,7 +724,7 @@ class TestInstanceModeErrorRecovery:
         
         config = make_config("test-recovery-dies", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Resilient test",
             "instance_mode": "reuse_instance",
         })
@@ -754,7 +754,7 @@ class TestInstanceModeMaxConcurrent:
         """Test that reuse_instance mode has same default max_concurrent=1."""
         config = make_config("test-reuse-max-default", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -767,7 +767,7 @@ class TestInstanceModeMaxConcurrent:
         """Test that new_instance mode can override max_concurrent."""
         config = make_config("test-new-max-custom", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "new_instance",
             "max_concurrent": 5,
@@ -784,7 +784,7 @@ class TestInstanceModeMaxConcurrent:
         
         config = make_config("test-reuse-semaphore", {
             "interval_seconds": 3600,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
             "max_concurrent": 1,  # Only 1 concurrent execution
@@ -821,7 +821,7 @@ class TestInstanceModeWithOtherFeatures:
         
         config = make_config("test-interval-instance", {
             "interval_seconds": 3600,  # 1 hour interval
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Interval test",
             "instance_mode": "reuse_instance",
         })
@@ -849,7 +849,7 @@ class TestInstanceModeWithOtherFeatures:
         
         config = make_config("test-cron-instance", {
             "schedule": "0 9 * * *",  # 9 AM daily
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Cron test",
             "instance_mode": "reuse_instance",
         })
@@ -875,7 +875,7 @@ class TestInstanceModeWithOtherFeatures:
         
         config = make_config("test-tz-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Timezone test",
             "instance_mode": "reuse_instance",
             "timezone": "Asia/Tokyo",
@@ -905,7 +905,7 @@ class TestInstanceModeEdgeCases:
         """Test reuse_instance mode with empty message content."""
         config = make_config("test-empty-msg", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "",  # Empty message
             "instance_mode": "reuse_instance",
         })
@@ -921,7 +921,7 @@ class TestInstanceModeEdgeCases:
         
         config = make_config("test-special-chars", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": special_message,
             "instance_mode": "reuse_instance",
         })
@@ -956,7 +956,7 @@ class TestInstanceModeEdgeCases:
         """Test that instance_mode is case-sensitive."""
         config = make_config("test-case-sensitive", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "NEW_INSTANCE",  # Uppercase
         })
@@ -982,7 +982,7 @@ class TestSkipInstanceRunning:
         """Test that _is_instance_active returns False for new_instance mode."""
         config = make_config("test-skip-new-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "new_instance",
         })
@@ -1002,7 +1002,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-no-mapping", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1027,7 +1027,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-idle-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1052,7 +1052,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-running-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1077,7 +1077,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-waiting-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1102,7 +1102,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-error-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1127,7 +1127,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-terminated-instance", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1144,7 +1144,7 @@ class TestSkipInstanceRunning:
         """Test that _is_instance_active handles missing instance_repo gracefully."""
         config = make_config("test-skip-no-instance-repo", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1171,7 +1171,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-execution-running", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Test",
             "instance_mode": "reuse_instance",
         })
@@ -1215,7 +1215,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-skip-execution-idle", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Execute this",
             "instance_mode": "reuse_instance",
         })
@@ -1258,7 +1258,7 @@ class TestSkipInstanceRunning:
         
         config = make_config("test-new-instance-never-skips", {
             "interval_seconds": 60,
-            "agent": "./agents/coder",
+            "agent": "./agents/developer",
             "message": "Execute this",
             "instance_mode": "new_instance",
         })

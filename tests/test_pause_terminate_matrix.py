@@ -162,7 +162,7 @@ def _make_mock_manager(
     # Instance repo: returns a MagicMock instance with the requested status.
     mock_instance = MagicMock()
     mock_instance.status = instance_status
-    mock_instance.agent_id = "coder"
+    mock_instance.agent_id = "developer"
     mock_instance.waiting_for = 0
     mock_instance.instance_metadata = {}
     m._instance_repository = MagicMock()

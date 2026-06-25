@@ -329,13 +329,13 @@ class TestModelInstantiation:
         from daemon.models.instance import InstanceCreate
         
         # Basic creation
-        ic = InstanceCreate(agent_id="coder")
-        assert ic.agent_id == "coder"
+        ic = InstanceCreate(agent_id="developer")
+        assert ic.agent_id == "developer"
         assert ic.instance_id is None
         
         # With custom instance_id
-        ic2 = InstanceCreate(agent_id="coder", instance_id="custom-123")
-        assert ic2.agent_id == "coder"
+        ic2 = InstanceCreate(agent_id="developer", instance_id="custom-123")
+        assert ic2.agent_id == "developer"
         assert ic2.instance_id == "custom-123"
         
         # Validation - empty agent_id should fail
@@ -419,10 +419,10 @@ class TestModelInstantiation:
         
         mapping = InstanceMappingCreate(
             external_user_id="123456789",
-            agent_id="coder",
+            agent_id="developer",
         )
         assert mapping.external_user_id == "123456789"
-        assert mapping.agent_id == "coder"
+        assert mapping.agent_id == "developer"
         assert mapping.metadata is None  # default
         
         # With metadata

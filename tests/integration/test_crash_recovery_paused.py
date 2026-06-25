@@ -107,7 +107,7 @@ def _seed_instance(
     instance_id: str | None = None,
     status: str = InstanceStatus.IDLE.value,
     parent_id: str | None = None,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
 ) -> str:
     """Insert an Instance row. Returns the instance_id."""
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
@@ -139,8 +139,8 @@ def _seed_processing_job(engine: Engine, instance_id: str) -> str:
         job = JobItem(
             job_id=jid,
             instance_id=instance_id,
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="test message",
             status=JobStatus.PROCESSING.value,
             created_at=now_iso,

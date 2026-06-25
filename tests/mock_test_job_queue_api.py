@@ -79,7 +79,7 @@ def client(test_app):
     """Create TestClient for API testing."""
     # Mock validate_agent_id at the location where it's imported from
     with patch("daemon.api.validate_agent_id") as mock_validate:
-        mock_validate.return_value = ("coder", Path("/test/agents/coder"))
+        mock_validate.return_value = ("developer", Path("/test/agents/developer"))
         with TestClient(test_app) as client:
             yield client
 
@@ -88,7 +88,7 @@ def client(test_app):
 def valid_job_data():
     """Valid job creation request data."""
     return {
-        "agent_id": "coder",
+        "agent_id": "developer",
         "message": "Test job message",
         "project_id": "test-project-123",
         "priority": 5,
@@ -101,7 +101,7 @@ def valid_job_data():
 def valid_job_data_no_project():
     """Valid job creation request data without project_id."""
     return {
-        "agent_id": "coder",
+        "agent_id": "developer",
         "message": "Test job message",
         "priority": 5,
         "source": "api"
@@ -115,7 +115,7 @@ def create_mock_job(
     job_id="test-job-123",
     status=JobStatus.PENDING.value,
     priority=5,
-    agent_dir="/agents/coder",
+    agent_dir="/agents/developer",
     project_id="test-project",
     instance_id=None,
     created_at=None,
@@ -151,7 +151,7 @@ class TestJobSubmission:
     def test_submit_job_immediate_start_no_project(self, client, job_queue_service):
         """Test job submission without project_id starts immediately."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job",
             "priority": 5
         })
@@ -166,7 +166,7 @@ class TestJobSubmission:
         """Test job submission with project_id gets queued when lock held."""
         # First, submit a job that holds the lock
         response1 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "First job",
             "project_id": "test-project",
             "priority": 5
@@ -175,7 +175,7 @@ class TestJobSubmission:
         
         # Second job should be queued
         response2 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Second job",
             "project_id": "test-project",
             "priority": 5
@@ -190,7 +190,7 @@ class TestJobSubmission:
         """Test job submission with all valid priority values (1-10)."""
         for priority in range(1, 11):
             response = client.post("/api/jobs", json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": f"Priority {priority} job",
                 "priority": priority
             })
@@ -212,7 +212,7 @@ class TestJobSubmission:
     def test_submit_job_missing_message(self, client, job_queue_service):
         """Test job submission with missing message returns 422."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "priority": 5
         })
         
@@ -229,7 +229,7 @@ class TestJobSubmission:
     def test_submit_job_invalid_priority_zero(self, client, job_queue_service):
         """Test job submission with priority 0 returns 422."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job",
             "priority": 0
         })
@@ -239,7 +239,7 @@ class TestJobSubmission:
     def test_submit_job_invalid_priority_eleven(self, client, job_queue_service):
         """Test job submission with priority 11 returns 422."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job",
             "priority": 11
         })
@@ -249,7 +249,7 @@ class TestJobSubmission:
     def test_submit_job_invalid_priority_negative(self, client, job_queue_service):
         """Test job submission with negative priority returns 422."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job",
             "priority": -1
         })
@@ -259,7 +259,7 @@ class TestJobSubmission:
     def test_submit_job_with_metadata(self, client, job_queue_service):
         """Test job submission with custom metadata."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job with metadata",
             "priority": 5,
             "metadata": {
@@ -276,7 +276,7 @@ class TestJobSubmission:
     def test_submit_job_with_unicode_message(self, client, job_queue_service):
         """Test job submission with unicode characters in message."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Fix the bug in 文件.py 🐛 你好世界",
             "priority": 5
         })
@@ -290,7 +290,7 @@ class TestJobSubmission:
         large_message = "A" * 2000  # 2KB message
         
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": large_message,
             "priority": 5
         })
@@ -310,7 +310,7 @@ class TestJobRetrieval:
         """Test retrieving an existing job."""
         # First create a job
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job",
             "priority": 5
         })
@@ -337,7 +337,7 @@ class TestJobRetrieval:
         """Test getting a pending job shows queue position."""
         # Create first job (holds lock)
         response1 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "First job",
             "project_id": "test-project",
             "priority": 5
@@ -345,7 +345,7 @@ class TestJobRetrieval:
         
         # Create second job (queued)
         response2 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Second job",
             "project_id": "test-project",
             "priority": 5
@@ -372,7 +372,7 @@ class TestJobListing:
         # Create a few jobs
         for i in range(3):
             client.post("/api/jobs", json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": f"Job {i}",
                 "priority": 5
             })
@@ -389,13 +389,13 @@ class TestJobListing:
         """Test listing jobs filtered by status=pending."""
         # Create jobs that will be pending (with same project to queue)
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "First job",
             "project_id": "test-project",
             "priority": 5
         })
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Second job",
             "project_id": "test-project",
             "priority": 5
@@ -412,7 +412,7 @@ class TestJobListing:
         """Test listing jobs filtered by status=processing."""
         # Create job without project (starts immediately)
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Processing job",
             "priority": 5
         })
@@ -430,7 +430,7 @@ class TestJobListing:
         
         # Create job for specific project
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Project job",
             "project_id": project_id,
             "priority": 5
@@ -448,7 +448,7 @@ class TestJobListing:
         # Create multiple jobs
         for i in range(5):
             client.post("/api/jobs", json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": f"Job {i}",
                 "priority": 5
             })
@@ -488,7 +488,7 @@ class TestJobCancellation:
         """Test cancelling a pending job."""
         # Create first job to hold lock
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "First job",
             "project_id": "test-project",
             "priority": 5
@@ -496,7 +496,7 @@ class TestJobCancellation:
         
         # Create second job (will be pending)
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Second job",
             "project_id": "test-project",
             "priority": 5
@@ -514,7 +514,7 @@ class TestJobCancellation:
         """Test cancelling a processing job."""
         # Create job without project (starts immediately)
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Processing job",
             "priority": 5
         })
@@ -531,7 +531,7 @@ class TestJobCancellation:
         """Test cancelling a completed job returns 400."""
         # Create and start a job
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Job to complete",
             "priority": 5
         })
@@ -559,7 +559,7 @@ class TestJobCancellation:
         """Test cancelling an already cancelled job returns 400."""
         # Create a job
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Job to cancel",
             "priority": 5
         })
@@ -584,7 +584,7 @@ class TestJobRetry:
         """Test retrying a failed job."""
         # Create and fail a job
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Job to fail",
             "priority": 5
         })
@@ -606,7 +606,7 @@ class TestJobRetry:
         """Test retrying a completed job returns 400."""
         # Create and complete a job
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Job to complete",
             "priority": 5
         })
@@ -626,7 +626,7 @@ class TestJobRetry:
         """Test retrying a pending job returns 400."""
         # Create first job to hold lock
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "First job",
             "project_id": "test-project",
             "priority": 5
@@ -634,7 +634,7 @@ class TestJobRetry:
         
         # Create second job (will be pending)
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Second job",
             "project_id": "test-project",
             "priority": 5
@@ -665,7 +665,7 @@ class TestJobEvents:
         """Test subscribing to job events via SSE for completed job."""
         # Create and complete a job so SSE immediately sends events
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test job",
             "priority": 5
         })
@@ -706,7 +706,7 @@ class TestJobEvents:
         """Test SSE endpoint returns correct content type."""
         # Create and complete a job
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Completed job",
             "priority": 5
         })
@@ -734,7 +734,7 @@ class TestEdgeCases:
         
         def submit_job(i):
             response = client.post("/api/jobs", json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": f"Concurrent job {i}",
                 "project_id": project_id,
                 "priority": 5
@@ -763,7 +763,7 @@ class TestEdgeCases:
         """Test that higher priority jobs are processed first."""
         # Create first job to hold lock
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Lock holder",
             "project_id": "priority-test-project",
             "priority": 5
@@ -771,21 +771,21 @@ class TestEdgeCases:
         
         # Queue jobs with different priorities (lower priority first)
         low_priority_id = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Low priority",
             "project_id": "priority-test-project",
             "priority": 1
         }).json()["job_id"]
         
         high_priority_id = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "High priority",
             "project_id": "priority-test-project",
             "priority": 10
         }).json()["job_id"]
         
         medium_priority_id = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Medium priority",
             "project_id": "priority-test-project",
             "priority": 5
@@ -805,7 +805,7 @@ class TestEdgeCases:
         special_message = "Test with special chars: \n\t\r\"'\\<>&{}[]"
         
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": special_message,
             "priority": 5
         })
@@ -815,7 +815,7 @@ class TestEdgeCases:
     def test_unicode_in_all_fields(self, client, job_queue_service):
         """Test job with unicode in all text fields."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "你好世界 مرحبا Hello 世界 🌍",
             "priority": 5,
             "metadata": {"key": "值 🎉"}
@@ -827,7 +827,7 @@ class TestEdgeCases:
         """Test job with null bytes in message (should be handled gracefully)."""
         # Note: JSON doesn't allow raw null bytes, but \u0000 escape should work
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Test\u0000with\u0000nulls",
             "priority": 5
         })
@@ -851,7 +851,7 @@ class TestEdgeCases:
     def test_empty_message_string(self, client, job_queue_service):
         """Test job with empty message string."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "",
             "priority": 5
         })
@@ -862,7 +862,7 @@ class TestEdgeCases:
     def test_whitespace_only_message(self, client, job_queue_service):
         """Test job with whitespace-only message."""
         response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "   \t\n   ",
             "priority": 5
         })
@@ -874,7 +874,7 @@ class TestEdgeCases:
         """Test that duplicate job IDs cannot be created."""
         # Create a job
         response1 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "First job",
             "priority": 5
         })
@@ -882,7 +882,7 @@ class TestEdgeCases:
         
         # Create another job - should get different ID
         response2 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Second job",
             "priority": 5
         })
@@ -894,14 +894,14 @@ class TestEdgeCases:
         """Test that jobs for different projects can run in parallel."""
         # Create jobs for different projects
         response1 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Project A job",
             "project_id": "project-a",
             "priority": 5
         })
         
         response2 = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Project B job",
             "project_id": "project-b",
             "priority": 5
@@ -923,7 +923,7 @@ class TestEdgeCases:
         
         # Create job with metadata
         create_response = client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Job to retry",
             "priority": 5,
             "metadata": original_metadata
@@ -949,7 +949,7 @@ class TestEdgeCases:
         # Create some jobs
         for i in range(5):
             client.post("/api/jobs", json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": f"Job {i}",
                 "priority": 5
             })
@@ -982,7 +982,7 @@ class TestPerformance:
         """Test listing with many jobs in queue."""
         # Create many jobs (with same project to queue them)
         client.post("/api/jobs", json={
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "Lock holder",
             "project_id": "perf-test-project",
             "priority": 5
@@ -990,7 +990,7 @@ class TestPerformance:
         
         for i in range(50):
             client.post("/api/jobs", json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": f"Queued job {i}",
                 "project_id": "perf-test-project",
                 "priority": 5
@@ -1009,7 +1009,7 @@ class TestPerformance:
         
         for i in range(20):
             response = client.post("/api/jobs", json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": f"Rapid job {i}",
                 "priority": 5
             })

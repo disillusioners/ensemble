@@ -114,7 +114,7 @@ def _get_send_message_tool(manager: MagicMock):
     for p in patches:
         p.start()
     try:
-        tools = create_instance_tools(manager, "parent-instance", "coder")
+        tools = create_instance_tools(manager, "parent-instance", "developer")
     finally:
         for p in reversed(patches):
             p.stop()

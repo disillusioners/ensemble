@@ -16,7 +16,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def _make_mock_instance_meta(agent_id: str = "coder", instance_id: str = "test-instance"):
+def _make_mock_instance_meta(agent_id: str = "developer", instance_id: str = "test-instance"):
     """Create a mock instance metadata."""
     meta = MagicMock()
     meta.instance_id = instance_id

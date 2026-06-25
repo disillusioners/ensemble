@@ -44,7 +44,7 @@ class MockJob:
     def __init__(
         self,
         job_id: str,
-        agent_id: str = "coder",
+        agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
         status: str = JobStatus.PENDING.value,
@@ -141,7 +141,7 @@ class TestJobProcessorTwoLevelPause:
         # Create a job with instance_id set
         started_job = MagicMock()
         started_job.job_id = "job-1"
-        started_job.agent_id = "coder"
+        started_job.agent_id = "developer"
         started_job.message = "test message"
         started_job.source = "api"
         started_job.instance_id = "instance-123"
@@ -233,7 +233,7 @@ class TestJobProcessorTwoLevelPause:
         
         started_job2 = MagicMock()
         started_job2.job_id = "job-2"
-        started_job2.agent_id = "coder"
+        started_job2.agent_id = "developer"
         started_job2.message = "test message"
         started_job2.source = "api"
         started_job2.instance_id = "instance-123"
@@ -560,7 +560,7 @@ class TestOrphanJobRecovery:
         mock_instance_manager.spawn_instance_with_mcp.assert_called_once()
         call_kwargs = mock_instance_manager.spawn_instance_with_mcp.call_args[1]
         assert call_kwargs["instance_id"] == "missing-instance-id"
-        assert call_kwargs["agent_id"] == "coder"
+        assert call_kwargs["agent_id"] == "developer"
         assert call_kwargs["project_id"] == "project-1"
 
         # Should have enqueued the job message

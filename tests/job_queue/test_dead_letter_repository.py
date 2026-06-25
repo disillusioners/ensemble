@@ -40,8 +40,8 @@ class TestDeadLetterRepositoryEnqueue:
         """Test that enqueue() creates a new DLQ item."""
         item = DeadLetterItem(
             job_id="job-123",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -68,8 +68,8 @@ class TestDeadLetterRepositoryGet:
         """Test retrieving an existing DLQ item by dlq_id."""
         item = DeadLetterItem(
             job_id="job-123",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -102,8 +102,8 @@ class TestDeadLetterRepositoryGetByJobId:
         """Test retrieving DLQ item by job_id."""
         item = DeadLetterItem(
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -136,8 +136,8 @@ class TestDeadLetterRepositoryList:
         # Create items for different projects
         item1 = DeadLetterItem(
             job_id="job-1",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 1",
             source="api",
             project_id="project-a",
@@ -150,8 +150,8 @@ class TestDeadLetterRepositoryList:
         )
         item2 = DeadLetterItem(
             job_id="job-2",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 2",
             source="api",
             project_id="project-b",
@@ -175,8 +175,8 @@ class TestDeadLetterRepositoryList:
         """Test listing DLQ items filtered by queue_id."""
         item1 = DeadLetterItem(
             job_id="job-1",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 1",
             source="api",
             project_id="project-a",
@@ -189,8 +189,8 @@ class TestDeadLetterRepositoryList:
         )
         item2 = DeadLetterItem(
             job_id="job-2",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 2",
             source="api",
             project_id="project-a",
@@ -213,8 +213,8 @@ class TestDeadLetterRepositoryList:
         """Test listing DLQ items filtered by reason."""
         item1 = DeadLetterItem(
             job_id="job-1",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 1",
             source="api",
             project_id="project-a",
@@ -227,8 +227,8 @@ class TestDeadLetterRepositoryList:
         )
         item2 = DeadLetterItem(
             job_id="job-2",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 2",
             source="api",
             project_id="project-a",
@@ -251,8 +251,8 @@ class TestDeadLetterRepositoryList:
         """Test listing DLQ items with multiple filters combined."""
         item1 = DeadLetterItem(
             job_id="job-1",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 1",
             source="api",
             project_id="project-a",
@@ -265,8 +265,8 @@ class TestDeadLetterRepositoryList:
         )
         item2 = DeadLetterItem(
             job_id="job-2",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 2",
             source="api",
             project_id="project-a",
@@ -279,8 +279,8 @@ class TestDeadLetterRepositoryList:
         )
         item3 = DeadLetterItem(
             job_id="job-3",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 3",
             source="api",
             project_id="project-b",
@@ -310,8 +310,8 @@ class TestDeadLetterRepositoryList:
         for i in range(5):
             item = DeadLetterItem(
                 job_id=f"job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Message {i}",
                 source="api",
                 project_id="project-a",
@@ -335,8 +335,8 @@ class TestDeadLetterRepositoryList:
         for i in range(5):
             item = DeadLetterItem(
                 job_id=f"job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Message {i}",
                 source="api",
                 project_id="project-a",
@@ -360,8 +360,8 @@ class TestDeadLetterRepositoryList:
         for i in range(10):
             item = DeadLetterItem(
                 job_id=f"job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Message {i}",
                 source="api",
                 project_id="project-a",
@@ -394,8 +394,8 @@ class TestDeadLetterRepositoryDelete:
         """Test deleting an existing DLQ item returns True."""
         item = DeadLetterItem(
             job_id="job-123",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -428,8 +428,8 @@ class TestDeadLetterRepositoryDeleteByJobId:
         """Test deleting DLQ item by job_id."""
         item = DeadLetterItem(
             job_id="job-456",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -463,8 +463,8 @@ class TestDeadLetterRepositoryCleanupByAge:
         old_time = datetime.utcnow() - timedelta(hours=25)
         old_item = DeadLetterItem(
             job_id="job-old",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Old message",
             source="api",
             project_id="project-a",
@@ -482,8 +482,8 @@ class TestDeadLetterRepositoryCleanupByAge:
         recent_time = datetime.utcnow() - timedelta(hours=1)
         recent_item = DeadLetterItem(
             job_id="job-recent",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Recent message",
             source="api",
             project_id="project-a",
@@ -512,8 +512,8 @@ class TestDeadLetterRepositoryCleanupByAge:
         old_time = datetime.utcnow() - timedelta(hours=25)
         old_item1 = DeadLetterItem(
             job_id="job-old-1",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Old message 1",
             source="api",
             project_id="project-a",
@@ -530,8 +530,8 @@ class TestDeadLetterRepositoryCleanupByAge:
         # Create old MANUAL item (should not be deleted with MAX_RETRIES filter)
         old_item2 = DeadLetterItem(
             job_id="job-old-2",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Old message 2",
             source="api",
             project_id="project-a",
@@ -560,8 +560,8 @@ class TestDeadLetterRepositoryCleanupByAge:
         recent_time = datetime.utcnow() - timedelta(hours=1)
         recent_item = DeadLetterItem(
             job_id="job-recent",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Recent message",
             source="api",
             project_id="project-a",
@@ -591,8 +591,8 @@ class TestDeadLetterRepositoryCount:
         for i in range(5):
             item = DeadLetterItem(
                 job_id=f"job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Message {i}",
                 source="api",
                 project_id="project-a",
@@ -613,8 +613,8 @@ class TestDeadLetterRepositoryCount:
         """Test counting items filtered by project_id."""
         item1 = DeadLetterItem(
             job_id="job-1",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 1",
             source="api",
             project_id="project-a",
@@ -627,8 +627,8 @@ class TestDeadLetterRepositoryCount:
         )
         item2 = DeadLetterItem(
             job_id="job-2",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 2",
             source="api",
             project_id="project-b",

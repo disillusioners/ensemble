@@ -57,7 +57,7 @@ class TestAddHistoryEntry:
             entry_type="task",
             summary="Fixed critical bug",
             details="Fixed memory leak in worker process",
-            source_agent="coder",
+            source_agent="developer",
             source_instance_id="instance-123",
             entry_metadata={"severity": "critical", "bug_id": "BUG-456"},
         )
@@ -65,7 +65,7 @@ class TestAddHistoryEntry:
         assert entry["entry_type"] == "task"
         assert entry["summary"] == "Fixed critical bug"
         assert entry["details"] == "Fixed memory leak in worker process"
-        assert entry["source_agent"] == "coder"
+        assert entry["source_agent"] == "developer"
         assert entry["source_instance_id"] == "instance-123"
         assert entry["entry_metadata"] == {"severity": "critical", "bug_id": "BUG-456"}
 

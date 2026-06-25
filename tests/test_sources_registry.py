@@ -140,7 +140,7 @@ def mock_manager():
         source_id="test-source",
         external_user_id="user123",
         agent_instance_id="test-instance",
-        agent_id="coder",
+        agent_id="developer",
         agent_dir="/default/agents",
         mapping_metadata={},
         last_message_at=None,

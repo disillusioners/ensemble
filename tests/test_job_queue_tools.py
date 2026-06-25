@@ -88,7 +88,7 @@ class TestJobCreateTool:
 
         mock_job_item = MagicMock()
         expected_dict = {
-            "job_id": "job-1", "status": "pending", "agent_id": "coder",
+            "job_id": "job-1", "status": "pending", "agent_id": "developer",
             "message": "test", "source": "api", "project_id": None, "queue_id": None,
             "priority": 5, "created_at": None, "started_at": None, "completed_at": None,
             "instance_id": None, "error_message": None, "result_summary": None,
@@ -100,7 +100,7 @@ class TestJobCreateTool:
         job_service.enqueue.return_value = mock_job_item
 
         result = await job_create.ainvoke({
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "test",
         })
 
@@ -116,7 +116,7 @@ class TestJobCreateTool:
         job_service.enqueue.side_effect = ValueError("Invalid job parameters")
 
         result = await job_create.ainvoke({
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "test",
         })
 
@@ -131,7 +131,7 @@ class TestJobCreateTool:
         job_service.enqueue.side_effect = RuntimeError("Database connection failed")
 
         result = await job_create.ainvoke({
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "test",
         })
 
@@ -149,7 +149,7 @@ class TestJobCreateTool:
         job_service.enqueue.return_value = mock_job_item
 
         await job_create.ainvoke({
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "test",
         })
 
@@ -169,7 +169,7 @@ class TestJobCreateTool:
         job_service.enqueue.return_value = mock_job_item
 
         await job_create.ainvoke({
-            "agent_id": "coder",
+            "agent_id": "developer",
             "message": "test",
             "source": "manual",
         })

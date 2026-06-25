@@ -123,7 +123,7 @@ def seed_job(
     with Session(engine) as s:
         item = JobItem(
             job_id=jid,
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/tmp/agent",
             message="test job",
             source="api",
@@ -143,7 +143,7 @@ def seed_instance(
     *,
     instance_id: str | None = None,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
     parent_id: str | None = None,
     version: int = 1,
 ) -> str:
@@ -656,7 +656,7 @@ class TestM10OrphanCleanup:
         mocks["job_queue_service"].start_job = AsyncMock(
             return_value=JobItem(
                 job_id=self.next_job.job_id,
-                agent_id="coder",
+                agent_id="developer",
                 agent_dir="/tmp/agent",
                 message="next job",
                 source="api",
@@ -700,7 +700,7 @@ class TestM10OrphanCleanup:
 
         next_job_item = JobItem(
             job_id=self.next_job.job_id,
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/tmp/agent",
             message="next job",
             source="api",

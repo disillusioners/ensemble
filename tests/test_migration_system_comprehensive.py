@@ -230,7 +230,7 @@ def old_schema_engine(temp_db_dir: Path, temp_migrations_dir: Path) -> Generator
         # Insert test data
         conn.execute(text("""
             INSERT INTO instances (instance_id, agent_dir, status, created_at, updated_at)
-            VALUES ('old-instance-1', './agents/coder', 'idle', '2024-01-01T00:00:00', '2024-01-01T00:00:00')
+            VALUES ('old-instance-1', "./agents/developer", 'idle', '2024-01-01T00:00:00', '2024-01-01T00:00:00')
         """))
         
         # Create instance_mappings table without agent_id
@@ -737,7 +737,7 @@ class TestScenario5IntegrationWithStartup:
         
         assert len(rows_after) == 1, "Should still have 1 instance after migration"
         assert rows_after[0][0] == "old-instance-1", "Instance ID should be preserved"
-        assert rows_after[0][1] == "./agents/coder", "agent_dir should be preserved"
+        assert rows_after[0][1] == "./agents/developer", "agent_dir should be preserved"
 
 
 # ============================================================================

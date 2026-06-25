@@ -174,14 +174,14 @@ class TestPersonaContentAccepted:
         _assert_not_project_knowledge(result)
         assert result["type"] == "identity"
 
-    # --- 19-21: I should trust / I am a coder / I need -------------------
+    # --- 19-21: I should trust / I am a developer / I need -------------------
 
     def test_i_should_trust_agents(self):
         result = _classify_request("I should trust agents more on small tasks")
         _assert_not_project_knowledge(result)
 
-    def test_i_am_a_coder_specialist(self):
-        result = _classify_request("I am a coder specialist")
+    def test_i_am_a_developer_specialist(self):
+        result = _classify_request("I am a developer specialist")
         _assert_not_project_knowledge(result)
         assert result["type"] == "identity"
 

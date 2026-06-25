@@ -82,8 +82,8 @@ class TestNotificationBroadcasting:
         queue = asyncio.Queue()
         notification = {
             "instance_id": "test-123",
-            "agent_id": "coder",
-            "name": "Coder",
+            "agent_id": "developer",
+            "name": "Developer",
             "status": "COMPLETED",
             "timestamp": "2024-01-01T00:00:00Z",
         }
@@ -134,8 +134,8 @@ class TestNotificationBroadcasting:
         await broadcaster.add_connection(queue)
         delivered = await broadcaster.emit_root_completion(
             instance_id="test-123",
-            agent_id="coder",
-            agent_name="Coder Agent",
+            agent_id="developer",
+            agent_name="Developer Agent",
             status="COMPLETED",
         )
 
@@ -143,8 +143,8 @@ class TestNotificationBroadcasting:
         received = await asyncio.wait_for(queue.get(), timeout=1.0)
 
         assert received["instance_id"] == "test-123"
-        assert received["agent_id"] == "coder"
-        assert received["name"] == "Coder Agent"
+        assert received["agent_id"] == "developer"
+        assert received["name"] == "Developer Agent"
         assert received["status"] == "COMPLETED"
         assert "timestamp" in received
 
@@ -157,7 +157,7 @@ class TestNotificationBroadcasting:
         await broadcaster.add_connection(queue)
         delivered = await broadcaster.emit_root_completion(
             instance_id="test-123",
-            agent_id="coder",
+            agent_id="developer",
             agent_name=None,
             status="COMPLETED",
         )
@@ -165,7 +165,7 @@ class TestNotificationBroadcasting:
         assert delivered == 1
         received = await asyncio.wait_for(queue.get(), timeout=1.0)
 
-        assert received["name"] == "Coder"
+        assert received["name"] == "Developer"
 
     @pytest.mark.asyncio
     async def test_emit_status_uppercase(self):
@@ -176,8 +176,8 @@ class TestNotificationBroadcasting:
         await broadcaster.add_connection(queue)
         await broadcaster.emit_root_completion(
             instance_id="test-123",
-            agent_id="coder",
-            agent_name="Coder",
+            agent_id="developer",
+            agent_name="Developer",
             status="completed",  # lowercase input
         )
 
@@ -282,7 +282,7 @@ class TestInstanceCreatedKBFiltering:
         await broadcaster.add_connection(queue)
         instance_data = {
             "instance_id": "test-123",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "parent_id": None,
             "status": "running",
             "project_id": "proj-1",
@@ -380,7 +380,7 @@ class TestInstanceCreatedKBFiltering:
         broadcaster = NotificationBroadcaster()
         instance_data = {
             "instance_id": "test-123",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "parent_id": None,
             "status": "running",
             "project_id": "proj-1",

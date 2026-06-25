@@ -205,7 +205,7 @@ class TestDLQProjectNormalization:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Orphan job for DLQ test",
                 "project_id": None,
             },
@@ -280,7 +280,7 @@ class TestDLQProjectNormalization:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Verify no null in DLQ",
                 "project_id": None,
             },
@@ -334,7 +334,7 @@ class TestDLQProjectNormalization:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Project ID preservation test",
                 "project_id": None,
             },
@@ -391,7 +391,7 @@ class TestDLQProjectNormalization:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "Queue ID inheritance test",
                 "project_id": None,
             },
@@ -444,7 +444,7 @@ class TestDLQProjectNormalization:
             response = client.post(
                 "/jobs",
                 json={
-                    "agent_id": "coder",
+                    "agent_id": "developer",
                     "message": f"DLQ filter test {i}",
                     "project_id": None,
                 },
@@ -495,7 +495,7 @@ class TestDLQProjectNormalization:
         response = client.post(
             "/jobs",
             json={
-                "agent_id": "coder",
+                "agent_id": "developer",
                 "message": "DLQ count filter test",
                 "project_id": None,
             },

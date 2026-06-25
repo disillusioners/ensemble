@@ -88,7 +88,7 @@ def create_child_instance(instance_id: str = "child-123", parent_id: str = "pare
     """Create a mock child instance."""
     instance = MagicMock(spec=Instance)
     instance.instance_id = instance_id
-    instance.agent_id = "coder"
+    instance.agent_id = "developer"
     instance.parent_id = parent_id
     instance.waiting_for = 0
     instance.status = InstanceStatus.COMPLETED.value

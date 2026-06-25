@@ -85,8 +85,8 @@ def sample_dlq_item():
     return DeadLetterItem(
         dlq_id="dlq-123",
         job_id="job-456",
-        agent_id="coder",
-        agent_dir="/agents/coder",
+        agent_id="developer",
+        agent_dir="/agents/developer",
         message="Fix the login bug",
         source="api",
         project_id="project-abc",
@@ -122,8 +122,8 @@ class TestListDLQItems:
         # Create a DLQ item in the repository
         item = DeadLetterItem(
             job_id="job-123",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -150,8 +150,8 @@ class TestListDLQItems:
         # Create items with different filters
         item1 = DeadLetterItem(
             job_id="job-1",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 1",
             source="api",
             project_id="project-abc",
@@ -164,8 +164,8 @@ class TestListDLQItems:
         )
         item2 = DeadLetterItem(
             job_id="job-2",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Message 2",
             source="api",
             project_id="project-abc",
@@ -207,8 +207,8 @@ class TestListDLQItems:
         for i in range(5):
             item = DeadLetterItem(
                 job_id=f"job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Message {i}",
                 source="api",
                 project_id="project-abc",
@@ -295,8 +295,8 @@ class TestReplayDLQItem:
         dlq_item = DeadLetterItem(
             dlq_id="dlq-replay-test",
             job_id="job-replay-test",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -313,8 +313,8 @@ class TestReplayDLQItem:
         # Create the job in DEAD_LETTER status
         job = JobItem(
             job_id="job-replay-test",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test message",
             source="api",
             project_id="project-abc",
@@ -417,8 +417,8 @@ class TestCleanupDLQ:
         for i in range(3):
             item = DeadLetterItem(
                 job_id=f"old-job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Old message {i}",
                 source="api",
                 project_id="project-abc",
@@ -437,8 +437,8 @@ class TestCleanupDLQ:
         for i in range(2):
             item = DeadLetterItem(
                 job_id=f"recent-job-{i}",
-                agent_id="coder",
-                agent_dir="/agents/coder",
+                agent_id="developer",
+                agent_dir="/agents/developer",
                 message=f"Recent message {i}",
                 source="api",
                 project_id="project-abc",
@@ -473,8 +473,8 @@ class TestCleanupDLQ:
         # Create old MAX_RETRIES item
         item1 = DeadLetterItem(
             job_id="old-max-retries",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Old message",
             source="api",
             project_id="project-abc",
@@ -491,8 +491,8 @@ class TestCleanupDLQ:
         # Create old MANUAL item (should not be deleted)
         item2 = DeadLetterItem(
             job_id="old-manual",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Old manual message",
             source="api",
             project_id="project-abc",
@@ -584,8 +584,8 @@ class TestDLQSchemas:
         dlq_item = DeadLetterItem(
             dlq_id="dlq-replay-struct",
             job_id="job-replay-struct",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test",
             source="api",
             project_id="project-abc",
@@ -602,8 +602,8 @@ class TestDLQSchemas:
         # Create job
         job = JobItem(
             job_id="job-replay-struct",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Test",
             source="api",
             project_id="project-abc",

@@ -109,7 +109,7 @@ def mock_instance():
     """Create a mock Instance with basic attributes."""
     instance = MagicMock()
     instance.instance_id = "instance-123"
-    instance.agent_id = "coder"
+    instance.agent_id = "developer"
     instance.parent_id = None
     instance.waiting_for = 0
     instance.status = "running"
@@ -196,7 +196,7 @@ class TestCompletionPath1RootInstance:
         mock_instance.parent_id = None
         mock_instance.waiting_for = 0
         mock_instance.instance_metadata = {}
-        mock_instance.agent_id = "coder"
+        mock_instance.agent_id = "developer"
         mock_instance.version = 1
 
         # Mock _instance_repository.get for content fetching
@@ -320,7 +320,7 @@ class TestCompletionPath3RegularChild:
         # Setup: regular child instance (has parent, not invoked_as_tool)
         mock_instance.parent_id = "parent-instance-456"
         mock_instance.instance_metadata = {}
-        mock_instance.agent_id = "coder"
+        mock_instance.agent_id = "developer"
         mock_instance.version = 1
 
         # Mock _instance_repository.get for content fetching

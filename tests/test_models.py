@@ -78,7 +78,7 @@ class TestInstanceInfo:
         """Test InstanceInfo with parent_id."""
         data = {
             "instance_id": "child-instance",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "agent_dir": "/path/to/agent",
             "status": "running",
             "parent_id": "parent-instance",
@@ -102,7 +102,7 @@ class TestInstanceInfo:
         """
         data = {
             "instance_id": "parent-instance",
-            "agent_id": "coder",
+            "agent_id": "developer",
             "agent_dir": "/path/to/agent",
             "status": "running",
             "parent_id": None,
@@ -344,14 +344,14 @@ class TestInstanceListResponse:
         instances = [
             InstanceInfo(
                 instance_id="instance-1",
-                agent_id="coder",
+                agent_id="developer",
                 agent_dir="/path/to/agent1",
                 status=InstanceStatus.RUNNING,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
             ),
             InstanceInfo(
                 instance_id="instance-2",
-                agent_id="coder",
+                agent_id="developer",
                 agent_dir="/path/to/agent2",
                 status=InstanceStatus.IDLE,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
@@ -387,7 +387,7 @@ class TestInstanceListResponse:
         instances = [
             InstanceInfo(
                 instance_id="instance-1",
-                agent_id="coder",
+                agent_id="developer",
                 agent_dir="/path/to/agent",
                 status=InstanceStatus.RUNNING,
                 created_at=datetime(2024, 1, 1, 0, 0, 0),
@@ -405,7 +405,7 @@ class TestInstanceListResponse:
         
         assert len(data["instances"]) == 1
         assert data["instances"][0]["instance_id"] == "instance-1"
-        assert data["instances"][0]["agent_id"] == "coder"
+        assert data["instances"][0]["agent_id"] == "developer"
 
 
 class TestModelValidation:
@@ -469,7 +469,7 @@ class TestInstanceInfoProjectId:
         """Test InstanceInfo accepts project_id."""
         instance = InstanceInfo(
             instance_id="test-instance",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
             status=InstanceStatus.RUNNING,
             project_id="proj-123",
@@ -481,7 +481,7 @@ class TestInstanceInfoProjectId:
         """Test InstanceInfo project_id defaults to None."""
         instance = InstanceInfo(
             instance_id="test-instance",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
             status=InstanceStatus.RUNNING,
             created_at=datetime(2024, 1, 1, 0, 0, 0),
@@ -492,7 +492,7 @@ class TestInstanceInfoProjectId:
         """Test InstanceInfo model_dump includes project_id."""
         instance = InstanceInfo(
             instance_id="test-instance",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
             status=InstanceStatus.RUNNING,
             project_id="proj-789",
@@ -505,7 +505,7 @@ class TestInstanceInfoProjectId:
         """Test InstanceInfo model_dump includes project_id as None."""
         instance = InstanceInfo(
             instance_id="test-instance",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
             status=InstanceStatus.RUNNING,
             created_at=datetime(2024, 1, 1, 0, 0, 0),
@@ -524,7 +524,7 @@ class TestInstanceModelProjectId:
         instance = Instance(
             instance_id="test-instance",
             project_id="proj-123",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
         )
         assert instance.project_id == "proj-123"
@@ -534,7 +534,7 @@ class TestInstanceModelProjectId:
         from daemon.repositories.instance.models import Instance
         instance = Instance(
             instance_id="test-instance",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
         )
         assert instance.project_id is None
@@ -545,7 +545,7 @@ class TestInstanceModelProjectId:
         instance = Instance(
             instance_id="test-instance",
             project_id="proj-456",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
         )
         data = instance.to_dict()
@@ -557,7 +557,7 @@ class TestInstanceModelProjectId:
         from daemon.repositories.instance.models import Instance
         instance = Instance(
             instance_id="test-instance",
-            agent_id="coder",
+            agent_id="developer",
             agent_dir="/path/to/agent",
         )
         data = instance.to_dict()

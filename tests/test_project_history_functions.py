@@ -217,7 +217,7 @@ class TestFormatProjectContextWithHistory:
                 "entry_type": "milestone",
                 "summary": "Completed Phase 1",
                 "details": None,
-                "source_agent": "coder",
+                "source_agent": "developer",
                 "source_instance_id": "inst-456",
                 "entry_metadata": None,
                 "created_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),

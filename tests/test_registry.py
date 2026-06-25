@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from daemon.registry import AgentMetadata, AgentRegistry
+from daemon.registry import AgentMetadata, AgentRegistry, get_registry
 
 
 @pytest.fixture
@@ -48,7 +48,7 @@ class TestDiscoverAgents:
     def test_discover_agents(self, temp_agents_dir: Path) -> None:
         """Test basic agent discovery."""
         # Create test agents
-        create_agent_meta(temp_agents_dir, "coder")
+        create_agent_meta(temp_agents_dir, "developer")
         create_agent_meta(temp_agents_dir, "reviewer")
 
         registry = AgentRegistry(temp_agents_dir)
@@ -57,7 +57,7 @@ class TestDiscoverAgents:
         agents = registry.list_all()
         assert len(agents) == 2
         agent_ids = {a.id for a in agents}
-        assert agent_ids == {"coder", "reviewer"}
+        assert agent_ids == {"developer", "reviewer"}
 
     def test_discover_sorted_alphabetically(self, temp_agents_dir: Path) -> None:
         """Test that agents are discovered in alphabetical order."""
@@ -75,16 +75,16 @@ class TestDiscoverAgents:
         """Test that innate_skills are properly loaded from meta.json."""
         # Create agent with innate_skills using helper
         create_agent_meta(
-            temp_agents_dir, "coder",
-            name="Coder",
-            description="Test coder",
+            temp_agents_dir, "developer",
+            name="Developer",
+            description="Test developer",
             innate_skills=["coding", "reviewing"],
         )
 
         registry = AgentRegistry(temp_agents_dir)
         registry.discover()
 
-        agent = registry.get("coder")
+        agent = registry.get("developer")
         assert agent is not None
         assert agent.innate_skills == ["coding", "reviewing"]
 
@@ -192,14 +192,14 @@ class TestGetAgent:
     def test_get_by_id(self, registry: AgentRegistry, temp_agents_dir: Path) -> None:
         """Test getting an existing agent by ID."""
         create_agent_meta(
-            temp_agents_dir, "coder", name="Coder", description="Writes code"
+            temp_agents_dir, "developer", name="Developer", description="Writes code"
         )
         registry.discover()
 
-        agent = registry.get("coder")
+        agent = registry.get("developer")
         assert agent is not None
-        assert agent.id == "coder"
-        assert agent.name == "Coder"
+        assert agent.id == "developer"
+        assert agent.name == "Developer"
         assert agent.description == "Writes code"
         assert isinstance(agent.path, Path)
 
@@ -214,10 +214,10 @@ class TestExists:
 
     def test_exists_true(self, registry: AgentRegistry, temp_agents_dir: Path) -> None:
         """Test exists returns True for existing agent."""
-        create_agent_meta(temp_agents_dir, "coder")
+        create_agent_meta(temp_agents_dir, "developer")
         registry.discover()
 
-        assert registry.exists("coder") is True
+        assert registry.exists("developer") is True
 
     def test_exists_false(self, registry: AgentRegistry) -> None:
         """Test exists returns False for non-existent agent."""
@@ -229,7 +229,7 @@ class TestListAll:
 
     def test_list_all(self, registry: AgentRegistry, temp_agents_dir: Path) -> None:
         """Test listing all agents."""
-        create_agent_meta(temp_agents_dir, "coder")
+        create_agent_meta(temp_agents_dir, "developer")
         create_agent_meta(temp_agents_dir, "reviewer")
         create_agent_meta(temp_agents_dir, "leader")
         registry.discover()
@@ -237,7 +237,7 @@ class TestListAll:
         agents = registry.list_all()
         assert len(agents) == 3
         agent_ids = {a.id for a in agents}
-        assert agent_ids == {"coder", "reviewer", "leader"}
+        assert agent_ids == {"developer", "reviewer", "leader"}
 
     def test_list_all_empty(self, registry: AgentRegistry) -> None:
         """Test listing when no agents exist."""
@@ -250,24 +250,24 @@ class TestResolveToId:
 
     def test_resolve_to_id_with_id(self, registry: AgentRegistry, temp_agents_dir: Path) -> None:
         """Test resolving a pure agent ID."""
-        create_agent_meta(temp_agents_dir, "coder")
+        create_agent_meta(temp_agents_dir, "developer")
         registry.discover()
 
-        assert registry.resolve_to_id("coder") == "coder"
+        assert registry.resolve_to_id("developer") == "developer"
 
     def test_resolve_to_id_with_relative_path(self, registry: AgentRegistry, temp_agents_dir: Path) -> None:
-        """Test resolving agents/coder path format."""
-        create_agent_meta(temp_agents_dir, "coder")
+        """Test resolving agents/developer path format."""
+        create_agent_meta(temp_agents_dir, "developer")
         registry.discover()
 
-        assert registry.resolve_to_id("agents/coder") == "coder"
+        assert registry.resolve_to_id("agents/developer") == "developer"
 
     def test_resolve_to_id_with_leading_dot_slash(self, registry: AgentRegistry, temp_agents_dir: Path) -> None:
-        """Test resolving ./agents/coder path format."""
-        create_agent_meta(temp_agents_dir, "coder")
+        """Test resolving ./agents/developer path format."""
+        create_agent_meta(temp_agents_dir, "developer")
         registry.discover()
 
-        assert registry.resolve_to_id("./agents/coder") == "coder"
+        assert registry.resolve_to_id("./agents/developer") == "developer"
 
     def test_resolve_to_id_nonexistent(self, registry: AgentRegistry) -> None:
         """Test resolving a non-existent agent returns None."""
@@ -275,11 +275,11 @@ class TestResolveToId:
 
     def test_resolve_to_id_with_absolute_path(self, registry: AgentRegistry, temp_agents_dir: Path) -> None:
         """Test resolving an absolute path to agent directory."""
-        create_agent_meta(temp_agents_dir, "coder")
+        create_agent_meta(temp_agents_dir, "developer")
         registry.discover()
 
-        abs_path = str(temp_agents_dir / "coder")
-        assert registry.resolve_to_id(abs_path) == "coder"
+        abs_path = str(temp_agents_dir / "developer")
+        assert registry.resolve_to_id(abs_path) == "developer"
 
     def test_resolve_to_id_empty_string(self) -> None:
         """Empty string should return None."""
@@ -330,26 +330,26 @@ class TestAgentMetadata:
     def test_agent_metadata_full(self, temp_agents_dir: Path) -> None:
         """Test AgentMetadata with all fields."""
         meta = AgentMetadata(
-            id="coder",
-            name="Coder",
+            id="developer",
+            name="Developer",
             description="Writes code",
             icon="💻",
             color="accent-cyan",
             version="2.0.0",
-            path=temp_agents_dir / "coder",
+            path=temp_agents_dir / "developer",
             system=True,
             capabilities=["code_generation", "refactoring"],
             tags=["development", "coding"],
             innate_skills=["coding", "reviewing"],
         )
 
-        assert meta.id == "coder"
-        assert meta.name == "Coder"
+        assert meta.id == "developer"
+        assert meta.name == "Developer"
         assert meta.description == "Writes code"
         assert meta.icon == "💻"
         assert meta.color == "accent-cyan"
         assert meta.version == "2.0.0"
-        assert meta.path == temp_agents_dir / "coder"
+        assert meta.path == temp_agents_dir / "developer"
         assert meta.system is True
         assert meta.capabilities == ["code_generation", "refactoring"]
         assert meta.tags == ["development", "coding"]
@@ -632,10 +632,45 @@ class TestLLMModelParsing:
         Validation (empty after strip) is handled downstream.
         """
         create_agent_meta(temp_agents_dir, "whitespace_agent", llm_model="  ")
-        
+
         registry = AgentRegistry(temp_agents_dir)
         registry.discover()
-        
+
         agent = registry.get("whitespace_agent")
         assert agent is not None
         assert agent.llm_model == "  "
+
+
+class TestAgentIdAliasBackwardCompatibility:
+    """Tests for the AGENT_ID_ALIASES backward-compatibility layer.
+
+    These tests guard against regressions when an agent_id is renamed
+    (e.g. ``coder`` → ``developer``). Old database rows, persisted
+    agent_ids, and external API consumers may still reference the old
+    id; the registry must transparently resolve the alias to the new
+    canonical id.
+    """
+
+    def test_resolve_pure_id_alias(self) -> None:
+        """resolve_pure_id('coder') returns 'developer' via alias."""
+        registry = get_registry()
+        result = registry.resolve_pure_id("coder")
+        assert result == "developer"
+
+    def test_resolve_path_to_id_alias(self) -> None:
+        """resolve_path_to_id('./agents/coder') returns 'developer' via alias."""
+        registry = get_registry()
+        result = registry.resolve_path_to_id("./agents/coder")
+        assert result == "developer"
+
+    def test_exists_alias(self) -> None:
+        """exists('coder') returns True via alias."""
+        registry = get_registry()
+        assert registry.exists("coder") is True
+
+    def test_instance_create_normalizes_alias(self) -> None:
+        """InstanceCreate(agent_id='coder') normalizes to 'developer'."""
+        from daemon.models.instance import InstanceCreate
+
+        instance = InstanceCreate(agent_id="coder")
+        assert instance.agent_id == "developer"

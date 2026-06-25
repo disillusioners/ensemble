@@ -162,7 +162,7 @@ def _make_instance(
     parent_id: str | None = None,
     waiting_for: int = 0,
     status: str = InstanceStatus.RUNNING.value,
-    agent_id: str = "coder",
+    agent_id: str = "developer",
 ) -> Instance:
     """Insert an Instance row into the test DB."""
     inst = Instance(

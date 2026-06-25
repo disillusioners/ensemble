@@ -38,7 +38,7 @@ def create_mock_project(
     project.relationships = {}
     project.critical_notes = critical_notes
     project.creator_instance_id = "instance-123"
-    project.creator_agent_id = "coder"
+    project.creator_agent_id = "developer"
     project.created_at = "2025-01-15T10:00:00"
     project.updated_at = "2025-01-15T11:00:00"
     return project
@@ -267,7 +267,7 @@ class TestProjectAPICriticalNotes:
         assert response.tags == ["python", "test"]
         assert response.shortnames == ["testproj"]
         assert response.creator_instance_id == "instance-123"
-        assert response.creator_agent_id == "coder"
+        assert response.creator_agent_id == "developer"
         # critical_notes is the field under test
         assert response.critical_notes == cn_entries
 

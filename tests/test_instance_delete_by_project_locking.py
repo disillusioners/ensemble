@@ -78,8 +78,8 @@ def make_instance(engine):
         instance_id = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
         instance = Instance(
             instance_id=instance_id,
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             status=status,
             project_id=project_id,
         )
@@ -98,8 +98,8 @@ def make_job(engine):
 
     def _make() -> JobItem:
         job = JobItem(
-            agent_id="coder",
-            agent_dir="/tmp/agents/coder",
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
             message="watch me",
         )
         with Session(engine) as session:

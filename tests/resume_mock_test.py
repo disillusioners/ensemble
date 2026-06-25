@@ -93,7 +93,7 @@ def list_instances() -> list[dict]:
         return []
 
 
-def create_instance(agent_id: str = "coder") -> Optional[dict]:
+def create_instance(agent_id: str = "developer") -> Optional[dict]:
     """Create a test instance."""
     try:
         response = requests.post(

@@ -29,11 +29,11 @@ def temp_agents_dir():
         (template_dir / "workflow.md").write_text("# Workflow\nSteps here.")
         
         # Create existing agent
-        coder_dir = agents_path / "coder"
-        coder_dir.mkdir()
-        (coder_dir / "meta.json").write_text(json.dumps({
-            "id": "coder",
-            "name": "Coder",
+        developer_dir = agents_path / "developer"
+        developer_dir.mkdir()
+        (developer_dir / "meta.json").write_text(json.dumps({
+            "id": "developer",
+            "name": "Developer",
             "description": "Code generation agent",
             "icon": "💻",
             "color": "accent-cyan",
@@ -87,11 +87,11 @@ async def test_list_agents_success(client_with_temp_agents):
     # Should only include non-internal agents
     agents = data["agents"]
     assert len(agents) == 1
-    assert agents[0]["id"] == "coder"
-    assert agents[0]["name"] == "Coder"
+    assert agents[0]["id"] == "developer"
+    assert agents[0]["name"] == "Developer"
     assert agents[0]["icon"] == "💻"
     assert agents[0]["color"] == "accent-cyan"
-    assert agents[0]["agent_dir"] == "./agents/coder"
+    assert agents[0]["agent_dir"] == "./agents/developer"
 
 
 @pytest.mark.asyncio
@@ -116,8 +116,8 @@ async def test_list_agents_empty_directory(client_with_temp_agents):
     client, temp_agents_dir = client_with_temp_agents
     
     # Remove all non-internal agents
-    coder_dir = temp_agents_dir / "coder"
-    shutil.rmtree(coder_dir)
+    developer_dir = temp_agents_dir / "developer"
+    shutil.rmtree(developer_dir)
     
     response = await client.get("/api/agents")
     
@@ -190,7 +190,7 @@ async def test_create_agent_already_exists(client_with_temp_agents):
     response = await client.post(
         "/api/agents",
         json={
-            "id": "coder",  # Already exists
+            "id": "developer",  # Already exists
             "name": "Another Coder",
             "description": "Duplicate"
         }

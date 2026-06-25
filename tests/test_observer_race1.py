@@ -119,7 +119,7 @@ def make_fake_sync(
             job_id=job_id,
             instance_id=instance_id,
             parent_id=None,
-            agent_id="coder",
+            agent_id="developer",
             result_summary=result_summary,
             error_message=error_message,
             locks_released=locks_released,
@@ -137,7 +137,7 @@ def make_mock_job(
     mock.status = "processing"
     mock.instance_id = instance_id or f"parent-{uuid.uuid4().hex[:8]}"
     mock.project_id = "test-project"
-    mock.agent_id = "coder"
+    mock.agent_id = "developer"
     mock.message = "test"
     mock.source = "api"
     return mock

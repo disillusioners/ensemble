@@ -5,7 +5,7 @@ End-to-end test for verifying MCP tools availability to LLM instances.
 This test:
 1. Starts the daemon using ./dev.sh in background
 2. Waits for the daemon to be healthy
-3. Spawns a coder instance via API
+3. Spawns a developer instance via API
 4. Sends a message asking about available MCP tools
 5. Waits for and retrieves the LLM response
 6. Verifies MCP tools are available:
@@ -136,7 +136,7 @@ def wait_for_daemon(timeout: int = DAEMON_STARTUP_TIMEOUT) -> bool:
     return False
 
 
-def spawn_instance(agent_id: str = "coder") -> Optional[str]:
+def spawn_instance(agent_id: str = "developer") -> Optional[str]:
     """Spawn a new instance via API."""
     logger.info("=" * 60)
     logger.info(f"Spawning {agent_id} instance...")
@@ -470,7 +470,7 @@ def main():
             print("   (Some MCP servers may be built-in and not show in API)")
 
         # Step 3: Spawn instance
-        instance_id = spawn_instance("coder")
+        instance_id = spawn_instance("developer")
         test_results["instance_created"] = instance_id is not None
 
         if not test_results["instance_created"]:

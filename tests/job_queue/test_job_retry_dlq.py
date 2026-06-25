@@ -95,8 +95,8 @@ def create_dead_letter_job(engine, job_repo, dlq_repo, job_id, dlq_id, status=Jo
     # Create job in DEAD_LETTER status
     job = JobItem(
         job_id=job_id,
-        agent_id="coder",
-        agent_dir="/agents/coder",
+        agent_id="developer",
+        agent_dir="/agents/developer",
         message="Failed job message",
         source="api",
         project_id="project-abc",
@@ -111,8 +111,8 @@ def create_dead_letter_job(engine, job_repo, dlq_repo, job_id, dlq_id, status=Jo
     dlq_item = DeadLetterItem(
         dlq_id=dlq_id,
         job_id=job_id,
-        agent_id="coder",
-        agent_dir="/agents/coder",
+        agent_id="developer",
+        agent_dir="/agents/developer",
         message="Failed job message",
         source="api",
         project_id="project-abc",
@@ -221,8 +221,8 @@ class TestRetryFailedJob:
         # Create a FAILED job
         job = JobItem(
             job_id=job_id,
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Failed job message",
             source="api",
             project_id="project-abc",
@@ -243,8 +243,8 @@ class TestRetryFailedJob:
         # Mock retry_job to return a new pending job (async)
         new_job = JobItem(
             job_id="new-job-789",
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Failed job message",
             source="api",
             project_id="project-abc",
@@ -302,8 +302,8 @@ class TestRetryInvalidStates:
         # Create job in COMPLETED status
         job = JobItem(
             job_id=job_id,
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Completed job",
             source="api",
             project_id="project-abc",
@@ -335,8 +335,8 @@ class TestRetryInvalidStates:
         # Create job in PROCESSING status
         job = JobItem(
             job_id=job_id,
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Processing job",
             source="api",
             project_id="project-abc",
@@ -368,8 +368,8 @@ class TestRetryInvalidStates:
         # Create job in PENDING status
         job = JobItem(
             job_id=job_id,
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Pending job",
             source="api",
             project_id="project-abc",
@@ -409,8 +409,8 @@ class TestRetryDeadLetterWithoutDLQEntry:
         # Create a job in DEAD_LETTER status but without DLQ entry
         job = JobItem(
             job_id=job_id,
-            agent_id="coder",
-            agent_dir="/agents/coder",
+            agent_id="developer",
+            agent_dir="/agents/developer",
             message="Dead letter job without DLQ entry",
             source="api",
             project_id="project-abc",

@@ -47,12 +47,12 @@ class TestCreate:
             tags=["python", "fastapi"],
             metadata={"framework": "FastAPI"},
             creator_instance_id="instance-123",
-            creator_agent_id="coder",
+            creator_agent_id="developer",
         )
         
         assert project.name == "Full Project"
         ...
-        assert project.creator_agent_id == "coder"
+        assert project.creator_agent_id == "developer"
 
     def test_create_duplicate_name_error(self, store):
         """Test that duplicate name raises error."""

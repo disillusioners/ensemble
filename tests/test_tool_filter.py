@@ -759,7 +759,7 @@ class TestExpandAllowForInnateSkills:
                 mock_agent_meta.innate_skills = ["opencode"]
                 mock_registry.return_value.get.return_value = mock_agent_meta
 
-                result = _apply_tool_filter(tools, "coder")
+                result = _apply_tool_filter(tools, "developer")
                 tool_names = {t.name for t in result}
 
         # opencode tools should be auto-included
@@ -788,7 +788,7 @@ class TestExpandAllowForInnateSkills:
                 mock_agent_meta.innate_skills = ["opencode"]
                 mock_registry.return_value.get.return_value = mock_agent_meta
 
-                result = _apply_tool_filter(tools, "coder")
+                result = _apply_tool_filter(tools, "developer")
                 tool_names = {t.name for t in result}
 
         assert "bash" in tool_names

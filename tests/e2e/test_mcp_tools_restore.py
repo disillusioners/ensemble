@@ -4,7 +4,7 @@ End-to-end test for verifying MCP tools availability after daemon restart.
 
 This test proves that MCP tools survive a daemon restart for existing instances:
 1. Starts the daemon via ./dev.sh, waits for healthy
-2. Creates a coder instance, sends a message about MCP tools, verifies response
+2. Creates a developer instance, sends a message about MCP tools, verifies response
 3. STOPS the daemon (simulating restart)
 4. Starts daemon AGAIN, waits for healthy
 5. Sends NEW message to SAME instance from step 2
@@ -235,7 +235,7 @@ def stop_daemon(process: subprocess.Popen) -> bool:
     return True
 
 
-def spawn_instance(agent_id: str = "coder") -> Optional[str]:
+def spawn_instance(agent_id: str = "developer") -> Optional[str]:
     """Spawn a new instance via API."""
     logger.info("=" * 60)
     logger.info(f"Spawning {agent_id} instance...")
@@ -525,7 +525,7 @@ def main():
             sys.exit(1)
 
         # Create instance
-        instance_id = spawn_instance("coder")
+        instance_id = spawn_instance("developer")
         phase1_results["instance_created"] = instance_id is not None
 
         if not phase1_results["instance_created"]:

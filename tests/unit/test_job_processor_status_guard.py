@@ -32,8 +32,8 @@ class MockInstance:
         """
         self.instance_id = "test-instance-id"
         self.project_id = "test-project"
-        self.agent_id = "coder"
-        self.agent_dir = "./agents/coder"
+        self.agent_id = "developer"
+        self.agent_dir = "./agents/developer"
         self.status = status
 
 
@@ -71,7 +71,7 @@ class MockJob:
     def __init__(
         self,
         job_id: str = "job-1",
-        agent_id: str = "coder",
+        agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
         status: str = JobStatus.PROCESSING.value,

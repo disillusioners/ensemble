@@ -55,7 +55,7 @@ class MockJob:
     def __init__(
         self,
         job_id: str,
-        agent_id: str = "coder",
+        agent_id: str = "developer",
         project_id: str | None = "project-1",
         queue_id: str = "queue-1",
         status: str = JobStatus.PENDING.value,
@@ -74,7 +74,7 @@ def create_started_job(job_id: str, project_id: str | None, instance_id: str = "
     """Create a mock started job with the given properties."""
     started_job = MagicMock()
     started_job.job_id = job_id
-    started_job.agent_id = "coder"
+    started_job.agent_id = "developer"
     started_job.message = "test message"
     started_job.source = "api"
     started_job.instance_id = instance_id
@@ -163,7 +163,7 @@ class TestProjectIdAutoInjection:
             f"got project_id={call_kwargs.get('project_id')}"
         )
         # Verify other required args
-        assert call_kwargs.get("agent_id") == "coder"
+        assert call_kwargs.get("agent_id") == "developer"
         assert call_kwargs.get("instance_id") == "instance-123"
 
     @pytest.mark.asyncio

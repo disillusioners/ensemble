@@ -78,7 +78,7 @@ def migrated_old_data_engine(temp_db_dir: Path) -> Engine:
         # Insert old-style instance data
         conn.execute(text("""
             INSERT INTO instances (instance_id, agent_dir, status, created_at, updated_at)
-            VALUES ('old-instance-1', './agents/coder', 'idle', '2024-01-01T00:00:00', '2024-01-01T00:00:00')
+            VALUES ('old-instance-1', './agents/developer', 'idle', '2024-01-01T00:00:00', '2024-01-01T00:00:00')
         """))
         conn.commit()
     
@@ -128,10 +128,10 @@ class TestExistingDataMigration:
         assert row is not None, "Instance should exist after migration"
         instance_id, agent_dir, agent_id = row
         
-        # Verify agent_id was populated (extract 'coder' from './agents/coder')
+        # Verify agent_id was populated (extract 'developer' from './agents/developer')
         assert agent_id is not None, "agent_id should be populated from agent_dir"
-        assert agent_id == "coder", f"agent_id should be 'coder', got '{agent_id}'"
-        assert agent_dir == "./agents/coder", "agent_dir should be preserved"
+        assert agent_id == "developer", f"agent_id should be 'developer', got '{agent_id}'"
+        assert agent_dir == "./agents/developer", "agent_dir should be preserved"
 
 
 # ============================================================================

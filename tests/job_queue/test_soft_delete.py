@@ -579,7 +579,7 @@ class TestListJobsEndpoint:
         # Create and delete job via repository
         job = repository.create(
             agent_id=sample_job_data_service["agent_id"],
-            agent_dir="./agents/coder",
+            agent_dir="./agents/developer",
             message=sample_job_data_service["message"],
             source="api",
             project_id=sample_job_data_service["project_id"],
@@ -608,7 +608,7 @@ class TestListJobsEndpoint:
         # Create and delete job via repository
         job = repository.create(
             agent_id=sample_job_data_service["agent_id"],
-            agent_dir="./agents/coder",
+            agent_dir="./agents/developer",
             message=sample_job_data_service["message"],
             source="api",
             project_id=sample_job_data_service["project_id"],
@@ -648,7 +648,7 @@ class TestSchedulerSafetyIntegration:
         # Create job directly via repository (sync, no async needed)
         job = repository.create(
             agent_id=sample_job_data_service["agent_id"],
-            agent_dir="./agents/coder",
+            agent_dir="./agents/developer",
             message=sample_job_data_service["message"],
             source="api",
             project_id=sample_job_data_service["project_id"],
@@ -676,7 +676,7 @@ class TestSchedulerSafetyIntegration:
         # Create job directly via repository
         job = repository.create(
             agent_id=sample_job_data_service["agent_id"],
-            agent_dir="./agents/coder",
+            agent_dir="./agents/developer",
             message=sample_job_data_service["message"],
             source="api",
             project_id=sample_job_data_service["project_id"],
@@ -703,7 +703,7 @@ class TestSchedulerSafetyIntegration:
         # Create job directly via repository
         job = repository.create(
             agent_id=sample_job_data_service["agent_id"],
-            agent_dir="./agents/coder",
+            agent_dir="./agents/developer",
             message=sample_job_data_service["message"],
             source="api",
             project_id=sample_job_data_service["project_id"],
@@ -740,7 +740,7 @@ class TestSchedulerSafetyIntegration:
         # Create two jobs directly via repository
         job1 = repository.create(
             agent_id=sample_job_data_service["agent_id"],
-            agent_dir="./agents/coder",
+            agent_dir="./agents/developer",
             message=sample_job_data_service["message"],
             source="api",
             project_id=sample_job_data_service["project_id"],
@@ -749,7 +749,7 @@ class TestSchedulerSafetyIntegration:
         )
         job2 = repository.create(
             agent_id=sample_job_data_service["agent_id"],
-            agent_dir="./agents/coder",
+            agent_dir="./agents/developer",
             message=sample_job_data_service["message"],
             source="api",
             project_id=sample_job_data_service["project_id"],
