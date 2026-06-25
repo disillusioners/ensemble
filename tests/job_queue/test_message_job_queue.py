@@ -75,6 +75,10 @@ class TestHttpMessageJobQueuePath:
             mock_agent = MagicMock()
             mock_agent.path = "./agents/test-agent"
             mock_reg.return_value.get.return_value = mock_agent
+            # enqueue() now uses alias-aware methods; stub them so the SQL
+            # INSERT receives a real object (not MagicMock) for agent_dir.
+            mock_reg.return_value.get_resolved.return_value = mock_agent
+            mock_reg.return_value.resolve_pure_id.return_value = "test-agent"
 
             job = await job_queue_service.enqueue(
                 agent_id="test-agent",
@@ -110,6 +114,10 @@ class TestHttpMessageJobQueuePath:
             mock_agent.path = "./agents/test-agent"
             mock_registry_instance = MagicMock()
             mock_registry_instance.get.return_value = mock_agent
+            # enqueue() now uses alias-aware methods; stub them so the SQL
+            # INSERT receives a real object (not MagicMock) for agent_dir.
+            mock_registry_instance.get_resolved.return_value = mock_agent
+            mock_registry_instance.resolve_pure_id.return_value = "test-agent"
             mock_reg.return_value = mock_registry_instance
 
             # Create job via service using project-1 which has system queues
@@ -129,7 +137,7 @@ class TestHttpMessageJobQueuePath:
 
         # Verify mock was called to get agent info
         mock_reg.assert_called_once()
-        assert mock_registry_instance.get.call_count >= 1
+        assert mock_registry_instance.get_resolved.call_count >= 1
 
 
 # ── 2. Concurrency Gate ─────────────────────────────────────────────────────────
@@ -536,6 +544,10 @@ class TestNoProjectContext:
             mock_agent = MagicMock()
             mock_agent.path = "./agents/test-agent"
             mock_reg.return_value.get.return_value = mock_agent
+            # enqueue() now uses alias-aware methods; stub them so the SQL
+            # INSERT receives a real object (not MagicMock) for agent_dir.
+            mock_reg.return_value.get_resolved.return_value = mock_agent
+            mock_reg.return_value.resolve_pure_id.return_value = "test-agent"
 
             # Enqueue with no project_id (will be normalized to SYSTEM_DEFAULT_PROJECT_ID)
             # Use project-1 which has system queues provisioned
@@ -561,6 +573,10 @@ class TestNoProjectContext:
             mock_agent = MagicMock()
             mock_agent.path = "./agents/test-agent"
             mock_reg.return_value.get.return_value = mock_agent
+            # enqueue() now uses alias-aware methods; stub them so the SQL
+            # INSERT receives a real object (not MagicMock) for agent_dir.
+            mock_reg.return_value.get_resolved.return_value = mock_agent
+            mock_reg.return_value.resolve_pure_id.return_value = "test-agent"
 
             job = await job_queue_service.enqueue(
                 agent_id="test-agent",
