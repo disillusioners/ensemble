@@ -1677,22 +1677,3 @@ class JobQueueService:
             "Lock release cannot be done synchronously. Use async release_lock_by_instance() instead."
         )
         return []
-
-    async def cancel_message_job(self, job_id: str) -> None:
-        """Backward-compat shim for the legacy MESSAGE-specific cancel entry point.
-
-        The :class:`MessageJobHandler` was removed; the per-job
-        CancellationToken that ``MessageJobHandler.cancel_message_job``
-        used to signal no longer exists (unified dispatcher owns the
-        cancellation token via the WorkerPool). This shim delegates to
-        the general-purpose :meth:`cancel_job` which handles both
-        PENDING and PROCESSING states atomically and notifies watchers.
-
-        Callers:
-          * :func:`daemon.services.instance_lifecycle.terminate_instance`
-            still calls this entry point after the bulk DB cancel.
-
-        Args:
-            job_id: The job to cancel.
-        """
-        await self.cancel_job(job_id)

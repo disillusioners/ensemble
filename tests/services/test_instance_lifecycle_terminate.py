@@ -84,7 +84,6 @@ def make_job_queue_service(
     svc._repository = MagicMock()
     svc._repository.find_jobs_by_instance = MagicMock(return_value=message_jobs or [])
     svc.cancel_job = AsyncMock(return_value=True)
-    svc.cancel_message_job = AsyncMock(return_value=True)
     svc.complete_job = AsyncMock(return_value=None)
     svc.complete_job_sync = MagicMock(return_value=None)
     svc.release_lock_by_instance = AsyncMock(return_value=[])

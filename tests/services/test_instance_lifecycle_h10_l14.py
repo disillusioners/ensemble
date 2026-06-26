@@ -299,7 +299,6 @@ def make_mock_manager(
     manager._job_queue_service._repository = MagicMock()
     manager._job_queue_service._repository.find_jobs_by_instance = MagicMock(return_value=[])
     manager._job_queue_service.cancel_job = AsyncMock(return_value=True)
-    manager._job_queue_service.cancel_message_job = AsyncMock(return_value=True)
     manager._job_queue_service.complete_job = AsyncMock(return_value=None)
     manager._job_queue_service.release_lock_by_instance = AsyncMock(return_value=[])
     manager._job_queue_service.get_job_by_instance_sync = MagicMock(return_value=None)

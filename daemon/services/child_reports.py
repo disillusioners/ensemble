@@ -345,36 +345,6 @@ class ChildReportsService:
         adapter = self._manager._checkpointer
         return adapter.raw_saver if adapter is not None else None
 
-    def _has_no_active_message_job(self, session, instance_id: str) -> bool:
-        """Check if there is NO active (PENDING/PROCESSING) MESSAGE job for an instance.
-
-        D13 (Phase 2): always returns ``True``. MESSAGE-type ``JobItem``
-        rows no longer exist — :meth:`InstanceMessagingService.enqueue_message`
-        writes only ``MessageQueue`` + ``Task`` rows. The guard's original
-        purpose (defense-in-depth against the task-claim race where a
-        ``job_item`` ended up terminal before any worker picked it up,
-        stranding the instance in WAITING_CHILDREN) is no longer applicable:
-        there is no ``job_item`` for messages to be terminal-or-not.
-
-        The Task-level coordination guard in
-        :meth:`TaskRepository.claim_pending_task` (one RUNNING task per
-        instance) remains in force — that is the post-D13 invariant that
-        replaces the cross-system MESSAGE-job guard.
-
-        Args:
-            session: Active SQLModel session (unused after D13 — kept
-                for caller-compatibility with WAITING_CHILDREN write
-                sites that pass the session unconditionally).
-            instance_id: The instance to check (unused after D13).
-
-        Returns:
-            Always ``True`` — the MESSAGE-job-based guard is a permanent
-            no-op after D13. WAITING_CHILDREN writes proceed without
-            this defense-in-depth check (the Task-level guard in
-            ``claim_pending_task`` provides equivalent protection).
-        """
-        return True
-
     def _trigger_title_generation(self, instance_id: str, completed_message_id: str) -> None:
         """Trigger title generation for an instance after message completion.
         
@@ -896,26 +866,12 @@ Provide a concise summary:"""
                 # messages) — contract required by
                 # ``tests/test_cascade_integration.py``.
                 #
-                # Defense-in-depth (F8): if there is NO active MESSAGE job
-                # for this parent, the parent_pending count is a false
-                # positive (stale/duplicate from task-claim race). Skip
-                # the WAITING_CHILDREN write to avoid permanently
-                # stranding the parent — fall through to ``return False,
-                # None, None`` so no transition is recorded.
-                #
-                # Phase 5: the guard is STILL required after bus
-                # consolidation. The bus tracks parent→child correlation
-                # (``dependency_watchers``) but does NOT cover the
-                # ``job_item`` MESSAGE-worker lifecycle this guard
-                # checks. See the method docstring for the full
-                # bus-vs-guard separation analysis.
-                if self._has_no_active_message_job(session, parent.instance_id):
-                    logger.warning(
-                        f"Parent {parent.instance_id[:8]}... has {parent_pending} pending "
-                        f"messages but no active MESSAGE job — skipping WAITING_CHILDREN "
-                        f"write (stale/duplicate messages from task-claim race)"
-                    )
-                    return False, None, None
+                # Defense-in-depth (F8): was a ``_has_no_active_message_job``
+                # carve-out check here. Removed in Phase 5: after D13 there
+                # are no MESSAGE ``JobItem`` rows, so the guard was a
+                # permanent no-op. The Task-level coordination guard in
+                # ``claim_pending_task`` (one RUNNING task per instance)
+                # is the post-D13 invariant that replaces it.
                 parent.status = InstanceStatus.WAITING_CHILDREN.value
                 logger.info(
                     f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
@@ -1314,51 +1270,6 @@ Provide a concise summary:"""
                     )
                     bus_pending = int(session.scalar(_bus_pending_stmt) or 0)
                     if bus_pending > 0:
-                        # F8 carve-out (2026-06-22): if there is
-                        # NO active MESSAGE job (PENDING/PROCESSING)
-                        # for this instance, the pending-children
-                        # signal is likely stale/duplicate from a
-                        # task-claim race. Writing WAITING_CHILDREN
-                        # here would permanently strand the
-                        # instance — no code path transitions out
-                        # of WAITING_CHILDREN other than a new
-                        # message arriving on a fresh MESSAGE job,
-                        # which is exactly what is missing. In
-                        # that case, return a
-                        # ``root_skipped_terminal_job`` result
-                        # (preserves status, signals
-                        # CompletionRegistry) instead of writing
-                        # the status. Mirrors the same guard in
-                        # the regular ``root_waiting_children``
-                        # path below — bus path must be
-                        # consistent with the non-bus path.
-                        #
-                        # Phase 5: the bus PENDING-watcher count
-                        # (``bus_pending > 0``) reflects parent→
-                        # child correlation, NOT the MESSAGE-job
-                        # lifecycle. The guard catches the case
-                        # where watchers exist but no MESSAGE
-                        # worker is in flight (stale/duplicate
-                        # from task-claim race). See the method
-                        # docstring for the full bus-vs-guard
-                        # separation analysis.
-                        if self._has_no_active_message_job(session, instance_id):
-                            logger.warning(
-                                f"Instance {instance_id[:8]}... has "
-                                f"{bus_pending} bus PENDING watchers "
-                                f"but no active "
-                                f"MESSAGE job — skipping WAITING_CHILDREN "
-                                f"write (stale/duplicate from task-claim "
-                                f"race). Status preserved as "
-                                f"{instance.status}."
-                            )
-                            return _ChildCompletionDbResult(
-                                outcome="root_skipped_terminal_job",
-                                instance_id=instance_id,
-                                agent_id=instance.agent_id,
-                                parent_id=None,
-                            )
-
                         # Bug fix (2026-06-22): transition
                         # ``instance.status`` to ``WAITING_CHILDREN``
                         # so the frontend reflects the "leader is
@@ -1367,9 +1278,11 @@ Provide a concise summary:"""
                         # whatever it was (typically ``running``)
                         # so the UI showed ``running`` even though
                         # no LLM call was in flight. The
-                        # F8 carve-out above protects against
-                        # stale/duplicate signals from a
-                        # task-claim race.
+                        # bus_pending count is the authoritative
+                        # signal that real pending children exist;
+                        # the legacy ``_has_no_active_message_job``
+                        # carve-out was removed in Phase 5 (no
+                        # MESSAGE ``JobItem`` rows exist post-D13).
                         instance.status = InstanceStatus.WAITING_CHILDREN.value
                         instance.updated_at = datetime.now(timezone.utc).isoformat()
                         instance.version = (instance.version or 1) + 1
@@ -1443,44 +1356,14 @@ Provide a concise summary:"""
                     # Phase 4: WAITING_CHILDREN status set is retained
                     # for graceful-degradation watchers and FIFO
                     # carve-out SQL compatibility (display only).
-
-                    # Defense-in-depth: if there is NO active MESSAGE job
-                    # (PENDING/PROCESSING) for this instance, the
-                    # pending_count is a false positive — stale/duplicate
-                    # messages from a task-claim race (see
-                    # daemon/repositories/task/repository.py claim race).
-                    # Do NOT write WAITING_CHILDREN or the instance gets
-                    # permanently stuck (no code path clears it back).
                     #
-                    # NOTE: MESSAGE jobs are NOT 1:1-per-instance — each
-                    # user message creates a new job. We check for ACTIVE
-                    # jobs, not terminal jobs, to avoid false positives
-                    # when a completed old job coexists with an active new
-                    # job.
-                    #
-                    # Phase 5: the guard is STILL required after bus
-                    # consolidation. The bus's
-                    # ``count_pending_for_target_sync`` covers parent→
-                    # child correlation (``dependency_watchers``) but
-                    # does NOT see the MESSAGE-worker lifecycle on
-                    # ``job_item`` this guard checks. See the method
-                    # docstring for the full bus-vs-guard separation
-                    # analysis.
-                    if self._has_no_active_message_job(session, instance_id):
-                        logger.warning(
-                            f"Instance {instance_id[:8]}... has pending_count={pending_count} "
-                            f"but no active MESSAGE job — skipping WAITING_CHILDREN "
-                            f"write (stale/duplicate messages from task-claim race)"
-                        )
-                        # Do NOT set status to WAITING_CHILDREN. Leave the
-                        # instance status as-is (current status preserved).
-                        return _ChildCompletionDbResult(
-                            outcome="root_skipped_terminal_job",
-                            instance_id=instance_id,
-                            agent_id=instance.agent_id,
-                            parent_id=None,
-                        )
-
+                    # Phase 5: the legacy
+                    # ``_has_no_active_message_job`` carve-out check
+                    # was removed. After D13 there are no MESSAGE
+                    # ``JobItem`` rows, so the guard was a permanent
+                    # no-op. The own-queue ``pending_count`` is the
+                    # authoritative signal that real queued work
+                    # exists.
                     instance.status = InstanceStatus.WAITING_CHILDREN.value
                     session.commit()
                     logger.info(
@@ -1728,43 +1611,29 @@ Provide a concise summary:"""
                     else:
                         # Has pending messages but all children done - transition to WAITING_CHILDREN
                         #
-                        # Defense-in-depth (F8): if there is NO active
-                        # MESSAGE job for this parent, the parent_pending
-                        # count is a false positive (stale/duplicate
-                        # from task-claim race). Skip the
-                        # WAITING_CHILDREN write to avoid permanently
-                        # stranding the parent. The child-completion
-                        # work above (report message, task,
-                        # hierarchy delete) is still real and we let
-                        # the function proceed to commit + emit
-                        # events — just leave the parent status as-is.
-                        #
-                        # Phase 5: the guard is STILL required after bus
-                        # consolidation. The bus's
-                        # ``count_pending_for_target_sync`` already
-                        # gates the inline cascade above (returning
-                        # ``is_parent_complete = bus.count_pending... ==
-                        # 0``); once we cross into the pending-messages
-                        # branch the bus is no longer the authority —
-                        # the ``message_queue`` / ``job_item`` lifecycle
-                        # is. See the method docstring for the full
-                        # bus-vs-guard separation analysis.
-                        if self._has_no_active_message_job(session, parent.instance_id):
-                            logger.warning(
-                                f"Parent {parent.instance_id[:8]}... has {parent_pending} pending "
-                                f"messages but no active MESSAGE job — skipping WAITING_CHILDREN "
-                                f"write (stale/duplicate messages from task-claim race)"
-                            )
-                        else:
-                            parent.status = InstanceStatus.WAITING_CHILDREN.value
-                            logger.info(
-                                f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
-                                f"pending messages, status=WAITING_CHILDREN (deprecated; bus is authoritative)"
-                            )
-                            # Flag SSE emission for the async caller (was at
-                            # line 624-627 in the pre-refactor inline block).
-                            parent_waiting_children_sse = True
-                            waiting_children_parent_agent_id = parent.agent_id
+                        # Phase 5: the previous ``_has_no_active_message_job``
+                        # carve-out (defense-in-depth against stale/duplicate
+                        # ``message_queue`` rows from a task-claim race) was
+                        # REMOVED. After D13 there are no MESSAGE
+                        # ``JobItem`` rows, so the guard was a permanent
+                        # no-op. The bus ``count_pending_for_target_sync``
+                        # already gates the inline cascade above; once we
+                        # cross into the pending-messages branch the
+                        # ``message_queue`` own-queue count is the
+                        # authoritative signal. The child-completion work
+                        # above (report message, task, hierarchy delete)
+                        # is still real and we let the function proceed to
+                        # commit + emit events — just write the parent
+                        # status here.
+                        parent.status = InstanceStatus.WAITING_CHILDREN.value
+                        logger.info(
+                            f"Parent {parent.instance_id[:8]}... all children done but has {parent_pending} "
+                            f"pending messages, status=WAITING_CHILDREN (deprecated; bus is authoritative)"
+                        )
+                        # Flag SSE emission for the async caller (was at
+                        # line 624-627 in the pre-refactor inline block).
+                        parent_waiting_children_sse = True
+                        waiting_children_parent_agent_id = parent.agent_id
             
             # --- Inline: _create_completion_events (no await needed) ---
             # Source of ``pending_for_parent``: DependencyBus (SOLE completion

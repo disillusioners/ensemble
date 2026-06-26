@@ -558,7 +558,6 @@ class TestTerminateInstanceJobCleanup:
         service._repository.get_by_instance = MagicMock(return_value=None)
         service._repository.find_jobs_by_instance = MagicMock(return_value=[])
         service.cancel_job = AsyncMock(return_value=True)
-        service.cancel_message_job = AsyncMock(return_value=True)
         service.complete_job = AsyncMock(return_value=None)
         service.complete_job_sync = MagicMock(return_value=None)
         service.release_lock_by_instance = AsyncMock(return_value=[])
