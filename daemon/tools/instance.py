@@ -498,7 +498,7 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 project_id = _get_instance_project_id(manager, current_instance_id)
                 project_id = normalize_project_id(project_id)
 
-            new_instance_id = manager.spawn_instance(
+            new_instance_id, validated_model_override = manager.spawn_instance(
                 agent_id=agent_id,
                 instance_id=None,
                 parent_id=current_instance_id,
@@ -506,9 +506,26 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 instance_name=instance_name,
                 model=model,
             )
+            # Surface a silent-fallback notice (Fix 2 / security review):
+            # if the caller supplied a model that's not in
+            # ``config.llm.allowed_models``, the spawn service silently
+            # fell back to the default model. The calling agent needs to
+            # know its requested model was rejected (cost, latency, and
+            # capability differ across models). We use the SAME validated
+            # value returned by ``spawn_instance`` (no second
+            # ``_resolve_model_override`` call) — closes the TOCTOU window
+            # where a mid-flight ``allowed_models`` mutation could yield
+            # a different notice than the model actually applied. The
+            # notice is ``None`` when no caller model was supplied, or
+            # when the model is in the allow-list — preserving the
+            # success-only path.
+            fallback_notice = manager._lifecycle_service._format_model_fallback_notice(
+                model, validated_model_override
+            )
             return (
                 f"Successfully spawned instance: {new_instance_id}\n"
                 f"To communicate with this instance, use: send_message(instance_id=\"{new_instance_id}\", message=\"your message here\")"
+                f"{fallback_notice or ''}"
             )
         except ValueError as e:
             # Return text guidance instead of raising - agent can self-correct

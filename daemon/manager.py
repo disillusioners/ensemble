@@ -2021,7 +2021,7 @@ class InstanceManager:
         instance_name: str | None = None,
         invoked_as_tool: bool = False,
         model: str | None = None,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
         Args:
@@ -2042,7 +2042,13 @@ class InstanceManager:
                 is used.
 
         Returns:
-            The instance_id of the newly created instance.
+            A ``(instance_id, validated_model_override)`` tuple. ``validated_model_override``
+            is the model value that was actually applied as the spawn-time override
+            (after silent fallback to ``None`` when the caller-supplied model was
+            rejected). The lifecycle service performs the single authoritative
+            validation; callers MUST NOT re-run ``_resolve_model_override`` on the
+            same input — the two calls could disagree under a mid-flight
+            ``allowed_models`` mutation.
 
         Raises:
             ValueError: If max_children_per_instance limit is exceeded,
@@ -2108,7 +2114,15 @@ class InstanceManager:
         await self.ensure_mcp_preloaded(instance_id)
 
         try:
-            return self.spawn_instance(instance_id=instance_id, **kwargs)
+            # Unpack the (instance_id, validated_model_override) tuple —
+            # we only propagate the instance_id here. The validated override
+            # is consumed by callers that need a fallback notice (the
+            # ``spawn_instance`` tool layer); the wrapper contract remains
+            # ``-> str`` for downstream HTTP / API consumers.
+            instance_id, _validated_model_override = self.spawn_instance(
+                instance_id=instance_id, **kwargs
+            )
+            return instance_id
         except Exception:
             # Clean up MCP connections on spawn failure
             if hasattr(self, '_mcp_service') and self._mcp_service:

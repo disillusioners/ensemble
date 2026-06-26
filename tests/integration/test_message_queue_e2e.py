@@ -240,7 +240,7 @@ async def test_single_message_no_duplicate_llm_calls(
         developer_agent_dir = str(project_root / "agents" / "developer")
         logger.info(f"[TEST] Creating instance with agent: {developer_agent_dir}")
 
-        instance_id = manager.spawn_instance(agent_id="developer")
+        instance_id, _ = manager.spawn_instance(agent_id="developer")
         logger.info(f"[TEST] ✅ Instance created: {instance_id}")
 
         # Track invocations before sending message
@@ -412,7 +412,7 @@ async def test_sse_events_count(
 
         project_root = Path(__file__).parent.parent.parent
         developer_agent_dir = str(project_root / "agents" / "developer")
-        instance_id = manager.spawn_instance(agent_id="developer")
+        instance_id, _ = manager.spawn_instance(agent_id="developer")
 
         # Start collecting events
         collect_task = asyncio.create_task(collect_events(instance_id))
@@ -521,7 +521,7 @@ async def test_debug_llm_invocation_count(
 
         project_root = Path(__file__).parent.parent.parent
         developer_agent_dir = str(project_root / "agents" / "developer")
-        instance_id = manager.spawn_instance(agent_id="developer")
+        instance_id, _ = manager.spawn_instance(agent_id="developer")
 
         logger.info(f"[DEBUG] Instance: {instance_id}")
 

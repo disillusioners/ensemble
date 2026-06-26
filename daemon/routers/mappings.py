@@ -102,7 +102,10 @@ async def create_mapping(source_id: str, mapping_create: InstanceMappingCreate, 
     
     # Spawn the agent instance
     try:
-        instance_id = manager.spawn_instance(
+        # Unpack the (instance_id, validated_model_override) tuple — the
+        # router only needs the instance_id; the validated override is
+        # consumed by tool-layer callers that emit a fallback notice.
+        instance_id, _validated_model_override = manager.spawn_instance(
             agent_id=resolved_agent_id,
             instance_id=instance_id,
         )

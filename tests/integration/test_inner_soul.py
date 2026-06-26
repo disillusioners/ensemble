@@ -133,7 +133,7 @@ async def test_inner_soul_remember_e2e(integration_config, test_agent_dir, mock_
         memories_before = list(memories_dir.glob("*.md"))
         
         # Spawn instance with test agent (uses mocked registry)
-        instance_id = manager.spawn_instance(agent_id="test_agent")
+        instance_id, _ = manager.spawn_instance(agent_id="test_agent")
         assert instance_id, "Should return a instance ID"
         
         # Send message asking agent to remember something
@@ -191,7 +191,7 @@ async def test_inner_soul_change_workflow_e2e(integration_config, test_agent_dir
         workflow_before = workflow_file.read_text()
         
         # Spawn instance
-        instance_id = manager.spawn_instance(agent_id="test_agent")
+        instance_id, _ = manager.spawn_instance(agent_id="test_agent")
         
         # Ask agent to change workflow
         message = """Please use the inner_soul tool to add a step to your workflow.
@@ -240,7 +240,7 @@ async def test_inner_soul_change_soul_proposal_e2e(integration_config, test_agen
         history_before = list(history_dir.glob("*.md"))
         
         # Spawn instance
-        instance_id = manager.spawn_instance(agent_id="test_agent")
+        instance_id, _ = manager.spawn_instance(agent_id="test_agent")
         
         # Ask agent to propose soul change
         message = """Please use the inner_soul tool to propose a change to your identity.

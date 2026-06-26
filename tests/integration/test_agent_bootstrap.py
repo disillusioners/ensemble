@@ -139,7 +139,7 @@ async def test_agent_bootstrap_with_instance_manager(integration_config, agent_s
     )
     
     # Spawn an instance with the developer agent
-    instance_id = manager.spawn_instance(agent_id="developer")
+    instance_id, _ = manager.spawn_instance(agent_id="developer")
     
     assert instance_id, "Should return an instance ID"
     assert instance_id in manager.instances, "Instance should be registered"

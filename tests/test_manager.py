@@ -155,7 +155,7 @@ class TestSpawnInstance:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer")
+            instance_id, _ = manager.spawn_instance(agent_id="developer")
             
             # Should have generated a UUID
             assert instance_id is not None
@@ -170,7 +170,7 @@ class TestSpawnInstance:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="550e8400-e29b-41d4-a716-446655440000")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="550e8400-e29b-41d4-a716-446655440000")
             
             assert instance_id == "550e8400-e29b-41d4-a716-446655440000"
 
@@ -204,7 +204,7 @@ class TestSpawnInstance:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             # Verify graph was built and stored
             mock_build.assert_called_once()
@@ -227,7 +227,7 @@ class TestSendMessage:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             # Send a message
             response = await manager.send_message(instance_id, "Hello!")
@@ -312,7 +312,7 @@ class TestTerminateInstance:
                 )
             )
 
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="550e8400-e29b-41d4-a716-446655440001")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="550e8400-e29b-41d4-a716-446655440001")
 
             result = await manager.terminate_instance(instance_id)
 
@@ -351,7 +351,7 @@ class TestGetInstance:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             graph = await manager.get_instance(instance_id)
             
@@ -427,7 +427,7 @@ class TestThinkTagParsing:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             result = await manager.send_message(instance_id, "Hello!")
             
@@ -458,7 +458,7 @@ class TestThinkTagParsing:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             result = await manager.send_message(instance_id, "Hello!")
             
@@ -488,7 +488,7 @@ class TestThinkTagParsing:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             result = await manager.send_message(instance_id, "Hello!")
             
@@ -517,7 +517,7 @@ class TestThinkTagParsing:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             result = await manager.send_message(instance_id, "Hello!")
             
@@ -546,7 +546,7 @@ class TestThinkTagParsing:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             result = await manager.send_message(instance_id, "Hello!")
             
@@ -574,7 +574,7 @@ class TestThinkTagParsing:
             
             manager = InstanceManager(mock_config)
             manager._instance_repository = mock_instance_repository
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             result = await manager.send_message(instance_id, "Hello!")
             
@@ -841,7 +841,7 @@ class TestProgressiveMessageDelivery:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             # Call _process_message_with_tracking directly with message_source
             response = await manager._process_message_with_tracking(
@@ -878,7 +878,7 @@ class TestProgressiveMessageDelivery:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             # Call _process_message_with_tracking directly with message_source
             response = await manager._process_message_with_tracking(
@@ -916,7 +916,7 @@ class TestProgressiveMessageDelivery:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
             # This should NOT raise - errors should be caught and logged
             response = await manager._process_message_with_tracking(
@@ -953,7 +953,7 @@ class TestProgressiveMessageDelivery:
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             # source_dispatcher defaults to None in this test
 
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
             # Should not raise even without dispatcher
             response = await manager._process_message_with_tracking(
@@ -985,7 +985,7 @@ class TestProgressiveMessageDelivery:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             # Call _process_message_with_tracking WITHOUT a message_source
             response = await manager._process_message_with_tracking(
@@ -1077,7 +1077,7 @@ class TestToolResultStreaming:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
             await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1128,7 +1128,7 @@ class TestToolResultStreaming:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
             await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1159,7 +1159,7 @@ class TestToolResultStreaming:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
             await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1278,7 +1278,7 @@ class TestListContentHandling:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             response = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1316,7 +1316,7 @@ class TestListContentHandling:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             response = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1348,7 +1348,7 @@ class TestListContentHandling:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             response = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1457,7 +1457,7 @@ class TestStreamingDeduplicationByMessageId:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             response = await manager._process_message_with_tracking(
                 instance_id=instance_id,
@@ -1495,7 +1495,7 @@ class TestStreamingDeduplicationByMessageId:
             manager._project_repository = MagicMock()
             manager._project_repository.match_by_keywords = MagicMock(return_value=None)
             
-            instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+            instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
             
             response = await manager._process_message_with_tracking(
                 instance_id=instance_id,

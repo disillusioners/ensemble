@@ -843,7 +843,8 @@ async def test_m8_spawn_inherits_original_source_atomically(engine, write_guard)
             parent_id=parent_id,
         )
 
-    assert result == new_id
+        instance_id, _validated_override = result
+        assert instance_id == new_id
 
     # ─── Verify the atomic inheritance ───
     child = get_instance(engine, new_id)

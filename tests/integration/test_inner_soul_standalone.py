@@ -246,7 +246,7 @@ async def _run_remember_test(config, agent_dir: str):
         
         # Spawn instance
         print(f"Spawning instance with test_agent (mocked registry)")
-        instance_id = manager.spawn_instance(agent_id="test_agent")
+        instance_id, _ = manager.spawn_instance(agent_id="test_agent")
         print(f"Instance ID: {instance_id}")
         
         # Send message asking agent to remember
@@ -347,7 +347,7 @@ async def _run_workflow_test(config, agent_dir: str):
         
         from daemon.manager import InstanceManager
         manager = InstanceManager(config=config)
-        instance_id = manager.spawn_instance(agent_id="test_agent")
+        instance_id, _ = manager.spawn_instance(agent_id="test_agent")
         
         message = """Use the inner_soul tool to add a workflow step.
 

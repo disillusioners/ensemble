@@ -207,7 +207,7 @@ class ThreadManager:
                 self._threads[workspace_id].move_to_end(thread_ts)
                 return thread.instance_id
             
-            instance_id = await self._manager.spawn_instance(agent_id=agent_id)
+            instance_id, _validated_model_override = await self._manager.spawn_instance(agent_id=agent_id)
             await self._register_thread_unlocked(workspace_id, channel_id, thread_ts, instance_id)
             return instance_id
 

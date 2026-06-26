@@ -855,7 +855,7 @@ async def test_manager_stores_original_source_in_metadata(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         result = await manager._process_message_with_tracking(
             instance_id=instance_id,
@@ -919,7 +919,7 @@ async def test_manager_uses_original_source_for_internal_report(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_report source
         result = await manager._process_message_with_tracking(
@@ -983,7 +983,7 @@ async def test_manager_skips_dispatch_when_no_original_source(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_report source but no original_source stored
         result = await manager._process_message_with_tracking(
@@ -1046,7 +1046,7 @@ async def test_manager_uses_original_source_for_internal_error_report(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_error_report source
         result = await manager._process_message_with_tracking(
@@ -1119,7 +1119,7 @@ async def test_internal_agent_source_does_not_trigger_source_replacement(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_agent source (should NOT be treated as completion report)
         result = await manager._process_message_with_tracking(
@@ -1191,7 +1191,7 @@ async def test_source_inheritance_parent_to_child(
         patch_spawn_instance_db_sync_with_inheritance(manager, mock_instance_repo)
 
         # Spawn child with valid parent UUID
-        child_id = manager.spawn_instance(
+        child_id, _ = manager.spawn_instance(
             agent_id="developer",
             instance_id=child_uuid,
             parent_id=parent_uuid
@@ -1266,7 +1266,7 @@ async def test_write_once_guard_original_source(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # First message from telegram:123 - should SET original_source
         await manager._process_message_with_tracking(
@@ -1377,7 +1377,7 @@ async def test_integration_external_source_child_report_dispatch(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Step 1: External message stores source
         await manager._process_message_with_tracking(
@@ -1532,7 +1532,7 @@ async def test_manager_warns_when_original_source_not_found(
         manager._project_repository = MagicMock()
         manager._project_repository.match_by_keywords = MagicMock(return_value=None)
 
-        instance_id = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
+        instance_id, _ = manager.spawn_instance(agent_id="developer", instance_id="test-instance")
 
         # Process with internal_report but no original_source stored
         with caplog.at_level(logging.WARNING):
@@ -1667,7 +1667,7 @@ async def test_full_chain_external_msg_to_telegram_after_child_completion(
         assert metadata_state["original_source"] == "telegram:123"
 
         # Step 2: Spawn child (simulating what happens in real flow)
-        child_id = manager.spawn_instance(
+        child_id, _ = manager.spawn_instance(
             agent_id="developer",
             instance_id=child_uuid,
             parent_id=parent_uuid

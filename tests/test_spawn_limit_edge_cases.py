@@ -118,7 +118,7 @@ class TestSpawnLimitEdgeCases:
                  patch('daemon.manager.create_instance_tools', return_value=[]):
 
                 # This should NOT raise ValueError
-                instance_id = manager.spawn_instance(
+                instance_id, _ = manager.spawn_instance(
                     agent_id="developer",
                     parent_id=None,  # Root instance
                 )
@@ -148,7 +148,7 @@ class TestSpawnLimitEdgeCases:
 
                 # This should NOT raise ValueError even with empty string
                 # because empty string is falsy and bypasses the check
-                instance_id = manager.spawn_instance(
+                instance_id, _ = manager.spawn_instance(
                     agent_id="developer",
                     parent_id="",  # Root instance (empty string is falsy)
                 )
@@ -192,7 +192,7 @@ class TestSpawnLimitEdgeCases:
                  patch('daemon.manager.create_instance_tools', return_value=[]):
 
                 # This should succeed
-                instance_id = manager.spawn_instance(
+                instance_id, _ = manager.spawn_instance(
                     agent_id="developer",
                     parent_id="parent-instance",
                 )
@@ -259,7 +259,7 @@ class TestSpawnLimitEdgeCases:
                  patch('daemon.manager.create_instance_tools', return_value=[]):
 
                 # This should succeed (4 < 5)
-                instance_id = manager.spawn_instance(
+                instance_id, _ = manager.spawn_instance(
                     agent_id="developer",
                     parent_id="parent-instance",
                 )

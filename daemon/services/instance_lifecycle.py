@@ -398,6 +398,41 @@ class InstanceLifecycleService:
         )
         return None
 
+    def _format_model_fallback_notice(
+        self,
+        model: str | None,
+        validated: str | None,
+    ) -> str | None:
+        """Return a user-facing notice if the caller-supplied model was rejected.
+
+        Companion to :meth:`_resolve_model_override` for the ``spawn_instance``
+        tool layer. The silent-fallback contract is preserved (no exception),
+        but the calling agent needs to know the requested model was rejected
+        so it can adjust expectations (cost, latency, capabilities differ
+        across models).
+
+        Args:
+            model: The original caller-supplied model (may be None / empty /
+                whitespace).
+            validated: The output of
+                :meth:`_resolve_model_override` for ``model``.
+
+        Returns:
+            A ``"\\n[NOTE] Model '<X>' is not in allowed_models; spawned
+            with the default model instead."`` notice string, or ``None`` if
+            no notice is needed (no caller model, or the model was accepted).
+        """
+        if not model or not model.strip():
+            # No caller-supplied model — nothing was rejected, no notice needed.
+            return None
+        if validated is not None:
+            # Override was accepted — no fallback, no notice needed.
+            return None
+        return (
+            f"\n[NOTE] Model '{model.strip()}' is not in allowed_models; "
+            f"spawned with the default model instead."
+        )
+
     def spawn_instance(
         self,
         agent_id: str,
@@ -407,7 +442,7 @@ class InstanceLifecycleService:
         instance_name: str | None = None,
         invoked_as_tool: bool = False,
         model: str | None = None,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         """Create a new agent instance.
 
         Args:
@@ -425,7 +460,15 @@ class InstanceLifecycleService:
                 is used (no error).
 
         Returns:
-            The instance_id of the newly created instance.
+            A ``(instance_id, validated_model_override)`` tuple where
+            ``validated_model_override`` is the model value that was actually
+            applied as the spawn-time override (after silent fallback to None
+            when the caller-supplied model was rejected). Returning the
+            validated value alongside the instance_id lets callers (notably
+            the ``spawn_instance`` tool layer) build a user-facing fallback
+            notice WITHOUT re-running ``_resolve_model_override`` — closing
+            the TOCTOU window where the second validation could disagree
+            with the first.
 
         Raises:
             ValueError: If max_children_per_instance limit is exceeded,
@@ -646,7 +689,7 @@ class InstanceLifecycleService:
                     broadcaster.emit_instance_created(instance_data)
                 )
 
-        return instance_id
+        return instance_id, validated_model_override
 
     async def terminate_instance(self, instance_id: str) -> bool:
         """Terminate an instance.
@@ -1412,9 +1455,40 @@ class InstanceLifecycleService:
 
         # Build LLM config — restore spawn-time model override if one was
         # persisted (highest priority over env + meta.json's llm_model).
+        #
+        # SECURITY/COMPLIANCE: re-run ``_resolve_model_override`` on the
+        # stored value so a model removed from ``config.llm.allowed_models``
+        # AFTER the instance was spawned cannot continue to be used after
+        # a daemon restart. Without this guard, instances spawned under a
+        # permissive allow-list would keep running on forbidden models
+        # indefinitely — a compliance/cost hazard flagged in the security
+        # review. If the stored value is rejected, log a warning and fall
+        # back to the default (env / meta.json) model.
         stored_override = None
+        raw_stored_override: str | None = None
         if meta.instance_metadata:
-            stored_override = meta.instance_metadata.get("model_override")
+            raw_stored_override = meta.instance_metadata.get("model_override")
+        validated_stored_override = self._resolve_model_override(raw_stored_override)
+        if (
+            raw_stored_override
+            and raw_stored_override.strip()
+            and validated_stored_override is None
+        ):
+            # Stored value is a real model name that is no longer in
+            # ``allowed_models`` → silent fallback to default. The
+            # ``raw_stored_override.strip()`` guard ensures we only warn
+            # for previously-valid model names, not for corrupt values
+            # like ``"   "`` (whitespace-only) that ``_resolve_model_override``
+            # would have rejected regardless of ``allowed_models`` content.
+            # Without the guard, a corrupt row would log a misleading
+            # ``"<spaces>" is no longer in allowed_models`` warning even
+            # though whitespace was never a valid model to begin with.
+            logger.warning(
+                f"restore_instance: stored model_override {raw_stored_override!r} "
+                f"is no longer in config.llm.allowed_models; falling back to "
+                f"default model for instance {instance_id[:8]}..."
+            )
+        stored_override = validated_stored_override
         llm_config = self._build_llm_config(
             agent_meta,
             override_model=stored_override,

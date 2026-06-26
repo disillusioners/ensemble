@@ -190,7 +190,7 @@ class TestSpawnInstanceLLMOverride:
                  return_value=fake_spawn_result,
              ):
 
-            instance_id = lifecycle.spawn_instance(agent_id="custom_agent")
+            instance_id, _validated_override = lifecycle.spawn_instance(agent_id="custom_agent")
 
             # Verify the instance was created
             assert instance_id is not None
@@ -244,7 +244,7 @@ class TestSpawnInstanceLLMOverride:
                  return_value=fake_spawn_result,
              ):
 
-            instance_id = lifecycle.spawn_instance(agent_id="standard_agent")
+            instance_id, _validated_override = lifecycle.spawn_instance(agent_id="standard_agent")
 
             assert instance_id is not None
             assert captured_llm_config.get("model") == "gpt-4"

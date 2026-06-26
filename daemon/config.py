@@ -39,7 +39,21 @@ def substitute_env_vars(value: Any) -> Any:
 
 
 def _parse_csv_or_json_list(value: Any) -> Any:
-    """Parse a comma-separated string or JSON-array string into a list[str]."""
+    """Parse a comma-separated string or JSON-array string into a list[str].
+
+    Accepts:
+      - ``"gpt-4,gpt-4o"`` → ``["gpt-4", "gpt-4o"]`` (CSV)
+      - ``'["gpt-4","gpt-4o"]'`` → ``["gpt-4", "gpt-4o"]`` (JSON array)
+      - ``["gpt-4", " gpt-4o "]`` → ``["gpt-4", "gpt-4o"]`` (list — each
+        entry stripped; falsy/whitespace-only entries filtered)
+      - ``""`` or whitespace → ``[]``
+      - ``"[oops"`` (malformed JSON) → falls through to CSV split
+
+    Regression note: list inputs were previously returned unchanged, so a
+    YAML entry like ``"gpt-4 "`` (trailing space) would be stored verbatim
+    and never match a stripped candidate ``"gpt-4"`` — silently rejecting
+    valid models. Fix 3 strips each list entry.
+    """
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
@@ -52,6 +66,11 @@ def _parse_csv_or_json_list(value: Any) -> Any:
             except json.JSONDecodeError:
                 pass
         return [i.strip() for i in stripped.split(",") if i.strip()]
+    if isinstance(value, list):
+        # List inputs come from YAML/JSON parsed structures — strip each
+        # entry to align with the string-input path so trailing/leading
+        # whitespace doesn't cause silent model-rejection mismatches.
+        return [str(item).strip() for item in value if str(item).strip()]
     return value
 
 

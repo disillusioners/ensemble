@@ -109,7 +109,7 @@ async def test_leader_spawns_developer_and_receives_report(
     leader_agent_dir = str(project_root / "agents" / "leader")
     logger.info(f"[TEST] Creating Leader instance with agent: {leader_agent_dir}")
     
-    leader_instance_id = manager.spawn_instance(agent_id="leader")
+    leader_instance_id, _ = manager.spawn_instance(agent_id="leader")
     logger.info(f"[TEST] ✅ Leader instance created: {leader_instance_id[:8]}...")
     
     # Track all events
@@ -328,11 +328,11 @@ async def test_completion_report_message_format(
     
     # Create Leader (parent)
     leader_agent_dir = str(project_root / "agents" / "leader")
-    leader_instance_id = manager.spawn_instance(agent_id="leader")
+    leader_instance_id, _ = manager.spawn_instance(agent_id="leader")
     
     # Create Developer as child of Leader
     developer_agent_dir = str(project_root / "agents" / "developer")
-    developer_instance_id = manager.spawn_instance(
+    developer_instance_id, _ = manager.spawn_instance(
         agent_id="developer",
         parent_id=leader_instance_id
     )
