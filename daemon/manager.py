@@ -1584,6 +1584,71 @@ class InstanceManager:
             )
         )
 
+    def _on_stale_task_cancelled_and_retried(
+        self, cancelled_task_id: int, retry_task_id: int
+    ) -> None:
+        """Bridge from StaleTaskRecovery thread to ``DependencyBus.cancel_for_source``.
+
+        Called on the recovery thread when a stale task is force-cancelled
+        and a retry is scheduled. Without this notification, the bus's
+        PENDING watchers keyed on the cancelled ``source_task_id`` stay
+        PENDING forever — the retry's natural completion fires
+        ``emit_terminal`` for its OWN task id and cannot match the
+        original watcher. The parent would remain in
+        ``waiting_children`` indefinitely (production incident 2026-06-26,
+        instance 06f500af stuck for hours despite all 8 children
+        completing successfully).
+
+        The bus is async and the recovery thread is a plain
+        ``threading.Thread`` — ``MainLoopBridge.run_async_no_wait`` hops
+        to the asyncio event loop, mirroring the existing
+        ``_on_stale_task_permanent_failure`` bridge above.
+
+        Args:
+            cancelled_task_id: The id of the task that was just cancelled
+                by the recovery action. Bus watchers against this id are
+                transitioned to CANCELLED.
+            retry_task_id: The id of the newly-scheduled retry task. Not
+                used by the bus but logged for traceability.
+        """
+        from .services.main_loop_bridge import MainLoopBridge
+
+        async def _cancel_bus_watchers() -> None:
+            from .services.dependency_bus import get_dependency_bus
+            bus = get_dependency_bus()
+            if bus is None:
+                logger.warning(
+                    "bus singleton is None — cannot cancel watchers for "
+                    "stale-cancelled task; parent may stay in "
+                    "waiting_children until manual intervention"
+                )
+                return
+            try:
+                cancelled = await bus.cancel_for_source(str(cancelled_task_id))
+                logger.info(
+                    f"Stale-recovery bus cancel: cancelled_task={cancelled_task_id}, "
+                    f"retry_task={retry_task_id}, bus_watchers_cancelled={cancelled}"
+                )
+            except Exception as bus_err:
+                logger.error(
+                    f"Failed to cancel bus watchers for stale task "
+                    f"{cancelled_task_id} (retry={retry_task_id}): {bus_err}"
+                )
+
+        # Fire-and-forget: hop to the asyncio event loop. If the bridge has
+        # no loop available (shutdown, tests), close the coroutine to avoid
+        # ``RuntimeWarning: coroutine '...' was never awaited`` on GC.
+        coro = _cancel_bus_watchers()
+        bridge_loop = getattr(MainLoopBridge, "_loop", None)
+        if bridge_loop is None or bridge_loop.is_closed():
+            logger.debug(
+                "Stale-recovery bus cancel skipped: MainLoopBridge has no loop "
+                "(cancelled_task={cancelled_task_id}); coroutine closed."
+            )
+            coro.close()
+            return
+        MainLoopBridge.run_async_no_wait(coro)
+
     def _ensure_postgres_columns(self) -> None:
         """Idempotent Postgres schema evolution.
 
@@ -1956,6 +2021,7 @@ class InstanceManager:
             retry_backoff_base=svc.task_retry_backoff_base,
             retry_backoff_max=svc.task_retry_backoff_max,
             on_task_permanently_failed=self._on_stale_task_permanent_failure,
+            on_task_cancelled_and_retried=self._on_stale_task_cancelled_and_retried,
         )
         # FIX: C3 — Assign BEFORE calling recover_on_startup() so _stale_recovery is set
         # even if recover_on_startup() raises an exception

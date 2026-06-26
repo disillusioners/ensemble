@@ -225,3 +225,36 @@ async def test_pg_cancel_prevents_fire(bus, pg_engine):
         # fired_at should be None on a CANCELLED row — the bus passes
         # fired_at=None for cancellation transitions.
         assert rows[0].fired_at is None
+
+
+@pytest.mark.asyncio
+async def test_pg_cancel_for_source_prevents_fire(bus, pg_engine):
+    """cancel_for_source: PG regression for the 2026-06-26 incident.
+
+    ``StaleTaskRecovery`` force-cancels a stale task and schedules a
+    retry; the bus must cancel the cancelled task's watchers so the
+    retry's natural completion (firing ``emit_terminal`` for its OWN
+    task id) doesn't strand the parent in ``waiting_children``.
+    Mirrors the existing ``test_pg_cancel_prevents_fire`` but keyed on
+    source instead of target.
+    """
+    await bus.watch(
+        "pg-task-cs", make_fu(target_id="parent-pg-cs", message="will-be-cancelled")
+    )
+
+    cancelled = await bus.cancel_for_source("pg-task-cs")
+    assert cancelled == 1
+
+    fired = await bus.emit_terminal("pg-task-cs", make_outcome())
+    assert fired == []
+
+    # Confirm via DB: the row is CANCELLED, never made it to FIRED.
+    cancelled_state = DependencyWatcherState.CANCELLED.value
+    with Session(pg_engine) as session:
+        stmt = select(DependencyWatcher).where(
+            DependencyWatcher.source_task_id == "pg-task-cs"
+        )
+        rows = list(session.exec(stmt))
+        assert len(rows) == 1
+        assert rows[0].state == cancelled_state
+        assert rows[0].fired_at is None

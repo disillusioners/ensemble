@@ -345,6 +345,113 @@ class TestCancellation:
 
 
 # -------------------------------------------------------------------------
+# TestCancelForSource
+# -------------------------------------------------------------------------
+
+
+class TestCancelForSource:
+    """Tests for :meth:`DependencyBus.cancel_for_source`.
+
+    Production regression (2026-06-26, instance 06f500af stuck in
+    ``waiting_children``): when ``StaleTaskRecovery`` force-cancels a
+    stale task and schedules a retry, the bus's PENDING watchers keyed
+    on the cancelled ``source_task_id`` are orphaned — the retry's
+    natural completion fires ``emit_terminal`` for its OWN task id,
+    which cannot match the original watcher. The parent stays in
+    ``waiting_children`` forever. ``cancel_for_source`` is the
+    symmetry to ``cancel_for_target`` keyed on the source task id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_source_transitions_to_cancelled(self, bus):
+        await bus.watch("task-1", make_fu(target_id="parent-X"))
+        count = await bus.cancel_for_source("task-1")
+        assert count == 1
+        assert await bus.pending_watchers("task-1") == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_source_only_affects_specified_source(self, bus):
+        """Cancel task-1 leaves task-2's watchers intact (proves per-source keying)."""
+        await bus.watch("task-1", make_fu(target_id="parent-X"))
+        await bus.watch("task-2", make_fu(target_id="parent-Y"))
+        await bus.cancel_for_source("task-1")
+        assert await bus.pending_watchers("task-1") == []
+        assert len(await bus.pending_watchers("task-2")) == 1
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_source_returns_count(self, bus):
+        """Multiple watchers on same source are all cancelled."""
+        for i in range(3):
+            await bus.watch("task-1", make_fu(target_id=f"parent-{i}"))
+        count = await bus.cancel_for_source("task-1")
+        assert count == 3
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_source_then_emit_fires_nothing(self, bus):
+        """After cancellation, emit_terminal is a no-op for that source.
+
+        Mirrors the ``cancel_for_target`` invariant: CANCELLED rows are
+        never fired (the bus keying is symmetric).
+        """
+        await bus.watch("task-1", make_fu(target_id="parent-A"))
+        cancelled = await bus.cancel_for_source("task-1")
+        assert cancelled == 1
+        fired = await bus.emit_terminal("task-1", make_outcome())
+        assert fired == []
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_source_unknown_returns_zero(self, bus):
+        """Unknown source_task_id is a clean no-op (matches target cancel)."""
+        count = await bus.cancel_for_source("never-watched-task")
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_source_releases_parent_in_waiting_children(
+        self, bus,
+    ):
+        """End-to-end regression: cancelling the source lets the parent complete.
+
+        Models the production incident (instance 06f500af). A parent
+        (``parent-X``) registered a watcher via ``send_message`` against
+        ``source_task_id=task-1``. The child task was force-cancelled by
+        stale recovery and a retry was scheduled. Without
+        ``cancel_for_source``, ``count_pending_for_target(parent-X)``
+        stays > 0 forever and the parent never reaches COMPLETED. With
+        the fix, cancelling the orphaned source releases the parent.
+        """
+        # Parent registered a FollowUp via send_message → bus.watch
+        await bus.watch("task-1", make_fu(target_id="parent-X"))
+        # Sanity: parent is "waiting on children"
+        assert await bus.count_pending_for_target("parent-X") == 1
+        # Stale recovery cancels the original task and schedules a retry
+        cancelled = await bus.cancel_for_source("task-1")
+        assert cancelled == 1
+        # Parent's gate now sees zero pending children
+        assert await bus.count_pending_for_target("parent-X") == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_for_source_purges_cache_for_restart(self, bus, bus_repo):
+        """Restart-survival: cancellation persists in the DB and the cache is clean.
+
+        Same shape as ``test_cancelled_watcher_not_fired_after_restart``
+        but keyed on source — proves the new path has the same crash-
+        survival guarantees as the existing cancel primitive.
+        """
+        b1 = DependencyBus(bus_repo)
+        await b1.start()
+        await b1.watch("task-1", make_fu(target_id="parent-1"))
+        await b1.cancel_for_source("task-1")
+        await b1.stop()
+
+        b2 = await fresh_bus(bus_repo)
+        try:
+            fired = await b2.emit_terminal("task-1", make_outcome())
+            assert fired == []
+        finally:
+            await b2.stop()
+
+
+# -------------------------------------------------------------------------
 # TestBackpressure
 # -------------------------------------------------------------------------
 

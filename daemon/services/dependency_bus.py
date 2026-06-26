@@ -785,6 +785,89 @@ class DependencyBus:
         )
         return count
 
+    async def cancel_for_source(self, source_task_id: str) -> int:
+        """Cancel all PENDING watchers keyed on ``source_task_id``.
+
+        Called when a child task is force-cancelled and a retry
+        task is scheduled to replace it (e.g. ``StaleTaskRecovery``
+        step 4+5, ``WorkerPool._handle_cancellation`` timeout-
+        retry path, startup crash recovery). Without this, the
+        parent-side watcher remains PENDING forever because the
+        retry task has a NEW ``source_task_id`` and the bus
+        ``emit_terminal`` fired for the retry cannot match the
+        original watcher.
+
+        Production incident 2026-06-26 (instance 06f500af stuck in
+        ``waiting_children`` for hours): this was the missing
+        link between the cancel-and-retry flow and the bus's
+        PENDING watcher state. The retry's natural completion
+        fired ``emit_terminal(task_id=retry)`` but the watcher
+        was registered against the cancelled task's id — the
+        watcher stayed PENDING, ``count_pending_for_target``
+        stayed > 0, and the leader never reached COMPLETED.
+
+        The retry itself, when scheduled via ``send_message`` /
+        ``_schedule_message_followup``, will register a FRESH
+        watcher keyed on its own task id, so cancelling the
+        original is safe — the retry's eventual terminal event
+        will fire its own watcher correctly.
+
+        Uses the same guarded ``transition_state`` primitive as
+        ``cancel_for_target`` so concurrent ``emit_terminal`` wins
+        (PENDING → FIRED) are not overwritten — a FIRED watcher
+        that wins the race returns ``False`` from
+        ``transition_state`` and is left untouched.
+
+        Args:
+            source_task_id: The cancelled child task id whose
+                PENDING watchers should be cancelled.
+
+        Returns:
+            The number of watchers transitioned from PENDING to
+            CANCELLED. Rows that were already FIRED (by a
+            concurrent ``emit_terminal`` for the same source) are
+            not counted — ``transition_state`` returns ``False``
+            for non-PENDING rows.
+        """
+        pending_rows = await asyncio.to_thread(
+            self._repo.fetch_pending_for_source, source_task_id
+        )
+
+        if not pending_rows:
+            logger.debug(
+                f"bus cancel_for_source: source={source_task_id[:8]} "
+                f"has no pending watchers",
+                extra={"completion_delivery_path": "bus"},
+            )
+            return 0
+
+        cancelled_state = DependencyWatcherState.CANCELLED.value
+        count = 0
+        for row in pending_rows:
+            transitioned = await asyncio.to_thread(
+                self._repo.transition_state,
+                row.watch_id,
+                cancelled_state,
+                None,  # CANCELLED rows do not stamp a fired_at
+            )
+            if transitioned:
+                count += 1
+
+        # The cache is keyed by source_task_id, so the cleanup
+        # here is O(1): drop the entire cache entry for this
+        # source if it exists.
+        cache_purged = 0
+        if source_task_id in self._pending:
+            cache_purged = len(self._pending[source_task_id])
+            del self._pending[source_task_id]
+
+        logger.info(
+            f"bus cancel_for_source: source={source_task_id[:8]}, "
+            f"cancelled={count}, cache_purged={cache_purged}",
+            extra={"completion_delivery_path": "bus"},
+        )
+        return count
+
     async def start(self) -> list[tuple[str, FollowUp]]:
         """Warm the in-memory cache from the DB and recover unsent fires.
 

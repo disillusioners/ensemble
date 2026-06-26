@@ -46,6 +46,7 @@ class StaleTaskRecovery:
         retry_backoff_max: int = DEFAULT_RETRY_BACKOFF_MAX,
         event_repository=None,
         on_task_permanently_failed: "Callable[[str, str, str | None], None] | None" = None,  # NEW: callback(instance_id, error, message_id)
+        on_task_cancelled_and_retried: "Callable[[int, int], None] | None" = None,  # NEW: callback(cancelled_task_id, retry_task_id)
     ):
         """Initialize stale task recovery.
         
@@ -54,13 +55,19 @@ class StaleTaskRecovery:
             message_repository: MessageQueueRepository for message recovery.
             threshold_minutes: Tasks running longer than this are considered stale.
             check_interval_seconds: How often to check for stale tasks.
-            cancel_grace_seconds: Time to wait after requesting cancel for graceful shutdown.
+            cancel_grace_seconds: Maximum time to wait for graceful shutdown.
             max_retries: Maximum number of retry attempts.
             retry_backoff_base: Base for exponential backoff (seconds).
             retry_backoff_max: Maximum backoff time (seconds).
             event_repository: Optional EventRepository for logging recovery events.
             on_task_permanently_failed: Optional callback(instance_id, error, message_id)
                 called when a task permanently fails.
+            on_task_cancelled_and_retried: Optional callback(cancelled_task_id, retry_task_id)
+                called when a task is force-cancelled and a retry task is scheduled
+                (replaces the cancelled task id in any pending bus watchers). This is
+                required to prevent the parent from getting stranded in waiting_children
+                when a retry succeeds but the bus watcher was registered against the
+                cancelled task id.
         """
         self._task_repo = task_repository
         self._message_repo = message_repository
@@ -74,6 +81,7 @@ class StaleTaskRecovery:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._on_task_permanently_failed = on_task_permanently_failed  # NEW
+        self._on_task_cancelled_and_retried = on_task_cancelled_and_retried  # NEW
     
     def start(self) -> None:
         """Start the background recovery thread."""
@@ -189,7 +197,7 @@ class StaleTaskRecovery:
                         backoff_base=self._retry_backoff_base,
                         backoff_max=self._retry_backoff_max,
                     )
-                    
+
                     if retry_task:
                         logger.info(
                             f"Step 4+5: Force-cancelled + retry {retry_task.id} "
@@ -198,6 +206,16 @@ class StaleTaskRecovery:
                         self._log_recovery_event(task, "force_cancelled_and_retried",
                                                    retry_task_id=retry_task.id)
                         task_acted_upon = True
+                        # Notify the bus that the cancelled task is gone so
+                        # parent-side watchers (registered against the cancelled
+                        # ``source_task_id``) are released. Without this, the
+                        # retry's natural completion fires ``emit_terminal`` for
+                        # its OWN task id, which cannot match the original
+                        # watcher — the parent would stay in ``waiting_children``
+                        # forever. The retry registers a fresh watcher when its
+                        # own ``send_message`` path runs, so cancelling the
+                        # original is safe.
+                        self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
                     else:
                         # Max retries exceeded or retry already scheduled — permanent fail
                         if current.retry_count >= self._max_retries:
@@ -249,6 +267,11 @@ class StaleTaskRecovery:
                             self._log_recovery_event(task, "retry_scheduled_by_recovery",
                                                        retry_task_id=retry_task.id)
                             task_acted_upon = True
+                            # Bus cancel: same reason as the force-cancel branch
+                            # above. The Worker cancelled the task but didn't
+                            # notify the bus; without this call the parent-side
+                            # watcher stays PENDING.
+                            self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
                         else:
                             self._task_repo.fail_task(
                                 task.id,
@@ -330,6 +353,12 @@ class StaleTaskRecovery:
                         )
                         self._log_recovery_event(task, "startup_recovered",
                                                    retry_task_id=retry_task.id)
+                        # Bus cancel: startup recovery force-cancelled a stale
+                        # RUNNING task whose worker likely crashed mid-execution.
+                        # The original task's bus watchers (if any) are now
+                        # orphans — release them so the parent doesn't stay in
+                        # ``waiting_children`` after the retry completes.
+                        self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
                     else:
                         self._task_repo.fail_task(
                             task.id,
@@ -381,6 +410,11 @@ class StaleTaskRecovery:
                         )
                         self._log_recovery_event(task, "orphan_recovered",
                                                    retry_task_id=retry_task.id)
+                        # Bus cancel: orphan recovery rescheduled a task that
+                        # was left CANCELLED by a prior crash. Any bus watchers
+                        # against the orphaned task id are stranded — release
+                        # them.
+                        self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
                         recovered += 1
                     else:
                         # Max retries exceeded — mark permanent fail
@@ -440,3 +474,48 @@ class StaleTaskRecovery:
     def is_running(self) -> bool:
         """Check if the recovery thread is running."""
         return self._thread is not None and self._thread.is_alive()
+
+    def _notify_bus_of_cancel_and_retry(
+        self, cancelled_task_id: int, retry_task_id: int
+    ) -> None:
+        """Notify the bus that a task was force-cancelled and a retry was scheduled.
+
+        Production incident 2026-06-26: when ``StaleTaskRecovery`` force-
+        cancels a stale task and schedules a retry, the bus's PENDING
+        watchers keyed on the cancelled ``source_task_id`` are orphaned.
+        The retry registers its OWN watcher when it runs through
+        ``send_message``, but the original watcher never fires (the bus
+        only fires PENDING → FIRED via ``emit_terminal`` on the
+        cancelling task's id). The parent stays in ``waiting_children``
+        forever.
+
+        Calls ``on_task_cancelled_and_retried`` (wired by the manager to
+        ``bus.cancel_for_source`` via ``MainLoopBridge``) so the
+        cancellation runs on the asyncio event loop — the bus is async
+        and the recovery thread is a plain ``threading.Thread``.
+
+        Failures are logged but never re-raised — the bus notification is
+        a defense-in-depth measure; the recovery action itself
+        (cancel + reschedule) already succeeded. A missing or failed bus
+        call leaves the parent in ``waiting_children`` until manual
+        intervention (matches the pre-fix behavior the user is reporting
+        here). Operations that want stricter guarantees can wire their
+        own retry on top.
+
+        Args:
+            cancelled_task_id: The id of the task that was just cancelled
+                by this recovery action.
+            retry_task_id: The id of the newly-scheduled retry task. Not
+                used directly — the bus notification is keyed on the
+                cancelled task id — but passed for logging context.
+        """
+        if self._on_task_cancelled_and_retried is None:
+            return
+        try:
+            self._on_task_cancelled_and_retried(cancelled_task_id, retry_task_id)
+        except Exception as cb_err:
+            logger.error(
+                f"Failed to notify bus of cancel-and-retry "
+                f"(cancelled_task={cancelled_task_id}, retry_task={retry_task_id}): "
+                f"{cb_err}"
+            )
