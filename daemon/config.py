@@ -1,5 +1,6 @@
 """Configuration loading with YAML, environment variable substitution, and Pydantic validation."""
 
+import json
 import os
 import re
 from pathlib import Path
@@ -34,6 +35,23 @@ def substitute_env_vars(value: Any) -> Any:
         return {k: substitute_env_vars(v) for k, v in value.items()}
     elif isinstance(value, list):
         return [substitute_env_vars(item) for item in value]
+    return value
+
+
+def _parse_csv_or_json_list(value: Any) -> Any:
+    """Parse a comma-separated string or JSON-array string into a list[str]."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return []
+        if stripped.startswith("[") and stripped.endswith("]"):
+            try:
+                parsed = json.loads(stripped)
+                if isinstance(parsed, list):
+                    return [str(i).strip() for i in parsed if str(i).strip()]
+            except json.JSONDecodeError:
+                pass
+        return [i.strip() for i in stripped.split(",") if i.strip()]
     return value
 
 
@@ -80,6 +98,7 @@ class LLMConfig(BaseSettings):
     def _parse_reasoning_echo_models(cls, value: Any) -> Any:
         """Accept comma-separated strings (and JSON arrays) from env / YAML.
 
+        Delegates to ``_parse_csv_or_json_list`` for the shared parsing logic.
         The ``NoDecode`` annotation prevents pydantic-settings from
         auto-parsing env values, so we handle both forms here:
           - ``"deepseek,glm"`` → ``["deepseek", "glm"]``
@@ -87,23 +106,7 @@ class LLMConfig(BaseSettings):
           - ``["deepseek", "glm"]`` → unchanged (passthrough)
           - ``""`` or whitespace → ``[]``
         """
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return []
-            # JSON array form
-            if stripped.startswith("[") and stripped.endswith("]"):
-                import json
-                try:
-                    parsed = json.loads(stripped)
-                    if isinstance(parsed, list):
-                        return [str(item).strip() for item in parsed if str(item).strip()]
-                except json.JSONDecodeError:
-                    pass
-                # Fall through to comma-split
-            # Comma-separated form (also covers "a, b , c")
-            return [item.strip() for item in stripped.split(",") if item.strip()]
-        return value
+        return _parse_csv_or_json_list(value)
 
     # Models allowed as instance model overrides at spawn time. Exact match
     # (case-insensitive) is performed against the override model name;
@@ -126,6 +129,7 @@ class LLMConfig(BaseSettings):
     def _parse_allowed_models(cls, value: Any) -> Any:
         """Accept comma-separated strings (and JSON arrays) from env / YAML.
 
+        Delegates to ``_parse_csv_or_json_list`` for the shared parsing logic.
         The ``NoDecode`` annotation prevents pydantic-settings from
         auto-parsing env values, so we handle both forms here:
           - ``"gpt-4,gpt-4o"`` → ``["gpt-4", "gpt-4o"]``
@@ -133,23 +137,7 @@ class LLMConfig(BaseSettings):
           - ``["gpt-4", "gpt-4o"]`` → unchanged (passthrough)
           - ``""`` or whitespace → ``[]``
         """
-        if isinstance(value, str):
-            stripped = value.strip()
-            if not stripped:
-                return []
-            # JSON array form
-            if stripped.startswith("[") and stripped.endswith("]"):
-                import json
-                try:
-                    parsed = json.loads(stripped)
-                    if isinstance(parsed, list):
-                        return [str(item).strip() for item in parsed if str(item).strip()]
-                except json.JSONDecodeError:
-                    pass
-                # Fall through to comma-split
-            # Comma-separated form (also covers "a, b , c")
-            return [item.strip() for item in stripped.split(",") if item.strip()]
-        return value
+        return _parse_csv_or_json_list(value)
 
     @model_validator(mode="after")
     def set_title_model_fallback(self) -> "LLMConfig":
