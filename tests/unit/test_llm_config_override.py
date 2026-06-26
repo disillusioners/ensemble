@@ -1,5 +1,6 @@
 """Unit tests for per-agent LLM model override functionality."""
 
+import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -7,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from daemon.config import Config, LLMConfig, LimitsConfig, QueueConfig
+from daemon.config import Config, LLMConfig, LimitsConfig, QueueConfig, _parse_csv_or_json_list
 from daemon.registry import AgentMetadata
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.services.instance_lifecycle import _SpawnResult
@@ -465,3 +466,270 @@ class TestBuildLLMConfigPriority:
         metadata_without = create_metadata(llm_model=None, agent_id="x")
         result_without = lifecycle._build_llm_config(metadata_without)
         assert result_without["model"] == "default-model"
+
+
+def _make_restore_mock_manager(allowed_models: list[str]) -> MagicMock:
+    """Build a mock ``InstanceManager`` sufficient for ``_restore_instance``.
+
+    Disables the optional MCP service branch of ``_get_mcp_tool_names`` by
+    setting ``_mcp_service = None`` so the helper falls through to the stored
+    / empty-list path (the real manager may or may not have an MCP service).
+    """
+    config = create_mock_config_with_allowed(
+        model="default-model", allowed_models=allowed_models
+    )
+    manager = create_mock_manager(config)
+    # MagicMock ``hasattr`` returns True for any attribute; setting
+    # ``_mcp_service = None`` short-circuits the MCP cache branch so the
+    # fallback ``return []`` path is taken deterministically.
+    manager._mcp_service = None
+    return manager
+
+
+def _make_restore_meta(
+    instance_metadata: dict | None,
+    agent_id: str = "test-agent",
+    instance_id: str = "test-instance-uuid",
+) -> MagicMock:
+    """Build a mock ``Instance`` row with the given metadata dict.
+
+    Only the attributes accessed by ``_restore_instance`` are populated:
+    ``instance_id``, ``agent_id``, ``agent_dir``, ``parent_id``, and
+    ``instance_metadata``.
+    """
+    meta = MagicMock()
+    meta.instance_id = instance_id
+    meta.agent_id = agent_id
+    meta.agent_dir = "/tmp/test"
+    meta.parent_id = None
+    # Use a real dict (not a MagicMock) so ``.get()`` returns the literal
+    # value, not a MagicMock — matches the production Instance model.
+    meta.instance_metadata = (
+        dict(instance_metadata) if instance_metadata is not None else {}
+    )
+    return meta
+
+
+@contextmanager
+def _patch_restore_dependencies(agent_meta: AgentMetadata, captured: dict):
+    """Patch every external dependency of ``_restore_instance``.
+
+    ``build_instance_graph`` is replaced with a side-effect that copies its
+    ``kwargs`` into ``captured`` so tests can assert on the
+    ``llm_config`` argument that was ultimately used to build the graph.
+    """
+
+    def _capture_build_graph(**kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return MagicMock()
+
+    mock_registry = MagicMock()
+    mock_registry.get_resolved.return_value = agent_meta
+    mock_registry.resolve_pure_id.return_value = agent_meta.id
+
+    with patch(
+        "daemon.services.instance_lifecycle.get_registry",
+        return_value=mock_registry,
+    ), patch(
+        "daemon.manager.load_and_cache_prompt",
+        return_value=("prompt", 100),
+    ), patch(
+        "daemon.manager.create_instance_tools",
+        return_value=[],
+    ), patch(
+        "daemon.manager.build_instance_graph",
+        side_effect=_capture_build_graph,
+    ):
+        yield
+
+
+class TestRestoreInstanceModelOverride:
+    """Tests for ``_restore_instance`` model-override re-validation.
+
+    SECURITY/COMPLIANCE: when an instance is restored from the DB after a
+    daemon restart, the persisted ``model_override`` MUST be re-validated
+    against the CURRENT ``config.llm.allowed_models`` list. A model removed
+    from the allow-list after spawn must NOT continue running indefinitely
+    on the now-forbidden model — this guards against the
+    "permissive-now-strict" compliance hazard.
+    """
+
+    def test_stored_override_reapplied_on_restore(self) -> None:
+        """Stored ``model_override='gpt-4'`` + ``allowed_models=['gpt-4']`` → reapplied.
+
+        The stored value is still in the allow-list, so it must pass through
+        ``_resolve_model_override`` unchanged and reach ``_build_llm_config``
+        as the highest-priority override.
+        """
+        manager = _make_restore_mock_manager(allowed_models=["gpt-4"])
+        agent_meta = create_metadata(llm_model=None, agent_id="test-agent")
+        captured: dict = {}
+
+        meta = _make_restore_meta({"model_override": "gpt-4"})
+
+        lifecycle = InstanceLifecycleService(manager, MagicMock())
+        with _patch_restore_dependencies(agent_meta, captured):
+            lifecycle._restore_instance(meta.instance_id, meta)
+
+        llm_config = captured.get("llm_config", {})
+        assert llm_config.get("model") == "gpt-4", (
+            f"Expected restored model 'gpt-4' from metadata, got "
+            f"{llm_config.get('model')!r}"
+        )
+
+    def test_stored_override_removed_from_allowed_falls_back(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Stored ``model_override='gpt-4'`` but ``allowed_models=['gpt-4o']`` → fallback.
+
+        The previously-valid model is no longer in the allow-list. The
+        restore path must:
+          1. Reject the override (return ``None`` from ``_resolve_model_override``).
+          2. Pass ``override_model=None`` to ``_build_llm_config`` so the
+             config default (``config.llm.model``) is used.
+          3. Emit a WARNING so operators can see the model was stripped.
+        """
+        manager = _make_restore_mock_manager(allowed_models=["gpt-4o"])
+        agent_meta = create_metadata(llm_model=None, agent_id="test-agent")
+        captured: dict = {}
+
+        meta = _make_restore_meta({"model_override": "gpt-4"})
+
+        lifecycle = InstanceLifecycleService(manager, MagicMock())
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.instance_lifecycle"
+        ):
+            with _patch_restore_dependencies(agent_meta, captured):
+                lifecycle._restore_instance(meta.instance_id, meta)
+
+        llm_config = captured.get("llm_config", {})
+        # override_model resolves to None → falls back to config.llm.model
+        assert llm_config.get("model") == "default-model", (
+            f"Expected fallback to default 'default-model', got "
+            f"{llm_config.get('model')!r}"
+        )
+
+        # WARNING must mention both the rejected model and the allow-list,
+        # so operators can diagnose the silent fallback.
+        warning_records = [
+            r for r in caplog.records if r.levelno == logging.WARNING
+        ]
+        assert warning_records, (
+            "Expected a WARNING log when a stored override is no longer in "
+            "allowed_models; got no WARNING records"
+        )
+        combined = " ".join(r.getMessage() for r in warning_records)
+        assert "gpt-4" in combined, (
+            f"WARNING must mention the rejected model 'gpt-4'; got: {combined!r}"
+        )
+        assert "allowed_models" in combined, (
+            f"WARNING must mention allowed_models; got: {combined!r}"
+        )
+
+    def test_no_stored_override_uses_default(self) -> None:
+        """No ``model_override`` key in metadata → fallback to default (backwards compat).
+
+        Pre-feature instances (and instances spawned without the override
+        param) have no ``model_override`` key. The restore path must not
+        crash and must use the config default.
+        """
+        manager = _make_restore_mock_manager(allowed_models=["gpt-4"])
+        agent_meta = create_metadata(llm_model=None, agent_id="test-agent")
+        captured: dict = {}
+
+        # No model_override key in metadata at all (only an unrelated key)
+        meta = _make_restore_meta({"unrelated_key": "value"})
+
+        lifecycle = InstanceLifecycleService(manager, MagicMock())
+        with _patch_restore_dependencies(agent_meta, captured):
+            lifecycle._restore_instance(meta.instance_id, meta)
+
+        llm_config = captured.get("llm_config", {})
+        assert llm_config.get("model") == "default-model", (
+            f"Expected default 'default-model', got {llm_config.get('model')!r}"
+        )
+
+    def test_corrupt_stored_override_graceful_fallback(self) -> None:
+        """Stored override is ``None`` or ``""`` → no crash, graceful fallback.
+
+        Guards against rows where ``model_override`` was set but contains no
+        usable value (interrupted writes, schema migrations, manual DB
+        edits). The restore flow must not raise and must use the default
+        model. This is the regression test for the
+        "raw_stored_override.strip()" guard in ``_restore_instance`` —
+        without it, a corrupt row would emit a misleading
+        ``"<spaces>" is no longer in allowed_models`` warning.
+        """
+        manager = _make_restore_mock_manager(allowed_models=["gpt-4"])
+        agent_meta = create_metadata(llm_model=None, agent_id="test-agent")
+        captured: dict = {}
+
+        lifecycle = InstanceLifecycleService(manager, MagicMock())
+
+        # Case A: explicit None (e.g. INSERT with NULL value)
+        meta_none = _make_restore_meta({"model_override": None})
+        with _patch_restore_dependencies(agent_meta, captured):
+            lifecycle._restore_instance(meta_none.instance_id, meta_none)
+        assert captured["llm_config"]["model"] == "default-model", (
+            "None model_override must fall back to default"
+        )
+
+        # Case B: empty string (e.g. partial write that left an empty value)
+        meta_empty = _make_restore_meta({"model_override": ""})
+        with _patch_restore_dependencies(agent_meta, captured):
+            lifecycle._restore_instance(meta_empty.instance_id, meta_empty)
+        assert captured["llm_config"]["model"] == "default-model", (
+            "Empty-string model_override must fall back to default"
+        )
+
+
+class TestAllowedModelsConfigParsing:
+    """Tests for the ``_parse_csv_or_json_list`` helper in ``daemon.config``.
+
+    This helper backs both ``LLMConfig.reasoning_echo_models`` and
+    ``LLMConfig.allowed_models`` parsing from env / YAML inputs, so any
+    regression here affects every consumer of the allow-list machinery.
+    """
+
+    def test_csv_string_parsing(self) -> None:
+        """``'gpt-4,gpt-4o'`` → ``['gpt-4', 'gpt-4o']`` (CSV path)."""
+        assert _parse_csv_or_json_list("gpt-4,gpt-4o") == ["gpt-4", "gpt-4o"]
+
+    def test_json_array_parsing(self) -> None:
+        """``'[\"gpt-4\",\"gpt-4o\"]'`` → ``['gpt-4', 'gpt-4o']`` (JSON path)."""
+        assert _parse_csv_or_json_list('["gpt-4","gpt-4o"]') == [
+            "gpt-4",
+            "gpt-4o",
+        ]
+
+    def test_malformed_json_does_not_crash(self) -> None:
+        """``'[oops'`` (malformed JSON) → falls through to CSV split.
+
+        Must NOT raise. The string is split on ``,`` as a last resort, so a
+        single entry with no commas is returned as a one-element list. This
+        is a defensive fallback — the helper should never crash on a
+        malformed env value.
+        """
+        assert _parse_csv_or_json_list("[oops") == ["[oops"]
+
+    def test_whitespace_only_entries_filtered(self) -> None:
+        """``'gpt-4, , gpt-4o'`` → ``['gpt-4', 'gpt-4o']`` (empty entries filtered)."""
+        assert _parse_csv_or_json_list("gpt-4, , gpt-4o") == [
+            "gpt-4",
+            "gpt-4o",
+        ]
+
+    def test_list_input_trailing_space_entries_stripped(self) -> None:
+        """``['gpt-4 ', ' gpt-4o']`` → ``['gpt-4', 'gpt-4o']``.
+
+        Regression test for the YAML list stripping fix: list inputs were
+        previously returned unchanged, so a YAML entry like ``'gpt-4 '``
+        (trailing space) would be stored verbatim and never match a
+        stripped candidate ``'gpt-4'`` — silently rejecting valid models.
+        """
+        assert _parse_csv_or_json_list(["gpt-4 ", " gpt-4o"]) == [
+            "gpt-4",
+            "gpt-4o",
+        ]
+
