@@ -46,7 +46,7 @@ class StaleTaskRecovery:
         retry_backoff_max: int = DEFAULT_RETRY_BACKOFF_MAX,
         event_repository=None,
         on_task_permanently_failed: "Callable[[str, str, str | None], None] | None" = None,  # NEW: callback(instance_id, error, message_id)
-        on_task_cancelled_and_retried: "Callable[[int, int], None] | None" = None,  # NEW: callback(cancelled_task_id, retry_task_id)
+        on_task_cancelled_and_retried: "Callable[[int, int, str], None] | None" = None,  # NEW: callback(cancelled_task_id, retry_task_id, origin)
     ):
         """Initialize stale task recovery.
         
@@ -62,7 +62,13 @@ class StaleTaskRecovery:
             event_repository: Optional EventRepository for logging recovery events.
             on_task_permanently_failed: Optional callback(instance_id, error, message_id)
                 called when a task permanently fails.
-            on_task_cancelled_and_retried: Optional callback(cancelled_task_id, retry_task_id)
+            on_task_cancelled_and_retried: Optional callback(cancelled_task_id, retry_task_id, origin)
+                called when a task is force-cancelled and a retry task is scheduled
+                (replaces the cancelled task id in any pending bus watchers). This is
+                required to prevent the parent from getting stranded in waiting_children
+                when a retry succeeds but the bus watcher was registered against the
+                cancelled task id. The ``origin`` tag identifies the call site
+                (e.g. ``"stale_recovery"``, ``"startup_stale_running"``).
                 called when a task is force-cancelled and a retry task is scheduled
                 (replaces the cancelled task id in any pending bus watchers). This is
                 required to prevent the parent from getting stranded in waiting_children
@@ -208,14 +214,14 @@ class StaleTaskRecovery:
                         task_acted_upon = True
                         # Notify the bus that the cancelled task is gone so
                         # parent-side watchers (registered against the cancelled
-                        # ``source_task_id``) are released. Without this, the
-                        # retry's natural completion fires ``emit_terminal`` for
-                        # its OWN task id, which cannot match the original
-                        # watcher — the parent would stay in ``waiting_children``
-                        # forever. The retry registers a fresh watcher when its
-                        # own ``send_message`` path runs, so cancelling the
-                        # original is safe.
-                        self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
+                        # ``source_task_id``) are released. See
+                        # ``_notify_bus_of_cancel_and_retry`` for the full
+                        # rationale (the retry does NOT re-register a bus
+                        # watcher, so cancelling the original is what unblocks
+                        # the parent gate).
+                        self._notify_bus_of_cancel_and_retry(
+                            task.id, retry_task.id, origin="stale_recovery"
+                        )
                     else:
                         # Max retries exceeded or retry already scheduled — permanent fail
                         if current.retry_count >= self._max_retries:
@@ -271,7 +277,9 @@ class StaleTaskRecovery:
                             # above. The Worker cancelled the task but didn't
                             # notify the bus; without this call the parent-side
                             # watcher stays PENDING.
-                            self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
+                            self._notify_bus_of_cancel_and_retry(
+                                task.id, retry_task.id, origin="worker_cancelled"
+                            )
                         else:
                             self._task_repo.fail_task(
                                 task.id,
@@ -358,7 +366,9 @@ class StaleTaskRecovery:
                         # The original task's bus watchers (if any) are now
                         # orphans — release them so the parent doesn't stay in
                         # ``waiting_children`` after the retry completes.
-                        self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
+                        self._notify_bus_of_cancel_and_retry(
+                            task.id, retry_task.id, origin="startup_stale_running"
+                        )
                     else:
                         self._task_repo.fail_task(
                             task.id,
@@ -414,7 +424,9 @@ class StaleTaskRecovery:
                         # was left CANCELLED by a prior crash. Any bus watchers
                         # against the orphaned task id are stranded — release
                         # them.
-                        self._notify_bus_of_cancel_and_retry(task.id, retry_task.id)
+                        self._notify_bus_of_cancel_and_retry(
+                            task.id, retry_task.id, origin="startup_orphan_cancelled"
+                        )
                         recovered += 1
                     else:
                         # Max retries exceeded — mark permanent fail
@@ -476,18 +488,28 @@ class StaleTaskRecovery:
         return self._thread is not None and self._thread.is_alive()
 
     def _notify_bus_of_cancel_and_retry(
-        self, cancelled_task_id: int, retry_task_id: int
+        self,
+        cancelled_task_id: int,
+        retry_task_id: int,
+        origin: str = "stale_recovery",
     ) -> None:
         """Notify the bus that a task was force-cancelled and a retry was scheduled.
 
         Production incident 2026-06-26: when ``StaleTaskRecovery`` force-
         cancels a stale task and schedules a retry, the bus's PENDING
         watchers keyed on the cancelled ``source_task_id`` are orphaned.
-        The retry registers its OWN watcher when it runs through
-        ``send_message``, but the original watcher never fires (the bus
-        only fires PENDING → FIRED via ``emit_terminal`` on the
-        cancelling task's id). The parent stays in ``waiting_children``
-        forever.
+        The original watcher never fires (the bus only fires PENDING →
+        FIRED via ``emit_terminal`` on the cancelling task's id) and
+        the parent stays in ``waiting_children`` forever.
+
+        The retry itself does NOT re-register a bus watcher — retries
+        are scheduled internally and never re-invoke ``send_message``.
+        Parent completion in the retry-succeeded path is satisfied by
+        the child-completion post-commit hook in
+        ``child_reports._process_child_completion_and_notify_parent``,
+        which routes through ``_emit_terminal_via_bus`` on the
+        retried message id. Releasing the ORIGINAL watcher is what
+        unblocks the parent gate.
 
         Calls ``on_task_cancelled_and_retried`` (wired by the manager to
         ``bus.cancel_for_source`` via ``MainLoopBridge``) so the
@@ -512,10 +534,10 @@ class StaleTaskRecovery:
         if self._on_task_cancelled_and_retried is None:
             return
         try:
-            self._on_task_cancelled_and_retried(cancelled_task_id, retry_task_id)
+            self._on_task_cancelled_and_retried(cancelled_task_id, retry_task_id, origin)
         except Exception as cb_err:
             logger.error(
                 f"Failed to notify bus of cancel-and-retry "
-                f"(cancelled_task={cancelled_task_id}, retry_task={retry_task_id}): "
-                f"{cb_err}"
+                f"(cancelled_task={cancelled_task_id}, retry_task={retry_task_id}, "
+                f"origin={origin}): {cb_err}"
             )

@@ -97,27 +97,42 @@ class MainLoopBridge:
             raise
     
     @classmethod
-    def run_async_no_wait(cls, coro: Coroutine[Any, Any, Any]) -> None:
+    def run_async_no_wait(cls, coro: Coroutine[Any, Any, Any]) -> bool:
         """Run a coroutine on the main event loop without waiting for result.
-        
+
         Fire-and-forget pattern. Exceptions are logged but not raised.
-        
+
+        When the event loop is not available (shutdown in progress, or a
+        test that never wired the bridge), the coroutine is explicitly
+        closed before returning so that Python's GC does not emit
+        ``RuntimeWarning: coroutine '...' was never awaited``. This was
+        a common source of test-suite noise before callers had to
+        reimplement the no-loop guard themselves.
+
         Args:
             coro: The coroutine to run.
+
+        Returns:
+            True if the coroutine was scheduled on the main event loop,
+            False if it was closed locally because no loop was available.
+            Callers usually ignore the return value; it exists for tests
+            and for callers that want to log the no-loop branch.
         """
         loop = cls._loop
         if loop is None or loop.is_closed():
             logger.warning("MainLoopBridge: cannot run coroutine, loop not available")
-            return
-        
+            coro.close()
+            return False
+
         def _log_exception(f: asyncio.Future[Any]) -> None:
             try:
                 f.result()
             except Exception as e:
                 logger.error(f"MainLoopBridge: unhandled exception in fire-and-forget coroutine: {e}")
-        
+
         future = asyncio.run_coroutine_threadsafe(coro, loop)
         future.add_done_callback(_log_exception)
+        return True
     
     @classmethod
     def reset(cls) -> None:

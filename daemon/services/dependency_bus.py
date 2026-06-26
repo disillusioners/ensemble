@@ -212,6 +212,103 @@ class FollowUp:
 
 
 # -------------------------------------------------------------------------
+# Cross-thread bus cancellation helper
+# -------------------------------------------------------------------------
+
+
+async def cancel_bus_watchers_for_task_async(
+    cancelled_task_id: int | str,
+    retry_task_id: int | str | None = None,
+    origin: str = "unspecified",
+    bus: "DependencyBus | None" = None,
+) -> int:
+    """Cancel all PENDING bus watchers for ``cancelled_task_id`` (async).
+
+    Shared helper used by ``StaleTaskRecovery`` (running on its own
+    ``threading.Thread`` background loop) and ``WorkerPool._handle_cancellation``
+    (running on a worker thread), both of which need to release bus
+    watchers when a task is force-cancelled and a retry is scheduled.
+
+    This consolidates the two near-identical bridges that previously
+    lived in ``manager._on_stale_task_cancelled_and_retried`` and
+    ``worker_pool.Worker._cancel_bus_watchers_for_task``. The single
+    helper guarantees both callsites agree on:
+
+    * the bus singleton lookup (``get_dependency_bus()`` by default;
+      ``bus=`` parameter overrides for tests that wire a bus instance
+      directly without registering the singleton),
+    * the no-bus warning copy,
+    * the ``cancel_for_source`` call shape,
+    * the success / failure log lines.
+
+    The ``origin`` tag distinguishes the call site in the log line —
+    useful for debugging which code path is responsible for a given
+    cancellation when both run during a single restart cycle.
+
+    The helper does NOT bridge the thread hop itself — callers from
+    sync threads must wrap the call in
+    ``MainLoopBridge.run_async_no_wait(...)``. ``run_async_no_wait``
+    closes the coroutine locally when no event loop is wired (so
+    callers don't need to defensively ``coro.close()`` themselves).
+
+    Correctness note — why cancellation is safe even though the retry
+    does NOT re-register a fresh bus watcher: retries are scheduled
+    internally by ``force_cancel_and_schedule_retry`` /
+    ``schedule_retry`` and never re-invoke ``send_message``, so the
+    retry task has no FollowUp of its own. Parent completion in the
+    retry-succeeded path is satisfied by the child-completion
+    post-commit hook in ``child_reports._process_child_completion_and_notify_parent``
+    — which routes through ``_emit_terminal_via_bus`` on the
+    *retried* message id. The bus-side state this helper releases is
+    therefore the ORIGINAL watcher that was waiting on the cancelled
+    task id; without releasing it, ``count_pending_for_target(parent)``
+    stays > 0 forever and the parent never reaches COMPLETED.
+
+    Args:
+        cancelled_task_id: The id of the task that was just cancelled
+            (passed as ``str`` because the ``source_task_id`` column
+            is VARCHAR; ``int`` is accepted and converted).
+        retry_task_id: Optional id of the newly-scheduled retry task.
+            Used for log traceability only — does not affect bus state.
+        origin: Short tag identifying the call site (e.g.
+            ``"stale_recovery"``, ``"worker_pool"``,
+            ``"startup_recovery"``).
+        bus: Optional explicit :class:`DependencyBus` instance to use.
+            When ``None`` (production default), falls back to
+            :func:`get_dependency_bus`. The override exists for tests
+            that don't register the bus as a singleton via
+            :func:`set_dependency_bus`.
+
+    Returns:
+        The number of PENDING watchers transitioned to CANCELLED.
+        Returns 0 when the bus singleton is missing or has no watchers.
+    """
+    if bus is None:
+        from .dependency_bus import get_dependency_bus as _get_bus
+        bus = _get_bus()
+    if bus is None:
+        logger.warning(
+            f"bus singleton is None (origin={origin}) — cannot cancel "
+            f"watchers for cancelled task {cancelled_task_id}; parent may "
+            f"stay in waiting_children until manual intervention"
+        )
+        return 0
+    try:
+        cancelled = await bus.cancel_for_source(str(cancelled_task_id))
+        logger.info(
+            f"Bus cancel: origin={origin}, cancelled_task={cancelled_task_id}, "
+            f"retry_task={retry_task_id}, bus_watchers_cancelled={cancelled}"
+        )
+        return int(cancelled)
+    except Exception as bus_err:
+        logger.error(
+            f"Failed to cancel bus watchers (origin={origin}) for cancelled "
+            f"task {cancelled_task_id} (retry={retry_task_id}): {bus_err}"
+        )
+        return 0
+
+
+# -------------------------------------------------------------------------
 # DependencyBus service
 # -------------------------------------------------------------------------
 
@@ -806,11 +903,19 @@ class DependencyBus:
         watcher stayed PENDING, ``count_pending_for_target``
         stayed > 0, and the leader never reached COMPLETED.
 
-        The retry itself, when scheduled via ``send_message`` /
-        ``_schedule_message_followup``, will register a FRESH
-        watcher keyed on its own task id, so cancelling the
-        original is safe — the retry's eventual terminal event
-        will fire its own watcher correctly.
+        Correctness note — why cancellation is safe here: retries are
+        scheduled internally by ``force_cancel_and_schedule_retry`` /
+        ``schedule_retry`` and do NOT re-invoke ``send_message``, so the
+        retry task id has no bus watcher of its own. Parent completion
+        in the retry-succeeded path is satisfied by the
+        child-completion post-commit hook in
+        ``child_reports._process_child_completion_and_notify_parent``,
+        which routes through ``_emit_terminal_via_bus`` on the
+        *retried* message id. Cancelling the ORIGINAL watcher is what
+        releases ``count_pending_for_target(parent)`` so the parent
+        can transition to COMPLETED. The fix would be unsound if the
+        retry relied on the bus to deliver a completion FollowUp — it
+        does not, so cancellation here is safe.
 
         Uses the same guarded ``transition_state`` primitive as
         ``cancel_for_target`` so concurrent ``emit_terminal`` wins
@@ -856,10 +961,33 @@ class DependencyBus:
         # The cache is keyed by source_task_id, so the cleanup
         # here is O(1): drop the entire cache entry for this
         # source if it exists.
+        #
+        # Implementation note — divergence from cancel_for_target:
+        # the sibling ``cancel_for_target`` (lines ~768-779) scans
+        # every cache entry and filters out individual FollowUps
+        # whose target matches. That O(n) scan is needed there
+        # because the cache is keyed by source but the cancel key
+        # is target — we have no index into the cache for it.
+        # Here the cancel key IS the cache key, so an O(1) ``del``
+        # is exact. The two methods are intentionally asymmetric
+        # for that reason.
+        #
+        # Race window: a concurrent ``watch(source_task_id, ...)``
+        # between the DB fetch above and the ``del`` could land a
+        # new PENDING row whose DB-side transition_state has not
+        # yet committed (or has committed but the cache update
+        # runs after our ``del``). In that case the new row is
+        # visible via the DB-backed ``count_pending_for_target`` /
+        # ``pending_watchers`` fall-through but missing from the
+        # cache. ``emit_terminal`` would then race with
+        # ``watch`` per the standard per-source ``asyncio.Lock``
+        # contract; the cache miss is harmless because the DB is
+        # authoritative. Bounded impact — the source is being
+        # cancelled, so the race window is near-zero in practice.
         cache_purged = 0
         if source_task_id in self._pending:
             cache_purged = len(self._pending[source_task_id])
-            del self._pending[source_task_id]
+            del self._pending[source_task_id] 
 
         logger.info(
             f"bus cancel_for_source: source={source_task_id[:8]}, "

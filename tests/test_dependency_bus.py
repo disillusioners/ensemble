@@ -452,6 +452,94 @@ class TestCancelForSource:
 
 
 # -------------------------------------------------------------------------
+# TestCancelBusWatchersForTaskAsync
+# -------------------------------------------------------------------------
+
+
+class TestCancelBusWatchersForTaskAsync:
+    """Tests for the shared ``cancel_bus_watchers_for_task_async`` helper.
+
+    This helper consolidates the two near-identical bus-cancel bridges
+    that live in ``manager._on_stale_task_cancelled_and_retried`` and
+    ``worker_pool.Worker._cancel_bus_watchers_for_task``. The two
+    callers are thin sync wrappers around it — see the refactor commit
+    that introduced the helper. Failure here breaks BOTH stale recovery
+    and the worker-pool timeout-retry cancel path, so coverage matters.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancels_watchers_for_task(self, bus):
+        """Direct invocation cancels registered watchers and returns count."""
+        await bus.watch("task-1", make_fu(target_id="parent-X"))
+        from daemon.services.dependency_bus import (
+            cancel_bus_watchers_for_task_async,
+        )
+        cancelled = await cancel_bus_watchers_for_task_async(
+            cancelled_task_id="task-1",
+            retry_task_id=99,
+            origin="unit_test",
+            bus=bus,
+        )
+        assert cancelled == 1
+        assert await bus.pending_watchers("task-1") == []
+
+    @pytest.mark.asyncio
+    async def test_no_watchers_returns_zero(self, bus):
+        """Unknown source_task_id returns 0 (not an error)."""
+        from daemon.services.dependency_bus import (
+            cancel_bus_watchers_for_task_async,
+        )
+        cancelled = await cancel_bus_watchers_for_task_async(
+            cancelled_task_id="never-watched",
+            retry_task_id=None,
+            origin="unit_test",
+            bus=bus,
+        )
+        assert cancelled == 0
+
+    @pytest.mark.asyncio
+    async def test_int_task_id_accepted(self, bus):
+        """``cancelled_task_id`` may be int; helper stringifies for the DB column."""
+        # Register a watcher whose source_task_id matches the str(int) form
+        # — the helper calls str() on the int before the DB lookup, so the
+        # watcher is keyed the same way.
+        await bus.watch("42", make_fu(target_id="parent-X"))
+        from daemon.services.dependency_bus import (
+            cancel_bus_watchers_for_task_async,
+        )
+        # Use int to match how worker_pool / stale_recovery call it (task.id is int)
+        cancelled = await cancel_bus_watchers_for_task_async(
+            cancelled_task_id=42,
+            retry_task_id=43,
+            origin="unit_test",
+            bus=bus,
+        )
+        assert cancelled == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_count_when_bus_missing(self):
+        """When no bus is available (singleton is None AND bus=None passed),
+        helper returns 0 without raising.
+
+        The bus can be missing in degraded states (test fixtures,
+        singleton reset). The helper must degrade gracefully — never
+        re-raise from the caller thread (a worker thread crash here
+        would propagate to the recovery thread, breaking subsequent
+        cancel cycles).
+        """
+        from daemon.services.dependency_bus import (
+            cancel_bus_watchers_for_task_async,
+        )
+        cancelled = await cancel_bus_watchers_for_task_async(
+            cancelled_task_id="task-1",
+            retry_task_id=None,
+            origin="unit_test",
+            bus=None,
+        )
+        assert cancelled == 0
+
+
+# -------------------------------------------------------------------------
 # TestBackpressure
 # -------------------------------------------------------------------------
 

@@ -473,13 +473,10 @@ class Worker(threading.Thread):
         parent stays in ``waiting_children`` indefinitely (production
         incident 2026-06-26).
 
-        The bus is async; the worker pool runs on a synchronous thread
-        pool. The hop to the asyncio event loop uses
-        ``MainLoopBridge.run_async_no_wait`` — matches the existing
-        ``_notify_parent_of_failure`` pattern. Failures are logged but
-        never re-raised: the cancellation itself (already committed in
-        the same call chain) is the authoritative action; the bus
-        notification is defense in depth.
+        Thin sync wrapper around the shared
+        :func:`daemon.services.dependency_bus.cancel_bus_watchers_for_task_async`
+        helper — same routing as ``manager._on_stale_task_cancelled_and_retried``
+        so the two callsites cannot drift.
 
         Args:
             cancelled_task_id: The id of the task that was just cancelled
@@ -487,47 +484,16 @@ class Worker(threading.Thread):
             retry_task_id: Optional id of the newly-scheduled retry task.
                 Used for logging context only.
         """
+        from daemon.services.dependency_bus import cancel_bus_watchers_for_task_async
         from daemon.services.main_loop_bridge import MainLoopBridge
 
-        async def _cancel() -> None:
-            from daemon.services.dependency_bus import get_dependency_bus
-            bus = get_dependency_bus()
-            if bus is None:
-                logger.warning(
-                    "bus singleton is None — cannot cancel watchers for "
-                    "cancelled task; parent may stay in waiting_children"
-                )
-                return
-            try:
-                cancelled = await bus.cancel_for_source(str(cancelled_task_id))
-                logger.info(
-                    f"WorkerPool bus cancel: cancelled_task={cancelled_task_id}, "
-                    f"retry_task={retry_task_id}, bus_watchers_cancelled={cancelled}"
-                )
-            except Exception as bus_err:
-                logger.error(
-                    f"Failed to cancel bus watchers for cancelled task "
-                    f"{cancelled_task_id} (retry={retry_task_id}): {bus_err}"
-                )
-
-        # Fire-and-forget: hop to the asyncio event loop. If the bridge has
-        # no loop available (shutdown, tests without a real event loop), the
-        # coroutine would otherwise be silently dropped and Python's
-        # ``RuntimeWarning: coroutine '...' was never awaited`` would leak
-        # from this fire-and-forget helper. Close the coroutine explicitly
-        # in that path to silence the warning — mirrors the bridge's
-        # internal "log and return" contract for the no-loop branch.
-        coro = _cancel()
-        bridge_loop = getattr(MainLoopBridge, "_loop", None)
-        if bridge_loop is None or bridge_loop.is_closed():
-            logger.debug(
-                "WorkerPool bus cancel skipped: MainLoopBridge has no loop "
-                "(cancelled_task={cancelled_task_id}); coroutine closed "
-                "to avoid RuntimeWarning on GC."
+        MainLoopBridge.run_async_no_wait(
+            cancel_bus_watchers_for_task_async(
+                cancelled_task_id=cancelled_task_id,
+                retry_task_id=retry_task_id,
+                origin="worker_pool_timeout",
             )
-            coro.close()
-            return
-        MainLoopBridge.run_async_no_wait(coro)
+        )
 
     def _handle_cancellation(
         self, task: "Task", reason: "CancellationReason"
@@ -632,9 +598,15 @@ class Worker(threading.Thread):
                 # ``source_task_id`` are stranded. Without this call the
                 # retry's natural completion fires ``emit_terminal`` for its
                 # OWN task id and cannot match the original watcher — the
-                # parent stays in ``waiting_children`` forever. The retry
-                # registers a fresh watcher when its own ``send_message``
-                # path runs, so cancelling the original is safe.
+                # parent stays in ``waiting_children`` forever.
+                #
+                # Note: the retry does NOT re-invoke ``send_message``, so it
+                # does NOT register a fresh bus watcher. Parent completion
+                # is satisfied by the child-completion post-commit hook in
+                # ``child_reports._process_child_completion_and_notify_parent``
+                # which routes through ``_emit_terminal_via_bus`` on the
+                # retried message id. Releasing the ORIGINAL watcher here
+                # is what unblocks the parent gate.
                 self._cancel_bus_watchers_for_task(task.id, retry_task.id)
             else:
                 # Max retries exceeded
