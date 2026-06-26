@@ -531,17 +531,189 @@ class TestWorkerRetryLogic:
             worker_pool=MockWorkerPool(),
             max_retries=3,
         )
-        
+
         # Handle task failure
         worker._handle_task_failure(mock_task, "Something went wrong")
-        
+
         # Verify fail_task was called
         mock_task_processor._task_repo.fail_task.assert_called_once_with(
             mock_task.id, "Something went wrong"
         )
-        
+
         # Verify task is counted as failed
         assert worker._tasks_failed == 1
+
+
+# ============================================================================
+# Timeout-Orphan Race Regression Tests (Bug B, 2026-06-26)
+# ============================================================================
+#
+# Production timeline (logs/prod_run.log, 2026-06-25):
+#   02:39:50  worker-1 hits graph_timeout_minutes safety net
+#   02:39:50  worker-1 schedules retry 4384 (cancels 4371 → creates 4384)
+#   02:39:54  underlying _run() coroutine completes 4s later
+#   → success path calls complete_task(4371) which no-ops (status='cancelled')
+#   → bus fires terminal, message marked completed, retry task 4384 born orphaned
+#   → retry claims later, no-ops (Bug C), never transitions out of running
+#   → recovery cascade: 4384 → 4395 → 4396 → fail → spurious error report
+#   → error report sits orphaned (Bug A) → parent stuck at waiting_children
+#
+# The grace-window poll in _handle_cancellation (rev2) catches this case
+# when the underlying coroutine completes within the bounded grace window.
+# These tests cover that path and the boundary conditions.
+
+
+class TestTimeoutOrphanRace:
+    """Regression tests for the timeout-orphan race (Bug B rev2)."""
+
+    def _make_worker_with_message_repo(self, message_status_sequence):
+        """Build a Worker whose _message_repo returns successive message rows.
+
+        ``message_status_sequence`` is a list of statuses; the mock returns
+        the next one on each poll call. Used to simulate the coroutine
+        completing mid-poll.
+        """
+        worker = Worker(
+            worker_id="test-worker",
+            task_processor=MockTaskProcessor(),
+            worker_pool=MockWorkerPool(),
+            max_retries=3,
+        )
+        poll_iter = iter(message_status_sequence)
+
+        def fake_get(message_id):
+            try:
+                status = next(poll_iter)
+            except StopIteration:
+                # Default to "completed" if the sequence runs out — simulates
+                # the coroutine having finished writing status.
+                status = "completed"
+            msg = Mock()
+            msg.status = status
+            return msg
+
+        # Wire a real (non-Mock) _message_repo on the processor so the
+        # helper falls past the isinstance(Mock) guard and into the loop.
+        class _RealRepo:
+            get = staticmethod(fake_get)
+
+        worker._task_processor._message_repo = _RealRepo()
+        return worker
+
+    def test_message_completes_within_grace_skips_retry(self, mock_task):
+        """Race scenario: timeout fires, message completes within grace window.
+
+        Production-equivalent: graph_timeout fires while coroutine is still
+        running; coroutine completes 1-4s later, before the grace window
+        expires. The grace window poll catches the COMPLETED status and
+        the worker MUST NOT schedule a retry (would orphan).
+        """
+        worker = self._make_worker_with_message_repo(
+            message_status_sequence=["processing", "processing", "completed"]
+        )
+        # task.message_id is required for the helper to do anything; the
+        # mock_task fixture sets it.
+        assert mock_task.message_id
+
+        worker._handle_cancellation(mock_task, CancellationReason.TIMEOUT)
+
+        # Critical assertion: schedule_retry was NOT called. The orphan
+        # retry chain is closed at its source.
+        worker._task_processor._task_repo.schedule_retry.assert_not_called()
+        # complete_task was called to carry the task to terminal (idempotent
+        # under the WHERE status='running' guard in production).
+        worker._task_processor._task_repo.complete_task.assert_called_once_with(
+            mock_task.id,
+            {"success": True, "message_id": mock_task.message_id, "skipped": True},
+        )
+        # Worker counts the task as completed (not failed).
+        assert worker._tasks_completed == 1
+        assert worker._tasks_failed == 0
+
+    def test_message_stays_processing_through_grace_proceeds_with_retry(
+        self, mock_task
+    ):
+        """Genuinely hung coroutine: grace expires, retry is scheduled."""
+        # All polls return 'processing' — coroutine never finishes.
+        worker = self._make_worker_with_message_repo(
+            message_status_sequence=["processing"] * 1000
+        )
+        # Override grace to a tiny value so the test runs fast.
+        worker._timeout_grace_seconds = 0.6
+        # Mock schedule_retry to return a retry task (the production path
+        # calls it after the grace window expires).
+        retry_task = Mock()
+        retry_task.id = 99
+        retry_task.retry_count = 1
+        worker._task_processor._task_repo.schedule_retry.return_value = retry_task
+
+        worker._handle_cancellation(mock_task, CancellationReason.TIMEOUT)
+
+        # The grace window expired → schedule_retry was called (correct
+        # behavior for a genuinely hung task).
+        worker._task_processor._task_repo.schedule_retry.assert_called_once()
+        # complete_task was NOT called — the task is genuinely incomplete.
+        worker._task_processor._task_repo.complete_task.assert_not_called()
+
+    def test_message_already_completed_at_first_poll_skips_retry(
+        self, mock_task
+    ):
+        """Catch-time race: message already completed when timeout fires.
+
+        Narrower window than the production case (4s gap). If the underlying
+        coroutine completed in the small interval between TimeoutError
+        firing and the worker thread reaching _handle_cancellation, the
+        first poll catches it.
+        """
+        worker = self._make_worker_with_message_repo(
+            message_status_sequence=["completed"]
+        )
+
+        worker._handle_cancellation(mock_task, CancellationReason.TIMEOUT)
+
+        worker._task_processor._task_repo.schedule_retry.assert_not_called()
+        worker._task_processor._task_repo.complete_task.assert_called_once()
+
+    def test_message_failed_at_poll_skips_retry(self, mock_task):
+        """Permanent failure committed by underlying coroutine → no retry.
+
+        If the coroutine completed with a 'failed' message status (e.g.
+        the LLM returned a non-retryable error right before the timeout),
+        the helper treats it as a terminal state — no point scheduling a
+        retry, the failure is already committed and recovery will see it.
+        """
+        worker = self._make_worker_with_message_repo(
+            message_status_sequence=["failed"]
+        )
+
+        worker._handle_cancellation(mock_task, CancellationReason.TIMEOUT)
+
+        worker._task_processor._task_repo.schedule_retry.assert_not_called()
+        worker._task_processor._task_repo.complete_task.assert_called_once()
+
+    def test_no_message_id_proceeds_with_retry(self, mock_task):
+        """Edge case: task has no message_id → bypass helper, retry normally.
+
+        Defensive: if some task type exists without a message_id (e.g. a
+        hypothetical cleanup task), the helper short-circuits and the
+        original retry path runs.
+        """
+        worker = self._make_worker_with_message_repo(
+            message_status_sequence=["completed"]
+        )
+        # Strip message_id to simulate a task without one.
+        mock_task.message_id = None
+        retry_task = Mock()
+        retry_task.id = 100
+        retry_task.retry_count = 1
+        worker._task_processor._task_repo.schedule_retry.return_value = retry_task
+
+        worker._handle_cancellation(mock_task, CancellationReason.TIMEOUT)
+
+        # Helper bypassed → schedule_retry called.
+        worker._task_processor._task_repo.schedule_retry.assert_called_once()
+        # complete_task not called.
+        worker._task_processor._task_repo.complete_task.assert_not_called()
 
 
 # ============================================================================

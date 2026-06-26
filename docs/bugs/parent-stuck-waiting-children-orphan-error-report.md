@@ -74,17 +74,15 @@ The actual completion report (`26fa3d78`, containing the success message) was al
 
 **Code:**
 ```python
-msg = await asyncio.to_thread(
-    self._queue_repository.enqueue,                  # ← bare enqueue, no Task row
-    instance_id=parent_id,
-    content=error_report,
-    source=f"internal_error_report:{instance_id}",
-    priority=1,
-    message_metadata={...},
-)
+if reason == CancellationReason.TIMEOUT:
+    # Try to schedule a retry
+    retry_task = self._task_processor._task_repo.schedule_retry(
+        task_id=task.id,
+        max_retries=self._max_retries,
+        backoff_base=self._retry_backoff_base,
+        backoff_max=self._retry_backoff_max,
+    )
 ```
-
-`_queue_repository.enqueue()` (`daemon/repositories/message_queue/repository.py:80`) only inserts into `message_queue`. It does NOT create a `task` row, NOT call `notify_work()`, NOT create a `JobItem`. The worker pool's `claim_pending_task` (`daemon/repositories/task/repository.py:196`) polls the `task` table, so the message is invisible to the worker pool — orphan forever.
 
 Compare with the working `internal_report:` (completion) path in `child_reports._create_completion_report` (`daemon/services/child_reports.py:676-740`), which:
 - Creates a `MessageQueue` row **and** a `Task(task_type=PROCESS_REPORT, status=PENDING)` row in the same transaction
@@ -179,37 +177,42 @@ This mirrors the working `internal_report:` completion path and the user-message
 
 ---
 
-### Bug B — Skip retry when message is already COMPLETED
+### Bug B — Skip retry when message is already COMPLETED (rev2: grace-window poll)
 
-**File:** `daemon/services/worker_pool.py` — `_handle_cancellation` TIMEOUT branch
+**File:** `daemon/services/worker_pool.py` — `_handle_cancellation` TIMEOUT branch + `_await_message_completion` helper
 
-Before calling `schedule_retry` on TIMEOUT, check if the underlying `_run()` coroutine has already completed the message. If yes, skip the retry creation entirely:
+Before calling `schedule_retry` on TIMEOUT, give the underlying `_run()` coroutine a bounded grace window to complete naturally. `MainLoopBridge.run_async(_run(), timeout=...)` raises `TimeoutError` via `future.result(timeout=)` — per Python semantics, this does NOT cancel the coroutine; it keeps running on the event loop and may finish a few seconds later (production timeline: 4s gap). If the coroutine commits `message.status='completed'` during the grace window, skip the retry and let `complete_task` carry the task to terminal (idempotent under the `WHERE status='running'` guard):
 
 ```python
 if task.message_id:
-    try:
-        msg = self._task_processor._message_repo.get(task.message_id)
-    except Exception:
-        msg = None
-    if msg is not None and msg.status == "completed":
-        logger.warning(
-            f"Worker {self.worker_id}: timeout fired for task "
-            f"{task.id} but message {task.message_id[:8]}... is "
-            f"already COMPLETED — underlying coroutine finished "
-            f"after the thread-side timeout. Skipping retry creation."
-        )
+    completed = self._await_message_completion(
+        task.message_id, getattr(self, "_timeout_grace_seconds", 30)
+    )
+    if completed:
+        logger.warning(...)
         try:
             self._task_processor._task_repo.complete_task(
                 task.id,
                 {"success": True, "message_id": task.message_id, "skipped": True},
             )
         except Exception:
-            pass  # guard makes this a no-op if status changed
+            pass  # status guard makes this a no-op if recovery won
         self._tasks_completed += 1
         return
 ```
 
-This eliminates the entire orphan-retry chain at its source. The `complete_task` call is idempotent under the status guard, so a concurrent writer (e.g., the still-running `_run()` coroutine) winning the race is fine.
+The `_await_message_completion` helper polls `message.status` every 0.5s for up to 30s, returning `True` on `completed` or `failed` (terminal) and `False` if the grace window expires. The grace window is bounded so a truly hung coroutine cannot stall the worker thread indefinitely.
+
+**Why a 30s grace window is safe:** the heartbeat thread keeps writing `last_heartbeat_at` for the task during this period (the worker is busy in `_handle_cancellation` but the heartbeat thread is independent), so the stale-task recovery predicate doesn't fire prematurely. Production observed 4s gap between `TimeoutError` and natural completion; 30s is well above that with 7x margin while still being bounded against pathological hangs.
+
+**This is best-effort, not bulletproof:** if the grace window expires and the coroutine still finishes later, the original orphan-chain recurs. The PRIMARY defense against the race is the timeout ceiling: `graph_timeout_minutes=120` is now well below `task_timeout_minutes=125`, so the `CancellationToken` path usually fires first (yielding `OperationCancelledError` at the catch site). The `TimeoutError` path is the safety net for truly wedged coroutines that don't observe cancellation. With both defenses, the orphan-retry chain is fully closed in practice.
+
+Regression tests in `tests/message_queue_redesign/test_worker_timeout.py::TestTimeoutOrphanRace`:
+- `test_message_completes_within_grace_skips_retry` — production scenario (3 polls, then completed)
+- `test_message_stays_processing_through_grace_proceeds_with_retry` — hung coroutine, retry scheduled
+- `test_message_already_completed_at_first_poll_skips_retry` — narrow race window
+- `test_message_failed_at_poll_skips_retry` — coroutine committed permanent failure
+- `test_no_message_id_proceeds_with_retry` — defensive: helper bypass
 
 ---
 

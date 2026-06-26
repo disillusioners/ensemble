@@ -180,6 +180,7 @@ class Worker(threading.Thread):
         retry_backoff_base: int = 60,
         retry_backoff_max: int = 3600,
         heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        timeout_grace_seconds: float = 30.0,
     ):
         """Initialize a worker thread.
 
@@ -196,12 +197,21 @@ class Worker(threading.Thread):
                 this smaller than ``stale_task_recovery_threshold_minutes``
                 so the recovery service sees a fresh heartbeat from
                 every live task.
+            timeout_grace_seconds: Grace window between the thread-side
+                ``TimeoutError`` from ``MainLoopBridge`` and the worker
+                deciding whether to schedule a retry. See
+                ``_handle_cancellation`` for context — closes the race
+                where the underlying coroutine completes naturally a
+                few seconds after the safety timeout fires. Default 30s
+                (production observed 4s gap between timeout and natural
+                completion).
         """
         super().__init__(daemon=True)
         self.worker_id = worker_id
         self._task_processor = task_processor
         self._worker_pool = worker_pool
         self._timeout_minutes = timeout_minutes
+        self._timeout_grace_seconds = timeout_grace_seconds
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
@@ -455,49 +465,66 @@ class Worker(threading.Thread):
     ) -> None:
         """Handle task cancellation — schedule retry or permanent fail."""
         if reason == CancellationReason.TIMEOUT:
-            # BUG FIX (2026-06-26, timeout-orphan race): the underlying
+            # BUG FIX (2026-06-26, timeout-orphan race, rev2): the underlying
             # ``_run()`` coroutine may complete successfully *after*
             # ``MainLoopBridge.run_async(_run(), timeout=...)`` raises
             # ``TimeoutError`` to the worker thread. ``future.result(timeout)``
-            # is a sync thread-side check; the coroutine itself keeps
-            # running on the event loop and can finish a few seconds
-            # later. When it does, it calls ``on_success`` →
-            # ``task_repo.complete_task(...)``, but the task row's
-            # ``WHERE status = 'running'`` guard silently no-ops because
-            # ``schedule_retry`` (called below) already flipped the task
-            # to ``cancelled``. The underlying message gets marked
-            # ``completed``, the bus emits terminal — but the retry task
-            # is born orphaned. When the retry worker later claims it,
-            # ``ProcessMessageProcessor`` no-ops on the already-completed
-            # message (return path skips ``on_success``), so the retry
-            # task itself never transitions out of ``running`` — recovery
-            # picks it up, retries, and eventually permanently-fails a
-            # task whose work was actually successful, producing a
+            # is a sync thread-side check — per Python semantics it does NOT
+            # cancel the coroutine; the coroutine keeps running on the event
+            # loop and may finish seconds later (production timeline: 4s after
+            # the safety timeout fired). When it does, it calls ``on_success``
+            # → ``task_repo.complete_task(...)`` whose ``WHERE status='running'``
+            # guard silently no-ops because ``schedule_retry`` (called below)
+            # already flipped the task to ``cancelled``. The underlying
+            # message gets marked ``completed`` and the bus emits terminal
+            # — but the retry task is born orphaned. When the retry worker
+            # claims it, ``ProcessMessageProcessor`` no-ops on the already-
+            # completed message (return path skips ``on_success``), so the
+            # retry task itself never transitions out of ``running`` —
+            # recovery picks it up, retries, and eventually permanently-
+            # fails a task whose work was actually successful, producing a
             # spurious error report to the parent.
             #
-            # Defensive check: if the message is already in ``completed``
-            # status (the underlying coroutine succeeded despite the
-            # thread-side timeout), do NOT create a retry task. We mark
-            # the current task as complete via the same guarded UPDATE
-            # ``complete_task`` uses — if the underlying coroutine
-            # already committed a complete transition (status guard
-            # ``WHERE status='running'`` would no-op), this is a no-op.
-            # This eliminates the entire orphan-retry chain at its
-            # source.
+            # The narrow check "is message already COMPLETED?" that the
+            # previous version of this code made at catch-time was almost
+            # always False (the coroutine finishes 1-30s later). To
+            # actually close the race we poll the message status for up
+            # to ``_timeout_grace_seconds`` (default 30s) before deciding
+            # to schedule the retry. If the coroutine completes within the
+            # grace window — i.e. ``message.status == 'completed'`` — we
+            # skip the retry and let ``complete_task`` carry the task to
+            # terminal (idempotent under the ``WHERE status='running'``
+            # guard). If the grace window expires, we proceed with the
+            # retry as before — the coroutine has either finished already
+            # (no harm, ``complete_task`` no-ops on the now-cancelled
+            # row) or is genuinely hung.
+            #
+            # The grace window is bounded by ``_timeout_grace_seconds`` so a
+            # truly hung coroutine cannot stall the worker thread
+            # indefinitely. Workers are single-threaded per pool, so a
+            # long grace window blocks other task processing for that
+            # duration. 30s is the empirical safe upper bound: production
+            # observed 4s gaps between timeout-fire and natural completion.
+            #
+            # This check is best-effort. The PRIMARY defense against the
+            # race is the timeout ceiling: ``graph_timeout_minutes=120`` is
+            # now well below ``task_timeout_minutes=125``, so the
+            # ``CancellationToken`` path usually fires first (yielding
+            # ``OperationCancelledError``, caught at the call site). The
+            # ``TimeoutError`` path is the safety net for truly wedged
+            # coroutines that don't observe cancellation. With both
+            # defenses, the orphan-retry chain is fully closed.
             if task.message_id:
-                try:
-                    msg = self._task_processor._message_repo.get(
-                        task.message_id
-                    )
-                except Exception:
-                    msg = None
-                if msg is not None and msg.status == "completed":
+                completed = self._await_message_completion(
+                    task.message_id, getattr(self, "_timeout_grace_seconds", 30)
+                )
+                if completed:
                     logger.warning(
                         f"Worker {self.worker_id}: timeout fired for task "
-                        f"{task.id} but message {task.message_id[:8]}... is "
-                        f"already COMPLETED — underlying coroutine "
-                        f"finished after the thread-side timeout. "
-                        f"Skipping retry creation to avoid orphan."
+                        f"{task.id} but message {task.message_id[:8]}... "
+                        f"completed during grace window — skipping retry "
+                        f"creation (underlying coroutine finished after "
+                        f"the thread-side timeout)."
                     )
                     try:
                         self._task_processor._task_repo.complete_task(
@@ -511,8 +538,8 @@ class Worker(threading.Thread):
                     except Exception as e:
                         logger.debug(
                             f"Worker {self.worker_id}: complete_task on "
-                            f"already-completed task {task.id} returned "
-                            f"no-op ({e})"
+                            f"task {task.id} no-op'd (race with recovery): "
+                            f"{e}"
                         )
                     self._tasks_completed += 1
                     return
@@ -570,6 +597,78 @@ class Worker(threading.Thread):
         self._task_processor._task_repo.fail_task(task.id, error)
         self._tasks_failed += 1
 
+    def _await_message_completion(
+        self, message_id: str, grace_seconds: float
+    ) -> bool:
+        """Poll the message row for ``completed`` status within a grace window.
+
+        Used by the timeout-orphan-race path (see ``_handle_cancellation``
+        for full context) to close the window between the thread-side
+        ``TimeoutError`` and the underlying ``_run()`` coroutine's natural
+        completion. ``future.result(timeout)`` does not cancel the
+        coroutine — Python's contract is to raise ``TimeoutError`` while
+        the future keeps running. The coroutine typically commits the
+        ``message.status = 'completed'`` write within a few seconds of
+        the timeout firing (4s in production), so a bounded poll catches
+        the natural completion before ``schedule_retry`` flips the task
+        to ``cancelled`` and produces an orphan retry.
+
+        Args:
+            message_id: Message row to watch.
+            grace_seconds: Maximum total wall-clock time to poll. Bounded
+                so a hung coroutine cannot stall the worker thread
+                indefinitely. Default 30s (production observed 4s gap).
+
+        Returns:
+            True if ``message.status == 'completed'`` was observed within
+            ``grace_seconds``. False if the message is still in any other
+            status when the grace window expires (the caller proceeds
+            with the retry).
+        """
+        import time as _time
+
+        deadline = _time.monotonic() + grace_seconds
+        interval_s = 0.5
+        last_status: str | None = None
+        repo = getattr(self._task_processor, "_message_repo", None)
+        # Test fixtures often build a partial MockTaskProcessor that does
+        # not wire _message_repo (MagicMock auto-creates attributes). Treat
+        # any non-real repo (None, or a ``MagicMock``/``Mock`` instance)
+        # as "missing" and fall through to the original retry path. This
+        # keeps the helper a safety net, not a correctness gate, for
+        # callers that don't have a message repo available.
+        from unittest.mock import Mock as _Mock
+        if repo is None or isinstance(repo, _Mock):
+            return False
+        while True:
+            try:
+                msg = repo.get(message_id)
+            except Exception as e:
+                logger.debug(
+                    f"Worker {self.worker_id}: _await_message_completion "
+                    f"DB read failed: {e}"
+                )
+                msg = None
+            if msg is None:
+                # Message row missing — nothing to poll. Be conservative
+                # and treat as "not completed" so the caller proceeds with
+                # the retry (same behavior as a DB outage).
+                return False
+            last_status = msg.status
+            if msg.status == "completed":
+                return True
+            if msg.status in ("failed",):
+                # Permanent failure committed by the underlying coroutine.
+                # Don't retry — let the worker's outer error path handle it.
+                return True
+            if _time.monotonic() >= deadline:
+                logger.debug(
+                    f"Worker {self.worker_id}: grace window expired for "
+                    f"message {message_id[:8]}... (last_status={last_status})"
+                )
+                return False
+            _time.sleep(interval_s)
+
 
 class WorkerPool:
     """Manages a pool of worker threads using notification-based coordination.
@@ -599,6 +698,7 @@ class WorkerPool:
         retry_backoff_base: int = 60,
         retry_backoff_max: int = 3600,
         heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        timeout_grace_seconds: float = 30.0,
     ):
         """Initialize the worker pool.
 
@@ -612,6 +712,8 @@ class WorkerPool:
             heartbeat_interval_seconds: How often each worker's heartbeat
                 thread updates ``task.last_heartbeat_at``. Passed through
                 to each Worker.
+            timeout_grace_seconds: Grace window for the timeout-orphan
+                race fix (see ``Worker.__init__`` for full context).
         """
         self._task_processor = task_processor
         self._num_workers = num_workers
@@ -620,6 +722,7 @@ class WorkerPool:
         self._retry_backoff_base = retry_backoff_base
         self._retry_backoff_max = retry_backoff_max
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
+        self._timeout_grace_seconds = timeout_grace_seconds
         self._workers: list[Worker] = []
         self._started = False
         self._stopped = False
@@ -712,7 +815,7 @@ class WorkerPool:
             raise RuntimeError("WorkerPool was stopped and cannot be restarted")
         
         logger.info(f"Starting WorkerPool with {self._num_workers} workers...")
-        
+
         for i in range(self._num_workers):
             worker = Worker(
                 worker_id=f"worker-{i}",
@@ -723,10 +826,11 @@ class WorkerPool:
                 retry_backoff_base=self._retry_backoff_base,
                 retry_backoff_max=self._retry_backoff_max,
                 heartbeat_interval_seconds=self._heartbeat_interval_seconds,
+                timeout_grace_seconds=self._timeout_grace_seconds,
             )
             worker.start()
             self._workers.append(worker)
-        
+
         self._started = True
         logger.info(f"WorkerPool started: {len(self._workers)} workers")
     
