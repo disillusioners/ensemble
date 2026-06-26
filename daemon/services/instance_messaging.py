@@ -122,7 +122,7 @@ class _PreparedEnqueueContext(NamedTuple):
     """Result of `_prepare_enqueued_message` shared prelude.
 
     Carries the values callers need to perform their path-specific dispatch
-    (WorkerPool Task row + notify vs JobQueueService enqueue).
+    (after D13: unified — WorkerPool Task row + notify, no JobQueue branch).
     """
     message_id: str
     msg_type: str
@@ -130,6 +130,14 @@ class _PreparedEnqueueContext(NamedTuple):
     is_idle_to_running: bool
     instance_agent_id: str | None
     previous_status: str | None
+    # D13: The Task row is always created in the same transaction as the
+    # MessageQueue row. ``task_id`` is its primary key (int | None) — None
+    # only if the task insert failed for an unrecoverable reason (callers
+    # treat None as "no job_id adapter available"). The HTTP route discards
+    # ``job_id``; the ``job_continue`` tool uses it as ``new_job_id`` (the
+    # semantic shift from JobItem UUID → Task int is intentional and
+    # documented on AsyncMessageResult.job_id).
+    task_id: int | None
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -795,6 +803,12 @@ class InstanceMessagingService:
         is_idle_to_running = False
         instance_agent_id: str | None = None
         previous_status: str | None = None
+        # D13: Task row is always created (was previously gated by
+        # create_task_row). Capture the PK after commit so the caller can
+        # surface it as ``AsyncMessageResult.job_id`` (adapter for the
+        # removed JobItem.job_id). session.refresh(task) inside the
+        # ``with`` block populates ``task.id`` from the autoincrement.
+        task_id: int | None = None
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
@@ -812,18 +826,20 @@ class InstanceMessagingService:
             )
             session.add(db_message)
 
-            # 2. (WorkerPool only) Create a task for the worker pool to pick up.
-            #    Inserted in the same transaction as MessageQueue so the two
-            #    either both commit or both roll back together.
-            if create_task_row:
-                task = Task(
-                    task_type=TaskType.PROCESS_MESSAGE.value,
-                    instance_id=instance_id,
-                    message_id=message_id,
-                    status=TaskStatus.PENDING.value,
-                    created_at=datetime.now(timezone.utc),
-                )
-                session.add(task)
+            # 2. D13: ALWAYS create a Task row (was previously gated by
+            #    ``create_task_row``). Inserted in the same transaction
+            #    as the MessageQueue row so the two either both commit
+            #    or both roll back together. This is the structural fix
+            #    that eliminates the dual-record coupling — messages no
+            #    longer create a JobItem at all.
+            task = Task(
+                task_type=TaskType.PROCESS_MESSAGE.value,
+                instance_id=instance_id,
+                message_id=message_id,
+                status=TaskStatus.PENDING.value,
+                created_at=datetime.now(timezone.utc),
+            )
+            session.add(task)
 
             # 3. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED.
             #    COMPLETED instances are reactivated on new messages (conversation continues).
@@ -874,6 +890,22 @@ class InstanceMessagingService:
             session.add(event)
 
             session.commit()
+            # D13: Capture the Task PK after commit + refresh so the
+            # caller can surface it as ``AsyncMessageResult.job_id``.
+            # ``task.id`` is populated by the autoincrement; refresh()
+            # re-reads the row from the DB to pick it up.
+            try:
+                session.refresh(task)
+                task_id = task.id
+            except Exception as e:
+                # Should not happen — the insert succeeded (we're past
+                # commit). Log and continue with None so callers degrade
+                # gracefully (HTTP route doesn't read job_id; job_continue
+                # would get None and surface a clear error).
+                logger.warning(
+                    f"Failed to refresh Task row for message {message_id}: {e}"
+                )
+                task_id = None
 
         return _PreparedEnqueueContext(
             message_id=message_id,
@@ -882,6 +914,7 @@ class InstanceMessagingService:
             is_idle_to_running=is_idle_to_running,
             instance_agent_id=instance_agent_id,
             previous_status=previous_status,
+            task_id=task_id,
         )
 
     async def enqueue_message(
@@ -896,62 +929,36 @@ class InstanceMessagingService:
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
-        Routes to the worker-pool path (default) for child-instance
-        resumptions and internal agent-to-agent comms, or to the
-        JobQueue path for external entry points that need a ``job_id``
-        back.
+        D13 (Phase 2): both ``dispatch_path="workerpool"`` (default) and
+        ``dispatch_path="jobqueue"`` now route through the same flow:
 
-        Args:
-            instance_id: The ID of the target instance.
-            message: The message content.
-            source: Source identifier (e.g., "api", "web", "telegram:user:123").
-            priority: Message priority (0=system, 1=user).
-            images: Optional list of base64-encoded images for vision messages.
-            metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-            dispatch_path: Routing strategy. ``"workerpool"`` (default)
-                writes a Task row and notifies WorkerPool — used for
-                child-instance resumption and internal agent-to-agent
-                comms where no JobQueue job exists. ``"jobqueue"``
-                enqueues a MESSAGE JobItem via JobQueueService and
-                returns its ``job_id`` — used by external entry points
-                (HTTP API, ``job_continue`` tool).
+          1. ``_prepare_enqueued_message`` writes ``MessageQueue`` + ``Task``
+             rows in a single transaction.
+          2. ``worker_pool.notify_work()`` wakes a worker to claim the Task.
 
-        Returns:
-            AsyncMessageResult with message_id and status. ``job_id`` is
-            populated only for ``dispatch_path="jobqueue"``.
+        No ``JobItem`` (job_queue_items) row is ever created for a message.
+        This eliminates the dual-record coupling that caused the
+        06f500af-class bugs.
 
-        New-message-during-pause behaviour (Phase 2, pause/resume redesign,
-        2026-06-25):
+        The ``dispatch_path`` parameter is preserved for Phase 4 removal
+        (the public API callers — HTTP ``send_message`` and
+        ``job_continue`` — still pass ``"jobqueue"``). Both paths now do
+        identical work; the parameter is accepted but ignored.
+
+        ``AsyncMessageResult.job_id`` is set to ``str(task_id)`` as an
+        adapter for the removed ``JobItem.job_id``. The HTTP route discards
+        ``job_id``; the ``job_continue`` tool returns it as ``new_job_id``
+        — both continue to work because the Task PK is a stable identifier
+        the calling agent can later reference for status.
+
+        New-message-during-pause behaviour:
 
             When this method is called for a PAUSED instance, the
             ``_prepare_enqueued_message`` helper writes a fresh ``Task``
-            row in PENDING status (regardless of dispatch_path), and
-            ``enqueue`` (for the jobqueue path) writes a JobItem in
-            PENDING status. Neither path inspects the instance's
-            pause state — enqueue is intentionally independent of pause
-            so messages accumulate naturally.
-
-            The pause-gate in ``TaskRepository.claim_pending_task``
-            (``daemon/repositories/task/repository.py``, the
-            ``WHERE instance_id NOT IN (SELECT instance_id FROM
-            instances WHERE status IN ('paused', 'terminated'))``
-            subquery) excludes PAUSED instances from worker claim.
-            WorkerPool's idle-claim loop therefore sees the Task as
-            "exists but not yet claimable" and waits. The JobItem
-            pause-gate is the equivalent clause in the
-            JobQueue service's start path.
-
-            INTENDED BEHAVIOUR: messages queue in PENDING and are
-            claimed the moment the instance resumes (Phase 3 —
-            ``_resume_cascade_db_sync`` transitions the instance
-            status back to RUNNING, the pause-gate lifts, and the
-            next worker poll picks up the pending Task). This is the
-            correct user-visible behaviour — pausing a long-running
-            conversation does NOT drop inbound messages.
-
-            If this ever needs to change (e.g. a "reject while paused"
-            policy), the gating belongs in
-            ``_prepare_enqueued_message`` / ``enqueue``, not here.
+            row in PENDING status. The pause-gate in
+            ``TaskRepository.claim_pending_task`` excludes PAUSED instances
+            from worker claim. INTENDED BEHAVIOUR: messages queue in
+            PENDING and are claimed the moment the instance resumes.
         """
         from ..manager import AsyncMessageResult
 
@@ -960,8 +967,11 @@ class InstanceMessagingService:
         # SQLite WAL write contention (busy_timeout=30s) a sync commit on the
         # event loop thread would wedge the loop completely — Ctrl+C ignored,
         # all APIs frozen. See the deadlock analysis in the experience docs.
-        create_task_row = (dispatch_path == "workerpool")
-        path_label = "WorkerPool" if create_task_row else ""
+        #
+        # D13: ``create_task_row=True`` for ALL paths (was previously gated by
+        # ``dispatch_path == "workerpool"``). The parameter is kept for
+        # backward compatibility — Phase 4 will remove ``dispatch_path`` and
+        # the ``create_task_row`` flag together.
         ctx = await asyncio.to_thread(
             self._prepare_enqueued_message,
             instance_id=instance_id,
@@ -970,8 +980,8 @@ class InstanceMessagingService:
             priority=priority,
             images=images,
             metadata=metadata,
-            create_task_row=create_task_row,
-            path_label=path_label,
+            create_task_row=True,
+            path_label="",
         )
 
         # Emit status_change event if status was changed to running
@@ -986,56 +996,23 @@ class InstanceMessagingService:
             instance_id, message, ctx.is_idle_to_running
         )
 
-        job_id: str | None = None
-        if dispatch_path == "jobqueue":
-            # JobQueue path: look up instance metadata + enqueue MESSAGE job.
-            # Wrap the sync DB read in ``asyncio.to_thread`` (see deadlock
-            # analysis in experience docs).
-            instance_meta = await asyncio.to_thread(
-                self._manager._instance_repository.get, instance_id
-            )
-            if instance_meta is None:
-                raise ValueError(f"Instance {instance_id} not found")
+        # D13: Unified dispatch — both paths write Task + MessageQueue rows
+        # and notify the WorkerPool. No ``_job_queue_service.enqueue()`` call.
+        if self._manager._worker_pool is not None:
+            self._manager._worker_pool.notify_work()
 
-            agent_id = instance_meta.agent_id
-            project_id = instance_meta.project_id
+        # ``job_id`` adapter: ``str(task_id)`` preserves the API contract for
+        # the only consumer that reads it (``job_continue`` tool → returns
+        # as ``new_job_id`` to the calling agent). The HTTP ``send_message``
+        # route discards ``job_id`` entirely. The semantic shift from
+        # ``JobItem.job_id`` (UUID) to ``Task.id`` (int) is intentional and
+        # documented on ``AsyncMessageResult.job_id``.
+        job_id = str(ctx.task_id) if ctx.task_id is not None else None
 
-            # instance_id goes to JobItem.instance_id column (not metadata)
-            # Pass resume_mode from caller metadata
-            resume_mode = metadata.get("resume_mode") if metadata else None
-            job = await self._manager._job_queue_service.enqueue(
-                agent_id=agent_id,
-                message=message,
-                source=source,
-                project_id=project_id,
-                priority=priority,
-                job_type="message",
-                instance_id=instance_id,  # stored in JobItem.instance_id column
-                metadata={
-                    "message_id": ctx.message_id,
-                    "source": source,
-                    "images": images,
-                    "resume_mode": resume_mode,
-                },
-            )
-            job_id = job.job_id
-
-            # [TRACE] Log job enqueue
-            instance_status = ctx.previous_status if ctx.previous_status is not None else "unknown"
-            logger.info(
-                f"[TRACE] enqueue_message: instance={instance_id[:8]} dispatch=jobqueue "
-                f"status={instance_status} job_id={job.job_id[:8]}... job_type=message"
-            )
-            # DispatchEventBus notification is sent internally by _job_queue_service.enqueue()
-            logger.debug(f"[TRACE] enqueue_message: job {job.job_id[:8]}... dispatched via DispatchEventBus")
-        else:
-            # WorkerPool path: after commit — task is now visible in DB, wake a worker.
-            if self._manager._worker_pool is not None:
-                self._manager._worker_pool.notify_work()
-            logger.debug(
-                f"Enqueued message {ctx.message_id} for instance {instance_id} "
-                f"dispatch_path=workerpool_direct"
-            )
+        logger.debug(
+            f"Enqueued message {ctx.message_id} for instance {instance_id} "
+            f"task_id={job_id} dispatch_path={dispatch_path}"
+        )
 
         return AsyncMessageResult(
             message_id=ctx.message_id,

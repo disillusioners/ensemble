@@ -348,85 +348,32 @@ class ChildReportsService:
     def _has_no_active_message_job(self, session, instance_id: str) -> bool:
         """Check if there is NO active (PENDING/PROCESSING) MESSAGE job for an instance.
 
-        Used as a defense-in-depth guard before writing WAITING_CHILDREN status.
-        If no active job exists, pending messages are likely stale/duplicate
-        (from a task-claim race) and writing WAITING_CHILDREN would permanently
-        strand the instance — there is no code path that transitions out of
-        WAITING_CHILDREN other than a new message arriving on a fresh
-        MESSAGE job, which is exactly what is missing here.
+        D13 (Phase 2): always returns ``True``. MESSAGE-type ``JobItem``
+        rows no longer exist — :meth:`InstanceMessagingService.enqueue_message`
+        writes only ``MessageQueue`` + ``Task`` rows. The guard's original
+        purpose (defense-in-depth against the task-claim race where a
+        ``job_item`` ended up terminal before any worker picked it up,
+        stranding the instance in WAITING_CHILDREN) is no longer applicable:
+        there is no ``job_item`` for messages to be terminal-or-not.
 
-        NOTE: MESSAGE jobs are NOT 1:1-per-instance — each user message creates
-        a new job (see ``instance_messaging.enqueue_message_job``). We check for
-        ACTIVE jobs (PENDING/PROCESSING), not terminal jobs, to avoid false
-        positives when a completed old job coexists with an active new job.
-
-        **Why this guard is STILL NEEDED after Phase 5 (bus consolidation)**
-
-        The ``DependencyBus`` (see :mod:`daemon.services.dependency_bus`) replaced
-        :class:`CorrelationManager` in Phases 1–5 and is now the SOLE completion
-        authority for *parent→child correlation* — i.e. whether a parent
-        instance is still waiting on any child's terminal event. The bus tracks
-        this state in the ``dependency_watchers`` table and exposes
-        :meth:`DependencyBus.count_pending_for_target_sync` as the completion
-        gate.
-
-        The bus does **NOT** cover the concern this guard checks. The guard
-        queries a different table (``job_item``) for a different state (the
-        MESSAGE worker-job lifecycle), which the bus does not track:
-
-          * **Bus tracks**: ``dependency_watchers`` — PENDING watchers per
-            ``target_instance_id`` (parent→child correlation). Answers the
-            question "is the parent still waiting on any child's response?".
-          * **Guard tracks**: ``job_item`` — active (PENDING/PROCESSING)
-            MESSAGE jobs per ``instance_id``. Answers the question "is any
-            worker currently processing (or queued to process) a message for
-            this instance?".
-
-        The race the guard protects against is a **task-claim race** in the
-        message-queue layer: a ``task.claim_pending_task`` call claims a task
-        and a ``message_queue`` row is created, but the corresponding
-        ``job_item`` for that message ends up terminal or soft-deleted before
-        any worker picks it up. The ``message_queue`` row is still
-        READY/PROCESSING (so a ``SELECT COUNT(*) FROM message_queue WHERE
-        status IN (READY, PROCESSING, RETRYING)`` returns > 0), but no
-        worker is going to drain it. Writing ``WAITING_CHILDREN`` in that
-        case strands the instance because nothing is coming to wake it.
-
-        The bus's ``count_pending_for_target_sync`` gate returns 0 in that
-        scenario (no PENDING watchers for this instance), so the bus gate
-        falls through to the WAITING_CHILDREN write — the guard is the
-        only thing that catches the stale-queue case before the write lands.
-        All WAITING_CHILDREN write sites consult the guard for this reason:
-        the guard returns True (allowing the write) when no active MESSAGE
-        job exists, and False (deferring the write) when at least one is
-        still in flight.
-
-        The guard is a cheap, single ``SELECT COUNT(*)`` on a small index
-        (``ix_job_item_instance_type_status``) and is exercised by
-        ``tests/unit/services/test_child_reports.py`` (F5/F8 carve-out
-        coverage). See the ``cleanup-old-architecture`` plan, Task 6.2,
-        for the full Phase 5 bus-vs-guard separation analysis.
+        The Task-level coordination guard in
+        :meth:`TaskRepository.claim_pending_task` (one RUNNING task per
+        instance) remains in force — that is the post-D13 invariant that
+        replaces the cross-system MESSAGE-job guard.
 
         Args:
-            session: Active SQLModel session (DB read happens here, not committed).
-            instance_id: The instance to check.
+            session: Active SQLModel session (unused after D13 — kept
+                for caller-compatibility with WAITING_CHILDREN write
+                sites that pass the session unconditionally).
+            instance_id: The instance to check (unused after D13).
 
         Returns:
-            True iff there is no active MESSAGE job (PENDING or PROCESSING) for
-            this instance. False when at least one active job exists.
+            Always ``True`` — the MESSAGE-job-based guard is a permanent
+            no-op after D13. WAITING_CHILDREN writes proceed without
+            this defense-in-depth check (the Task-level guard in
+            ``claim_pending_task`` provides equivalent protection).
         """
-        _no_active = session.exec(
-            select(func.count())
-            .select_from(JobItem)
-            .where(JobItem.instance_id == instance_id)
-            .where(JobItem.job_type == "message")
-            .where(JobItem.deleted_at.is_(None))
-            .where(JobItem.status.in_([
-                JobStatus.PENDING.value,
-                JobStatus.PROCESSING.value,
-            ]))
-        ).scalar_one() == 0
-        return _no_active
+        return True
 
     def _trigger_title_generation(self, instance_id: str, completed_message_id: str) -> None:
         """Trigger title generation for an instance after message completion.

@@ -152,7 +152,28 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
 # 2. GET /instances/{instance_id}/messages/{message_id} - Get message status
 @router.get("/{instance_id}/messages/{message_id}")
 async def get_message_status(instance_id: str, message_id: str, request: Request):
-    """Get the status of a queued message."""
+    """Get the status of a queued message.
+
+    D13 (Phase 2): rewritten to query the ``task`` table instead of
+    ``job_queue_items``. After D13, messages no longer create
+    ``JobItem`` rows — they create ``Task`` rows via the unified
+    WorkerPool path. The HTTP ``send_message`` route (which previously
+    used ``dispatch_path="jobqueue"`` and returned a ``job_id`` backed
+    by a ``JobItem``) now returns a ``job_id`` backed by a ``Task.id``
+    (see :meth:`InstanceMessagingService.enqueue_message` for the
+    adapter contract).
+
+    Response shape is preserved: ``message_id``, ``instance_id``,
+    ``status``, ``result_summary``, ``error``. The ``status`` field
+    maps the ``Task.status`` enum (``pending`` / ``running`` /
+    ``completed`` / ``failed`` / ``cancelled`` / ``paused``) — the
+    frontend treats these the same as the previous
+    ``JobItem.status`` values.
+
+    Fallback: if no Task row exists for the message_id (e.g., internal
+    WorkerPool messages that use a different code path), return the
+    ``get_queue_stats`` summary as before.
+    """
     manager = _get_manager(request)
 
     # Check instance exists
@@ -167,29 +188,49 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
             ).model_dump()
         )
 
-    # Try JobQueue path first (HTTP-originated messages)
-    job_item = None
-    if manager._job_queue_service:
-        # Find MESSAGE job with this instance_id + message_id in metadata
-        jobs = manager._job_queue_service.find_active_jobs_by_instance(
-            instance_id, job_type="message"
-        )
-        job_item = next(
-            (j for j in jobs if j.job_metadata and j.job_metadata.get("message_id") == message_id),
-            None,
-        )
+    # D13: look up the Task row by message_id. The task table is
+    # indexed on message_id (see daemon/repositories/task/models.py)
+    # so this is a single indexed SELECT.
+    if manager._task_repo is not None:
+        try:
+            task_row = await asyncio.to_thread(
+                manager._task_repo.get_by_message, message_id
+            )
+        except Exception as e:
+            logger.warning(
+                f"get_message_status: task lookup failed for "
+                f"message {message_id[:8]}...: {e}"
+            )
+            task_row = None
 
-    if job_item:
-        # Return job-based status
-        return {
-            "message_id": message_id,
-            "instance_id": instance_id,
-            "status": job_item.status,
-            "result_summary": job_item.result_summary,
-            "error": job_item.error_message,
-        }
+        if task_row is not None:
+            # Map Task.result (JSON text) to result_summary, Task.error
+            # to error. The frontend's status display logic is
+            # job_type-agnostic so these field names are preserved.
+            result_summary = None
+            if task_row.result:
+                try:
+                    import json as _json
+                    parsed = _json.loads(task_row.result)
+                    # result_summary expects a string; serialize the
+                    # parsed payload so the frontend gets a readable
+                    # value regardless of the original shape.
+                    result_summary = (
+                        parsed if isinstance(parsed, str) else _json.dumps(parsed)
+                    )
+                except Exception:
+                    result_summary = task_row.result
+            return {
+                "message_id": message_id,
+                "instance_id": instance_id,
+                "status": task_row.status,
+                "result_summary": result_summary,
+                "error": task_row.error,
+            }
 
-    # Fallback: existing queue stats (internal/WorkerPool messages)
+    # Fallback: no Task row found (e.g., internal WorkerPool messages
+    # that didn't go through enqueue_message). Return queue stats so
+    # the frontend can still show pending/processing counts.
     stats = await manager.get_queue_stats(instance_id)
     return {
         "message_id": message_id,

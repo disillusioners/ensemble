@@ -38,6 +38,7 @@ Run with::
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -581,24 +582,38 @@ class TestStatusTransitionParity:
         manager._live_hub.stream_status_change.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_missing_instance_in_jq_path_raises_value_error(
-        self, engine, manager, messaging_service
+    async def test_missing_instance_in_jq_path_warns_but_creates_message(
+        self, engine, manager, messaging_service, caplog
     ):
-        """JobQueue path raises ``ValueError`` if the instance is missing.
+        """JobQueue path: when the instance row is missing, the helper
+        still creates the MessageQueue + Event, logs a warning, and does
+        NOT raise.
 
-        This is intentional asymmetry: ``enqueue_message(dispatch_path="workerpool")``
-        tolerates a missing instance and only logs a warning, while
-        ``enqueue_message(dispatch_path="jobqueue")`` needs the instance
-        metadata (agent_id, project_id) to enqueue the MESSAGE job, so
-        it raises.
+        D13 unified the two dispatch paths. Both now tolerate a briefly-
+        missing instance row (race window during instance creation) by
+        logging a warning and continuing — no ValueError is raised. This
+        mirrors the WorkerPool path behavior.
         """
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            with pytest.raises(ValueError, match="Instance ghost-jq not found"):
-                await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            with caplog.at_level(
+                logging.WARNING, logger="daemon.services.instance_messaging"
+            ):
+                await messaging_service.enqueue_message(dispatch_path="jobqueue",
                     instance_id="ghost-jq", message="hi", source="api"
                 )
+
+        # MessageQueue and Event rows should still exist.
+        assert len(_load_message_queues(engine, "ghost-jq")) == 1
+        assert len(_load_events(engine, "ghost-jq")) == 1
+        # And no status SSE was emitted (no instance to transition).
+        manager._live_hub.stream_status_change.assert_not_awaited()
+        # A warning about the missing instance must be logged.
+        assert any(
+            "ghost-jq" in record.getMessage() and "not found" in record.getMessage()
+            for record in caplog.records
+        ), "expected a warning log about missing instance 'ghost-jq'"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -772,10 +787,19 @@ class TestPrepareEnqueuedMessageHelper:
         assert task.message_id == ctx.message_id
         assert task.status == TaskStatus.PENDING.value
 
-    def test_helper_create_task_row_false_skips_task(
+    def test_helper_create_task_row_false_still_inserts_task_post_d13(
         self, engine, manager, messaging_service
     ):
-        """``create_task_row=False`` (JobQueue path) writes no Task row."""
+        """D13: ``create_task_row`` flag is preserved for API compat but
+        the helper ALWAYS inserts a Task row regardless of its value.
+
+        Pre-D13 the JQ path skipped the Task row and instead enqueued a
+        JobItem via ``_job_queue_service.enqueue``. Post-D13 both paths
+        share the same Task-row creation in ``_prepare_enqueued_message``;
+        the ``dispatch_path`` is accepted but ignored at the prelude level.
+        This test pins the post-D13 contract: ``create_task_row=False``
+        still produces a Task row (the flag is a no-op after D13).
+        """
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
 
         ctx = messaging_service._prepare_enqueued_message(
@@ -789,8 +813,9 @@ class TestPrepareEnqueuedMessageHelper:
             path_label="",
         )
 
-        assert len(_load_tasks(engine, "inst-1")) == 0
-        # MessageQueue and Event are still written — only the Task is path-specific.
+        # D13: a Task row is always inserted.
+        assert len(_load_tasks(engine, "inst-1")) == 1
+        # MessageQueue and Event are also written.
         assert len(_load_message_queues(engine, "inst-1")) == 1
         assert len(_load_events(engine, "inst-1")) == 1
         assert ctx.message_id
@@ -974,21 +999,36 @@ class TestDispatchLayerDifference:
         manager._job_queue_service.enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_jq_path_skips_task_and_calls_jq_service(
+    async def test_jq_path_post_d13_matches_wp_path(
         self, engine, manager, messaging_service
     ):
+        """D13: ``dispatch_path="jobqueue"`` produces the SAME observable
+        state as ``dispatch_path="workerpool"``.
+
+        Pre-D13 the JQ path was structurally different: it skipped the
+        Task row, did not call ``_worker_pool.notify_work``, and instead
+        called ``_job_queue_service.enqueue`` to create a JobItem. Post-D13
+        both paths share the unified prelude (Task + MessageQueue + Event)
+        and the WorkerPool notify; ``_job_queue_service.enqueue`` is
+        NEVER called for messages (its ``enqueue`` rejects
+        ``job_type="message"`` with ``ValueError``).
+        """
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            result = await messaging_service.enqueue_message(dispatch_path="jobqueue",
                 instance_id="inst-1", message="x", source="api"
             )
 
-        # No Task row, no WorkerPool notify.
-        assert len(_load_tasks(engine, "inst-1")) == 0
-        manager._worker_pool.notify_work.assert_not_called()
-        # JobQueueService.enqueue called once.
-        manager._job_queue_service.enqueue.assert_awaited_once()
-        # The JobItem.job_id surfaces in the AsyncMessageResult.
-        assert result.job_id == "job-test-123"
+        # D13: Task row IS created (same as WP path).
+        assert len(_load_tasks(engine, "inst-1")) == 1
+        # WorkerPool IS notified (same as WP path).
+        manager._worker_pool.notify_work.assert_called_once()
+        # JobQueueService.enqueue is NEVER called for messages post-D13.
+        manager._job_queue_service.enqueue.assert_not_awaited()
+        # AsyncMessageResult.job_id is str(task_id) post-D13, not the
+        # legacy "job-test-123" JobItem.job_id sentinel from the mock.
+        assert result.job_id is not None
+        assert result.job_id.isdigit()
+        assert int(result.job_id) > 0

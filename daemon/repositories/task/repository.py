@@ -15,12 +15,6 @@ from ..job_queue.models import JobStatus
 from ..instance.models import Instance, InstanceStatus
 from .models import Task, TaskStatus, TaskType
 
-# Job type string for MESSAGE jobs. job_type is a free-form string column
-# (see JobItem.job_type), not an enum — the canonical job-side query
-# (find_processing_message_jobs_by_instance) uses the same literal.
-JOB_TYPE_MESSAGE = "message"
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -357,12 +351,23 @@ class TaskRepository:
                         -- The per-instance serialization guard above
                         -- (one RUNNING task per instance) still applies
                         -- — that is the only invariant reports need.
+                        --
+                        -- D13: the previous ``j.job_type = 'message'``
+                        -- filter inside this subquery is removed —
+                        -- messages no longer create ``JobItem`` rows
+                        -- (see InstanceMessagingService.enqueue_message).
+                        -- The subquery now checks for ANY processing
+                        -- ``JobItem`` for the instance; after D13 these
+                        -- are exclusively TASK-type dispatch-queue jobs,
+                        -- so blocking on them is correct (they drive
+                        -- instance spawn + message enqueue and must
+                        -- complete before a second message can be
+                        -- processed for the same instance).
                         task_type != :process_message_type
                         OR instance_id NOT IN (
                             SELECT j.instance_id FROM job_queue_items j
                             LEFT JOIN instances i ON j.instance_id = i.instance_id
                             WHERE j.status = :status_processing
-                              AND j.job_type = :job_type_message
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
                               AND (i.status IS NULL OR i.status != :status_waiting_children)
@@ -385,7 +390,6 @@ class TaskRepository:
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running_guard": TaskStatus.RUNNING.value,
                 "status_processing": JobStatus.PROCESSING.value,
-                "job_type_message": JOB_TYPE_MESSAGE,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
                 "status_paused": InstanceStatus.PAUSED.value,
                 "status_terminated": InstanceStatus.TERMINATED.value,
@@ -859,18 +863,23 @@ class TaskRepository:
                             SELECT 1 FROM job_queue_items j_running
                             LEFT JOIN instances i ON j_running.instance_id = i.instance_id
                             WHERE j_running.status = :status_processing
-                            AND j_running.job_type = :job_type_message
                             AND j_running.instance_id = t_pending.instance_id
                             AND j_running.deleted_at IS NULL
                             -- FIFO carve-out (mirrors claim_pending_task).
                             AND (i.status IS NULL OR i.status != :status_waiting_children)
                             -- Unified-dispatcher admission carve-out
-                            -- (mirror of claim_pending_task). A MESSAGE
+                            -- (mirror of claim_pending_task). A TASK
                             -- job with a corresponding pending/running
                             -- Task row is the FIFO placeholder for an
                             -- admitted dispatch — NOT driving astream —
                             -- so it is NOT actively blocking the
                             -- instance.
+                            --
+                            -- D13: removed ``j_running.job_type =
+                            -- 'message'`` filter — messages no longer
+                            -- create ``JobItem`` rows. The subquery
+                            -- now checks ALL processing ``JobItem``
+                            -- rows (TASK-type dispatch-queue jobs).
                             AND NOT EXISTS (
                                 SELECT 1 FROM task t_admitted
                                 WHERE t_admitted.message_id = {json_extract_message_id}
@@ -885,7 +894,6 @@ class TaskRepository:
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
                 "status_processing": JobStatus.PROCESSING.value,
-                "job_type_message": JOB_TYPE_MESSAGE,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
             }).fetchone()
             return row is not None

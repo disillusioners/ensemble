@@ -1,5 +1,5 @@
-Current Plan: Rename coder agent to developer
-Tracking File: rename-coder-to-developer-tracking.md
-Iteration: 001
+Current Plan: Finish Architecture Migration
+Tracking File: finish-architecture-migration-tracking.md
+Iteration: 002
 Status: APPROVED
-Last Updated: 2026-06-25 17:57
+Last Updated: 2026-06-26 18:55

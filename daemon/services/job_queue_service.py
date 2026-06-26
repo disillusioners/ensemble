@@ -315,17 +315,23 @@ class JobQueueService:
         instance_id: str | None = None,
     ) -> JobItem:
         """Submit a job for processing.
-        
+
         Jobs are always created as PENDING. The JobProcessor picks up pending
         jobs, transitions them to PROCESSING, spawns instances, and enqueues
         messages for processing.
-        
+
         If project_id is set but queue_id is None, the job is assigned to the
-        project's "system_fifo_queue" (for TASK jobs) or "system_parallel_queue"
-        (for MESSAGE jobs) automatically.
+        project's "system_fifo_queue" (for TASK jobs) automatically.
 
         With idempotency_key: if a job with the same key exists and is non-terminal,
         returns the existing job instead of creating a duplicate.
+
+        D13 (Phase 2): ``job_type="message"`` is REJECTED with ``ValueError``.
+        Messages no longer create ``JobItem`` rows — they create ``Task`` rows
+        in the WorkerPool path (see :meth:`InstanceMessagingService.enqueue_message`).
+        This guard is defense-in-depth: the only legitimate caller
+        (``enqueue_message`` with ``dispatch_path="jobqueue"``) has been
+        removed.
 
         Args:
             agent_id: Agent ID (e.g., 'developer').
@@ -335,18 +341,29 @@ class JobQueueService:
             priority: Job priority (1-10, default 5).
             metadata: Optional metadata dictionary.
             queue_id: Optional queue ID for job routing. If None and project_id
-                     is set, defaults to the project's system queue.
+                     is set, defaults to the project's system FIFO queue.
             idempotency_key: Optional idempotency key for deduplication.
                            If a non-terminal job with this key exists, returns it.
-            job_type: Job type ("task" or "message", default "task").
-            instance_id: Optional pre-set instance ID (for MESSAGE jobs).
+            job_type: Job type — must be ``"task"`` (D13 rejects ``"message"``).
+            instance_id: Optional pre-set instance ID.
 
         Returns:
             JobItem with PENDING status (or existing non-terminal job if idempotent).
 
         Raises:
-            ValueError: If project_id is set but system queue doesn't exist.
+            ValueError: If ``job_type == "message"`` (D13 — use
+                :meth:`InstanceMessagingService.enqueue_message` instead).
         """
+        # D13 defense-in-depth: messages must use enqueue_message (WorkerPool
+        # Task row), not this JobItem-creating path. The only legitimate
+        # caller (enqueue_message with dispatch_path="jobqueue") has been
+        # removed. Raising here ensures any leftover caller fails loudly.
+        if job_type == "message":
+            raise ValueError(
+                "enqueue_job no longer accepts job_type='message' — "
+                "use enqueue_message instead (D13 architecture migration)"
+            )
+
         # Canonical normalization: ensures ALL callers get system_default_project for None/empty
         project_id = normalize_project_id(project_id)
         if project_id is None:
@@ -374,18 +391,15 @@ class JobQueueService:
             agent_id = resolved_agent_id
 
             # Resolve queue_id for projects (needed for the INSERT row)
+            # D13: only TASK jobs reach this point (message jobs are
+            # rejected by the guard above). Always route to the FIFO
+            # system queue.
             resolved_queue_id = queue_id
             if resolved_queue_id is None:
-                if job_type == "message":
-                    queue = await asyncio.to_thread(
-                        self._queue_repo.get_by_name, project_id, "system_parallel_queue"
-                    )
-                    queue_kind = "parallel"
-                else:
-                    queue = await asyncio.to_thread(
-                        self._queue_repo.get_by_name, project_id, "system_fifo_queue"
-                    )
-                    queue_kind = "fifo"
+                queue = await asyncio.to_thread(
+                    self._queue_repo.get_by_name, project_id, "system_fifo_queue"
+                )
+                queue_kind = "fifo"
                 if queue is not None:
                     resolved_queue_id = queue.queue_id
                 else:
@@ -494,21 +508,16 @@ class JobQueueService:
         agent_id = resolved_agent_id
 
         # Resolve queue_id for projects
+        # D13: only TASK jobs reach this point (message jobs are
+        # rejected by the guard above). Always route to the FIFO
+        # system queue.
         resolved_queue_id = queue_id
         if queue_id is None:
             # project_id is always valid after normalize_project_id()
-            if job_type == "message":
-                # MESSAGE jobs → system_parallel_queue (parallel execution)
-                queue = await asyncio.to_thread(
-                    self._queue_repo.get_by_name, project_id, "system_parallel_queue"
-                )
-                queue_kind = "parallel"
-            else:
-                # TASK jobs → system_fifo_queue (serial execution, existing behavior)
-                queue = await asyncio.to_thread(
-                    self._queue_repo.get_by_name, project_id, "system_fifo_queue"
-                )
-                queue_kind = "fifo"
+            queue = await asyncio.to_thread(
+                self._queue_repo.get_by_name, project_id, "system_fifo_queue"
+            )
+            queue_kind = "fifo"
             if queue is not None:
                 resolved_queue_id = queue.queue_id
             else:
@@ -1202,49 +1211,15 @@ class JobQueueService:
                     return None
 
                 if instance.status in TERMINAL_STATUSES:
-                    if job.job_type == "task":
-                        # TASK jobs get fresh instances — clear stale ref and allow normal start
-                        logger.info(
-                            f"[TRACE] start_job: clearing stale instance_id for TASK job {job_id[:8]}... "
-                            f"(instance {job.instance_id[:8]}... is {instance.status})"
-                        )
-                        await asyncio.to_thread(self._repository.update, job.job_id, instance_id=None)
-                        # Fall through to normal start logic below (don't return None)
-                    else:
-                        # MESSAGE: reactivate any terminal instance (COMPLETED/TERMINATED/ERROR/FAILED)
-                        # Use transition_status_if (atomic WHERE status IN guard) instead of
-                        # update_status — F-04 made update() reject status= with ValueError, and
-                        # transition_status_if avoids clobbering a concurrent terminal write.
-                        logger.info(
-                            f"[TRACE] start_job: attempting reactivation of {instance.status} instance "
-                            f"{job.instance_id[:8]}... for MESSAGE job {job.job_id[:8]}..."
-                        )
-                        reactivated = await asyncio.to_thread(
-                            self._instance_manager._instance_repository.transition_status_if,
-                            job.instance_id,
-                            InstanceStatus.RUNNING.value,
-                            tuple(TERMINAL_STATUSES),
-                        )
-                        if reactivated is None:
-                            # Concurrent writer changed status between our read and the
-                            # atomic UPDATE, or the row no longer exists. Don't stream
-                            # RUNNING — the actual status is whatever the writer set.
-                            logger.info(
-                                f"[TRACE] start_job: reactivation no-op for job {job_id[:8]}... "
-                                f"(instance {job.instance_id[:8]}... no longer in terminal state)"
-                            )
-                        else:
-                            await self._instance_manager._live_hub.stream_status_change(
-                                job.instance_id, InstanceStatus.RUNNING.value,
-                                agent_id=instance.agent_id
-                            )
-                        logger.info(
-                            f"start_job: reactivating {instance.status} instance {job.instance_id[:8]}... "
-                            f"for MESSAGE job {job.job_id[:8]}..."
-                        )
-                        # NOTE: Revived instances get graph + MCP rebuilt lazily via get_instance().
-                        # Children that were cascade-terminated remain terminated — only the targeted instance is revived.
-                        # Fall through to normal processing
+                    # D13: all jobs are TASK-type now (message-type jobs
+                    # are rejected at enqueue). TASK jobs get fresh
+                    # instances — clear stale ref and allow normal start.
+                    logger.info(
+                        f"[TRACE] start_job: clearing stale instance_id for TASK job {job_id[:8]}... "
+                        f"(instance {job.instance_id[:8]}... is {instance.status})"
+                    )
+                    await asyncio.to_thread(self._repository.update, job.job_id, instance_id=None)
+                    # Fall through to normal start logic below (don't return None)
 
                 if instance.status == InstanceStatus.PAUSED.value:
                     logger.info(
@@ -1252,11 +1227,11 @@ class JobQueueService:
                     )
                     return None
 
-        # Generate instance_id: MESSAGE jobs use pre-set instance_id, TASK jobs get new UUID
-        if job.job_type == "message" and job.instance_id:
-            instance_id = job.instance_id
-        else:
-            instance_id = str(uuid.uuid4())
+        # Generate instance_id: TASK jobs always get a new UUID.
+        # D13: removed MESSAGE-specific ``if job.job_type == "message"
+        # and job.instance_id`` branch — no MESSAGE jobs exist anymore,
+        # so all jobs uniformly get a fresh UUID.
+        instance_id = str(uuid.uuid4())
         
         # [TRACE] Log instance_id being used
         logger.info(

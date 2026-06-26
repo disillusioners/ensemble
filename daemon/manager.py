@@ -571,6 +571,24 @@ class InstanceManager:
             # executed here. Idempotent via IF EXISTS.
             self._ensure_postgres_drop_legacy_columns()
 
+        # ── D13 data migration: cancel in-flight MESSAGE JobItems ──────────
+        # Runs on BOTH SQLite and PostgreSQL. After D13 (Phase 2 of the
+        # decouple-architecture migration), enqueue_message no longer creates
+        # JobItem rows for messages — it writes only Task + MessageQueue rows.
+        # Any PENDING/PROCESSING MESSAGE JobItems left in the DB from a
+        # pre-D13 deployment have no processor to handle them (Phase 3 will
+        # remove the MESSAGE branch from JobProcessor). We cancel them here
+        # as a one-time, idempotent data migration.
+        #
+        # Idempotency: the WHERE clause restricts to status IN ('pending',
+        # 'processing'), so re-running on an already-cancelled DB is a no-op
+        # (rowcount=0). The method is safe to call on every startup.
+        #
+        # Dual-driver: uses the SQLModel ORM ``update()`` so the same code
+        # works on both SQLite and PostgreSQL. The column type for
+        # ``error_message`` is TEXT on both backends.
+        self._migrate_cancel_inflight_message_jobitems()
+
         # ── Database Tool Category (Phase 2) ──────────────────────────────
         # ConnectionPoolManager is a shared singleton at the manager level (C3)
         # so N instances share M connection pools instead of proliferating them.
@@ -1926,6 +1944,76 @@ class InstanceManager:
         logger.debug(
             "Phase 4 column drop: ``waiting_for`` and ``children`` removed (or absent) on PostgreSQL"
         )
+
+    def _migrate_cancel_inflight_message_jobitems(self) -> None:
+        """D13 (Phase 2) data migration: cancel in-flight MESSAGE JobItems.
+
+        Cancels all ``job_queue_items`` rows with ``job_type='message'``
+        that are still in ``pending`` or ``processing`` status. After
+        D13, ``InstanceMessagingService.enqueue_message`` no longer
+        creates ``JobItem`` rows for messages — it writes only
+        ``Task`` + ``MessageQueue`` rows. Any pre-D13 MESSAGE JobItems
+        left in the DB have no processor to handle them (Phase 3 will
+        remove the MESSAGE branch from ``JobProcessor``), so we cancel
+        them here as a one-time, idempotent data migration.
+
+        **Idempotency**: the ``WHERE status IN ('pending','processing')``
+        guard ensures already-cancelled (or already-completed/terminal)
+        rows are NOT re-touched. Re-running the migration on an
+        already-cancelled DB returns ``rowcount=0`` and is a no-op.
+        The ``deleted_at IS NULL`` predicate excludes soft-deleted rows
+        (they were already taken out of the active set by the soft-delete
+        timestamp).
+
+        **Dual-driver**: uses SQLAlchemy core ``update()`` with bound
+        parameters, which works on both SQLite and PostgreSQL. No raw
+        SQL dialect-specific syntax is used.
+
+        **Error handling**: logs and swallows exceptions. A failed
+        migration should not block daemon startup — the worst case is
+        that some MESSAGE JobItems remain in PROCESSING state, which the
+        JobProcessor will fail to dispatch (Phase 3 removes that path).
+        Those rows will linger as orphans in the DB but will not block
+        any other operation. Logging at WARNING level surfaces the issue
+        for operators.
+        """
+        try:
+            from sqlalchemy import update as sql_update
+            from .repositories.job_queue.models import JobItem, JobStatus
+
+            cancel_message = (
+                "Cancelled: MESSAGE JobItem type eliminated by "
+                "D13 architecture migration"
+            )
+            with self._engine.begin() as conn:
+                stmt = (
+                    sql_update(JobItem.__table__)
+                    .where(JobItem.job_type == "message")
+                    .where(JobItem.deleted_at.is_(None))
+                    .where(JobItem.status.in_([
+                        JobStatus.PENDING.value,
+                        JobStatus.PROCESSING.value,
+                    ]))
+                    .values(
+                        status=JobStatus.CANCELLED.value,
+                        cancelled_at=datetime.now(timezone.utc).isoformat(),
+                        error_message=cancel_message,
+                    )
+                )
+                result = conn.execute(stmt)
+                if result.rowcount > 0:
+                    logger.info(
+                        f"D13 data migration: cancelled {result.rowcount} "
+                        f"in-flight MESSAGE JobItems"
+                    )
+                else:
+                    logger.debug(
+                        "D13 data migration: no in-flight MESSAGE JobItems to cancel"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"D13 data migration failed (non-fatal): {e}"
+            )
 
     def setup_worker_pool(
         self,

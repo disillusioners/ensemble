@@ -588,24 +588,33 @@ class JobFeedbackObserver:
         await self._finalize_job(job, parent_id, terminal_status, error=None)
 
     async def _admit_via_worker_pool(self, job) -> None:
-        """C6: Route a MESSAGE-type JobItem through the WorkerPool.
+        """C6: Route a JobItem through the WorkerPool.
 
         Phase C (decouple-architecture) replaces the legacy JobQueue
         execution path (``MessageJobHandler.handle``) with the unified
-        observer → Task → WorkerPool path. When JobProcessor admits a
-        ``job_type='message'`` job, it calls this method. The method:
+        observer → Task → WorkerPool path. This method admits a
+        dispatch-queue JobItem by:
 
-          1. Extracts ``message_id`` from ``job.job_metadata`` (set by
-             :meth:`InstanceMessagingService.enqueue_message` with
-             ``dispatch_path="jobqueue"``).
-          2. Creates a ``Task`` row pointing at the same ``message_id``
+          1. Extracting ``message_id`` from ``job.job_metadata`` (set by
+             :meth:`InstanceMessagingService.enqueue_message`).
+          2. Creating a ``Task`` row pointing at the same ``message_id``
              (same pattern as :meth:`InstanceMessagingService.enqueue_message`).
-          3. Calls ``worker_pool.notify_work()`` to wake a worker.
+          3. Calling ``worker_pool.notify_work()`` to wake a worker.
           4. The ``JobItem`` is already ``PROCESSING`` (``start_job``
              transitioned it in :class:`JobProcessor`); the observer's
              existing event subscription (instance_lifecycle →
              :meth:`_process_event` → :meth:`_finalize_job`) handles the
              terminal transition when the Task completes.
+
+        D13 (Phase 2): this method is preserved for backward
+        compatibility with the dispatch-queue path (TASK-type JobItems
+        enqueued via ``JobQueueService.enqueue(job_type="task")``).
+        The MESSAGE-type path (which used this method for legacy
+        ``enqueue_message(dispatch_path="jobqueue")``) has been
+        eliminated — messages now write only Task + MessageQueue rows
+        in the unified WorkerPool path, and no MESSAGE JobItem is ever
+        created. Phase 3 will complete the cleanup by removing the
+        JobProcessor branch that called this method.
 
         The job is NOT marked ``FAILED`` here on error paths: those
         exceptions propagate up to ``JobProcessor._process_next_job``,

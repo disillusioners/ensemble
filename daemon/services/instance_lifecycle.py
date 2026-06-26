@@ -906,11 +906,16 @@ class InstanceLifecycleService:
             except Exception as e:
                 logger.warning(f"Failed to release locks for instance {instance_id[:8]}...: {e}")
 
-        # 7.5/7.6. Cancel remaining MESSAGE and non-PROCESSING jobs.
+        # 7.5/7.6. Cancel remaining non-PROCESSING jobs.
         # These are best-effort async cancels. The DB cancel for the
         # PROCESSING job is already in the helper; this loop only handles
         # the per-job notify path that the helper did NOT do (the helper
         # bulk-updates job rows but does not call cancel_job per job).
+        #
+        # D13: no MESSAGE-specific loop — messages no longer create
+        # ``JobItem`` rows (see :meth:`InstanceMessagingService.enqueue_message`).
+        # The generic ``find_jobs_by_instance(job_type=None)`` loop below
+        # already covers TASK-type jobs and is the only cleanup needed.
         #
         # Why this is safe AFTER commit: the DB cancel already happened;
         # the only thing this loop does is fire the per-job side effects
@@ -918,21 +923,6 @@ class InstanceLifecycleService:
         # this loop leaves the rows terminal but un-notified — recoverable
         # by the next job_processor poll.
         if self._job_queue_service is not None:
-            try:
-                message_jobs = self._job_queue_service._repository.find_jobs_by_instance(
-                    instance_id, job_type="message"
-                )
-                for msg_job in message_jobs:
-                    try:
-                        await self._job_queue_service.cancel_message_job(msg_job.job_id)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to cancel MESSAGE job {msg_job.job_id[:8]}... "
-                            f"on terminate: {e}"
-                        )
-            except Exception as e:
-                logger.warning(f"Failed to enumerate MESSAGE jobs on terminate: {e}")
-
             try:
                 all_jobs = self._job_queue_service._repository.find_jobs_by_instance(
                     instance_id, job_type=None
@@ -1848,22 +1838,9 @@ class InstanceLifecycleService:
                         },
                     )
 
-                # message-job-style count: count from the just-cancelled
-                # set where job_type='message'. We don't have the type
-                # on hand here, so the async caller will recount via
-                # ``find_jobs_by_instance(job_type='message')`` for the
-                # post-commit side effects. For the [TRACE] log we
-                # approximate by counting the pre-update set that had
-                # ``job_type='message'`` (loaded here for accuracy).
-                message_job_rows = list(
-                    session.exec(
-                        select(JobItem.job_id)
-                        .where(JobItem.instance_id == instance_id)
-                        .where(JobItem.job_type == "message")
-                        .where(JobItem.status.in_(non_terminal_statuses))
-                    )
-                )
-                message_jobs_cancelled = len(message_job_rows)
+                # D13: no separate MESSAGE-job count — MESSAGE-type
+                # JobItems no longer exist (see enqueue_message).
+                message_jobs_cancelled = 0
                 all_jobs_cancelled = len(jobs)
 
             # ── Step 3: delete ``job_locks`` rows for this instance ──

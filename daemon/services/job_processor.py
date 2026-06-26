@@ -669,97 +669,16 @@ class JobProcessor:
                         f"status={started_job.status}"
                     )
 
-                    # >>> MESSAGE jobs: route through the unified observer (D11) <<<
-                    # The legacy message-handler dispatch path was removed.
-                    # The JobFeedbackObserver is the SOLE dispatch
-                    # authority for ``job_type='message'`` work — it admits
-                    # the job to the WorkerPool (creates a Task row + wakes
-                    # a worker). The observer's instance_lifecycle event
-                    # subscription then drives the terminal JobItem
-                    # transition (see ``_process_event`` →
-                    # ``_finalize_job``).
-                    #
-                    # TASK jobs fall through to the spawn-instance +
-                    # enqueue-message path below — that path is the
-                    # dispatch authority for TASK work (the observer
-                    # only drives terminal transitions).
-                    if getattr(started_job, 'job_type', 'task') == "message":
-                        if self._job_feedback_observer is None:
-                            # Misconfiguration: operator has not wired
-                            # the observer. Mark FAILED rather than
-                            # silently looping, which would wedge the
-                            # per-queue lock.
-                            logger.error(
-                                f"JobProcessor: MESSAGE job "
-                                f"{started_job.job_id[:8]}... cannot be "
-                                f"dispatched — JobFeedbackObserver is not wired. "
-                                f"Marking FAILED."
-                            )
-                            try:
-                                await self._queue_service.complete_job(
-                                    started_job.job_id,
-                                    demand_state=DemandState.FAILED,
-                                    error=(
-                                        "No dispatch path available: "
-                                        "JobFeedbackObserver not wired"
-                                    ),
-                                )
-                            except Exception:
-                                logger.warning(
-                                    f"JobProcessor: failed to FAILED-mark "
-                                    f"job {started_job.job_id[:8]}... in "
-                                    f"misconfigured dispatch path"
-                                )
-                            self._cleanup_in_progress_tracking(started_job.job_id)
-                            continue
-                        try:
-                            await self._job_feedback_observer._admit_via_worker_pool(
-                                started_job
-                            )
-                        except asyncio.CancelledError:
-                            instance_id = started_job.instance_id
-                            logger.info(
-                                f"[TRACE] _process_next_job: CancelledError "
-                                f"caught for instance "
-                                f"{instance_id[:8] if instance_id else 'N/A'}..., "
-                                f"continuing loop"
-                            )
-                            return
-                        except Exception as e:
-                            # The observer's _admit_via_worker_pool
-                            # already swallows its own Task-creation /
-                            # notify errors and returns silently; the
-                            # ``except Exception`` here is the outer
-                            # safety net for unexpected errors. Mark the
-                            # job FAILED and continue — leaving it in
-                            # PROCESSING would deadlock the
-                            # per-queue lock.
-                            logger.error(
-                                f"JobProcessor: failed to admit MESSAGE job "
-                                f"{started_job.job_id[:8]}... via observer: "
-                                f"{type(e).__name__}: {e}",
-                                exc_info=True,
-                            )
-                            try:
-                                await self._queue_service.complete_job(
-                                    started_job.job_id,
-                                    demand_state=DemandState.FAILED,
-                                    error=f"Observer admission failed: {e}",
-                                )
-                            except Exception:
-                                logger.warning(
-                                    f"JobProcessor: failed to FAILED-mark "
-                                    f"job {started_job.job_id[:8]}... after "
-                                    f"observer error"
-                                )
-                            self._cleanup_in_progress_tracking(started_job.job_id)
-                            continue
-                        # The observer handles the terminal JobItem
-                        # transition via its instance_lifecycle
-                        # subscription. Skip the TASK-only spawn +
-                        # enqueue path below.
-                        continue
-                    # <<< END MESSAGE dispatch >>>
+                    # D13 (Phase 2): the legacy MESSAGE dispatch branch
+                    # via JobFeedbackObserver._admit_via_worker_pool has
+                    # been removed. Messages no longer create JobItem
+                    # rows (see InstanceMessagingService.enqueue_message)
+                    # — they write only Task + MessageQueue rows. The
+                    # JobProcessor therefore only handles TASK-type
+                    # dispatch-queue jobs from this point forward.
+                    # Phase 3 (D11) will complete the cleanup by also
+                    # removing the unified-observer subscription that
+                    # drove MESSAGE-job terminal transitions.
 
                     # Spawn instance for this job
                     try:

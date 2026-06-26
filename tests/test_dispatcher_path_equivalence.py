@@ -356,10 +356,16 @@ class TestDispatcherPathEquivalence:
     # ────────────────────────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_4_worker_pool_path_creates_task_row(
+    async def test_4_both_paths_create_task_row(
         self, engine, manager, messaging_service
     ):
-        """WorkerPool writes a ``Task`` row + notifies the pool; JQ does neither."""
+        """D13: BOTH paths write a ``Task`` row + notify the pool.
+
+        Pre-D13: only ``dispatch_path="workerpool"`` created a Task row;
+        the ``"jobqueue"`` path created a JobItem instead. Post-D13 both
+        paths are identical: they write MessageQueue + Task + Event rows
+        and notify the WorkerPool. No JobItem is ever created.
+        """
         _seed_instance(engine, instance_id="inst-wp")
         _seed_instance(engine, instance_id="inst-jq")
 
@@ -367,33 +373,41 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            await messaging_service.enqueue_message(dispatch_path="jobqueue",
                 instance_id="inst-jq", message="m", source="api"
             )
 
         wp_tasks = _load_tasks(engine, "inst-wp")
         jq_tasks = _load_tasks(engine, "inst-jq")
 
-        # WP path created a Task; JQ path did not.
-        assert len(wp_tasks) == 1
-        assert len(jq_tasks) == 0
+        # D13: BOTH paths create exactly one Task row each.
+        assert len(wp_tasks) == 1, "WorkerPool path must create a Task row"
+        assert len(jq_tasks) == 1, "JobQueue path must ALSO create a Task row (D13)"
 
-        wp_task = wp_tasks[0]
-        assert wp_task.task_type == TaskType.PROCESS_MESSAGE.value
-        assert wp_task.status == TaskStatus.PENDING.value
+        # Task rows are structurally identical (same type, status, etc.).
+        wp_task, jq_task = wp_tasks[0], jq_tasks[0]
+        assert wp_task.task_type == jq_task.task_type == TaskType.PROCESS_MESSAGE.value
+        assert wp_task.status == jq_task.status == TaskStatus.PENDING.value
 
-        # WorkerPool.notify_work called by WP only.
-        manager._worker_pool.notify_work.assert_called_once()
+        # WorkerPool.notify_work called once per enqueue (both paths).
+        assert manager._worker_pool.notify_work.call_count == 2
 
     # ────────────────────────────────────────────────────────────────────────
     # 5. Dispatch divergence: JobItem enqueue (JobQueue only)
     # ────────────────────────────────────────────────────────────────────────
 
     @pytest.mark.asyncio
-    async def test_5_jobqueue_path_calls_jq_service(
+    async def test_5_no_path_calls_jq_service(
         self, engine, manager, messaging_service
     ):
-        """JQ path calls ``_job_queue_service.enqueue``; WP path does not."""
+        """D13: NEITHER path calls ``_job_queue_service.enqueue``.
+
+        Pre-D13: ``dispatch_path="jobqueue"`` called
+        ``_job_queue_service.enqueue(job_type="message")``. Post-D13
+        messages no longer create JobItem rows — the unified WorkerPool
+        path writes only Task + MessageQueue rows. ``_job_queue_service``
+        is reserved for TASK-type dispatch-queue jobs.
+        """
         _seed_instance(engine, instance_id="inst-wp")
         _seed_instance(engine, instance_id="inst-jq")
 
@@ -401,20 +415,14 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            await messaging_service.enqueue_message(dispatch_path="jobqueue",
                 instance_id="inst-jq", message="m", source="api"
             )
 
-        # JQ service called once; WP path did not call it.
-        manager._job_queue_service.enqueue.assert_awaited_once()
-        call_kwargs = manager._job_queue_service.enqueue.await_args.kwargs
-        assert call_kwargs["job_type"] == "message"
-        assert call_kwargs["instance_id"] == "inst-jq"
-        assert call_kwargs["message"] == "m"
-        assert call_kwargs["source"] == "api"
-        # The dispatched message_id should land in the JQ job metadata so
-        # downstream workers can correlate.
-        assert call_kwargs["metadata"]["message_id"]
+        # D13 invariant: ``_job_queue_service.enqueue`` is NEVER called
+        # for messages (the guard in ``enqueue_job`` rejects job_type=
+        # "message" with ValueError).
+        manager._job_queue_service.enqueue.assert_not_awaited()
 
     # ────────────────────────────────────────────────────────────────────────
     # 6. version + last_activity_at equivalence
@@ -452,7 +460,18 @@ class TestDispatcherPathEquivalence:
     async def test_7_async_message_result_equivalence(
         self, engine, manager, messaging_service
     ):
-        """Both return ``AsyncMessageResult``; only JQ populates ``job_id``."""
+        """D13: BOTH paths return ``AsyncMessageResult`` with ``job_id``
+        populated as ``str(task_id)``.
+
+        Pre-D13: only the ``"jobqueue"`` path populated ``job_id`` (from
+        ``JobItem.job_id``); the ``"workerpool"`` path left it as
+        ``None``. Post-D13 both paths populate ``job_id`` with
+        ``str(task_id)`` as the adapter contract — the HTTP route
+        discards it and the ``job_continue`` tool returns it as
+        ``new_job_id``. The semantic shift from ``JobItem.job_id`` (UUID)
+        to ``Task.id`` (int) is intentional and documented on
+        ``AsyncMessageResult.job_id``.
+        """
         _seed_instance(engine, instance_id="inst-wp")
         _seed_instance(engine, instance_id="inst-jq")
 
@@ -460,7 +479,7 @@ class TestDispatcherPathEquivalence:
             wp_result = await messaging_service.enqueue_message(
                 instance_id="inst-wp", message="m", source="api"
             )
-            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue",
                 instance_id="inst-jq", message="m", source="api"
             )
 
@@ -474,13 +493,17 @@ class TestDispatcherPathEquivalence:
         assert jq_result.instance_id == "inst-jq"
         assert wp_result.status == jq_result.status == "queued"
 
-        # job_id asymmetry: JQ path surfaces the JobItem.job_id; WP path
-        # has no job (it dispatches via the Task table) so job_id stays None.
-        assert wp_result.job_id is None, (
-            "WorkerPool path must NOT populate job_id — there is no JobItem"
+        # D13: BOTH paths populate job_id with str(task_id). The value is
+        # a stringified int (Task PK), not the old "job-jq-xyz" sentinel
+        # from the mock — that sentinel is no longer relevant since no
+        # JobItem is created.
+        assert wp_result.job_id is not None and wp_result.job_id.isdigit(), (
+            f"WorkerPool path must populate job_id=str(task_id) post-D13, "
+            f"got {wp_result.job_id!r}"
         )
-        assert jq_result.job_id == "job-jq-xyz", (
-            "JobQueue path must surface the JobItem.job_id from _job_queue_service"
+        assert jq_result.job_id is not None and jq_result.job_id.isdigit(), (
+            f"JobQueue path must populate job_id=str(task_id) post-D13, "
+            f"got {jq_result.job_id!r}"
         )
 
     # ────────────────────────────────────────────────────────────────────────
@@ -502,7 +525,7 @@ class TestDispatcherPathEquivalence:
                 source="api",
                 images=_SAMPLE_IMAGES,
             )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            await messaging_service.enqueue_message(dispatch_path="jobqueue",
                 instance_id="inst-jq",
                 message="vision",
                 source="api",
@@ -514,10 +537,10 @@ class TestDispatcherPathEquivalence:
         assert wp.images == _SAMPLE_IMAGES
         assert jq.images == _SAMPLE_IMAGES
 
-        # JQ path also passes images through to JobItem metadata so the
-        # downstream MessageJobHandler can hydrate the multimodal payload.
-        jq_call_kwargs = manager._job_queue_service.enqueue.await_args.kwargs
-        assert jq_call_kwargs["metadata"]["images"] == _SAMPLE_IMAGES
+        # D13: ``_job_queue_service.enqueue`` is NEVER called for messages,
+        # so the pre-D13 assertion that ``jq_call_kwargs["metadata"]
+        # ["images"]`` matches the input is no longer applicable. Images
+        # live on the MessageQueue row, which both paths populate.
 
     # ────────────────────────────────────────────────────────────────────────
     # 9. priority parameter equivalence
@@ -538,7 +561,7 @@ class TestDispatcherPathEquivalence:
             await messaging_service.enqueue_message(
                 instance_id=wp_id, message="m", source="api", priority=priority
             )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            await messaging_service.enqueue_message(dispatch_path="jobqueue",
                 instance_id=jq_id, message="m", source="api", priority=priority
             )
 
@@ -547,9 +570,9 @@ class TestDispatcherPathEquivalence:
         assert wp.priority == priority
         assert jq.priority == priority
 
-        # JQ path forwards priority to the JobItem (where ordering matters).
-        jq_call_kwargs = manager._job_queue_service.enqueue.await_args.kwargs
-        assert jq_call_kwargs["priority"] == priority
+        # D13: priority flows only through MessageQueue.priority (both
+        # paths). No JobItem is created, so there is no per-path
+        # priority divergence.
 
     # ────────────────────────────────────────────────────────────────────────
     # 10. SSE status_change equivalence
@@ -584,3 +607,174 @@ class TestDispatcherPathEquivalence:
         assert jq_call.args[0] == "inst-jq"
         assert wp_call.args[1] == InstanceStatus.RUNNING.value
         assert jq_call.args[1] == InstanceStatus.RUNNING.value
+
+    # ────────────────────────────────────────────────────────────────────────
+    # D13 (Phase 2) invariants
+    # ────────────────────────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_d13_no_jobitem_row_created_for_either_path(
+        self, engine, manager, messaging_service
+    ):
+        """D13 invariant: NO ``job_queue_items`` row is created for ANY
+        ``enqueue_message`` call.
+
+        Pre-D13: ``dispatch_path="jobqueue"`` created a JobItem with
+        ``job_type="message"``. Post-D13 both paths write only
+        ``MessageQueue`` + ``Task`` rows. The ``job_queue_items`` table
+        is reserved for TASK-type dispatch-queue jobs only.
+        """
+        from sqlmodel import Session, select
+        from daemon.repositories.job_queue.models import JobItem
+
+        _seed_instance(engine, instance_id="inst-wp")
+        _seed_instance(engine, instance_id="inst-jq")
+
+        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
+            await messaging_service.enqueue_message(
+                instance_id="inst-wp", message="m", source="api"
+            )
+            await messaging_service.enqueue_message(dispatch_path="jobqueue",
+                instance_id="inst-jq", message="m", source="api"
+            )
+
+        with Session(engine) as session:
+            jobs = list(session.exec(select(JobItem)))
+        assert len(jobs) == 0, (
+            f"D13 invariant violated: enqueue_message created {len(jobs)} "
+            f"JobItem row(s); expected 0"
+        )
+
+    @pytest.mark.asyncio
+    async def test_d13_job_id_adapter_is_str_of_task_id(
+        self, engine, manager, messaging_service
+    ):
+        """D13: ``AsyncMessageResult.job_id`` = ``str(task_id)`` for BOTH paths.
+
+        The HTTP ``send_message`` route discards ``job_id`` (unaffected).
+        The ``job_continue`` tool returns ``job_id`` as ``new_job_id`` —
+        it must be a stable identifier the calling agent can reference
+        later for status. ``str(task_id)`` (int-as-string) is that stable
+        identifier after D13.
+        """
+        _seed_instance(engine, instance_id="inst-wp")
+        _seed_instance(engine, instance_id="inst-jq")
+
+        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
+            wp_result = await messaging_service.enqueue_message(
+                instance_id="inst-wp", message="m", source="api"
+            )
+            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue",
+                instance_id="inst-jq", message="m", source="api"
+            )
+
+        # job_id must be a stringified int (Task PK), not None, not the
+        # legacy "job-jq-xyz" mock sentinel.
+        for label, result in (("wp", wp_result), ("jq", jq_result)):
+            assert result.job_id is not None, (
+                f"D13: {label} path must populate job_id (str(task_id)), got None"
+            )
+            assert isinstance(result.job_id, str), (
+                f"D13: {label} job_id must be str, got {type(result.job_id).__name__}"
+            )
+            assert result.job_id.isdigit(), (
+                f"D13: {label} job_id must be a stringified int (Task PK), "
+                f"got {result.job_id!r}"
+            )
+
+        # The two job_ids must be distinct (independent Task rows).
+        assert wp_result.job_id != jq_result.job_id
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# D13 guard: enqueue_job(job_type="message") raises ValueError
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestEnqueueJobRejectsMessage:
+    """D13 defense-in-depth guard: ``JobQueueService.enqueue`` rejects
+    ``job_type="message"`` with ``ValueError``.
+
+    Pre-D13 the JobQueue path created a MESSAGE JobItem for messages.
+    Post-D13 messages write only Task + MessageQueue rows. Any leftover
+    caller attempting the legacy API must fail loudly rather than
+    silently creating a JobItem that no processor can handle.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _set_system_default_project(self):
+        """``JobQueueService.enqueue`` calls ``normalize_project_id`` which
+        requires ``daemon.constants.SYSTEM_DEFAULT_PROJECT_ID`` to be set.
+        Set it for the duration of each test in this class.
+        """
+        from daemon import constants
+        original = constants.SYSTEM_DEFAULT_PROJECT_ID
+        constants.SYSTEM_DEFAULT_PROJECT_ID = "test-system-project-id"
+        try:
+            yield
+        finally:
+            constants.SYSTEM_DEFAULT_PROJECT_ID = original
+
+    @pytest.mark.asyncio
+    async def test_enqueue_rejects_message_job_type(self):
+        """``enqueue(job_type="message")`` raises ``ValueError`` immediately."""
+        from unittest.mock import AsyncMock, MagicMock
+        from daemon.services.job_queue_service import JobQueueService
+
+        service = JobQueueService(
+            repository=MagicMock(),
+            lock_manager=MagicMock(),
+            queue_repo=MagicMock(),
+        )
+        with pytest.raises(ValueError) as exc_info:
+            await service.enqueue(
+                agent_id="developer",
+                message="test",
+                job_type="message",
+                project_id="test-project",
+            )
+        # The error message must mention both the deprecated type and the
+        # replacement entry point so operators can find the right method.
+        assert "message" in str(exc_info.value).lower()
+        assert "enqueue_message" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_enqueue_accepts_task_job_type(self):
+        """``enqueue(job_type="task")`` still works (dispatch-queue path)."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from daemon.services.job_queue_service import JobQueueService
+        from daemon.repositories.job_queue.models import JobStatus
+
+        service = JobQueueService(
+            repository=MagicMock(),
+            lock_manager=MagicMock(),
+            queue_repo=MagicMock(),
+        )
+        # Stub the repo's create() to return a fake JobItem
+        fake_job = MagicMock()
+        fake_job.job_id = "task-job-1"
+        fake_job.status = JobStatus.PENDING.value
+        # ``_queue_repo.get(queue_id)`` is called when queue_id is provided
+        # directly (the test bypasses name resolution). The returned object
+        # must have ``.project_id == "test-project"`` or the production
+        # code's "Queue does not belong to project" guard raises ValueError.
+        fake_queue = MagicMock()
+        fake_queue.project_id = "test-project"
+        queue_repo_stub = MagicMock(
+            get_by_name=MagicMock(return_value=None),
+            get=MagicMock(return_value=fake_queue),
+        )
+        with patch.object(service, "_queue_repo", new=queue_repo_stub):
+            # ``_repository.create`` is a synchronous method (production
+            # wraps it with ``asyncio.to_thread`` at the call site), so we
+            # use a plain MagicMock, not AsyncMock.
+            service._repository.create = MagicMock(return_value=fake_job)
+            service._dispatch_bus = MagicMock()
+            result = await service.enqueue(
+                agent_id="developer",
+                message="test",
+                job_type="task",
+                project_id="test-project",
+                queue_id="some-queue-id",
+            )
+        assert result.job_id == "task-job-1"
