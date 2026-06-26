@@ -1486,7 +1486,7 @@ class DependencyBus:
                 "SET state = :cancelled_state, fired_at = :now "
                 "WHERE state = :pending_state "
                 "AND source_task_id NOT IN ("
-                "  SELECT id FROM task "
+                "  SELECT CAST(id AS TEXT) FROM task "
                 "  WHERE status IN ('running', 'pending', 'paused')"
                 ")"
             )
