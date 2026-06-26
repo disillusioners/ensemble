@@ -2,10 +2,9 @@
 
 Phase 6.1 of the cleanup-old-architecture effort consolidated the legacy
 ``enqueue_message_via_jq`` JobQueue dispatch path into the unified
-``enqueue_message`` (with a ``dispatch_path="jobqueue"`` parameter).
-This grep-based regression test fails the build if any source or test
-file re-introduces the old method name, which would silently bypass
-the unified dispatcher.
+``enqueue_message``. This grep-based regression test fails the build if
+any source or test file re-introduces the old method name, which would
+silently bypass the unified dispatcher.
 
 The legacy name is only allowed to appear inside THIS file (as part of
 the assertion message and the grep pattern itself). Any other reference
@@ -112,6 +111,6 @@ def test_enqueue_message_via_jq_not_reintroduced():
 
     assert not refs, (
         "Legacy enqueue_message_via_jq was removed in Phase 6.1. "
-        "Use the unified enqueue_message(..., dispatch_path='jobqueue') instead.\n\n"
+        "Use the unified enqueue_message instead.\n\n"
         + "\n".join(summary_lines)
     )

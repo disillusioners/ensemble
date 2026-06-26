@@ -79,7 +79,7 @@ from .constants import WORKER_POOL_SIZE
 from .write_pause_guard import WritePauseGuard
 
 # Worker pool imports (lazy import to avoid circular dependency)
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .services.worker_pool import WorkerPool
@@ -2292,18 +2292,17 @@ class InstanceManager:
         priority: int = 1,
         images: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-        dispatch_path: Literal["workerpool", "jobqueue"] = "workerpool",
     ) -> AsyncMessageResult:
         """Enqueue a message via the unified dispatcher.
 
-        Routes to the worker-pool path (default) for child-instance
-        resumptions and internal agent-to-agent comms, or to the
-        JobQueue path for external entry points that need a ``job_id``
-        back.
+        All messages flow through the same single dispatcher:
 
-        This method creates a MessageQueue entry plus the dispatch-side
-        side effects (a ``Task`` row + worker wake-up for ``workerpool``,
-        or a ``JobItem`` row + JobQueue dispatch for ``jobqueue``).
+          1. ``MessageQueue`` + ``Task`` rows are written in a single
+             transaction.
+          2. The WorkerPool is notified to claim the Task.
+
+        No ``JobItem`` row is ever created for a message — the Task row
+        IS the dispatch primitive.
 
         Args:
             instance_id: The ID of the target instance.
@@ -2312,12 +2311,11 @@ class InstanceManager:
             priority: Message priority (0=system, 1=user).
             images: Optional list of base64-encoded images for vision messages.
             metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
-            dispatch_path: Routing strategy — see
-                :meth:`InstanceMessagingService.enqueue_message`.
 
         Returns:
-            AsyncMessageResult with message_id; ``job_id`` is populated
-            only when ``dispatch_path="jobqueue"``.
+            AsyncMessageResult with message_id, instance_id, status, and
+            ``job_id`` populated as ``str(task_id)`` (adapter for the
+            removed ``JobItem.job_id``).
         """
         return await self._messaging_service.enqueue_message(
             instance_id=instance_id,
@@ -2326,7 +2324,6 @@ class InstanceManager:
             priority=priority,
             images=images,
             metadata=metadata,
-            dispatch_path=dispatch_path,
         )
 
     async def _process_message_with_tracking(

@@ -698,8 +698,8 @@ class ErrorReportingService:
             # the working ``internal_report:`` path in
             # ``child_reports._create_completion_report`` and the
             # user-message path in ``instance_messaging.enqueue_message``.
-            # ``dispatch_path='workerpool'`` matches the system-message
-            # convention used by the completion-report path.
+            # Matches the system-message convention used by the
+            # completion-report path.
             error_report = (
                 f"⚠️ {agent_name} encountered an error:\n\n"
                 f"**Error Type:** {error_type}\n"
@@ -721,7 +721,6 @@ class ErrorReportingService:
                     "severity": severity,
                     "recoverable": error_type in RECOVERABLE_ERROR_TYPES,
                 },
-                dispatch_path="workerpool",
             )
             report_message_id = result.message_id
             

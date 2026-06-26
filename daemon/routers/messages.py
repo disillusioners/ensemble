@@ -164,7 +164,6 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
             message=message.content,
             source="api",
             images=message.images,
-            dispatch_path="jobqueue",
         )
     except Exception as e:
         raise HTTPException(
@@ -200,11 +199,10 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
     D13 (Phase 2): rewritten to query the ``task`` table instead of
     ``job_queue_items``. After D13, messages no longer create
     ``JobItem`` rows — they create ``Task`` rows via the unified
-    WorkerPool path. The HTTP ``send_message`` route (which previously
-    used ``dispatch_path="jobqueue"`` and returned a ``job_id`` backed
-    by a ``JobItem``) now returns a ``job_id`` backed by a ``Task.id``
-    (see :meth:`InstanceMessagingService.enqueue_message` for the
-    adapter contract).
+    WorkerPool path. The HTTP ``send_message`` route returns a
+    ``job_id`` backed by a ``Task.id`` (see
+    :meth:`InstanceMessagingService.enqueue_message` for the adapter
+    contract).
 
     Response shape is preserved: ``message_id``, ``instance_id``,
     ``status``, ``result_summary``, ``error``. The ``status`` field

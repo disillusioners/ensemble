@@ -259,10 +259,9 @@ class TestResumeQueueFlow:
             instance_id, message="resume", silent=False
         )
 
-        # Should enqueue via WorkerPool path (not JobQueue)
+        # Child resume routes through the unified dispatcher.
         mock_manager.enqueue_message.assert_called_once()
         wp_kwargs = mock_manager.enqueue_message.call_args[1]
-        assert wp_kwargs.get("dispatch_path", "workerpool") == "workerpool"
         assert wp_kwargs["instance_id"] == instance_id
         assert wp_kwargs["message"] == "resume"
         assert wp_kwargs["source"] == "cascade_resume"

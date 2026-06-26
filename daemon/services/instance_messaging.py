@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -741,37 +741,33 @@ class InstanceMessagingService:
         images: list[str] | None,
         metadata: dict[str, Any] | None,
         *,
-        create_task_row: bool = False,
         path_label: str = "",
     ) -> _PreparedEnqueueContext:
-        """Shared prelude for `enqueue_message` (both dispatch paths).
+        """Shared prelude for ``enqueue_message``.
 
-        Performs the work both paths do identically before diverging into
-        path-specific dispatch (WorkerPool Task + notify vs JobQueue enqueue):
+        Writes the atomic MessageQueue + Task + Event trio that every
+        message enqueue needs:
 
         - Reject messages during shutdown.
         - Resolve ``msg_type`` from the ``source`` prefix and mint a UUID.
         - Insert the ``MessageQueue`` row.
-        - Optionally insert a ``Task`` row in the same transaction (atomicity
-          is preserved — see ``create_task_row``).
+        - Insert the ``Task`` row in the same transaction (so the two
+          either both commit or both roll back together — this is the
+          D13 structural fix that eliminated the dual-record coupling).
         - Auto-resume ``IDLE`` / ``WAITING_CHILDREN`` / ``COMPLETED`` instances
           to ``RUNNING`` and bump ``last_activity_at`` / ``version``.
         - Append a ``MESSAGE_RECEIVED`` event for event-sourced features.
         - Commit the session.
 
         Args:
-            create_task_row: When ``True``, also insert a ``Task`` row for
-                WorkerPool dispatch within the same transaction as the
-                ``MessageQueue`` row, so the two either both commit or both
-                roll back together.
             path_label: Optional identifier appended to the "Reactivating
-                completed instance" log message (e.g., ``"WorkerPool"``).
-                Empty string omits the suffix.
+                completed instance" log message. Empty string omits the
+                suffix.
 
         Returns:
             ``_PreparedEnqueueContext`` carrying the values callers need to
-            proceed with their path-specific dispatch (SSE emit, title
-            generation, and either Task notification or JobQueue enqueue).
+            proceed with dispatch (SSE emit, title generation, WorkerPool
+            notify).
         """
         # Reject new messages during shutdown
         if self._cancellation_service.is_shutting_down:
@@ -803,11 +799,13 @@ class InstanceMessagingService:
         is_idle_to_running = False
         instance_agent_id: str | None = None
         previous_status: str | None = None
-        # D13: Task row is always created (was previously gated by
-        # create_task_row). Capture the PK after commit so the caller can
-        # surface it as ``AsyncMessageResult.job_id`` (adapter for the
-        # removed JobItem.job_id). session.refresh(task) inside the
-        # ``with`` block populates ``task.id`` from the autoincrement.
+        # Task row is always created in the same transaction as the
+        # MessageQueue row. ``task_id`` is its primary key (int | None) —
+        # None only if the task insert failed for an unrecoverable reason
+        # (callers treat None as "no job_id adapter available"). The HTTP
+        # route discards ``job_id``; the ``job_continue`` tool uses it as
+        # ``new_job_id`` (the semantic shift from JobItem UUID → Task int
+        # is intentional and documented on AsyncMessageResult.job_id).
         task_id: int | None = None
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
@@ -826,12 +824,10 @@ class InstanceMessagingService:
             )
             session.add(db_message)
 
-            # 2. D13: ALWAYS create a Task row (was previously gated by
-            #    ``create_task_row``). Inserted in the same transaction
-            #    as the MessageQueue row so the two either both commit
-            #    or both roll back together. This is the structural fix
-            #    that eliminates the dual-record coupling — messages no
-            #    longer create a JobItem at all.
+            # 2. Insert the Task row in the same transaction as the
+            #    MessageQueue row. The structural D13 fix that eliminates
+            #    the dual-record coupling — messages no longer create a
+            #    JobItem at all; the Task row IS the dispatch primitive.
             task = Task(
                 task_type=TaskType.PROCESS_MESSAGE.value,
                 instance_id=instance_id,
@@ -890,8 +886,8 @@ class InstanceMessagingService:
             session.add(event)
 
             session.commit()
-            # D13: Capture the Task PK after commit + refresh so the
-            # caller can surface it as ``AsyncMessageResult.job_id``.
+            # Capture the Task PK after commit + refresh so the caller
+            # can surface it as ``AsyncMessageResult.job_id``.
             # ``task.id`` is populated by the autoincrement; refresh()
             # re-reads the row from the DB to pick it up.
             try:
@@ -925,12 +921,10 @@ class InstanceMessagingService:
         priority: int = 1,
         images: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-        dispatch_path: Literal["workerpool", "jobqueue"] = "workerpool",
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
-        D13 (Phase 2): both ``dispatch_path="workerpool"`` (default) and
-        ``dispatch_path="jobqueue"`` now route through the same flow:
+        All messages flow through the same single dispatcher:
 
           1. ``_prepare_enqueued_message`` writes ``MessageQueue`` + ``Task``
              rows in a single transaction.
@@ -939,11 +933,6 @@ class InstanceMessagingService:
         No ``JobItem`` (job_queue_items) row is ever created for a message.
         This eliminates the dual-record coupling that caused the
         06f500af-class bugs.
-
-        The ``dispatch_path`` parameter is preserved for Phase 4 removal
-        (the public API callers — HTTP ``send_message`` and
-        ``job_continue`` — still pass ``"jobqueue"``). Both paths now do
-        identical work; the parameter is accepted but ignored.
 
         ``AsyncMessageResult.job_id`` is set to ``str(task_id)`` as an
         adapter for the removed ``JobItem.job_id``. The HTTP route discards
@@ -967,11 +956,6 @@ class InstanceMessagingService:
         # SQLite WAL write contention (busy_timeout=30s) a sync commit on the
         # event loop thread would wedge the loop completely — Ctrl+C ignored,
         # all APIs frozen. See the deadlock analysis in the experience docs.
-        #
-        # D13: ``create_task_row=True`` for ALL paths (was previously gated by
-        # ``dispatch_path == "workerpool"``). The parameter is kept for
-        # backward compatibility — Phase 4 will remove ``dispatch_path`` and
-        # the ``create_task_row`` flag together.
         ctx = await asyncio.to_thread(
             self._prepare_enqueued_message,
             instance_id=instance_id,
@@ -980,8 +964,6 @@ class InstanceMessagingService:
             priority=priority,
             images=images,
             metadata=metadata,
-            create_task_row=True,
-            path_label="",
         )
 
         # Emit status_change event if status was changed to running
@@ -996,8 +978,10 @@ class InstanceMessagingService:
             instance_id, message, ctx.is_idle_to_running
         )
 
-        # D13: Unified dispatch — both paths write Task + MessageQueue rows
-        # and notify the WorkerPool. No ``_job_queue_service.enqueue()`` call.
+        # Unified dispatch: notify the WorkerPool (Task row was already
+        # written in the prelude, in the same transaction as the
+        # MessageQueue row). No path-specific branch — the legacy
+        # ``_job_queue_service.enqueue()`` call was eliminated in D13.
         if self._manager._worker_pool is not None:
             self._manager._worker_pool.notify_work()
 
@@ -1011,7 +995,7 @@ class InstanceMessagingService:
 
         logger.debug(
             f"Enqueued message {ctx.message_id} for instance {instance_id} "
-            f"task_id={job_id} dispatch_path={dispatch_path}"
+            f"task_id={job_id}"
         )
 
         return AsyncMessageResult(

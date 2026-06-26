@@ -14,9 +14,7 @@ instance's langgraph thread:
 2. **JobQueue path** —
    :class:`daemon.services.message_job_handler.MessageJobHandler` is
    driven by ``JobProcessor._process_loop`` polling the
-   ``job_queue_items`` table. Triggered by
-   ``enqueue_message`` with ``dispatch_path="jobqueue"`` (the API/HTTP
-   entry point and some internal paths).
+   ``job_queue_items`` table.
 
 Before Phase 5, the two paths each contained near-identical copies of
 the same six shared stages: building the ``_do_process`` closure,

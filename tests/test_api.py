@@ -813,7 +813,6 @@ async def test_send_message_success(client, mock_manager):
         message="Hello, agent!",
         source="api",
         images=None,
-        dispatch_path="jobqueue"
     )
 
 

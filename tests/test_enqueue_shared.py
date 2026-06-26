@@ -1,34 +1,24 @@
-"""Phase 5 — Tests for the shared `_prepare_enqueued_message` helper.
+"""Tests for the shared ``_prepare_enqueued_message`` helper and the
+unified ``enqueue_message`` dispatcher.
 
-These tests verify that the ``_prepare_enqueued_message`` helper — the
-extracted shared prelude for ``enqueue_message`` (both
-``dispatch_path="workerpool"`` and ``dispatch_path="jobqueue"``) —
-produces **identical** pre-state side effects when called from either
-branch of the unified dispatcher.
+These tests verify the unified dispatcher end-to-end — every test
+exercises a single ``enqueue_message`` call (or a single
+``_prepare_enqueued_message`` call for the helper-level tests) and
+asserts the observable state.
 
-What's tested (SHARED behavior, identical for both paths):
+What's verified:
 
-  1. **MessageQueue row parity** — both create a row with the same
-     ``instance_id``, ``content``, ``source``, and ``type``.
-  2. **Event row parity** — both create a ``MESSAGE_RECEIVED`` event
-     row, sharing the same ``message_id``.
-  3. **Status transition parity** — both transition
-     ``IDLE`` / ``WAITING_CHILDREN`` / ``COMPLETED`` → ``RUNNING`` and
-     bump ``last_activity_at`` / ``version``.
-  4. **Title generation parity** — both fire ``_maybe_trigger_title_generation``
-     on ``IDLE`` → ``RUNNING``.
-  5. **Helper isolation** — calling ``_prepare_enqueued_message`` directly
-     produces correct DB state and the expected ``_PreparedEnqueueContext``.
-
-What's **NOT** tested (intentionally different between paths):
-
-  - ``Task`` row creation (only for ``dispatch_path="workerpool"``).
-  - ``JobQueueService.enqueue`` call (only for ``dispatch_path="jobqueue"``).
-  - WorkerPool ``notify_work`` (only for ``dispatch_path="workerpool"``).
-  - The ``_job_queue_service.enqueue`` call (only for ``dispatch_path="jobqueue"``).
-
-These are tested separately in ``tests/job_queue/`` and
-``tests/test_worker_notification*.py``.
+  * MessageQueue row is created with the input fields.
+  * Event row is created and links to the MessageQueue row by message_id.
+  * Status transitions (IDLE / WAITING_CHILDREN / COMPLETED → RUNNING)
+    and ``version`` + ``last_activity_at`` bumps.
+  * PAUSED instances are NOT auto-resumed.
+  * Title generation fires on IDLE → RUNNING and stays silent on
+    reactivation transitions.
+  * Internal source prefixes map to the correct ``MessageType``.
+  * ``_prepare_enqueued_message`` contract: returns the right context
+    fields, raises on shutdown, atomically writes MessageQueue + Task
+    + Event rows.
 
 Run with::
 
@@ -39,7 +29,6 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -158,7 +147,7 @@ def _build_manager(
     manager._worker_pool = MagicMock()
     manager._worker_pool.notify_work = MagicMock()
 
-    # The ``dispatch_path="jobqueue"`` branch looks up instance + dispatches via JQS.
+    # JobQueueService.enqueue is NEVER called for messages (D13 invariant).
     manager._job_queue_service = MagicMock()
     manager._job_queue_service.enqueue = AsyncMock(
         return_value=MagicMock(job_id="job-test-123")
@@ -219,8 +208,8 @@ def _load_instance(engine, instance_id: str) -> Instance | None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestMessageQueueRowParity:
-    """Both enqueue paths must create an identical ``MessageQueue`` row."""
+class TestMessageQueueRow:
+    """``enqueue_message`` creates a ``MessageQueue`` row with the input fields."""
 
     @pytest.mark.asyncio
     async def test_enqueue_message_creates_message_queue_row(
@@ -251,108 +240,37 @@ class TestMessageQueueRowParity:
         assert row.message_id  # auto-minted
 
     @pytest.mark.asyncio
-    async def test_enqueue_message_jobqueue_creates_message_queue_row(
-        self, engine, manager, messaging_service
-    ):
-        """``enqueue_message(dispatch_path="jobqueue")`` inserts a MessageQueue with the input fields."""
-        _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ):
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-1",
-                message="hello world",
-                source="api",
-                priority=1,
-            )
-
-        rows = _load_message_queues(engine, "inst-1")
-        assert len(rows) == 1, "enqueue_message(dispatch_path='jobqueue') should create exactly one MessageQueue"
-        row = rows[0]
-        assert row.instance_id == "inst-1"
-        assert row.content == "hello world"
-        assert row.source == "api"
-        assert row.type == MessageType.HUMAN.value
-        assert row.status == MessageStatus.READY.value
-        assert row.priority == 1
-        assert row.message_id
-
-    @pytest.mark.asyncio
-    async def test_message_queue_rows_are_identical(
-        self, engine, manager, messaging_service
-    ):
-        """Both paths produce a MessageQueue with **the same** fields.
-
-        The only difference allowed is the ``message_id`` (UUIDs are
-        minted per-call) and row ``id`` / ``enqueued_at`` (auto-generated).
-        """
-        _seed_instance(engine, instance_id="inst-a", status=InstanceStatus.IDLE.value)
-        _seed_instance(engine, instance_id="inst-b", status=InstanceStatus.IDLE.value)
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ):
-            wp_result = await messaging_service.enqueue_message(
-                instance_id="inst-a",
-                message="identical body",
-                source="telegram:user:42",
-                priority=0,
-            )
-            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-b",
-                message="identical body",
-                source="telegram:user:42",
-                priority=0,
-            )
-
-        wp_rows = _load_message_queues(engine, "inst-a")
-        jq_rows = _load_message_queues(engine, "inst-b")
-        assert len(wp_rows) == 1
-        assert len(jq_rows) == 1
-
-        wp, jq = wp_rows[0], jq_rows[0]
-        # Fields that must be equal (shared by the helper):
-        for field in (
-            "content",
-            "source",
-            "type",
-            "status",
-            "priority",
-            "images",
-        ):
-            assert getattr(wp, field) == getattr(jq, field), (
-                f"Field {field!r} differs: wp={getattr(wp, field)!r} "
-                f"jq={getattr(jq, field)!r}"
-            )
-
-        # message_id must be returned by both, but the value itself is per-call.
-        assert wp_result.message_id == wp.message_id
-        assert jq_result.message_id == jq.message_id
-        assert wp.message_id != jq.message_id  # independent UUIDs
-
-    @pytest.mark.asyncio
     async def test_internal_sources_map_to_correct_message_types(
         self, engine, manager, messaging_service
     ):
-        """``source`` prefix determines ``MessageType`` — verified for both paths."""
-        _seed_instance(engine, instance_id="inst-r", status=InstanceStatus.RUNNING.value)
+        """``source`` prefix determines ``MessageType`` for the unified dispatcher."""
+        # Use a different instance per call to avoid duplicate row conflicts.
+        sources_and_types = [
+            ("api", MessageType.HUMAN.value),
+            ("internal_agent:other", MessageType.AGENT.value),
+            ("internal_report:child", MessageType.COMPLETION_REPORT.value),
+            ("internal_error_report:child", MessageType.ERROR_REPORT.value),
+        ]
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            await messaging_service.enqueue_message(
-                instance_id="inst-r",
-                message="agent to agent",
-                source="internal_agent:other",
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-r",
-                message="completion report",
-                source="internal_report:child",
-            )
+            for idx, (src, expected) in enumerate(sources_and_types):
+                iid = f"inst-msg-{idx}"
+                _seed_instance(engine, instance_id=iid, status=InstanceStatus.RUNNING.value)
+                await messaging_service.enqueue_message(
+                    instance_id=iid,
+                    message="x",
+                    source=src,
+                    priority=1,
+                )
 
-        rows = _load_message_queues(engine, "inst-r")
-        by_source = {r.source: r.type for r in rows}
-        assert by_source["internal_agent:other"] == MessageType.AGENT.value
-        assert by_source["internal_report:child"] == MessageType.COMPLETION_REPORT.value
+        for idx, (src, expected) in enumerate(sources_and_types):
+            iid = f"inst-msg-{idx}"
+            rows = _load_message_queues(engine, iid)
+            assert len(rows) == 1
+            assert rows[0].type == expected, (
+                f"source={src!r} expected type={expected!r}, got {rows[0].type!r}"
+            )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -360,8 +278,8 @@ class TestMessageQueueRowParity:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestEventRowParity:
-    """Both enqueue paths must create a ``MESSAGE_RECEIVED`` event."""
+class TestEventRow:
+    """``enqueue_message`` creates a ``MESSAGE_RECEIVED`` event."""
 
     @pytest.mark.asyncio
     async def test_enqueue_message_creates_message_received_event(
@@ -395,30 +313,6 @@ class TestEventRowParity:
         assert data["role"] == "user"
 
     @pytest.mark.asyncio
-    async def test_enqueue_message_jobqueue_creates_message_received_event(
-        self, engine, manager, messaging_service
-    ):
-        _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ):
-            result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-1",
-                message="hi",
-                source="api",
-            )
-
-        events = _load_events(engine, "inst-1")
-        assert len(events) == 1
-        ev = events[0]
-        assert ev.kind == EventKind.MESSAGE_RECEIVED.value
-        assert ev.instance_id == "inst-1"
-        assert ev.message_id == result.message_id
-        data = json.loads(ev.data)
-        assert data["content"] == "hi"
-        assert data["source"] == "api"
-
-    @pytest.mark.asyncio
     async def test_event_message_id_matches_message_queue_message_id(
         self, engine, manager, messaging_service
     ):
@@ -433,7 +327,7 @@ class TestEventRowParity:
             wp_result = await messaging_service.enqueue_message(
                 instance_id="inst-1", message="x", source="api"
             )
-            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
+            jq_result = await messaging_service.enqueue_message(
                 instance_id="inst-1", message="y", source="api"
             )
 
@@ -455,8 +349,8 @@ class TestEventRowParity:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestStatusTransitionParity:
-    """Both enqueue paths must perform identical status transitions."""
+class TestStatusTransition:
+    """``enqueue_message`` performs the documented status transitions."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("initial", [
@@ -467,49 +361,23 @@ class TestStatusTransitionParity:
     async def test_status_transitions_to_running(
         self, engine, manager, messaging_service, initial
     ):
-        """``IDLE`` / ``WAITING_CHILDREN`` / ``COMPLETED`` all become ``RUNNING``.
-
-        Uses a fresh instance per path so each call performs the actual
-        transition (the first call on a given instance moves the status;
-        the second call on the same instance is a no-op).
-        """
-        # WorkerPool path on its own instance
-        wp_id = f"inst-wp-{initial}"
-        _seed_instance(engine, instance_id=wp_id, status=initial, version=3)
+        """``IDLE`` / ``WAITING_CHILDREN`` / ``COMPLETED`` all become ``RUNNING``."""
+        instance_id = f"inst-{initial}"
+        _seed_instance(engine, instance_id=instance_id, status=initial, version=3)
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
             await messaging_service.enqueue_message(
-                instance_id=wp_id, message="m", source="api"
+                instance_id=instance_id, message="m", source="api"
             )
 
-        wp_inst = _load_instance(engine, wp_id)
-        assert wp_inst.status == InstanceStatus.RUNNING.value
-        assert wp_inst.version == 4  # 3 + 1 enqueue call
-        assert wp_inst.last_activity_at is not None
+        inst = _load_instance(engine, instance_id)
+        assert inst.status == InstanceStatus.RUNNING.value
+        assert inst.version == 4  # 3 + 1 enqueue call
+        assert inst.last_activity_at is not None
         assert manager._live_hub.stream_status_change.await_count == 1
         call = manager._live_hub.stream_status_change.await_args
-        assert call.args[0] == wp_id
-        assert call.args[1] == InstanceStatus.RUNNING.value
-
-        # JobQueue path on its own instance (fresh manager mock to isolate counts)
-        jq_id = f"inst-jq-{initial}"
-        _seed_instance(engine, instance_id=jq_id, status=initial, version=3)
-        manager._live_hub.stream_status_change.reset_mock()
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ):
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id=jq_id, message="m", source="api"
-            )
-
-        jq_inst = _load_instance(engine, jq_id)
-        assert jq_inst.status == InstanceStatus.RUNNING.value
-        assert jq_inst.version == 4
-        assert jq_inst.last_activity_at is not None
-        assert manager._live_hub.stream_status_change.await_count == 1
-        call = manager._live_hub.stream_status_change.await_args
-        assert call.args[0] == jq_id
+        assert call.args[0] == instance_id
         assert call.args[1] == InstanceStatus.RUNNING.value
 
     @pytest.mark.asyncio
@@ -526,9 +394,6 @@ class TestStatusTransitionParity:
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
             await messaging_service.enqueue_message(
-                instance_id="inst-paused", message="x", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
                 instance_id="inst-paused", message="x", source="api"
             )
 
@@ -552,9 +417,6 @@ class TestStatusTransitionParity:
             await messaging_service.enqueue_message(
                 instance_id="inst-run", message="m", source="api"
             )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-run", message="m", source="api"
-            )
 
         inst = _load_instance(engine, "inst-run")
         assert inst.status == InstanceStatus.RUNNING.value
@@ -562,37 +424,15 @@ class TestStatusTransitionParity:
         manager._live_hub.stream_status_change.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_missing_instance_in_wp_path_warns_but_creates_message(
-        self, engine, manager, messaging_service
-    ):
-        """WorkerPool path: when the instance row is missing, the helper
-        still creates the MessageQueue + Event but does NOT raise.
-        """
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ):
-            await messaging_service.enqueue_message(
-                instance_id="ghost-wp", message="hi", source="api"
-            )
-
-        # MessageQueue and Event rows should still exist.
-        assert len(_load_message_queues(engine, "ghost-wp")) == 1
-        assert len(_load_events(engine, "ghost-wp")) == 1
-        # And no status SSE was emitted (no instance to transition).
-        manager._live_hub.stream_status_change.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_missing_instance_in_jq_path_warns_but_creates_message(
+    async def test_missing_instance_warns_but_creates_message(
         self, engine, manager, messaging_service, caplog
     ):
-        """JobQueue path: when the instance row is missing, the helper
-        still creates the MessageQueue + Event, logs a warning, and does
-        NOT raise.
+        """When the instance row is missing, the helper still creates the
+        MessageQueue + Event, logs a warning, and does NOT raise.
 
-        D13 unified the two dispatch paths. Both now tolerate a briefly-
+        D13 unified the two dispatch paths. Both tolerate a briefly-
         missing instance row (race window during instance creation) by
-        logging a warning and continuing — no ValueError is raised. This
-        mirrors the WorkerPool path behavior.
+        logging a warning and continuing — no ValueError is raised.
         """
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
@@ -600,63 +440,49 @@ class TestStatusTransitionParity:
             with caplog.at_level(
                 logging.WARNING, logger="daemon.services.instance_messaging"
             ):
-                await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                    instance_id="ghost-jq", message="hi", source="api"
+                await messaging_service.enqueue_message(
+                    instance_id="ghost-inst", message="hi", source="api"
                 )
 
         # MessageQueue and Event rows should still exist.
-        assert len(_load_message_queues(engine, "ghost-jq")) == 1
-        assert len(_load_events(engine, "ghost-jq")) == 1
+        assert len(_load_message_queues(engine, "ghost-inst")) == 1
+        assert len(_load_events(engine, "ghost-inst")) == 1
         # And no status SSE was emitted (no instance to transition).
         manager._live_hub.stream_status_change.assert_not_awaited()
         # A warning about the missing instance must be logged.
         assert any(
-            "ghost-jq" in record.getMessage() and "not found" in record.getMessage()
+            "ghost-inst" in record.getMessage() and "not found" in record.getMessage()
             for record in caplog.records
-        ), "expected a warning log about missing instance 'ghost-jq'"
+        ), "expected a warning log about missing instance 'ghost-inst'"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. Title generation parity
+# 4. Title generation
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestTitleGenerationParity:
-    """Both paths fire ``_maybe_trigger_title_generation`` on
-    ``IDLE`` → ``RUNNING``."""
+class TestTitleGeneration:
+    """``enqueue_message`` fires ``_maybe_trigger_title_generation`` on
+    ``IDLE`` → ``RUNNING``.
+    """
 
     @pytest.mark.asyncio
-    async def test_wp_path_triggers_title_on_idle_to_running(
+    async def test_triggers_title_on_idle_to_running(
         self, engine, manager, messaging_service
     ):
-        _seed_instance(engine, instance_id="inst-wp", status=InstanceStatus.IDLE.value)
+        _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.IDLE.value)
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ) as mock_bridge:
             await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="hello", source="api"
+                instance_id="inst-1", message="hello", source="api"
             )
 
         # Bridge called once for the IDLE -> RUNNING transition.
         assert mock_bridge.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_jq_path_triggers_title_on_idle_to_running(
-        self, engine, manager, messaging_service
-    ):
-        _seed_instance(engine, instance_id="inst-jq", status=InstanceStatus.IDLE.value)
-        with patch(
-            "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
-        ) as mock_bridge:
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-jq", message="hello", source="api"
-            )
-
-        # Bridge called once for the IDLE -> RUNNING transition.
-        assert mock_bridge.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_neither_path_triggers_title_on_completed_to_running(
+    async def test_does_not_trigger_title_on_completed_to_running(
         self, engine, manager, messaging_service
     ):
         """``COMPLETED`` → ``RUNNING`` (reactivation) does NOT trigger title gen.
@@ -666,26 +492,20 @@ class TestTitleGenerationParity:
         resume, not a new conversation.
         """
         _seed_instance(
-            engine, instance_id="inst-c-wp", status=InstanceStatus.COMPLETED.value
-        )
-        _seed_instance(
-            engine, instance_id="inst-c-jq", status=InstanceStatus.COMPLETED.value
+            engine, instance_id="inst-c", status=InstanceStatus.COMPLETED.value
         )
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ) as mock_bridge:
             await messaging_service.enqueue_message(
-                instance_id="inst-c-wp", message="resume", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-c-jq", message="resume", source="api"
+                instance_id="inst-c", message="resume", source="api"
             )
 
         # Title generation should NOT fire for the reactivation path.
         mock_bridge.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_neither_path_triggers_title_on_waiting_children_to_running(
+    async def test_does_not_trigger_title_on_waiting_children_to_running(
         self, engine, manager, messaging_service
     ):
         """``WAITING_CHILDREN`` → ``RUNNING`` does NOT trigger title gen.
@@ -694,19 +514,13 @@ class TestTitleGenerationParity:
         is unblocking it.
         """
         _seed_instance(
-            engine, instance_id="inst-w-wp", status=InstanceStatus.WAITING_CHILDREN.value
-        )
-        _seed_instance(
-            engine, instance_id="inst-w-jq", status=InstanceStatus.WAITING_CHILDREN.value
+            engine, instance_id="inst-w", status=InstanceStatus.WAITING_CHILDREN.value
         )
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ) as mock_bridge:
             await messaging_service.enqueue_message(
-                instance_id="inst-w-wp", message="child report", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-w-jq", message="child report", source="api"
+                instance_id="inst-w", message="child report", source="api"
             )
 
         mock_bridge.assert_not_called()
@@ -719,13 +533,11 @@ class TestTitleGenerationParity:
 
 class TestPrepareEnqueuedMessageHelper:
     """Tests that call ``_prepare_enqueued_message`` directly, bypassing
-    the path-specific dispatch (Task row / JobQueue enqueue).
+    the dispatch layer.
 
     These verify the helper's contract in isolation:
 
       * Returns a ``_PreparedEnqueueContext`` with the right fields.
-      * Honors ``create_task_row=True`` (Task row in same transaction).
-      * Honors ``create_task_row=False`` (no Task row).
       * Honors ``path_label`` (logged when reactivating COMPLETED).
       * Raises on shutdown.
     """
@@ -743,7 +555,6 @@ class TestPrepareEnqueuedMessageHelper:
             priority=1,
             images=None,
             metadata=None,
-            create_task_row=True,
             path_label="WorkerPool",
         )
 
@@ -755,50 +566,19 @@ class TestPrepareEnqueuedMessageHelper:
         assert ctx.previous_status == InstanceStatus.IDLE.value
         assert ctx.instance_agent_id == "developer"
 
-        # DB state: 1 message queue + 1 task + 1 event.
+        # DB state: 1 message queue + 1 task + 1 event (atomic).
         assert len(_load_message_queues(engine, "inst-1")) == 1
         assert len(_load_tasks(engine, "inst-1")) == 1
         assert len(_load_events(engine, "inst-1")) == 1
         inst = _load_instance(engine, "inst-1")
         assert inst.status == InstanceStatus.RUNNING.value
 
-    def test_helper_create_task_row_true_inserts_task(
+    def test_helper_always_inserts_task_row(
         self, engine, manager, messaging_service
     ):
-        """``create_task_row=True`` writes a Task row in the same transaction."""
-        _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
-
-        ctx = messaging_service._prepare_enqueued_message(
-            instance_id="inst-1",
-            message="x",
-            source="api",
-            priority=1,
-            images=None,
-            metadata=None,
-            create_task_row=True,
-            path_label="WorkerPool",
-        )
-
-        tasks = _load_tasks(engine, "inst-1")
-        assert len(tasks) == 1
-        task = tasks[0]
-        assert task.task_type == TaskType.PROCESS_MESSAGE.value
-        assert task.instance_id == "inst-1"
-        assert task.message_id == ctx.message_id
-        assert task.status == TaskStatus.PENDING.value
-
-    def test_helper_create_task_row_false_still_inserts_task_post_d13(
-        self, engine, manager, messaging_service
-    ):
-        """D13: ``create_task_row`` flag is preserved for API compat but
-        the helper ALWAYS inserts a Task row regardless of its value.
-
-        Pre-D13 the JQ path skipped the Task row and instead enqueued a
-        JobItem via ``_job_queue_service.enqueue``. Post-D13 both paths
-        share the same Task-row creation in ``_prepare_enqueued_message``;
-        the ``dispatch_path`` is accepted but ignored at the prelude level.
-        This test pins the post-D13 contract: ``create_task_row=False``
-        still produces a Task row (the flag is a no-op after D13).
+        """Phase 4: ``_prepare_enqueued_message`` ALWAYS inserts a Task row
+        in the same transaction as the MessageQueue row. Task row creation
+        is unconditional.
         """
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
 
@@ -809,16 +589,16 @@ class TestPrepareEnqueuedMessageHelper:
             priority=1,
             images=None,
             metadata=None,
-            create_task_row=False,
-            path_label="",
+            path_label="WorkerPool",
         )
 
-        # D13: a Task row is always inserted.
-        assert len(_load_tasks(engine, "inst-1")) == 1
-        # MessageQueue and Event are also written.
-        assert len(_load_message_queues(engine, "inst-1")) == 1
-        assert len(_load_events(engine, "inst-1")) == 1
-        assert ctx.message_id
+        tasks = _load_tasks(engine, "inst-1")
+        assert len(tasks) == 1
+        task = tasks[0]
+        assert task.task_type == TaskType.PROCESS_MESSAGE.value
+        assert task.instance_id == "inst-1"
+        assert task.message_id == ctx.message_id
+        assert task.status == TaskStatus.PENDING.value
 
     def test_helper_is_idle_to_running_false_for_completed(
         self, engine, manager, messaging_service
@@ -835,7 +615,6 @@ class TestPrepareEnqueuedMessageHelper:
             priority=1,
             images=None,
             metadata=None,
-            create_task_row=False,
             path_label="JobQueue",
         )
 
@@ -858,7 +637,6 @@ class TestPrepareEnqueuedMessageHelper:
             priority=1,
             images=None,
             metadata=None,
-            create_task_row=False,
             path_label="",
         )
 
@@ -872,8 +650,7 @@ class TestPrepareEnqueuedMessageHelper:
     def test_helper_atomicity_task_and_message_committed_together(
         self, engine, manager, messaging_service
     ):
-        """When ``create_task_row=True``, the Task + MessageQueue commit
-        atomically — i.e., both are visible after the call returns."""
+        """Task + MessageQueue commit atomically — both visible after the call."""
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
 
         ctx = messaging_service._prepare_enqueued_message(
@@ -883,7 +660,6 @@ class TestPrepareEnqueuedMessageHelper:
             priority=1,
             images=None,
             metadata=None,
-            create_task_row=True,
             path_label="WorkerPool",
         )
 
@@ -907,7 +683,6 @@ class TestPrepareEnqueuedMessageHelper:
                 priority=1,
                 images=None,
                 metadata=None,
-                create_task_row=True,
                 path_label="",
             )
 
@@ -920,7 +695,6 @@ class TestPrepareEnqueuedMessageHelper:
 
     def test_helper_message_type_resolution(self, engine, manager, messaging_service):
         """``source`` prefix -> ``msg_type`` mapping."""
-        # All three internal prefixes and the default HUMAN case.
         sources_and_types = [
             ("api", MessageType.HUMAN.value),
             ("internal_agent:other", MessageType.AGENT.value),
@@ -938,7 +712,6 @@ class TestPrepareEnqueuedMessageHelper:
                 priority=1,
                 images=None,
                 metadata=None,
-                create_task_row=False,
                 path_label="",
             )
             assert ctx.msg_type == expected, (
@@ -960,7 +733,6 @@ class TestPrepareEnqueuedMessageHelper:
             priority=0,
             images=images,
             metadata=meta,
-            create_task_row=False,
             path_label="",
         )
 
@@ -971,19 +743,18 @@ class TestPrepareEnqueuedMessageHelper:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 6. Dispatch-layer difference (sanity check)
+# 6. Dispatch-layer invariants
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestDispatchLayerDifference:
-    """Sanity: the only difference between the two paths is the dispatch
-    layer (Task row + WorkerPool notify for WP; JobQueueService.enqueue for
-    JQ). Everything else (MessageQueue, Event, status) is identical."""
+class TestDispatchLayerInvariants:
+    """Single dispatcher: Task row + WorkerPool notify; no JobQueue.enqueue."""
 
     @pytest.mark.asyncio
-    async def test_worker_pool_path_creates_task_and_notifies_pool(
+    async def test_creates_task_and_notifies_pool(
         self, engine, manager, messaging_service
     ):
+        """``enqueue_message`` writes a Task row and notifies the WorkerPool."""
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
@@ -995,40 +766,26 @@ class TestDispatchLayerDifference:
         # Task row created; WorkerPool notified.
         assert len(_load_tasks(engine, "inst-1")) == 1
         manager._worker_pool.notify_work.assert_called_once()
-        # JobQueueService.enqueue NOT called for WorkerPool path.
+        # JobQueueService.enqueue NOT called.
         manager._job_queue_service.enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_jq_path_post_d13_matches_wp_path(
+    async def test_returns_job_id_as_str_of_task_id(
         self, engine, manager, messaging_service
     ):
-        """D13: ``dispatch_path="jobqueue"`` produces the SAME observable
-        state as ``dispatch_path="workerpool"``.
-
-        Pre-D13 the JQ path was structurally different: it skipped the
-        Task row, did not call ``_worker_pool.notify_work``, and instead
-        called ``_job_queue_service.enqueue`` to create a JobItem. Post-D13
-        both paths share the unified prelude (Task + MessageQueue + Event)
-        and the WorkerPool notify; ``_job_queue_service.enqueue`` is
-        NEVER called for messages (its ``enqueue`` rejects
-        ``job_type="message"`` with ``ValueError``).
+        """``AsyncMessageResult.job_id`` = ``str(task_id)`` — stable identifier
+        for callers (the ``job_continue`` tool returns it as ``new_job_id``).
         """
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
         with patch(
             "daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"
         ):
-            result = await messaging_service.enqueue_message(dispatch_path="jobqueue",
+            result = await messaging_service.enqueue_message(
                 instance_id="inst-1", message="x", source="api"
             )
 
-        # D13: Task row IS created (same as WP path).
-        assert len(_load_tasks(engine, "inst-1")) == 1
-        # WorkerPool IS notified (same as WP path).
-        manager._worker_pool.notify_work.assert_called_once()
-        # JobQueueService.enqueue is NEVER called for messages post-D13.
-        manager._job_queue_service.enqueue.assert_not_awaited()
-        # AsyncMessageResult.job_id is str(task_id) post-D13, not the
-        # legacy "job-test-123" JobItem.job_id sentinel from the mock.
+        # ``job_id`` must be a stringified int (Task PK), not None, not
+        # the legacy ``"job-test-123"`` JobItem.job_id sentinel from the mock.
         assert result.job_id is not None
         assert result.job_id.isdigit()
         assert int(result.job_id) > 0

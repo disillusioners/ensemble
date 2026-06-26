@@ -1,20 +1,28 @@
-"""Path-equivalence tests for ``enqueue_message`` (both dispatch paths).
+"""Tests for the unified ``enqueue_message`` dispatcher.
 
-These tests assert that calling the unified ``enqueue_message`` with
-``dispatch_path="workerpool"`` and ``dispatch_path="jobqueue"`` with
-the **same inputs** produces the same observable state — for everything
-that the two paths are supposed to share (the ``_prepare_enqueued_message``
-prelude side-effects).
+These tests verify the unified dispatcher behavior end-to-end — every
+test exercises a single ``enqueue_message`` call and asserts the
+observable state (MessageQueue, Task, Event rows, WorkerPool notify,
+status transitions, AsyncMessageResult contract).
 
-The two paths are *deliberately* divergent at the dispatch layer:
+The earlier "path equivalence" framing is no longer relevant: the
+parameter that named the two paths was removed in Phase 4. There is
+now only one path.
 
-  * ``enqueue_message(dispatch_path="workerpool")`` writes a ``Task``
-    row and notifies ``_worker_pool.notify_work()``.
-  * ``enqueue_message(dispatch_path="jobqueue")`` writes a ``JobItem``
-    row and calls ``_job_queue_service.enqueue()``.
+What's verified here:
 
-That divergence is tested explicitly as a sanity check (tests 4 and 5)
-so future refactors can't accidentally collapse the two dispatchers.
+  * MessageQueue row is created with the input fields.
+  * Status transition (IDLE / WAITING_CHILDREN / COMPLETED → RUNNING).
+  * MESSAGE_RECEIVED event row.
+  * Task row is created in the same transaction.
+  * WorkerPool is notified.
+  * Instance ``version`` + ``last_activity_at`` are bumped.
+  * ``AsyncMessageResult.job_id`` is ``str(task_id)``.
+  * ``images`` and ``priority`` are stored on the MessageQueue row.
+  * SSE ``status_change`` is emitted on transitions.
+  * PAUSED instances are NOT auto-resumed.
+  * No ``JobItem`` row is created (D13 invariant).
+  * ``_job_queue_service.enqueue`` is never called for messages.
 
 Run with::
 
@@ -24,7 +32,6 @@ Run with::
 from __future__ import annotations
 
 import json
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -115,13 +122,13 @@ def _build_manager(engine, instance_repository, write_guard) -> MagicMock:
     manager._live_hub = MagicMock()
     manager._live_hub.stream_status_change = AsyncMock()
 
-    # WorkerPool notify is called only on the WP path; mock it so we can
-    # assert call counts.
+    # WorkerPool notify is called by the unified dispatcher; mock it so we
+    # can assert call counts.
     manager._worker_pool = MagicMock()
     manager._worker_pool.notify_work = MagicMock()
 
-    # JobQueueService.enqueue is called only on the JQ path; mock it so we
-    # can assert call counts and inspect kwargs (images, priority, etc.).
+    # JobQueueService.enqueue is NEVER called for messages (D13 invariant).
+    # Mock it so the test can assert the absence.
     manager._job_queue_service = MagicMock()
     manager._job_queue_service.enqueue = AsyncMock(
         return_value=MagicMock(job_id="job-jq-xyz")
@@ -180,7 +187,7 @@ def _load_instance(engine, instance_id: str) -> Instance | None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Shared inputs — used for side-by-side equivalence tests
+# Shared inputs
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SAMPLE_MESSAGE = "Hello, world!"
@@ -190,40 +197,23 @@ _SAMPLE_IMAGES = ["data:image/png;base64,AAAA"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tests 1–10: Path equivalence
+# Tests — unified dispatcher behavior
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-class TestDispatcherPathEquivalence:
-    """Both paths must produce equivalent observable state for the same inputs."""
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 1. MessageQueue row equivalence
-    # ────────────────────────────────────────────────────────────────────────
+class TestUnifiedEnqueueDispatcher:
+    """Unified dispatcher behavior — single ``enqueue_message`` call per test."""
 
     @pytest.mark.asyncio
-    async def test_1_message_queue_row_equivalence(
+    async def test_1_creates_message_queue_row_with_input_fields(
         self, engine, manager, messaging_service
     ):
-        """Both paths insert a ``MessageQueue`` row with identical fields.
-
-        The only differences allowed are row ``id`` and ``enqueued_at``
-        (auto-generated) and ``message_id`` (UUIDs minted per call).
-        """
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
+        """``enqueue_message`` inserts a MessageQueue row with the input fields."""
+        _seed_instance(engine, instance_id="inst-1")
 
         with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
             await messaging_service.enqueue_message(
-                instance_id="inst-wp",
-                message=_SAMPLE_MESSAGE,
-                source=_SAMPLE_SOURCE,
-                priority=_SAMPLE_PRIORITY,
-                images=_SAMPLE_IMAGES,
-                metadata={"resume_mode": True},
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-jq",
+                instance_id="inst-1",
                 message=_SAMPLE_MESSAGE,
                 source=_SAMPLE_SOURCE,
                 priority=_SAMPLE_PRIORITY,
@@ -231,411 +221,117 @@ class TestDispatcherPathEquivalence:
                 metadata={"resume_mode": True},
             )
 
-        wp = _load_message_queues(engine, "inst-wp")[0]
-        jq = _load_message_queues(engine, "inst-jq")[0]
-
-        # Both paths create exactly one MessageQueue row.
-        assert len(_load_message_queues(engine, "inst-wp")) == 1
-        assert len(_load_message_queues(engine, "inst-jq")) == 1
-
-        # Compare field-by-field on the shared prelude contract.
-        # NOTE: ``instance_id`` is the test-supplied input (the two paths
-        # are seeded with different IDs) and ``message_id`` is a UUID
-        # minted per-call — both are necessarily different. We compare
-        # the remaining fields that the prelude is contractually
-        # obligated to produce identically for the same inputs.
-        for field in (
-            "content",
-            "source",
-            "type",
-            "status",
-            "priority",
-            "images",
-        ):
-            assert getattr(wp, field) == getattr(jq, field), (
-                f"MessageQueue.{field} diverges between paths: "
-                f"wp={getattr(wp, field)!r} jq={getattr(jq, field)!r}"
-            )
-
-        # Both paths must store their own (per-call) instance_id correctly.
-        assert wp.instance_id == "inst-wp"
-        assert jq.instance_id == "inst-jq"
-        # message_id is a per-call UUID — must exist but values will differ.
-        assert wp.message_id and jq.message_id
-        assert wp.message_id != jq.message_id
-
-        assert wp.content == _SAMPLE_MESSAGE
-        assert wp.source == _SAMPLE_SOURCE
-        assert wp.priority == _SAMPLE_PRIORITY
-        assert wp.images == _SAMPLE_IMAGES
-        assert wp.type == MessageType.HUMAN.value
-        assert wp.status == MessageStatus.READY.value
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 2. Status transition equivalence (IDLE → RUNNING)
-    # ────────────────────────────────────────────────────────────────────────
+        rows = _load_message_queues(engine, "inst-1")
+        assert len(rows) == 1, "enqueue_message should create exactly one MessageQueue"
+        row = rows[0]
+        assert row.instance_id == "inst-1"
+        assert row.content == _SAMPLE_MESSAGE
+        assert row.source == _SAMPLE_SOURCE
+        assert row.priority == _SAMPLE_PRIORITY
+        assert row.images == _SAMPLE_IMAGES
+        assert row.type == MessageType.HUMAN.value
+        assert row.status == MessageStatus.READY.value
+        assert row.message_id  # auto-minted
 
     @pytest.mark.asyncio
-    async def test_2_idle_to_running_transition_equivalence(
+    async def test_2_transitions_idle_to_running_with_version_bump(
         self, engine, manager, messaging_service
     ):
-        """Both paths transition IDLE → RUNNING with the same version bump."""
-        _seed_instance(engine, instance_id="inst-wp", version=3)
-        _seed_instance(engine, instance_id="inst-jq", version=3)
+        """IDLE → RUNNING with the same version bump + last_activity_at."""
+        _seed_instance(engine, instance_id="inst-1", version=3)
 
         with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
             await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="m", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-jq", message="m", source="api"
+                instance_id="inst-1", message="m", source="api"
             )
 
-        wp_inst = _load_instance(engine, "inst-wp")
-        jq_inst = _load_instance(engine, "inst-jq")
-
-        assert wp_inst.status == jq_inst.status == InstanceStatus.RUNNING.value
+        inst = _load_instance(engine, "inst-1")
+        assert inst.status == InstanceStatus.RUNNING.value
         # version went from 3 → 4 (one enqueue call).
-        assert wp_inst.version == jq_inst.version == 4
-        # last_activity_at set on both.
-        assert wp_inst.last_activity_at is not None
-        assert jq_inst.last_activity_at is not None
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 3. MESSAGE_RECEIVED event equivalence
-    # ────────────────────────────────────────────────────────────────────────
+        assert inst.version == 4
+        # last_activity_at set.
+        assert inst.last_activity_at is not None
 
     @pytest.mark.asyncio
-    async def test_3_message_received_event_equivalence(
+    async def test_3_emits_message_received_event(
         self, engine, manager, messaging_service
     ):
-        """Both paths emit a ``MESSAGE_RECEIVED`` event linked by message_id."""
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
+        """``enqueue_message`` emits a ``MESSAGE_RECEIVED`` event linked by message_id."""
+        _seed_instance(engine, instance_id="inst-1")
 
         with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-            wp_result = await messaging_service.enqueue_message(
-                instance_id="inst-wp", message=_SAMPLE_MESSAGE, source=_SAMPLE_SOURCE
-            )
-            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-jq", message=_SAMPLE_MESSAGE, source=_SAMPLE_SOURCE
+            result = await messaging_service.enqueue_message(
+                instance_id="inst-1", message=_SAMPLE_MESSAGE, source=_SAMPLE_SOURCE
             )
 
-        wp_evs = _load_events(engine, "inst-wp")
-        jq_evs = _load_events(engine, "inst-jq")
+        events = _load_events(engine, "inst-1")
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.kind == EventKind.MESSAGE_RECEIVED.value
+        assert ev.instance_id == "inst-1"
+        assert ev.message_id == result.message_id
 
-        assert len(wp_evs) == 1
-        assert len(jq_evs) == 1
-
-        wp_ev, jq_ev = wp_evs[0], jq_evs[0]
-
-        # Event kind is identical.
-        assert wp_ev.kind == jq_ev.kind == EventKind.MESSAGE_RECEIVED.value
-        # message_id links event to MessageQueue row in both paths.
-        assert wp_ev.message_id == wp_result.message_id
-        assert jq_ev.message_id == jq_result.message_id
-
-        # Event payload parity on shared fields. ``message_id`` is a
-        # per-call UUID (necessarily different between the two enqueues);
-        # we compare the contractually shared fields only.
-        wp_data = json.loads(wp_ev.data)
-        jq_data = json.loads(jq_ev.data)
-        for field in ("content", "source", "role"):
-            assert wp_data[field] == jq_data[field], (
-                f"event.data.{field} diverges between paths: "
-                f"wp={wp_data[field]!r} jq={jq_data[field]!r}"
-            )
-        assert wp_data["content"] == _SAMPLE_MESSAGE
-        assert wp_data["source"] == _SAMPLE_SOURCE
-        # Each event's message_id must match its own call's returned UUID.
-        assert wp_data["message_id"] == wp_result.message_id
-        assert jq_data["message_id"] == jq_result.message_id
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 4. Dispatch divergence: Task row (WorkerPool only)
-    # ────────────────────────────────────────────────────────────────────────
+        data = json.loads(ev.data)
+        assert data["content"] == _SAMPLE_MESSAGE
+        assert data["source"] == _SAMPLE_SOURCE
+        assert data["message_id"] == result.message_id
 
     @pytest.mark.asyncio
-    async def test_4_both_paths_create_task_row(
+    async def test_4_creates_task_row_and_notifies_pool(
         self, engine, manager, messaging_service
     ):
-        """D13: BOTH paths write a ``Task`` row + notify the pool.
-
-        Pre-D13: only ``dispatch_path="workerpool"`` created a Task row;
-        the ``"jobqueue"`` path created a JobItem instead. Post-D13 both
-        paths are identical: they write MessageQueue + Task + Event rows
-        and notify the WorkerPool. No JobItem is ever created.
-        """
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
+        """``enqueue_message`` writes a ``Task`` row + notifies the WorkerPool."""
+        _seed_instance(engine, instance_id="inst-1")
 
         with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
             await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="m", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                instance_id="inst-jq", message="m", source="api"
+                instance_id="inst-1", message="m", source="api"
             )
 
-        wp_tasks = _load_tasks(engine, "inst-wp")
-        jq_tasks = _load_tasks(engine, "inst-jq")
+        tasks = _load_tasks(engine, "inst-1")
+        assert len(tasks) == 1, "Unified dispatcher must create a Task row"
+        task = tasks[0]
+        assert task.task_type == TaskType.PROCESS_MESSAGE.value
+        assert task.status == TaskStatus.PENDING.value
 
-        # D13: BOTH paths create exactly one Task row each.
-        assert len(wp_tasks) == 1, "WorkerPool path must create a Task row"
-        assert len(jq_tasks) == 1, "JobQueue path must ALSO create a Task row (D13)"
-
-        # Task rows are structurally identical (same type, status, etc.).
-        wp_task, jq_task = wp_tasks[0], jq_tasks[0]
-        assert wp_task.task_type == jq_task.task_type == TaskType.PROCESS_MESSAGE.value
-        assert wp_task.status == jq_task.status == TaskStatus.PENDING.value
-
-        # WorkerPool.notify_work called once per enqueue (both paths).
-        assert manager._worker_pool.notify_work.call_count == 2
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 5. Dispatch divergence: JobItem enqueue (JobQueue only)
-    # ────────────────────────────────────────────────────────────────────────
+        # WorkerPool.notify_work called once.
+        manager._worker_pool.notify_work.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_5_no_path_calls_jq_service(
+    async def test_5_does_not_call_jq_service_enqueue(
         self, engine, manager, messaging_service
     ):
-        """D13: NEITHER path calls ``_job_queue_service.enqueue``.
-
-        Pre-D13: ``dispatch_path="jobqueue"`` called
-        ``_job_queue_service.enqueue(job_type="message")``. Post-D13
-        messages no longer create JobItem rows — the unified WorkerPool
-        path writes only Task + MessageQueue rows. ``_job_queue_service``
-        is reserved for TASK-type dispatch-queue jobs.
+        """D13 invariant: ``_job_queue_service.enqueue`` is NEVER called
+        for messages — the unified dispatcher only writes Task + MessageQueue
+        rows and notifies the WorkerPool. ``_job_queue_service`` is reserved
+        for TASK-type dispatch-queue jobs.
         """
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
+        _seed_instance(engine, instance_id="inst-1")
 
         with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
             await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="m", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                instance_id="inst-jq", message="m", source="api"
+                instance_id="inst-1", message="m", source="api"
             )
 
-        # D13 invariant: ``_job_queue_service.enqueue`` is NEVER called
-        # for messages (the guard in ``enqueue_job`` rejects job_type=
-        # "message" with ValueError).
         manager._job_queue_service.enqueue.assert_not_awaited()
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 6. version + last_activity_at equivalence
-    # ────────────────────────────────────────────────────────────────────────
-
     @pytest.mark.asyncio
-    async def test_6_version_and_activity_bump_equivalence(
+    async def test_6_no_jobitem_row_created(
         self, engine, manager, messaging_service
     ):
-        """Both paths bump ``version`` and set ``last_activity_at``."""
-        _seed_instance(engine, instance_id="inst-wp", version=7)
-        _seed_instance(engine, instance_id="inst-jq", version=7)
-
-        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-            await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="x", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-jq", message="x", source="api"
-            )
-
-        wp_inst = _load_instance(engine, "inst-wp")
-        jq_inst = _load_instance(engine, "inst-jq")
-
-        assert wp_inst.version == 8
-        assert jq_inst.version == 8
-        assert wp_inst.last_activity_at is not None
-        assert jq_inst.last_activity_at is not None
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 7. AsyncMessageResult contract equivalence
-    # ────────────────────────────────────────────────────────────────────────
-
-    @pytest.mark.asyncio
-    async def test_7_async_message_result_equivalence(
-        self, engine, manager, messaging_service
-    ):
-        """D13: BOTH paths return ``AsyncMessageResult`` with ``job_id``
-        populated as ``str(task_id)``.
-
-        Pre-D13: only the ``"jobqueue"`` path populated ``job_id`` (from
-        ``JobItem.job_id``); the ``"workerpool"`` path left it as
-        ``None``. Post-D13 both paths populate ``job_id`` with
-        ``str(task_id)`` as the adapter contract — the HTTP route
-        discards it and the ``job_continue`` tool returns it as
-        ``new_job_id``. The semantic shift from ``JobItem.job_id`` (UUID)
-        to ``Task.id`` (int) is intentional and documented on
-        ``AsyncMessageResult.job_id``.
-        """
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
-
-        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-            wp_result = await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="m", source="api"
-            )
-            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                instance_id="inst-jq", message="m", source="api"
-            )
-
-        # Type contract is identical.
-        assert isinstance(wp_result, AsyncMessageResult)
-        assert isinstance(jq_result, AsyncMessageResult)
-
-        # Both must return message_id, instance_id, status="queued".
-        assert wp_result.message_id and jq_result.message_id
-        assert wp_result.instance_id == "inst-wp"
-        assert jq_result.instance_id == "inst-jq"
-        assert wp_result.status == jq_result.status == "queued"
-
-        # D13: BOTH paths populate job_id with str(task_id). The value is
-        # a stringified int (Task PK), not the old "job-jq-xyz" sentinel
-        # from the mock — that sentinel is no longer relevant since no
-        # JobItem is created.
-        assert wp_result.job_id is not None and wp_result.job_id.isdigit(), (
-            f"WorkerPool path must populate job_id=str(task_id) post-D13, "
-            f"got {wp_result.job_id!r}"
-        )
-        assert jq_result.job_id is not None and jq_result.job_id.isdigit(), (
-            f"JobQueue path must populate job_id=str(task_id) post-D13, "
-            f"got {jq_result.job_id!r}"
-        )
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 8. images metadata equivalence
-    # ────────────────────────────────────────────────────────────────────────
-
-    @pytest.mark.asyncio
-    async def test_8_images_metadata_equivalence(
-        self, engine, manager, messaging_service
-    ):
-        """``images`` is stored on the MessageQueue row by both paths."""
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
-
-        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-            await messaging_service.enqueue_message(
-                instance_id="inst-wp",
-                message="vision",
-                source="api",
-                images=_SAMPLE_IMAGES,
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                instance_id="inst-jq",
-                message="vision",
-                source="api",
-                images=_SAMPLE_IMAGES,
-            )
-
-        wp = _load_message_queues(engine, "inst-wp")[0]
-        jq = _load_message_queues(engine, "inst-jq")[0]
-        assert wp.images == _SAMPLE_IMAGES
-        assert jq.images == _SAMPLE_IMAGES
-
-        # D13: ``_job_queue_service.enqueue`` is NEVER called for messages,
-        # so the pre-D13 assertion that ``jq_call_kwargs["metadata"]
-        # ["images"]`` matches the input is no longer applicable. Images
-        # live on the MessageQueue row, which both paths populate.
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 9. priority parameter equivalence
-    # ────────────────────────────────────────────────────────────────────────
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("priority", [0, 1, 5])
-    async def test_9_priority_parameter_equivalence(
-        self, engine, manager, messaging_service, priority
-    ):
-        """``priority`` parameter is stored on MessageQueue by both paths."""
-        wp_id = f"inst-wp-{priority}"
-        jq_id = f"inst-jq-{priority}"
-        _seed_instance(engine, instance_id=wp_id)
-        _seed_instance(engine, instance_id=jq_id)
-
-        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-            await messaging_service.enqueue_message(
-                instance_id=wp_id, message="m", source="api", priority=priority
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                instance_id=jq_id, message="m", source="api", priority=priority
-            )
-
-        wp = _load_message_queues(engine, wp_id)[0]
-        jq = _load_message_queues(engine, jq_id)[0]
-        assert wp.priority == priority
-        assert jq.priority == priority
-
-        # D13: priority flows only through MessageQueue.priority (both
-        # paths). No JobItem is created, so there is no per-path
-        # priority divergence.
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 10. SSE status_change equivalence
-    # ────────────────────────────────────────────────────────────────────────
-
-    @pytest.mark.asyncio
-    async def test_10_sse_status_change_equivalence(
-        self, engine, manager, messaging_service
-    ):
-        """Both paths emit ``_live_hub.stream_status_change`` on IDLE → RUNNING."""
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
-
-        # Reset mock so we can count calls per path.
-        manager._live_hub.stream_status_change.reset_mock()
-
-        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-            await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="m", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue", 
-                instance_id="inst-jq", message="m", source="api"
-            )
-
-        # Exactly one SSE per path (each transitioned IDLE → RUNNING).
-        assert manager._live_hub.stream_status_change.await_count == 2
-
-        # Both calls targeted the running status with the correct instance id.
-        wp_call = manager._live_hub.stream_status_change.await_args_list[0]
-        jq_call = manager._live_hub.stream_status_change.await_args_list[1]
-        assert wp_call.args[0] == "inst-wp"
-        assert jq_call.args[0] == "inst-jq"
-        assert wp_call.args[1] == InstanceStatus.RUNNING.value
-        assert jq_call.args[1] == InstanceStatus.RUNNING.value
-
-    # ────────────────────────────────────────────────────────────────────────
-    # D13 (Phase 2) invariants
-    # ────────────────────────────────────────────────────────────────────────
-
-    @pytest.mark.asyncio
-    async def test_d13_no_jobitem_row_created_for_either_path(
-        self, engine, manager, messaging_service
-    ):
-        """D13 invariant: NO ``job_queue_items`` row is created for ANY
-        ``enqueue_message`` call.
-
-        Pre-D13: ``dispatch_path="jobqueue"`` created a JobItem with
-        ``job_type="message"``. Post-D13 both paths write only
-        ``MessageQueue`` + ``Task`` rows. The ``job_queue_items`` table
-        is reserved for TASK-type dispatch-queue jobs only.
+        """D13 invariant: NO ``job_queue_items`` row is created for any
+        ``enqueue_message`` call. Messages write only MessageQueue + Task
+        rows. The ``job_queue_items`` table is reserved for TASK-type
+        dispatch-queue jobs only.
         """
         from sqlmodel import Session, select
         from daemon.repositories.job_queue.models import JobItem
 
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
+        _seed_instance(engine, instance_id="inst-1")
 
         with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
             await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="m", source="api"
-            )
-            await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                instance_id="inst-jq", message="m", source="api"
+                instance_id="inst-1", message="m", source="api"
             )
 
         with Session(engine) as session:
@@ -646,44 +342,80 @@ class TestDispatcherPathEquivalence:
         )
 
     @pytest.mark.asyncio
-    async def test_d13_job_id_adapter_is_str_of_task_id(
+    async def test_7_returns_async_message_result_with_job_id_str_task_id(
         self, engine, manager, messaging_service
     ):
-        """D13: ``AsyncMessageResult.job_id`` = ``str(task_id)`` for BOTH paths.
-
-        The HTTP ``send_message`` route discards ``job_id`` (unaffected).
-        The ``job_continue`` tool returns ``job_id`` as ``new_job_id`` —
-        it must be a stable identifier the calling agent can reference
-        later for status. ``str(task_id)`` (int-as-string) is that stable
-        identifier after D13.
+        """``AsyncMessageResult.job_id`` = ``str(task_id)`` — stable identifier
+        for callers (the ``job_continue`` tool returns it as ``new_job_id``).
+        The semantic shift from ``JobItem.job_id`` (UUID) to ``Task.id`` (int)
+        is intentional and documented on ``AsyncMessageResult.job_id``.
         """
-        _seed_instance(engine, instance_id="inst-wp")
-        _seed_instance(engine, instance_id="inst-jq")
+        _seed_instance(engine, instance_id="inst-1")
 
         with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
-            wp_result = await messaging_service.enqueue_message(
-                instance_id="inst-wp", message="m", source="api"
-            )
-            jq_result = await messaging_service.enqueue_message(dispatch_path="jobqueue",
-                instance_id="inst-jq", message="m", source="api"
+            result = await messaging_service.enqueue_message(
+                instance_id="inst-1", message="m", source="api"
             )
 
-        # job_id must be a stringified int (Task PK), not None, not the
-        # legacy "job-jq-xyz" mock sentinel.
-        for label, result in (("wp", wp_result), ("jq", jq_result)):
-            assert result.job_id is not None, (
-                f"D13: {label} path must populate job_id (str(task_id)), got None"
-            )
-            assert isinstance(result.job_id, str), (
-                f"D13: {label} job_id must be str, got {type(result.job_id).__name__}"
-            )
-            assert result.job_id.isdigit(), (
-                f"D13: {label} job_id must be a stringified int (Task PK), "
-                f"got {result.job_id!r}"
+        assert isinstance(result, AsyncMessageResult)
+        assert result.message_id
+        assert result.instance_id == "inst-1"
+        assert result.status == "queued"
+        assert result.job_id is not None and result.job_id.isdigit(), (
+            f"job_id must be str(task_id) (stringified int), got {result.job_id!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_8_images_stored_on_message_queue(
+        self, engine, manager, messaging_service
+    ):
+        """``images`` is stored on the MessageQueue row."""
+        _seed_instance(engine, instance_id="inst-1")
+
+        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
+            await messaging_service.enqueue_message(
+                instance_id="inst-1",
+                message="vision",
+                source="api",
+                images=_SAMPLE_IMAGES,
             )
 
-        # The two job_ids must be distinct (independent Task rows).
-        assert wp_result.job_id != jq_result.job_id
+        row = _load_message_queues(engine, "inst-1")[0]
+        assert row.images == _SAMPLE_IMAGES
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("priority", [0, 1, 5])
+    async def test_9_priority_stored_on_message_queue(
+        self, engine, manager, messaging_service, priority
+    ):
+        """``priority`` parameter is stored on the MessageQueue row."""
+        instance_id = f"inst-prio-{priority}"
+        _seed_instance(engine, instance_id=instance_id)
+
+        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
+            await messaging_service.enqueue_message(
+                instance_id=instance_id, message="m", source="api", priority=priority
+            )
+
+        row = _load_message_queues(engine, instance_id)[0]
+        assert row.priority == priority
+
+    @pytest.mark.asyncio
+    async def test_10_emits_sse_status_change_on_idle_to_running(
+        self, engine, manager, messaging_service
+    ):
+        """``_live_hub.stream_status_change`` is emitted on IDLE → RUNNING."""
+        _seed_instance(engine, instance_id="inst-1")
+
+        with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
+            await messaging_service.enqueue_message(
+                instance_id="inst-1", message="m", source="api"
+            )
+
+        assert manager._live_hub.stream_status_change.await_count == 1
+        call = manager._live_hub.stream_status_change.await_args
+        assert call.args[0] == "inst-1"
+        assert call.args[1] == InstanceStatus.RUNNING.value
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -695,8 +427,7 @@ class TestEnqueueJobRejectsMessage:
     """D13 defense-in-depth guard: ``JobQueueService.enqueue`` rejects
     ``job_type="message"`` with ``ValueError``.
 
-    Pre-D13 the JobQueue path created a MESSAGE JobItem for messages.
-    Post-D13 messages write only Task + MessageQueue rows. Any leftover
+    After D13 messages write only Task + MessageQueue rows. Any leftover
     caller attempting the legacy API must fail loudly rather than
     silently creating a JobItem that no processor can handle.
     """

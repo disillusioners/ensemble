@@ -173,12 +173,9 @@ class TestChildNotificationWorkerPoolPath:
             instance_id, message="resume", silent=False
         )
 
-        # Should use WorkerPool path (unified dispatcher with dispatch_path="workerpool")
+        # Child resume routes through the unified dispatcher.
         mock_manager.enqueue_message.assert_called_once()
         kwargs = mock_manager.enqueue_message.call_args[1]
-        assert kwargs.get("dispatch_path", "workerpool") == "workerpool", (
-            "Child resume should use the WorkerPool dispatch path"
-        )
 
         # Verify enqueue was called with correct args
         assert kwargs["instance_id"] == instance_id

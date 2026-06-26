@@ -489,12 +489,11 @@ def create_job_tools(
                 if has_inflight:
                     return {"error": f"Instance {instance_id} has a task still in flight — wait for it to complete first"}
 
-            # 6. Send message via the JobQueue path (same as FE "send message")
+            # 6. Send message via the unified dispatcher (same as FE "send message")
             result = await manager.enqueue_message(
                 instance_id=instance_id,
                 message=message,
                 source=f"agent:{caller_agent_id}" if caller_agent_id else "api",
-                dispatch_path="jobqueue",
             )
 
             # 7. Return new job_id (provided by AsyncMessageResult)

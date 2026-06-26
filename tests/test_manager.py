@@ -1751,10 +1751,9 @@ class TestTitleGenerationTrigger:
             # Call enqueue_message with AGENT source
             await service.enqueue_message(
                 instance_id="test-instance-id",
-                message="Agent message via jq",
+                message="Agent message",
                 source="internal_agent:parent-123",
                 priority=0,
-                dispatch_path="jobqueue",
             )
 
             # Verify title generation was triggered
@@ -1806,10 +1805,9 @@ class TestTitleGenerationTrigger:
             # Call enqueue_message with default source (triggers HUMAN)
             await service.enqueue_message(
                 instance_id="test-instance-id",
-                message="Human message via jq",
+                message="Human message",
                 source="user",
                 priority=0,
-                dispatch_path="jobqueue",
             )
 
             # Verify title generation was NOT triggered

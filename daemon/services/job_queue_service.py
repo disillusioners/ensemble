@@ -329,9 +329,8 @@ class JobQueueService:
         D13 (Phase 2): ``job_type="message"`` is REJECTED with ``ValueError``.
         Messages no longer create ``JobItem`` rows — they create ``Task`` rows
         in the WorkerPool path (see :meth:`InstanceMessagingService.enqueue_message`).
-        This guard is defense-in-depth: the only legitimate caller
-        (``enqueue_message`` with ``dispatch_path="jobqueue"``) has been
-        removed.
+        This guard is defense-in-depth against any leftover caller that might
+        attempt the legacy API.
 
         Args:
             agent_id: Agent ID (e.g., 'developer').
@@ -355,9 +354,9 @@ class JobQueueService:
                 :meth:`InstanceMessagingService.enqueue_message` instead).
         """
         # D13 defense-in-depth: messages must use enqueue_message (WorkerPool
-        # Task row), not this JobItem-creating path. The only legitimate
-        # caller (enqueue_message with dispatch_path="jobqueue") has been
-        # removed. Raising here ensures any leftover caller fails loudly.
+        # Task row), not this JobItem-creating path. Raising here ensures
+        # any leftover caller fails loudly rather than silently creating
+        # a JobItem that no processor can handle.
         if job_type == "message":
             raise ValueError(
                 "enqueue_job no longer accepts job_type='message' — "
