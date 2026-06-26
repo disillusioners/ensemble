@@ -789,7 +789,6 @@ Provide a concise summary:"""
         # completed successfully should still report as ERROR (it errored first, and that
         # state is more useful for diagnostics than overwriting it with COMPLETED).
         #
-        # Phase 4: column dropped (see commit).
         from .dependency_bus import get_dependency_bus
         bus = get_dependency_bus()
         if bus is not None:

@@ -108,8 +108,9 @@ class JobProcessor:
 
         C7: called from ``daemon/api.py`` after both the processor and the
         observer are constructed. With this reference in place, the
-        processor routes MESSAGE-type work through
-        ``observer._admit_via_worker_pool``. The observer is the SOLE
+        processor routes MESSAGE-type work through the unified
+        ``JobFeedbackObserver`` lifecycle path (Task → WorkerPool →
+        ``_process_event`` → ``_finalize_job``). The observer is the SOLE
         dispatch authority for MESSAGE jobs (legacy handler path
         removed).
 
@@ -606,10 +607,10 @@ class JobProcessor:
 
                 # NOTE: The legacy MESSAGE-specific DB-level
                 # sibling pre-check was removed in D11. The unified
-                # observer owns message dispatch end-to-end —
-                # ``_admit_via_worker_pool`` does the concurrency gate
-                # via the Execution Gate. JobQueue no longer needs a
-                # DB-level sibling check for MESSAGE jobs.
+                # observer owns message dispatch end-to-end — it
+                # runs the concurrency gate via the Execution Gate.
+                # JobQueue no longer needs a DB-level sibling check
+                # for MESSAGE jobs.
                 #
                 # Instance-level pause, however, must be evaluated here
                 # (BEFORE ``start_job``) so the test contract holds:
@@ -670,15 +671,14 @@ class JobProcessor:
                     )
 
                     # D13 (Phase 2): the legacy MESSAGE dispatch branch
-                    # via JobFeedbackObserver._admit_via_worker_pool has
-                    # been removed. Messages no longer create JobItem
-                    # rows (see InstanceMessagingService.enqueue_message)
-                    # — they write only Task + MessageQueue rows. The
+                    # via JobFeedbackObserver has been removed. Messages
+                    # no longer create JobItem rows (see
+                    # InstanceMessagingService.enqueue_message) — they
+                    # write only Task + MessageQueue rows. The
                     # JobProcessor therefore only handles TASK-type
                     # dispatch-queue jobs from this point forward.
-                    # Phase 3 (D11) will complete the cleanup by also
-                    # removing the unified-observer subscription that
-                    # drove MESSAGE-job terminal transitions.
+                    # Phase 3 (D11) completed the cleanup of legacy
+                    # admission-path code in the observer.
 
                     # Spawn instance for this job
                     try:

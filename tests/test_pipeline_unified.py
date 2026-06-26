@@ -10,7 +10,7 @@ handles the 6 processing stages for the single WorkerPool dispatcher:
 
 The legacy JobQueue path (``MessageJobHandler``) was removed in Phase
 D — all message work now flows through the unified
-``JobFeedbackObserver._admit_via_worker_pool`` path. The
+``JobFeedbackObserver`` lifecycle path. The
 ``TestPathParity`` parity suite was deleted with the MJH legacy path.
 
 This file verifies **pipeline behaviour** directly:

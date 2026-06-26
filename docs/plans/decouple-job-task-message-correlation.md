@@ -1,3 +1,7 @@
+**STATUS: COMPLETED (2026-06-26) — This is a historical planning document. The migration is complete. See LESSONS/ for final status.**
+
+---
+
 # Plan: Decouple Job / Task / Message / Correlation — Single-Run Delivery
 
 | Field | Value |

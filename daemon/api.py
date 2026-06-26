@@ -390,7 +390,7 @@ async def lifespan(app: FastAPI):
     # (Phase 1 — CM removed; the lifecycle event is the SOLE completion
     # authority for parents with children tracked by the bus).
     job_processor.setup_job_feedback_observer(job_feedback_observer)
-    logger.info("JobFeedbackObserver wired into JobProcessor (dispatch_path=jobqueue_local)")
+    logger.info("JobFeedbackObserver wired into JobProcessor")
 
     # Wire the JobFeedbackObserver onto the InstanceManager facade so the
     # observer's ``_process_event`` lifecycle handler can finalize the

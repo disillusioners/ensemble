@@ -49,7 +49,15 @@ class InstanceInfo(BaseModel):
     status: InstanceStatus = Field(..., description="Current instance status")
     title: str | None = Field(default=None, description="Auto-generated instance title from first message")
     parent_id: str | None = Field(default=None, description="Parent instance ID if this is a child instance")
-    children: list[str] | None = Field(default=None, description="List of child instance IDs loaded from instance_hierarchy junction table (working set — empty after children complete)")
+    children: list[str] | None = Field(
+        default=None,
+        description=(
+            "API response field populated from the instance_hierarchy junction "
+            "table via list_child_ids() — NOT a DB column on the instances table. "
+            "Represents the working set of currently-active child instance IDs; "
+            "children are removed when they complete or error."
+        ),
+    )
     mcp_tool_names: list[str] | None = Field(default=None, description="List of MCP tool names available to this instance")
     created_at: datetime = Field(..., description="Instance creation timestamp")
     updated_at: datetime | None = Field(default=None, description="Last update timestamp")

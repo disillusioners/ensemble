@@ -308,3 +308,47 @@ forget to inform the bus.
   id? If yes, then `cancel_for_source` is safe (we just release the
   old one). Need to verify `send_message` registers a fresh watcher
   when the retry runs.
+
+---
+
+## Resolution (2026-06-26)
+
+This bug class is **resolved**. All three items from the proposed fix landed, plus the structural cause (D13) was also completed. The 06f500af-class bug — orphaned `PENDING` watchers after a force-cancel-and-retry — is now **architecturally impossible** under the post-migration design.
+
+### 1. `cancel_for_source` — implemented
+
+The new `DependencyBus.cancel_for_source(task_id)` method was added (commit `4926a2eb`). It transitions all `PENDING` watchers keyed on `source_task_id=task_id` to `CANCELLED`, matching the existing `cancel_for_target` contract (PENDING-only — leaves `FIRED` rows untouched). It is wired into all three code paths identified in the bug analysis above:
+
+- `daemon/services/stale_task_recovery.py:recover_stale_tasks` — both the `force_cancel_and_schedule_retry` branch and the `schedule_retry` branch now invoke `bus.cancel_for_source(task_id)` after the retry is scheduled.
+- `daemon/services/stale_task_recovery.py:recover_on_startup` — same wiring on the crash-recovery retry path.
+- `daemon/services/worker_pool.py:_handle_cancellation` — invoked after `schedule_retry` succeeds on the timeout-with-retry path (gated to avoid double-firing with the permanent-fail path, which already routes through `_send_error_report`).
+
+### 2. Startup sweep — implemented
+
+`DependencyBus.start()` now runs a one-shot sweep on daemon startup (defense in depth — see cleanup plan Phase 1): any `PENDING` watcher whose `source_task_id` does NOT correspond to an active task (`status` NOT IN `('running', 'pending', 'paused')`) is transitioned to `CANCELLED`. This protects against any future code path that forgets to inform the bus, and it cleans up any pre-existing orphan watchers left over from earlier versions of the system.
+
+### 3. Structural elimination via D13
+
+The root cause of this bug class was the **two coupled work records per message** — a `Task` row and a `JobItem` row — which `StaleTaskRecovery` had to keep in sync on every state transition. When the cancel-and-retry path replaced task 4464 with retry 4466 in the task table, the bus watcher (keyed on 4464) became orphaned because no code path translated "this message id was retired; its replacement is task N" into a bus emit.
+
+D13 (and the wider D11+D13 architecture migration) eliminated this entirely:
+
+- `enqueue_message` no longer writes a `JobItem` for messages — only a `message_queue` row and a `task` row.
+- `job_queue_service.enqueue_job` rejects `job_type="message"` with `ValueError` (defense in depth).
+- `job_processor.py` no longer carries an `if job_type == 'message':` dispatch branch.
+- There is exactly **one** work record per message: the `task` row.
+
+The cancel-and-retry path now produces a clean handoff: the cancelled task is force-cancelled, `cancel_for_source(task_id)` releases the bus watcher, and the retry registers fresh watchers for itself under the new task id. There is no second row to lose sync with, so the translation gap that produced this bug class is structurally closed.
+
+### 4. Impact
+
+- The 06f500af production instance can be unblocked by running the SQL one-shot in §"One-shot recovery" above; the cleanup will be picked up automatically on the next startup sweep once the daemon restarts on the post-migration build.
+- `StaleTaskRecovery` no longer strands parent instances when a child task times out and is retried — the retry path now reliably releases the bus.
+- Future regressions of this shape are caught by the startup sweep even if a new code path forgets to call `cancel_for_source`.
+
+### 5. Test coverage added
+
+- `tests/unit/test_dependency_bus.py::test_cancel_for_source_releases_pending_watchers` — verifies the new method transitions only PENDING rows.
+- `tests/unit/services/test_stale_task_recovery.py::test_retry_branch_cancels_bus_watchers` — verifies the wire-up.
+- `tests/integration/test_orphan_watcher_recovery.py` — simulates a stale-worker scenario end-to-end and asserts the parent transitions to `COMPLETED` after the retry's completion report.
+- `tests/unit/test_pause_flow_redesign.py::test_pause_does_not_cancel_bus_watchers` — regression test confirming the fix does NOT touch the pause path (paused tasks leave their watchers PENDING so resume can re-fire them).

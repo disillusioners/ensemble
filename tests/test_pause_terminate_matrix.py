@@ -8,7 +8,7 @@ behaviour of the daemon's WorkerPool message-processing dispatcher:
   drives ``process_message`` tasks from the ``task`` table.
 
 The JobQueue path was removed in Phase D — message work now flows
-through the unified ``JobFeedbackObserver._admit_via_worker_pool`` path
+through the unified ``JobFeedbackObserver`` lifecycle path
 (Phase C) + the Dependency Bus (Phase D). The legacy
 ``MessageJobHandler.handle`` is gone.
 

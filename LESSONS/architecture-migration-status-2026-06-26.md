@@ -229,3 +229,59 @@ With:
 - Acceptance: `tests/postgres/test_legacy_column_drop.py` passes after the migration is repaired per cleanup plan Task 4.5.
 - Effort estimate: ~3 days (D11 + D13 + regression tests).
 - Risk: touches HTTP API response shape (`job_id` → `task.id`).
+
+---
+
+## Post-Migration Update (2026-06-26)
+
+A follow-up exploration sweep on 2026-06-26 verified that **all items flagged above as "incomplete" have actually landed on `latest`**. This section supersedes the prior "open items" framing — the migration is **COMPLETE**. Use this section as the authoritative status going forward.
+
+### 1. Items previously flagged as incomplete — verified DONE
+
+| Item | Prior status | Verified actual state (2026-06-26) |
+|---|---|---|
+| `waiting_for` and `children` DB columns dropped | Migration marked NOT auto-applied | Dropped via `_ensure_postgres_drop_legacy_columns()` at `daemon/manager.py`; both columns removed from the SQLModel `Instance` table |
+| Migration `20260621_000002` (broken DROP TABLE) | Flagged as half-broken | Fixed — drops only the two legacy columns; no `DROP TABLE instance_hierarchy` remains |
+| Dead test files referencing legacy paths | Flagged for deletion | Already deleted: `test_kill_switch_legacy_path.py`, `test_correlation_authority_shadow.py`, `test_unified_dispatcher_shadow.py` |
+| "bus default / CM fallback" framing in source | Cleanup plan Phase 7 | Removed — `grep` for that framing in `daemon/` source returns 0 hits |
+| `waiting_for` references in daemon source | 324 grep matches per cleanup plan §4 Task 4.1 | Reduced to 2 hits (the ALTER TABLE migration statement itself + one log line); both are inert |
+| `.children` attribute reads on Instance | Flagged across 19 files | 0 hits in daemon source |
+
+### 2. D11 + D13 — now structurally complete
+
+The MESSAGE-vs-Job coupling that produced the 06f500af-class bug is **gone**:
+
+- `MessageJobHandler.py` deleted (770 lines, removed in commit `8d20ffb6` / D12).
+- `job_processor.py` no longer carries an `if job_type == 'message':` dispatch branch (D11 landed).
+- `job_queue_service.enqueue_job` rejects `job_type="message"`; `enqueue_message` writes only `message_queue` + `task` rows — no `JobItem` is created for messages (D13 landed).
+- Unified dispatch path: `JobFeedbackObserver → Task → WorkerPool`. All message work flows through this single path.
+- `dispatch_path` parameter on `enqueue_message` has been collapsed; one code path, one work record per message.
+- `_has_no_active_message_job` defense-in-depth guard is no longer needed (its premise — separate `job_item` lifecycle — no longer holds).
+
+### 3. Known false positives (NOT bugs)
+
+A naive grep sweep will produce hits that look like unfinished cleanup but are unrelated:
+
+- `waiting_for` in `opencode/state.py` (~3 hits) — these are the `waiting_for_input` state **reason** string for the opencode runtime, not the dropped DB column. Unrelated to the migration.
+- `.children` (~4 hits across the codebase) — these are **comment-only** references (e.g., "child instances" in docstrings). No attribute reads.
+
+### 4. Final state
+
+The architecture migration is **COMPLETE** end-to-end:
+
+- DependencyBus is the **sole completion authority** for parent→child correlation. No parallel-path remains.
+- `waiting_for` and `children` columns are dropped from the DB and from the SQLModel.
+- `instance_hierarchy` table is the live parent→child relationship; `dependency_watchers` is the live correlation table.
+- `CorrelationManager` is deleted; `MessageJobHandler` is deleted; the `USE_DEPENDENCY_BUS` flag is gone.
+- All message work is exactly one `task` row (plus the `message_queue` row); no coupled `JobItem` is ever created.
+- The 06f500af-class bug (orphan watcher from cancel-and-retry) is **structurally impossible** under the post-migration design — D13 eliminates the work-record duplication that caused the divergence.
+
+### 5. Open follow-ups (cosmetic / non-blocking)
+
+The only remaining work is cosmetic docstring cleanup — no functional code changes:
+
+- Module docstrings on `daemon/services/dependency_bus.py`, `daemon/repositories/dependency_bus/__init__.py`, `daemon/repositories/dependency_bus/models.py`, `daemon/repositories/dependency_bus/repository.py` still carry Phase D framing.
+- A few inline comments at `daemon/services/error_reporting.py:516-526`, `daemon/services/child_reports.py:162-168`, `daemon/services/job_feedback_observer.py:688-700`, and the `JobSystemConfig` docstring at `daemon/config.py:314-364` still reference "Phase D", "rollback path", or "CM shadow validator" language.
+- `daemon/api.py:506-522` `init_dependency_bus` docstring still mentions "graceful degradation" — the bus is mandatory, not optional.
+
+These are documentation-only and can be cleaned up in any future docs pass. They do NOT indicate any open functional work.

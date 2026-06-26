@@ -646,7 +646,7 @@ class InstanceLifecycleService:
 
         # The ``instance_hierarchy`` junction table is the canonical
         # source of parent-child relationships. A row was inserted by
-        # ``_spawn_instance_db_sync`` above. Phase 4: column dropped (see commit).
+        # ``_spawn_instance_db_sync`` above.
         # Parent-waits-for-children is now tracked via the Dependency Bus.
 
         # Store in instances dict
@@ -1287,10 +1287,8 @@ class InstanceLifecycleService:
 
         # Single batched UPDATE — L14 transaction-boundary fix.
         # The helper issues one UPDATE that flips status + clears
-        # paused_at for all eligible nodes. Phase 4: column
-        # dropped; this UPDATE no longer touches any completion
-        # counter. Parent-waits-for-children is owned by the
-        # CorrelationManager / Dependency Bus.
+        # paused_at for all eligible nodes. Parent-waits-for-children
+        # is owned by the Dependency Bus.
         if resumable_ids:
             db_result = await asyncio.to_thread(
                 self._resume_cascade_db_sync,
@@ -1727,7 +1725,6 @@ class InstanceLifecycleService:
             agent_id = instance.agent_id
 
             # ── Step 1: atomic instance UPDATE (status only) ──
-            # Phase 4: column dropped (see commit).
             # Single-statement update keeps the status transition atomic.
             session.execute(
                 text(

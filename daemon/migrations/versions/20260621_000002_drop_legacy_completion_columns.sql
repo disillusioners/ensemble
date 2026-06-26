@@ -60,7 +60,7 @@
 --     - PostgreSQL: supports ``ALTER TABLE ... DROP COLUMN IF EXISTS``
 --       natively. This is the recommended target environment. The
 --       migration runner NO-OPs all .sql files on PostgreSQL
---       (runner.py lines 446-448), so this file is INERT on
+--       (runner.py lines 455-482), so this file is INERT on
 --       PostgreSQL until an operator applies it manually (e.g.
 --       via psql) -- which is the intended behavior.
 --     - SQLite 3.35.0+ supports ``ALTER TABLE ... DROP COLUMN`` but

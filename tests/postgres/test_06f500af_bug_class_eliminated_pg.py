@@ -34,7 +34,7 @@ each gated by a separate phase of the architecture migration:
     watchers intact. See
     ``.agents/shared/planning/finish-architecture-migration/phase1-plan.md``.
 
-  * **Phase 2 — D13 single-record invariant** (xfail Scenario 3). Makes
+  * **Phase 2 — D13 single-record invariant** (Scenario 3). Makes
     ``enqueue_message`` route ALL messages through the WorkerPool path
     (write only ``task`` + ``message_queue`` rows), and makes
     ``enqueue_job`` reject ``job_type='message'``. This eliminates the
@@ -56,8 +56,10 @@ green while the implementation phases landed. Status as of Phase 1
   * Scenario 2 (``test_paused_task_watcher_not_cancelled_by_sweep``)
     — **un-xfail'd** alongside Scenario 1 (same Phase 1 work — the
     paused exemption is part of the same SQL filter).
-  * Scenario 3 (``test_d13_single_record_invariant``) — still
-    ``xfail``; will be un-xfail'd when Phase 2's D13 changes land.
+  * Scenario 3 (``test_d13_single_record_invariant``) —
+    **un-xfail'd** in Phase 3 (D11 cleanup). Phase 2's D13 changes
+    shipped (MESSAGE JobItem creation eliminated; enqueue_job rejects
+    ``job_type='message'``).
 
 References
 ----------
@@ -465,18 +467,10 @@ async def test_paused_task_watcher_not_cancelled_by_sweep(
 
 
 # =============================================================================
-# Scenario 3: D13 single-record invariant (xfail — Phase 2)
+# Scenario 3: D13 single-record invariant (un-xfail'd in Phase 3 — D11 cleanup)
 # =============================================================================
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Phase 2: D13 not yet implemented — enqueue_message with "
-        "dispatch_path='jobqueue' still creates a job_queue_items row "
-        "in addition to a task row, violating the single-record invariant."
-    ),
-)
 @pytest.mark.asyncio
 async def test_d13_single_record_invariant(pg_engine, instance_id):
     """Scenario 3 placeholder simulation — D13 single-record invariant.

@@ -593,8 +593,8 @@ class TestTaskClaiming:
         # Parent instance exists in normal RUNNING state (NOT
         # WAITING_CHILDREN) — this is the path that was deadlocked
         # before the fix. The JobItem is PROCESSING (set by
-        # JobProcessor.start_job before _admit_via_worker_pool creates
-        # the Task), and the Task is PENDING with the same message_id.
+        # JobProcessor.start_job before the observer admits the
+        # Task), and the Task is PENDING with the same message_id.
         with SQLModelSession(engine) as session:
             session.add(Instance(
                 instance_id="inst-UD-1",
@@ -623,7 +623,8 @@ class TestTaskClaiming:
             ))
             session.commit()
 
-        # Task created by _admit_via_worker_pool with the same message_id.
+        # Task created by the unified observer admission with the same
+        # message_id.
         t1 = repository.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="inst-UD-1",

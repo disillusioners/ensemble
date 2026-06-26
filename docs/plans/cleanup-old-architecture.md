@@ -1,3 +1,7 @@
+**STATUS: COMPLETED (2026-06-26) — This is a historical planning document. The migration is complete. See LESSONS/ for final status.**
+
+---
+
 # Cleanup Plan: Remove Old / Legacy Architecture Parts
 
 | Field | Value |

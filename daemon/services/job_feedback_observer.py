@@ -604,136 +604,6 @@ class JobFeedbackObserver:
         # UPDATE) and run Steps 2+3 unconditionally.
         return _ProcessingJobContext(instance_id=instance_id, job_id=None)
 
-    async def _admit_via_worker_pool(self, job) -> None:
-        """C6: Route a JobItem through the WorkerPool.
-
-        Phase C (decouple-architecture) replaces the legacy JobQueue
-        execution path (``MessageJobHandler.handle``) with the unified
-        observer → Task → WorkerPool path. This method admits a
-        dispatch-queue JobItem by:
-
-          1. Extracting ``message_id`` from ``job.job_metadata`` (set by
-             :meth:`InstanceMessagingService.enqueue_message`).
-          2. Creating a ``Task`` row pointing at the same ``message_id``
-             (same pattern as :meth:`InstanceMessagingService.enqueue_message`).
-          3. Calling ``worker_pool.notify_work()`` to wake a worker.
-          4. The ``JobItem`` is already ``PROCESSING`` (``start_job``
-             transitioned it in :class:`JobProcessor`); the observer's
-             existing event subscription (instance_lifecycle →
-             :meth:`_process_event` → :meth:`_finalize_job`) handles the
-             terminal transition when the Task completes.
-
-        D13 (Phase 2): this method is preserved for backward
-        compatibility with the dispatch-queue path (TASK-type JobItems
-        enqueued via ``JobQueueService.enqueue(job_type="task")``).
-        The MESSAGE-type path (which used this method for legacy
-        ``enqueue_message(dispatch_path="jobqueue")``) has been
-        eliminated — messages now write only Task + MessageQueue rows
-        in the unified WorkerPool path, and no MESSAGE JobItem is ever
-        created. Phase 3 will complete the cleanup by removing the
-        JobProcessor branch that called this method.
-
-        The job is NOT marked ``FAILED`` here on error paths: those
-        exceptions propagate up to ``JobProcessor._process_next_job``,
-        whose ``except Exception`` handler calls ``complete_job(FAILED)``
-        and ``_cleanup_in_progress_tracking`` so the per-queue lock is
-        released. Silently returning on these failure modes (the
-        pre-fix behaviour) wedges the JobItem in ``PROCESSING`` because
-        the caller ``continue``s without doing any cleanup — see the
-        regression test ``test_16_*`` in
-        ``tests/test_unified_dispatcher_shadow.py``.
-
-        Args:
-            job: The ``JobItem`` in ``PROCESSING`` status. Must have
-                ``job.job_metadata['message_id']`` and ``job.instance_id``
-                set; otherwise a ``RuntimeError`` is raised so the
-                caller's failure handler can mark the job FAILED.
-        """
-        instance_id = job.instance_id
-        message_id: str | None = None
-        if job.job_metadata:
-            message_id = job.job_metadata.get("message_id")
-        if not message_id:
-            logger.error(
-                f"Observer._admit_via_worker_pool: MESSAGE job "
-                f"{job.job_id[:8]}... missing message_id in job_metadata; "
-                f"caller should mark FAILED"
-            )
-            raise RuntimeError(
-                f"Cannot admit job {job.job_id}: missing message_id in job_metadata"
-            )
-        if not instance_id:
-            logger.error(
-                f"Observer._admit_via_worker_pool: MESSAGE job "
-                f"{job.job_id[:8]}... missing instance_id; "
-                f"caller should mark FAILED"
-            )
-            raise RuntimeError(
-                f"Cannot admit job {job.job_id}: missing instance_id"
-            )
-
-        # Resolve the task repository from the InstanceManager facade.
-        # The manager wires ``_task_repo`` in ``setup_worker_pool``;
-        # ``getattr`` keeps the observer safe in tests that bypass
-        # full manager initialization.
-        task_repo = getattr(self._instance_manager, "_task_repo", None)
-        if task_repo is None:
-            logger.error(
-                f"Observer._admit_via_worker_pool: InstanceManager has no "
-                f"_task_repo; cannot create Task for MESSAGE job "
-                f"{job.job_id[:8]}..."
-            )
-            raise RuntimeError(
-                f"Cannot admit job {job.job_id}: task_repo is None "
-                f"(repository unavailable)"
-            )
-
-        # Create the Task row. ``TaskRepository.create`` opens its own
-        # ``SQLModelSession`` and commits — we wrap in ``asyncio.to_thread``
-        # so the sync DB call does not block the event loop (same pattern
-        # as ``_prepare_enqueued_message`` in instance_messaging.py).
-        try:
-            task = await asyncio.to_thread(
-                task_repo.create,
-                task_type=TaskType.PROCESS_MESSAGE.value,
-                instance_id=instance_id,
-                message_id=message_id,
-            )
-        except Exception as e:
-            logger.error(
-                f"Observer._admit_via_worker_pool: failed to create Task "
-                f"for MESSAGE job {job.job_id[:8]}... "
-                f"instance={instance_id[:8]}... message_id={message_id[:8]}...: "
-                f"{type(e).__name__}: {e}",
-                exc_info=True,
-            )
-            raise RuntimeError(
-                f"Cannot admit job {job.job_id}: Task creation failed"
-            ) from e
-
-        # Notify the WorkerPool so an idle worker wakes immediately
-        # rather than waiting for the next poll (default 0.5s).
-        # ``notify_work`` is thread-safe; it can be called from any
-        # coroutine (the condition variable handles cross-thread
-        # signaling). Defensive ``getattr`` for tests that mock
-        # the manager without a real worker pool.
-        worker_pool = getattr(self._instance_manager, "_worker_pool", None)
-        if worker_pool is not None:
-            try:
-                worker_pool.notify_work()
-            except Exception as e:
-                logger.warning(
-                    f"Observer._admit_via_worker_pool: worker_pool.notify_work() "
-                    f"failed for MESSAGE job {job.job_id[:8]}... (non-fatal): {e}"
-                )
-
-        logger.info(
-            f"Observer._admit_via_worker_pool: admitted MESSAGE job "
-            f"{job.job_id[:8]}... instance={instance_id[:8]}... "
-            f"message_id={message_id[:8]}... task_id={task.id} "
-            f"dispatch_path=jobqueue_local"
-        )
-
     async def _process_event(self, event: dict) -> None:
         """Process a single instance_lifecycle event.
 
@@ -921,16 +791,22 @@ class JobFeedbackObserver:
         transition will still fire via the bus completion callback (or the
         shared terminal path) regardless of whether this notification succeeds.
 
-        Phase 2.5 (Task 2.5.3 + Task 2.5.6): the parameter is now a
+        Phase 2.5 (Task 2.5.3 + Task 2.5.6): the parameter is a
         :class:`_ProcessingJobContext` rather than a ``JobItem``. The
-        ``job_id`` field is passed to ``notify_watchers``. When
-        ``ctx.job_id is None`` (post-D13 MESSAGE path), the caller
-        skips this emission entirely (no JobItem to notify watchers of).
+        ``job_id`` field is passed to ``notify_watchers``. Both
+        callers (the lifecycle handler ``_process_event`` and the
+        resume finalize ``_process_resume_finalize``) gate on
+        ``ctx.job_id is not None`` before calling this method, so
+        when invoked, ``ctx.job_id`` is guaranteed to be a real
+        JobItem id (TASK-type jobs and pre-D13 MESSAGE JobItems
+        that still exist). Post-D13 MESSAGE-driven instances
+        (``ctx.job_id is None``) skip emission entirely — there is
+        no JobItem to notify watchers of.
 
         Args:
-            ctx: The finalize context. ``ctx.job_id`` is required by
-                this method (callers must skip emission when
-                ``ctx.job_id is None``).
+            ctx: The finalize context. ``ctx.job_id`` is guaranteed
+                non-None by callers (both gating sites return early
+                when ``ctx.job_id is None``).
             instance_id: The parent instance ID (for LLM checkpoint fetch).
         """
         try:
