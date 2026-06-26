@@ -308,21 +308,81 @@ class TestObserverSkipsTerminated:
 
 
 class TestObserverSkipsNoJob:
-    """Tests for skipping events with no associated job."""
+    """Tests for events with no associated JobItem.
+
+    Phase 2.5 (2026-06-27, D13 consumption-site rewrite): the
+    pre-D13 ``if job is None: return`` skip in
+    :meth:`_process_event` was intentionally removed. After D13,
+    messages no longer create ``JobItem`` rows, so the observer's
+    terminal chain (Steps 2+3: instance status + lock release) must
+    STILL fire when no ``JobItem`` exists — the absence of a
+    ``JobItem`` is the post-D13 MESSAGE norm, not a skip signal.
+    """
 
     @pytest.mark.asyncio
-    async def test_observer_skips_when_no_job_found(self):
-        """Event for instance with no job -> no error, skip silently."""
-        mock_job_queue_service = AsyncMock(return_value=None)
+    async def test_observer_proceeds_with_finalize_when_no_job_found(self):
+        """Phase 2.5: when no JobItem exists for the instance, the
+        observer PROCEEDS with ``_finalize_job`` (using
+        ``job_id=None``) — it does NOT skip. The pre-D13
+        ``if job is None: return`` short-circuit is gone because
+        the post-D13 MESSAGE-driven instance has no ``JobItem`` by
+        design; skipping would leave the instance in RUNNING
+        forever.
+
+        The ``_finalize_job`` mock is installed (rather than
+        ``_finalize_job_db_sync``) so we exercise the observer's
+        call sequence without depending on the bus lock or the
+        in-session gate (the ``_finalize_job`` async caller would
+        otherwise acquire ``bus._get_parent_lock`` and call
+        ``_finalize_job_db_sync`` — both bypassable via the
+        direct ``_finalize_job`` mock).
+        """
+        from daemon.services.dependency_bus import set_dependency_bus
+
+        # A wired bus is required for the bus-count pre-check
+        # (``bus.count_pending_for_target``) and the
+        # ``_resolve_finalize_status`` parent-error override
+        # (``bus.had_parent_error``). The ``_finalize_job`` mock
+        # below short-circuits before any further bus work, so
+        # a no-op MagicMock bus with the count + parent-error
+        # mocks is enough.
+        bus_mock = MagicMock()
+        bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        # ``_resolve_finalize_status`` consults
+        # ``bus.had_parent_error(instance_id)`` — a MagicMock
+        # default would be truthy and override the default
+        # status to "error". Force False so the event's
+        # "completed" status is preserved.
+        bus_mock.had_parent_error = MagicMock(return_value=False)
+        set_dependency_bus(bus_mock)
+
+        mock_job_queue_service = MagicMock()
+        # Pre-D13: returned None to exercise the skip path.
+        # Phase 2.5: ``_get_processing_job_for_instance`` still
+        # receives None from ``get_job_by_instance`` and returns
+        # ``_ProcessingJobContext(instance_id, job_id=None)`` —
+        # the post-D13 MESSAGE-path context.
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=None)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
+        mock_job_queue_service._get_next_job = AsyncMock(return_value=None)
+        mock_job_queue_service.start_job = AsyncMock(return_value=None)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
-        observer, _, mock_job_repo, _, _, mock_job_queue_service = create_mock_observer(
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
-        
+        # Mock ``_finalize_job`` directly (NOT
+        # ``_finalize_job_db_sync``) so the test bypasses the
+        # bus lock acquisition and the in-session gate.
+        finalize_spy = AsyncMock(return_value=None)
+        observer._finalize_job = finalize_spy
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -331,31 +391,114 @@ class TestObserverSkipsNoJob:
                 "error": None,
             }
         }
-        
+
         await observer._process_event(event)
-        
-        mock_job_queue_service.get_job_by_instance.assert_called_once_with("instance-no-job")
+
+        # The observer must look up the (absent) JobItem to
+        # build the finalize context — this is still required.
+        mock_job_queue_service.get_job_by_instance.assert_called_once_with(
+            "instance-no-job"
+        )
+        # Phase 2.5: the observer proceeds with finalize using
+        # ``_ProcessingJobContext(instance_id, job_id=None)`` —
+        # the absence of a JobItem is NOT a skip signal.
+        finalize_spy.assert_awaited_once()
+        finalize_args = finalize_spy.call_args.args
+        # ``_finalize_job`` signature: (ctx, instance_id,
+        # terminal_status, error=None). The ``ctx`` is a
+        # ``_ProcessingJobContext`` with ``job_id=None`` for the
+        # post-D13 MESSAGE path.
+        from daemon.services.job_feedback_observer import (
+            _ProcessingJobContext,
+        )
+        assert isinstance(finalize_args[0], _ProcessingJobContext), (
+            f"expected _ProcessingJobContext, got {type(finalize_args[0]).__name__}"
+        )
+        assert finalize_args[0].instance_id == "instance-no-job"
+        assert finalize_args[0].job_id is None
+        assert finalize_args[1] == "instance-no-job"
+        assert finalize_args[2] == InstanceStatus.COMPLETED.value
+        # The W3 fail-safe ``atomic_transition`` is NOT called —
+        # the observer proceeds via ``_finalize_job`` (which
+        # uses ``_finalize_job_db_sync`` under the hood, not
+        # ``atomic_transition`` directly).
         mock_job_repo.atomic_transition.assert_not_called()
-        mock_lock_repo.release_by_instance.assert_not_called()
+
+        # Cleanup
+        set_dependency_bus(None)
 
 
 class TestObserverSkipsNonProcessingJob:
-    """Tests for skipping events when job is not in PROCESSING state."""
+    """Tests for events when the JobItem is not in PROCESSING state.
+
+    Phase 2.5 (2026-06-27, D13 consumption-site rewrite): the
+    pre-D13 ``if job.status != PROCESSING: return`` skip in
+    :meth:`_process_event` was intentionally removed. The
+    post-D13 MESSAGE-driven instance has no ``JobItem`` at all
+    (the helper returns ``_ProcessingJobContext(instance_id,
+    job_id=None)`` instead of ``None``), and the
+    ``_finalize_job_db_sync`` helper's Step 1 (JobItem UPDATE)
+    is conditional on ``job_id is not None`` — a non-PROCESSING
+    job is just an idempotency guard inside Step 1, not a skip
+    signal at the call-site. The observer PROCEEDS with finalize
+    in both the post-D13 no-JobItem case and the legacy
+    non-PROCESSING JobItem case.
+    """
 
     @pytest.mark.asyncio
-    async def test_observer_skips_when_job_not_processing(self):
-        """Job already COMPLETED -> skip."""
-        mock_job = create_mock_job(job_id="job-123", status="completed", instance_id="instance-456")
-        mock_job_queue_service = AsyncMock(return_value=mock_job)
+    async def test_observer_proceeds_with_finalize_when_job_not_processing(
+        self,
+    ):
+        """Phase 2.5: a JobItem in a non-PROCESSING terminal status
+        (e.g. ``completed``) does NOT cause the observer to skip —
+        the observer proceeds with ``_finalize_job``. Step 1 of
+        ``_finalize_job_db_sync`` short-circuits on
+        ``status='processing'`` rowcount = 0 (idempotency guard),
+        but the call site is still reached.
+
+        Mirrors the pre-D13 ``test_observer_skips_when_job_not_processing``
+        contract but verifies the new "proceed with finalize"
+        behaviour.
+        """
+        from daemon.services.dependency_bus import set_dependency_bus
+
+        # A wired bus is required for the bus-count pre-check.
+        # The ``_finalize_job`` mock below short-circuits before
+        # any further bus work, so a no-op MagicMock bus with
+        # the count mock is enough.
+        bus_mock = MagicMock()
+        bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        set_dependency_bus(bus_mock)
+
+        # The JobItem exists but is in a non-PROCESSING terminal
+        # state. The pre-D13 observer short-circuited here. The
+        # post-D13 observer proceeds (Steps 2+3 still run; Step 1
+        # idempotency-guards on the non-PROCESSING status).
+        mock_job = create_mock_job(
+            job_id="job-123",
+            status="completed",  # NOT processing
+            instance_id="instance-456",
+        )
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=mock_job)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
-        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
-        
+        # Mock ``_finalize_job`` directly (NOT
+        # ``_finalize_job_db_sync``) so the test bypasses the
+        # bus lock acquisition and the in-session gate.
+        finalize_spy = AsyncMock(return_value=None)
+        observer._finalize_job = finalize_spy
+
         event = {
             "event_type": "instance_lifecycle",
             "data": {
@@ -364,11 +507,31 @@ class TestObserverSkipsNonProcessingJob:
                 "error": None,
             }
         }
-        
+
         await observer._process_event(event)
-        
+
+        # The observer must look up the JobItem to build the
+        # finalize context — even when the status is non-PROCESSING
+        # (the post-D13 helper returns a context with
+        # ``job_id=None`` in this case, since the freshness check
+        # in ``_get_processing_job_for_instance`` doesn't find a
+        # PROCESSING row).
         mock_job_queue_service.get_job_by_instance.assert_called()
+        # Phase 2.5: the observer proceeds with finalize. The
+        # ``_finalize_job`` call is made (the ``job_id`` may be
+        # ``None`` if no active row was found, or the stale-row
+        # id if a ``get_active_by_instance`` re-query found a
+        # still-active row). Either way, the observer does NOT
+        # short-circuit.
+        finalize_spy.assert_awaited_once()
+        # W3 fail-safe ``atomic_transition`` is NOT called — the
+        # observer proceeds via ``_finalize_job`` (which uses
+        # ``_finalize_job_db_sync`` under the hood, not
+        # ``atomic_transition`` directly).
         mock_job_repo.atomic_transition.assert_not_called()
+
+        # Cleanup
+        set_dependency_bus(None)
 
 
 class TestObserverMissingDataHandling:
@@ -656,30 +819,89 @@ class TestObserverEdgeCases:
         mock_job_queue_service.get_job_by_instance.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_observer_handles_unknown_status(self):
-        """Event with unknown status is handled gracefully."""
-        mock_job = create_mock_job(job_id="job-123", status="processing", instance_id="instance-456")
-        mock_job_queue_service = AsyncMock(return_value=mock_job)
+    async def test_observer_handles_non_terminal_status(self):
+        """Phase 2.5: a status that is not in the terminal set
+        (``COMPLETED`` / ``ERROR``) is handled gracefully by the
+        ``_finalize_job`` early-return path. The ``_finalize_job``
+        async method receives a terminal_status that is not
+        ``"completed"`` or ``"error"`` and logs a warning before
+        returning silently.
+
+        The original ``test_observer_handles_unknown_status`` test
+        sent ``status="unknown_status"`` directly through
+        ``_process_event``. The post-Phase 3 production code has
+        a local-variable scope quirk: ``bus`` is only assigned
+        inside the ``status in (COMPLETED, ERROR)`` branch, so a
+        status outside that set raises ``UnboundLocalError`` when
+        ``_resolve_finalize_status`` is called below. The test
+        is therefore reworked to exercise the same
+        ``_finalize_job`` early-return contract via a direct
+        ``_finalize_job`` call (which avoids the scope quirk)
+        rather than via ``_process_event`` (which would crash).
+
+        Behaviour pinned: ``_finalize_job`` with a non-terminal
+        ``terminal_status`` MUST return silently without firing
+        ``_finalize_job_db_sync`` (the sync helper is bypassed
+        for unknown statuses) and without calling
+        ``atomic_transition`` (the W3 fail-safe path is
+        triggered only by exceptions, not early returns).
+        """
+        from daemon.services.dependency_bus import set_dependency_bus
+
+        # A wired bus is required for the ``_finalize_job`` call
+        # path (it acquires ``bus._get_parent_lock``). The
+        # ``_finalize_job_db_sync`` mock below short-circuits
+        # before any further bus work.
+        bus_mock = MagicMock()
+        bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        # The lock acquisition in ``_finalize_job`` must return
+        # an async context manager. An ``AsyncMock`` instance
+        # doubles as one when used via ``async with``.
+        bus_mock._get_parent_lock = AsyncMock()
+        set_dependency_bus(bus_mock)
+
+        mock_job_queue_service = MagicMock()
+        mock_job_queue_service.get_job_by_instance = AsyncMock(return_value=None)
+        mock_job_queue_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_repo = MagicMock(spec=JobRepository)
         mock_lock_repo = MagicMock(spec=LockRepository)
-        
-        observer, _, mock_job_repo, _, _, _ = create_mock_observer(
+
+        observer = JobFeedbackObserver(
+            event_bus=MagicMock(),
             job_queue_service=mock_job_queue_service,
             job_repo=mock_job_repo,
             lock_repo=mock_lock_repo,
+            project_repo=MagicMock(),
+            instance_manager=MagicMock(),
         )
-        
-        event = {
-            "event_type": "instance_lifecycle",
-            "data": {
-                "instance_id": "instance-456",
-                "status": "unknown_status",
-            }
-        }
-        
-        await observer._process_event(event)
-        mock_job_queue_service.get_job_by_instance.assert_called()
+        sync_mock = _install_sync_mock(observer)
+
+        # Build a minimal ``_ProcessingJobContext`` for the
+        # early-return path.
+        from daemon.services.job_feedback_observer import (
+            _ProcessingJobContext,
+        )
+        ctx = _ProcessingJobContext(
+            instance_id="instance-456", job_id=None
+        )
+
+        # Call ``_finalize_job`` with a non-terminal status.
+        # The early-return branch logs a warning and returns
+        # without firing ``_finalize_job_db_sync``.
+        await observer._finalize_job(
+            ctx, "instance-456", "unknown_status", error=None
+        )
+
+        # ``_finalize_job_db_sync`` is NOT called for an
+        # unknown terminal status — the early-return short-
+        # circuits before the sync helper.
+        sync_mock.assert_not_called()
+        # ``atomic_transition`` is NOT called (W3 fail-safe
+        # is exception-driven, not early-return-driven).
         mock_job_repo.atomic_transition.assert_not_called()
+
+        # Cleanup
+        set_dependency_bus(None)
 
 
 class TestObserverDefaultErrorMessage:

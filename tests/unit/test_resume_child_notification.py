@@ -1,11 +1,16 @@
 """Tests for resume_processing_job new queue flow behavior.
 
 With the new implementation:
-1. Child instances (no old_jobs): enqueue_message() via WorkerPool
-2. Root instances (has old_jobs): resume from checkpoint via _process_message_with_tracking
+1. Child instances (no PAUSED/RUNNING PROCESS_MESSAGE Task): enqueue_message() via WorkerPool
+2. Root instances (has PAUSED/RUNNING PROCESS_MESSAGE Task): resume from checkpoint via _process_message_with_tracking
 
 The _process_child_completion_and_notify_parent is now called directly by resume_processing_job
 for root instances, after processing completes successfully.
+
+Phase 2.5 (D13 / Phase 2 migration): the routing primitive moved off
+``JobRepository.find_processing_message_jobs_by_instance`` (no MESSAGE
+``JobItem`` rows exist post-D13) onto
+``TaskRepository.find_paused_or_running_by_instance`` (Task 2.5.2).
 """
 
 import uuid
@@ -50,9 +55,24 @@ class MockMessageResult:
 
 
 class MockJob:
-    """Mock job returned by find_processing_message_jobs_by_instance."""
+    """Mock ``Task`` row returned by ``TaskRepository.find_paused_or_running_by_instance``.
+
+    Phase 2.5 (D13): the legacy ``MockJob`` (which simulated a
+    ``JobItem`` row) now stands in for a ``Task`` row instead. The
+    ``.id`` attribute matches what ``resume_processing_job`` reads
+    (``existing_task.id``) — the new routing primitive returns a Task
+    row, not a JobItem.
+    """
 
     def __init__(self, job_id: str = "test-job-123", message_id: str = "test-msg-456"):
+        # Post-D13 ``Task`` attributes.
+        self.id = job_id
+        self.task_type = "process_message"
+        self.instance_id = "test-instance"
+        self.message_id = message_id
+        self.status = "running"
+        self.worker_id = "worker-0"
+        # Pre-D13 ``JobItem`` attributes (kept for backwards-compat).
         self.job_id = job_id
         self.job_metadata = {"message_id": message_id}
 
@@ -83,12 +103,28 @@ def mock_instance_repository():
 
 
 @pytest.fixture
-def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_repository):
+def mock_task_repository():
+    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive)."""
+    repo = MagicMock()
+    repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
+    return repo
+
+
+@pytest.fixture
+def mock_manager(
+    mock_job_queue_service,
+    mock_queue_repository,
+    mock_instance_repository,
+    mock_task_repository,
+):
     """Create mock manager with all required dependencies."""
     manager = MagicMock()
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
+    # Phase 2.5 (Task 2.5.2): routing primitive moved onto
+    # ``TaskRepository.find_paused_or_running_by_instance``.
+    manager._task_repo = mock_task_repository
     # Mock enqueue_message for WorkerPool path (child instances)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
     # Mock _process_message_with_tracking for JobQueue path (root instances)
@@ -111,6 +147,7 @@ def instance_manager(mock_manager):
     manager._job_queue_service = mock_manager._job_queue_service
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
+    manager._task_repo = mock_manager._task_repo
     manager.enqueue_message = mock_manager.enqueue_message
     manager._process_message_with_tracking = mock_manager._process_message_with_tracking
     manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
@@ -127,8 +164,9 @@ class TestChildNotificationWorkerPoolPath:
         """Child instance (no old_jobs) should enqueue via WorkerPool."""
         instance_id = "child-instance-123"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         result = await instance_manager.resume_processing_job(
@@ -162,8 +200,9 @@ class TestChildNotificationWorkerPoolPath:
         """
         instance_id = "child-instance-silent"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         result = await instance_manager.resume_processing_job(
@@ -184,8 +223,9 @@ class TestChildNotificationWorkerPoolPath:
         """message_id should come from enqueue_message result."""
         instance_id = "child-instance-msgid"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         # Configure mock to return specific message_id
@@ -207,12 +247,13 @@ class TestChildNotificationJobQueuePath:
 
     @pytest.mark.asyncio
     async def test_parent_resumes_from_checkpoint(self, instance_manager, mock_manager):
-        """Root instance (has old_jobs) should schedule background processing and return immediately."""
+        """Root instance (PAUSED/RUNNING PROCESS_MESSAGE Task) should schedule background processing and return immediately."""
         instance_id = "parent-instance-123"
         job_id = "job-abc-789"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id="msg-456")]
+        # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=MockJob(job_id=job_id, message_id="msg-456")
         )
 
         # Instance is complete (waiting_for=0)
@@ -246,8 +287,9 @@ class TestChildNotificationJobQueuePath:
         instance_id = "parent-instance-silent"
         job_id = "job-xyz-789"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id="msg-456")]
+        # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=MockJob(job_id=job_id, message_id="msg-456")
         )
 
         # Instance is complete (waiting_for=0)
@@ -278,8 +320,9 @@ class TestChildNotificationErrorHandling:
         """When enqueue_message fails, should return None."""
         instance_id = "child-instance-fail"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         mock_manager.enqueue_message.side_effect = RuntimeError("enqueue failed")
@@ -300,8 +343,9 @@ class TestChildNotificationErrorHandling:
         instance_id = "parent-instance-fail"
         job_id = "job-123"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id="msg-456")]
+        # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=MockJob(job_id=job_id, message_id="msg-456")
         )
 
         # The test verifies that resume_processing_job returns "resuming" immediately

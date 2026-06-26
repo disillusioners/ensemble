@@ -216,19 +216,21 @@ def _make_mock_job_service():
     return svc
 
 
-def _make_mock_job_repo(active_message_jobs: list | None = None):
+def _make_mock_job_repo():
     """Build a MagicMock JobRepository.
 
-    Args:
-        active_message_jobs: List returned by
-            ``find_processing_message_jobs_by_instance``. Default: ``[]``
-            (no sibling MESSAGE jobs) so the handler passes the pre-flight
-            and proceeds to the gate.
+    Phase 2.5 (D13 / Phase 2 migration): the legacy
+    ``find_processing_message_jobs_by_instance`` cross-dispatcher
+    pre-flight has been removed (no MESSAGE ``JobItem`` rows are
+    created post-D13). The pause/resume routing decision now lives on
+    ``TaskRepository.find_paused_or_running_by_instance`` (Task 2.5.2)
+    and the ``job_continue`` concurrency gate moved to
+    ``TaskRepository.has_inflight_task`` (Task 2.5.8). This helper is
+    retained as a thin stub so callers can still mock
+    ``atomic_transition`` without needing to fabricate the removed
+    method.
     """
     repo = MagicMock()
-    repo.find_processing_message_jobs_by_instance = MagicMock(
-        return_value=active_message_jobs if active_message_jobs is not None else []
-    )
     repo.atomic_transition = MagicMock(return_value=MagicMock())
     return repo
 

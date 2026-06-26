@@ -370,8 +370,11 @@ class TestJobProcessorInstancePause:
         mock_project_repo.list_projects.return_value = [project]
         mock_queue_repo.list_by_project.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
-        # Mock the concurrency check - no active message jobs for this instance
-        mock_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=None)
+        # Phase 2.5 (D13): the legacy
+        # ``find_processing_message_jobs_by_instance`` cross-dispatcher
+        # pre-flight has been removed (no MESSAGE ``JobItem`` rows are
+        # created post-D13). The pause guard now lives entirely on
+        # ``_instance_repository.get`` + ``start_job``'s internal check.
 
         # Mock the paused instance
         mock_instance_manager._instance_repository.get.return_value = MockInstance(
@@ -439,8 +442,10 @@ class TestJobProcessorInstancePause:
         mock_project_repo.list_projects.return_value = [project]
         mock_queue_repo.list_by_project.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
-        # Mock the concurrency check - no active message jobs for this instance
-        mock_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=None)
+        # Phase 2.5 (D13): see companion comment in
+        # ``test_processor_skips_paused_instance`` — the legacy
+        # ``find_processing_message_jobs_by_instance`` mock has been
+        # removed. The instance pause guard is now inside ``start_job``.
 
         # Mock the running instance
         mock_instance_manager._instance_repository.get.return_value = MockInstance(

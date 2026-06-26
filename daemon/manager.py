@@ -2773,11 +2773,32 @@ class InstanceManager:
         """Resume a paused instance by resuming from checkpoint.
 
         This method routes based on instance type:
-        - Child instances (no JobQueue job): use WorkerPool via enqueue_message()
-        - Root instances (has JobQueue job): resume existing PROCESSING job from checkpoint
+        - Root instances (have a PAUSED/RUNNING PROCESS_MESSAGE Task): resume from checkpoint
+        - Child instances (no PAUSED/RUNNING PROCESS_MESSAGE Task): use WorkerPool via enqueue_message()
 
         When silent=False (default), appends the resume message to the conversation.
         When silent=True, resumes from checkpoint without appending any new message.
+
+        Phase 2.5 (2026-06-27, D13 consumption-site rewrite). The root-
+        vs-child routing decision was previously driven by looking up
+        a PROCESSING MESSAGE ``JobItem`` via
+        ``JobRepository.find_processing_message_jobs_by_instance`` —
+        after D13, messages no longer create ``JobItem`` rows, so the
+        decision moves onto the ``task`` table. We use the new
+        :meth:`TaskRepository.find_paused_or_running_by_instance`
+        which returns the first PAUSED-or-RUNNING ``PROCESS_MESSAGE``
+        task. If found → root instance (checkpoint resume via
+        ``_resume_processing_background``). If ``None`` → child
+        instance (enqueue a fresh message via WorkerPool).
+
+        The ``old_job_id`` parameter threaded downstream into
+        ``_resume_processing_background`` and ultimately
+        ``_process_resume_finalize`` (Task 2.5.5) is now derived from
+        ``task.id`` (the WorkerPool task identifier) rather than a
+        ``JobItem.job_id``. Post-D13, ``job_id`` is a logical alias
+        for the Task row's ``id``; ``_finalize_job_db_sync`` accepts
+        ``job_id=None`` and skips Step 1 (no JobItem UPDATE) while
+        still running Steps 2+3 (instance status + lock release).
 
         Args:
             instance_id: The instance ID.
@@ -2787,30 +2808,44 @@ class InstanceManager:
 
         Returns dict with result info (instance_id, job_id, message_id), or None on error.
         """
-        from .services.job_queue_service import DemandState
-
         logger.info(f"[RESUME] instance={instance_id[:8]} resume_processing_job called, message={repr(message)}, silent={silent}")
 
-        # 1. Find existing PROCESSING MESSAGE job(s) for this instance
-        old_jobs = await asyncio.to_thread(
-            self._job_queue_service._repository.find_processing_message_jobs_by_instance,
-            instance_id
+        # 1. Find existing PAUSED/RUNNING PROCESS_MESSAGE Task for this
+        #    instance. Pre-D13: queried MESSAGE JobItems (no longer
+        #    created after D13/Phase 2). Post-D13: query the task table
+        #    via the new find_paused_or_running_by_instance primitive
+        #    (Task 2.5.1). The presence of such a task identifies the
+        #    root instance (an in-flight graph turn to resume from).
+        existing_task = await asyncio.to_thread(
+            self._task_repo.find_paused_or_running_by_instance,
+            instance_id,
         )
 
-        logger.info(f"[RESUME] instance={instance_id[:8]} old_jobs_count={len(old_jobs)}, branch={'root' if old_jobs else 'child'}")
+        logger.info(
+            f"[RESUME] instance={instance_id[:8]} "
+            f"existing_task_id={existing_task.id if existing_task else None}, "
+            f"branch={'root' if existing_task else 'child'}"
+        )
 
         # Deduplication: prevent multiple concurrent resume tasks for the same instance
-        existing_task = self._graph_tasks.get(instance_id)
-        if existing_task and not existing_task.done():
+        graph_task = self._graph_tasks.get(instance_id)
+        if graph_task and not graph_task.done():
             logger.warning(f"Resume already in progress for {instance_id[:8]}")
-            return {"instance_id": instance_id, "job_id": old_jobs[0].job_id if old_jobs else None, "message_id": None, "status": "already_resuming"}
+            return {
+                "instance_id": instance_id,
+                "job_id": str(existing_task.id) if existing_task else None,
+                "message_id": None,
+                "status": "already_resuming",
+            }
 
-        if not old_jobs:
+        if not existing_task:
             # Child instance path: use WorkerPool via enqueue_message()
-            # Child instances don't have JobQueue entries (they use WorkerPool).
-            # When silent=True (cascade resume), DON'T enqueue any message.
-            # The parent's send_message tool will send the child its actual work.
-            # Only the selected target instance gets the resume message injected.
+            # Child instances don't have a PAUSED/RUNNING PROCESS_MESSAGE
+            # Task (they use WorkerPool with no parent-level checkpoint
+            # resume). When silent=True (cascade resume), DON'T enqueue
+            # any message. The parent's send_message tool will send the
+            # child its actual work. Only the selected target instance
+            # gets the resume message injected.
             if silent:
                 logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, silent=True — skipping message enqueue (child will resume via parent's send_message)")
                 return {
@@ -2819,8 +2854,8 @@ class InstanceManager:
                     "message_id": None,
                     "status": "silent_resume",
                 }
-            
-            logger.info(f"No PROCESSING job found for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
+
+            logger.info(f"No PAUSED/RUNNING PROCESS_MESSAGE task for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
             # Enqueue a message via WorkerPool path with resume_mode metadata
             logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, enqueuing message={repr(message)}, silent={silent}")
@@ -2843,18 +2878,13 @@ class InstanceManager:
                 logger.error(f"Failed to enqueue message for child instance {instance_id[:8]}...: {type(e).__name__}: {e}")
                 return None
 
-        # Root instance path: has existing PROCESSING JobQueue job
-        old_job = old_jobs[0]
-        logger.info(f"Found PROCESSING job {old_job.job_id[:8]}... for root instance {instance_id[:8]}..., resuming from checkpoint")
-
-        # W4: Clean up extra jobs if multiple PROCESSING jobs exist
-        if len(old_jobs) > 1:
-            logger.warning(f"Multiple PROCESSING jobs for {instance_id[:8]}...")
-            for extra in old_jobs[1:]:
-                try:
-                    await self._job_queue_service.complete_job(extra.job_id, DemandState.CANCELLED, error="Superseded by primary job resume")
-                except Exception:
-                    pass
+        # Root instance path: has a PAUSED/RUNNING PROCESS_MESSAGE Task
+        old_job_id = str(existing_task.id)
+        logger.info(
+            f"Found PAUSED/RUNNING PROCESS_MESSAGE task id="
+            f"{existing_task.id} (status={existing_task.status}) for root "
+            f"instance {instance_id[:8]}..., resuming from checkpoint"
+        )
 
         # 1. Clean stale MessageQueue entries (PENDING, PROCESSING, RETRYING)
         #    These are stale entries from the previous processing attempt
@@ -2922,7 +2952,7 @@ class InstanceManager:
 
         # 3. Return immediately - processing happens in background task
         #    This allows the HTTP response to return fast while the LLM processes asynchronously
-        logger.info(f"[RESUME] instance={instance_id[:8]} scheduling background processing for job {old_job.job_id[:8]}...")
+        logger.info(f"[RESUME] instance={instance_id[:8]} scheduling background processing for task {existing_task.id}")
 
         # Create background task for processing and job completion
         # Store in _graph_tasks so it can be cancelled by pause_instance_cascade
@@ -2933,6 +2963,12 @@ class InstanceManager:
         # rather than killing the asyncio task abruptly. The registry
         # returns a CancellationTokenSource; we thread ``.token`` into the
         # background task and unregister in the outermost finally block.
+        #
+        # Phase 2.5: ``old_job_id`` is now the WorkerPool Task ID (not a
+        # ``JobItem.job_id``); the post-D13 ``_process_resume_finalize``
+        # path (Task 2.5.5) and ``_finalize_job_db_sync`` (Task 2.5.4)
+        # accept ``job_id=None` and skip Step 1 (JobItem UPDATE) when no
+        # ``JobItem` exists.
         cancellation_source = self._request_registry.register(
             message_id=message_id,
             instance_id=instance_id,
@@ -2941,7 +2977,7 @@ class InstanceManager:
             instance_id=instance_id,
             message=message if not silent else "",
             message_id=message_id,
-            old_job_id=old_job.job_id,
+            old_job_id=old_job_id,
             silent=silent,
             images=images,
             cancellation_token=cancellation_source.token,
@@ -2950,7 +2986,7 @@ class InstanceManager:
 
         return {
             "instance_id": instance_id,
-            "job_id": old_job.job_id,
+            "job_id": old_job_id,
             "message_id": message_id,
             "status": "resuming",
         }
@@ -2978,11 +3014,22 @@ class InstanceManager:
         on the same event loop until the holder releases; there is no
         contention return path.
 
+        Phase 2.5 (2026-06-27, D13 consumption-site rewrite): ``old_job_id``
+        is now the WorkerPool Task ID (the row that
+        ``_pause_cascade_db_sync`` transitioned ``RUNNING → PAUSED``).
+        It is passed through to ``_process_resume_finalize`` and
+        ultimately ``_finalize_job_db_sync`` as the logical ``job_id``
+        — when there is no ``JobItem`` for the message (the post-D13
+        norm), ``_finalize_job_db_sync`` accepts ``job_id=None`` and
+        skips Step 1 (JobItem UPDATE) while still running Steps 2+3
+        (instance status + lock release).
+
         Args:
             instance_id: The instance ID.
             message: The resume message text.
             message_id: The internal tracking message ID.
-            old_job_id: The JobQueue job ID to complete.
+            old_job_id: The WorkerPool Task ID (Phase 2.5; pre-D13
+                this was a ``JobItem.job_id``).
             silent: If True, resume from checkpoint without injecting a new message.
             images: Optional list of base64-encoded images for multimodal content.
             cancellation_token: Optional token for cooperative cancellation.
@@ -3158,12 +3205,31 @@ class InstanceManager:
 
             except Exception as e:
                 logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")
-                # Mark the job as FAILED on failure
+                # Mark the Task as FAILED on failure. Phase 2.5: there is
+                # no JobItem to complete — ``old_job_id`` is the Task ID.
+                # ``_resume_cascade_db_sync`` transitions PAUSED → PENDING
+                # so the WorkerPool can re-claim; the per-instance guard
+                # blocks that re-claim while we're inside the
+                # ExecutionGate. Once we exit the gate (this handler
+                # runs), we explicitly transition the task to FAILED so
+                # the per-instance guard releases — otherwise the next
+                # ``job_continue`` call is blocked by
+                # ``has_inflight_task`` (which counts PENDING + RUNNING
+                # tasks for the instance, see Task 2.5.8).
                 try:
-                    await self._job_queue_service.complete_job(
-                        old_job_id,
-                        DemandState.FAILED,
-                        error=f"Resume failed: {e}"
+                    task_id_int = int(old_job_id)
+                    await asyncio.to_thread(
+                        self._task_repo.fail_task,
+                        task_id_int,
+                        f"Resume failed: {e}",
+                    )
+                except (ValueError, TypeError):
+                    # ``old_job_id`` was a non-integer (e.g. a legacy
+                    # JobQueue UUID). Pre-D13 fallback — best-effort
+                    # only. Skip silently.
+                    logger.debug(
+                        f"[RESUME] could not parse old_job_id "
+                        f"{old_job_id!r} as Task ID, skipping fail_task"
                     )
                 except Exception:
                     pass

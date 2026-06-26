@@ -499,35 +499,6 @@ class JobRepository:
             jobs = list(db_session.exec(stmt))
             return jobs
 
-    def find_processing_message_jobs_by_instance(self, instance_id: str) -> list[JobItem]:
-        """D13 no-op: MESSAGE-type ``JobItem`` rows no longer exist.
-
-        After D13 (Phase 2 of the decouple-architecture migration),
-        :meth:`InstanceMessagingService.enqueue_message` writes only
-        ``MessageQueue`` + ``Task`` rows — no ``job_queue_items`` row is
-        ever created for a message. The ``enqueue_job`` entry point
-        rejects ``job_type="message"`` with ``ValueError`` as defense in
-        depth.
-
-        This method is preserved (rather than removed) because callers
-        still invoke it and rely on its return type:
-          * ``daemon/manager.py:resume_processing_job`` — used to
-            distinguish "root instance" (had a MESSAGE JobItem) vs
-            "child instance" (no MESSAGE JobItem). Post-D13 this
-            always returns the child-instance branch (enqueue via
-            WorkerPool), which is the correct behavior — all
-            instances use the WorkerPool path now.
-          * ``daemon/tools/job_queue.py:job_continue`` — pre-flight
-            check to reject concurrent MESSAGE jobs for the same
-            instance. Post-D13 no MESSAGE jobs exist, so the check
-            is a no-op pass-through.
-
-        Returns:
-            Empty list. The ``instance_id`` parameter is accepted for
-            caller-compatibility but is not used in the query.
-        """
-        return []
-
     def find_jobs_by_instance(
         self, instance_id: str, job_type: str | None = None
     ) -> list[JobItem]:

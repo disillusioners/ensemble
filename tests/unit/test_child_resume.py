@@ -1,10 +1,16 @@
 """Tests for child instance resume in resume_processing_job.
 
-Child instances (sub-agents in a tree) don't have JobQueue entries — they use
-WorkerPool directly. When resuming a child instance, the code should call
+Child instances (sub-agents in a tree) don't have a PAUSED/RUNNING
+PROCESS_MESSAGE ``Task`` row of their own — they use WorkerPool directly.
+When resuming a child instance, the code should call
 _process_message_with_tracking directly instead of looking for old jobs.
 
 These tests verify the fix in the `if not old_jobs:` branch of resume_processing_job.
+
+Phase 2.5 (D13 / Phase 2 migration): the routing primitive moved off
+``JobRepository.find_processing_message_jobs_by_instance`` (no MESSAGE
+``JobItem`` rows exist post-D13) onto
+``TaskRepository.find_paused_or_running_by_instance`` (Task 2.5.2).
 """
 
 import uuid
@@ -67,12 +73,28 @@ def mock_instance_repository():
 
 
 @pytest.fixture
-def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_repository):
+def mock_task_repository():
+    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive)."""
+    repo = MagicMock()
+    repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
+    return repo
+
+
+@pytest.fixture
+def mock_manager(
+    mock_job_queue_service,
+    mock_queue_repository,
+    mock_instance_repository,
+    mock_task_repository,
+):
     """Create mock manager with all required dependencies."""
     manager = MagicMock()
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
+    # Phase 2.5 (Task 2.5.2): routing primitive moved onto
+    # ``TaskRepository.find_paused_or_running_by_instance``.
+    manager._task_repo = mock_task_repository
     # Mock enqueue_message (used by both WorkerPool and JobQueue paths)
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
     manager._graph_tasks = {}
@@ -87,6 +109,7 @@ def instance_manager(mock_manager):
     manager._job_queue_service = mock_manager._job_queue_service
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
+    manager._task_repo = mock_manager._task_repo
     manager.enqueue_message = mock_manager.enqueue_message
     manager._graph_tasks = {}
     return manager
@@ -104,9 +127,9 @@ class TestChildInstanceResume:
         """
         instance_id = "child-instance-123"
 
-        # No old jobs (child instance uses WorkerPool)
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         # Instance meta exists with PAUSED status
@@ -148,8 +171,9 @@ class TestChildInstanceResume:
         """
         instance_id = "child-instance-456"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         # Instance meta exists with RUNNING status
@@ -179,8 +203,10 @@ class TestChildInstanceResume:
         """
         instance_id = "child-instance-789"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
+        # (Phase 2.5 / D13 — see module docstring).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         mock_manager._instance_repository.get = MagicMock(
@@ -205,8 +231,10 @@ class TestChildInstanceResume:
         """
         instance_id = "child-instance-error"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
+        # (Phase 2.5 / D13 — see module docstring).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         mock_manager._instance_repository.get = MagicMock(
@@ -232,8 +260,10 @@ class TestChildInstanceResume:
         """
         instance_id = "nonexistent-instance"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
+        # (Phase 2.5 / D13 — see module docstring).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         # Instance meta is None
@@ -259,8 +289,10 @@ class TestChildInstanceResume:
         """
         instance_id = "completed-instance"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
+        # (Phase 2.5 / D13 — see module docstring).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         # Instance meta with COMPLETED status (unexpected)
@@ -285,8 +317,10 @@ class TestChildInstanceResume:
         """
         instance_id = "child-instance-duplicate"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
+        # (Phase 2.5 / D13 — see module docstring).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         mock_manager._instance_repository.get = MagicMock(
@@ -331,8 +365,10 @@ class TestChildInstanceResume:
         """
         instance_id = "child-instance-token"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance
+        # (Phase 2.5 / D13 — see module docstring).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         mock_manager._instance_repository.get = MagicMock(

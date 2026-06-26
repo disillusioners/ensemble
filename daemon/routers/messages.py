@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from daemon.constants import SSE_PING_INTERVAL, SSE_QUEUE_MAXSIZE, SSE_TIMEOUT_S
 from daemon.models import ErrorCodes, ErrorResponse, MessageCreate, MessageResponse
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.repositories.task.models import TaskStatus
 from daemon.services.live_event_hub import LiveEventHub
 from sse_starlette.sse import EventSourceResponse
 
@@ -19,6 +20,48 @@ logger = logging.getLogger(__name__)
 
 
 router = APIRouter(prefix="/instances", tags=["instances-messages"])
+
+
+# D13 status enum mapping (Critical Fix 3, 2026-06-27).
+# The ``/messages/{message_id}`` endpoint returns the status of a
+# message's processing entity. Pre-D13, the processing entity was a
+# ``JobItem`` row with ``status`` enum: ``pending``, ``processing``,
+# ``completed``, ``failed``, ``cancelled``, ``dead_letter``. Post-D13,
+# messages create ``Task`` rows (WorkerPool) with ``status`` enum:
+# ``pending``, ``running``, ``paused``, ``completed``, ``failed``,
+# ``cancelled``.
+#
+# Frontend clients were written against the pre-D13 enum and compare
+# ``status === 'processing'`` directly. Returning the raw ``Task``
+# status (e.g. ``"running"``) would silently break the UI for any
+# client that has not been updated. The mapping below translates the
+# post-D13 ``Task`` status back to the pre-D13 ``JobItem`` status
+# the API contract promised:
+#
+#   * ``pending`` → ``pending`` (no change)
+#   * ``running`` → ``processing`` (the main rename — Task rows are
+#     "running" while they drive ``graph.astream``, mirroring the
+#     JobItem "processing" lifecycle)
+#   * ``paused`` → ``paused`` (preserved — pause was a first-class
+#     JobItem state in Phase 1, and Task rows added the same state in
+#     Phase 1)
+#   * ``completed`` → ``completed``
+#   * ``failed`` → ``failed``
+#   * ``cancelled`` → ``cancelled``
+#
+# The mapping is deliberately one-way and stateless — the ``Task``
+# status is the source of truth in the DB; the response is the
+# pre-D13 API contract. The frontend (and any other consumer) sees
+# the familiar ``processing`` status without needing a synchronous
+# rename.
+_STATUS_MAP: dict[str, str] = {
+    TaskStatus.PENDING.value: "pending",
+    TaskStatus.RUNNING.value: "processing",
+    TaskStatus.PAUSED.value: "paused",
+    TaskStatus.COMPLETED.value: "completed",
+    TaskStatus.FAILED.value: "failed",
+    TaskStatus.CANCELLED.value: "cancelled",
+}
 
 
 def _get_manager(request: Request) -> Any:
@@ -220,10 +263,24 @@ async def get_message_status(instance_id: str, message_id: str, request: Request
                     )
                 except Exception:
                     result_summary = task_row.result
+            # Critical Fix 3 (D13): map the Task.status enum back to
+            # the pre-D13 JobItem status contract. ``Task.status``
+            # values are ``pending``, ``running``, ``paused``,
+            # ``completed``, ``failed``, ``cancelled``; the API
+            # contract promises ``pending``, ``processing``,
+            # ``paused``, ``completed``, ``failed``, ``cancelled``.
+            # The frontend compares ``status === 'processing'``
+            # directly; returning ``"running"`` would silently break
+            # the UI. The mapping is one-way — the DB stores the
+            # canonical Task status, the response is the legacy API
+            # contract.
+            mapped_status = _STATUS_MAP.get(
+                task_row.status, task_row.status
+            )
             return {
                 "message_id": message_id,
                 "instance_id": instance_id,
-                "status": task_row.status,
+                "status": mapped_status,
                 "result_summary": result_summary,
                 "error": task_row.error,
             }

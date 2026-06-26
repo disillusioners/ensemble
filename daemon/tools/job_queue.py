@@ -459,15 +459,35 @@ def create_job_tools(
             if instance_meta.status == InstanceStatus.PAUSED.value:
                 return {"error": "Instance is paused — unpause it first"}
 
-            # 5a. Pre-check: reject if there's a zombie PROCESSING MESSAGE job for
-            #     this instance. find_processing_message_jobs_by_instance is a sync
-            #     method on the repository (DB-level concurrency gate); wrap in
-            #     to_thread so the event loop isn't blocked.
-            active_jobs = await asyncio.to_thread(
-                job_service._repository.find_processing_message_jobs_by_instance, instance_id
-            )
-            if active_jobs:
-                return {"error": f"Instance {instance_id} has a job still processing — wait for it to complete first"}
+# 5a. Pre-check: reject if the instance has an in-flight Task. After
+            #     D13 (Phase 2 of the decouple-architecture migration),
+            #     messages create ``Task`` rows instead of ``JobItem``
+            #     rows — the previous ``find_processing_message_jobs_by_instance``
+            #     check became a no-op pass-through (it always returned []).
+            #     Replaced with ``TaskRepository.has_inflight_task(instance_id)``
+            #     which checks for ANY PENDING or RUNNING ``task`` row
+            #     belonging to the instance.
+            #
+            #     PAUSED tasks are intentionally EXCLUDED by
+            #     ``has_inflight_task`` — paused tasks are not actively
+            #     driving the graph, so a ``job_continue`` against a paused
+            #     instance is allowed to proceed (the instance is already
+            #     in a quiescent state and the user is opting to enqueue
+            #     more work). The companion primitive
+            #     ``TaskRepository.find_paused_or_running_by_instance``
+            #     does include PAUSED — it is the root-vs-child routing
+            #     decision for ``resume_processing_job``, which needs to
+            #     recognise paused state to fire checkpoint resume.
+            #
+            #     The check is sync (TaskRepository.has_inflight_task is a
+            #     pure DB query); wrap in asyncio.to_thread so the event
+            #     loop isn't blocked.
+            if manager._task_repo is not None:
+                has_inflight = await asyncio.to_thread(
+                    manager._task_repo.has_inflight_task, instance_id
+                )
+                if has_inflight:
+                    return {"error": f"Instance {instance_id} has a task still in flight — wait for it to complete first"}
 
             # 6. Send message via the JobQueue path (same as FE "send message")
             result = await manager.enqueue_message(

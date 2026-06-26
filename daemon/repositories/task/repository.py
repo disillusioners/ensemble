@@ -140,6 +140,67 @@ class TaskRepository:
             )
             return db_session.exec(stmt).first()
 
+    def find_paused_or_running_by_instance(
+        self, instance_id: str
+    ) -> Task | None:
+        """Return the first PAUSED or RUNNING ``PROCESS_MESSAGE`` ``task`` for ``instance_id``.
+
+        Phase 2.5 (2026-06-27, D13 consumption-site rewrite). The
+        root-vs-child routing primitive for
+        ``InstanceManager.resume_processing_job``. Pre-D13, the same
+        decision was made by looking up a PROCESSING ``JobItem`` via
+        ``JobRepository.find_processing_message_jobs_by_instance`` —
+        after D13, messages no longer create ``JobItem`` rows, so the
+        routing decision moves onto the ``task`` table.
+
+        Widened sister query to :meth:`find_running_by_instance` (the
+        happy-path RUNNING-only lookup) and :meth:`has_inflight_task`
+        (PENDING-or-RUNNING EXISTS check):
+
+          * PAUSED tasks are included because a paused root instance is
+            exactly the case where checkpoint resume must fire
+            (``task.status`` was transitioned ``RUNNING → PAUSED`` by
+            ``_pause_cascade_db_sync`` and will be transitioned back to
+            ``PENDING`` by ``_resume_cascade_db_sync`` — the resume
+            path needs to recognise that state and re-attach the
+            graph driver).
+          * PAUSED is intentionally NOT included by
+            :meth:`has_inflight_task` — that helper is the
+            ``job_continue`` concurrency gate, which must let PAUSED
+            through (paused tasks are not actively driving the
+            graph). The two semantics are deliberately different.
+
+        Filters on ``task_type = PROCESS_MESSAGE`` so report tasks
+        (``PROCESS_REPORT``) do not collide with the resume routing
+        decision — a paused report task is irrelevant to whether the
+        root instance has an in-flight graph turn to resume.
+
+        Pattern (parameterised ``IN`` clause) matches the dual-driver
+        approach in :meth:`has_inflight_task` — works on both SQLite
+        and PostgreSQL without dialect branching.
+
+        Args:
+            instance_id: The langgraph thread_id / instance_id.
+
+        Returns:
+            The first PAUSED or RUNNING ``PROCESS_MESSAGE`` Task for
+            the instance, or ``None``.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.instance_id == instance_id)
+                .where(
+                    Task.status.in_([
+                        TaskStatus.PAUSED.value,
+                        TaskStatus.RUNNING.value,
+                    ])
+                )
+                .where(Task.task_type == TaskType.PROCESS_MESSAGE.value)
+                .order_by(col(Task.created_at).desc())
+            )
+            return db_session.exec(stmt).first()
+
     def has_inflight_task(self, instance_id: str) -> bool:
         """Return True if any PENDING or RUNNING ``task`` row exists for ``instance_id``.
 
@@ -150,10 +211,25 @@ class TaskRepository:
         Task is still PENDING or RUNNING and will finalize the
         parent itself when it ends).
 
+        Phase 2.5 (2026-06-27, D13 consumption-site rewrite). Also
+        used by ``tools/job_queue.py:job_continue`` as the
+        DB-level concurrency gate (replaces the pre-D13
+        ``find_processing_message_jobs_by_instance`` check, which
+        became a no-op after MESSAGE ``JobItem`` creation was
+        eliminated in Phase 2).
+
         Sister query to :meth:`find_running_by_instance` —
         widened to include PENDING so a not-yet-claimed report
         Task is also treated as in-flight. One indexed EXISTS
         against ``ix_task_instance_id``.
+
+        PAUSED is intentionally NOT included: paused tasks are not
+        actively driving the graph — the per-instance guard should
+        not block a ``job_continue`` call against a paused instance
+        (the user has explicitly paused it and is now choosing to
+        unpause via a separate flow). This is the inverse of
+        :meth:`find_paused_or_running_by_instance`, which DOES
+        include PAUSED for the resume-routing primitive.
 
         Dual-driver SQL: pure SQLModel via ``session.scalar`` —
         the parameterized ``IN (:pending, :running)`` works on
@@ -250,9 +326,8 @@ class TaskRepository:
         for the parent message, so the carve-out is inert there.
 
         ``deleted_at IS NULL`` matches the canonical job-side query
-        (``find_processing_message_jobs_by_instance``): a soft-deleted
-        PROCESSING job never auto-completes and would otherwise
-        permanently block the instance.
+        (a soft-deleted PROCESSING job never auto-completes and would
+        otherwise permanently block the instance).
 
         Heartbeat init: ``last_heartbeat_at`` is set to the same value as
         ``started_at`` on claim, so the recovery service can distinguish

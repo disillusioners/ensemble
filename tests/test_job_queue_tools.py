@@ -895,6 +895,17 @@ class TestJobContinueTool:
         instance_repo = MagicMock()
         manager._instance_repository = instance_repo
         manager.enqueue_message = AsyncMock()
+        # Phase 2.5 (Task 2.5.8): ``job_continue`` no longer consults
+        # ``JobRepository.find_processing_message_jobs_by_instance`` —
+        # that method is removed (no MESSAGE ``JobItem`` rows post-D13).
+        # The DB-level concurrency gate now lives on
+        # ``TaskRepository.has_inflight_task(instance_id)``, returning
+        # True when ANY PENDING or RUNNING ``task`` row exists for the
+        # instance. Default to False so happy-path tests pass; tests
+        # exercising the gate override the return value explicitly.
+        task_repo = MagicMock()
+        task_repo.has_inflight_task = MagicMock(return_value=False)
+        manager._task_repo = task_repo
         return manager
 
     @pytest.fixture
@@ -926,8 +937,14 @@ class TestJobContinueTool:
         """Configure all mocks for the happy path; return the new_job_id used."""
         old_job = self._make_old_job(instance_id="inst-1")
         job_service.get_job.return_value = old_job
-        # No zombie PROCESSING MESSAGE jobs
-        job_service._repository.find_processing_message_jobs_by_instance = MagicMock(return_value=[])
+        # No in-flight Task rows for this instance (Phase 2.5 gate).
+        # The legacy ``find_processing_message_jobs_by_instance`` mock
+        # on ``job_service._repository`` is gone — the gate moved to
+        # ``TaskRepository.has_inflight_task`` (Task 2.5.8). The default
+        # fixture value (False) already satisfies the happy path; this
+        # line is explicit so the intent is visible next to the legacy
+        # mock that used to live here.
+        mock_manager._task_repo.has_inflight_task = MagicMock(return_value=False)
         # Instance is healthy
         instance = self._make_instance(status=instance_status)
         mock_manager._instance_repository.get.return_value = instance
@@ -1072,18 +1089,24 @@ class TestJobContinueTool:
 
     @pytest.mark.asyncio
     async def test_job_continue_zombie_processing_job(self, mock_services, mock_manager, tools):
-        """Error: a PROCESSING MESSAGE job already exists for the instance → 'has a job still processing'."""
+        """Error: a PENDING/RUNNING Task already exists for the instance → 'has a task still in flight'.
+
+        Phase 2.5 (Task 2.5.8): the legacy ``find_processing_message_jobs_by_instance``
+        gate was replaced with ``TaskRepository.has_inflight_task`` —
+        when the instance has a PENDING or RUNNING ``task`` row, the
+        tool returns ``{"error": "Instance ... has a task still in
+        flight — wait for it to complete first"}`` and skips the
+        enqueue. PAUSED tasks are intentionally NOT counted as
+        in-flight (paused is a quiescent state).
+        """
         job_service, _, _ = mock_services
         job_continue = tools[12]
 
         job_service.get_job.return_value = self._make_old_job()
         instance = self._make_instance(status="running")
         mock_manager._instance_repository.get.return_value = instance
-        # Zombie job exists
-        zombie = MagicMock()
-        job_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[zombie]
-        )
+        # Phase 2.5 gate: a Task is already driving this instance.
+        mock_manager._task_repo.has_inflight_task = MagicMock(return_value=True)
 
         result = await job_continue.ainvoke({
             "old_job_id": "old-job-1",
@@ -1091,7 +1114,7 @@ class TestJobContinueTool:
         })
 
         assert "error" in result
-        assert "has a job still processing" in result["error"]
+        assert "has a task still in flight" in result["error"]
         assert "inst-1" in result["error"]
         # Critical: enqueue should NOT have been called
         mock_manager.enqueue_message.assert_not_awaited()

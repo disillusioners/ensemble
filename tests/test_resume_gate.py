@@ -306,30 +306,56 @@ class TestResumeGateWrapping:
     @pytest.mark.asyncio
     async def test_other_exception_inside_gate_propagates_to_error_handler(self, _make_manager):
         """If the gate raises an exception that is NOT a gate-specific
-        error, it must propagate to the existing error handler (job
+        error, it must propagate to the existing error handler (Task
         FAILED, instance ERROR). The race-fix should not break the
         existing error path.
+
+        Phase 2.5 (D13 / Phase 2 migration): post-D13 there is no
+        ``JobItem`` to ``complete_job``. The error handler now calls
+        ``TaskRepository.fail_task(task_id, ...)`` instead, where
+        ``task_id`` is parsed from ``old_job_id`` (the WorkerPool Task
+        ID). For non-integer ``old_job_id`` values (a legacy UUID or a
+        non-task identifier), the ``fail_task`` call is skipped
+        silently and only the instance ERROR transition runs — the
+        per-instance guard release that ``fail_task`` would normally
+        provide is lost in that legacy fallback path. The test uses
+        an integer ``old_job_id`` so both transitions fire.
         """
         gate = _make_fake_gate(
             raise_after=(RuntimeError, "boom")
         )
         manager = _make_manager(gate)
+        # Phase 2.5: wire ``_task_repo.fail_task`` so the new
+        # error-handler path is observable.
+        manager._task_repo = MagicMock()
+        manager._task_repo.fail_task = MagicMock(return_value=None)
 
         # Should not raise — the existing except Exception block
-        # catches and marks the job FAILED.
+        # catches and marks the Task FAILED + instance ERROR.
         await manager._resume_processing_background(
             instance_id="inst-other-err",
             message="resume",
             message_id=str(uuid.uuid4()),
-            old_job_id="job-other-err",
+            old_job_id="42",  # integer — parsed as Task ID
             silent=False,
             images=None,
         )
 
-        manager._job_queue_service.complete_job.assert_awaited_once()
-        cj_args = manager._job_queue_service.complete_job.await_args.args
-        assert cj_args[1] == DemandState.FAILED
+        # Phase 2.5: ``_task_repo.fail_task(42, ...)`` replaces the
+        # legacy ``_job_queue_service.complete_job(_, DemandState.FAILED)``
+        # call. The Task ID comes from parsing ``old_job_id`` as int.
+        manager._task_repo.fail_task.assert_called_once()
+        ft_args = manager._task_repo.fail_task.call_args.args
+        assert ft_args[0] == 42
+        assert "Resume failed" in ft_args[1]
 
+        # ``complete_job`` is no longer called by the resume path —
+        # there is no ``JobItem`` for the message post-D13. The legacy
+        # fallback (non-int ``old_job_id``) would also skip
+        # ``fail_task`` and only update the instance status.
+        manager._job_queue_service.complete_job.assert_not_called()
+
+        # Instance is still marked ERROR (unconditional).
         manager._instance_repository.update_instance.assert_called_once()
         ui_kwargs = manager._instance_repository.update_instance.call_args.kwargs
         assert ui_kwargs["status"] == InstanceStatus.ERROR.value

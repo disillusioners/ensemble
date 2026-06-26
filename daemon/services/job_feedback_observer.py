@@ -170,6 +170,45 @@ class _InstanceFinalizeResult(NamedTuple):
     agent_id: str | None
 
 
+class _ProcessingJobContext(NamedTuple):
+    """Lightweight finalize context passed through the observer's terminal chain.
+
+    Phase 2.5 (2026-06-27, D13 consumption-site rewrite). Replaces the
+    direct ``JobItem`` reference that the observer previously returned
+    from :meth:`JobFeedbackObserver._get_processing_job_for_instance`.
+
+    Pre-D13: messages created ``JobItem`` rows, so every finalization had
+    a JobItem to update. ``_finalize_job`` took a ``JobItem`` directly and
+    used ``job.job_id`` throughout.
+
+    Post-D13: messages create ``Task`` rows instead of ``JobItem`` rows.
+    The observer's terminal chain still needs the ``job_id`` (used by
+    ``_finalize_job_db_sync`` Step 1 — the JobItem UPDATE — and by
+    notify_watchers / _trigger_next_job downstream side effects), but
+    there is no ``JobItem`` to attach to.
+
+    Two semantic modes:
+
+      * ``job_id is not None`` — TASK-type jobs and any pre-D13 legacy
+        JobItem that still exists. Step 1 of ``_finalize_job_db_sync``
+        runs as before; downstream side effects
+        (``notify_watchers``, ``_trigger_next_job``) fire with this
+        ``job_id``.
+      * ``job_id is None`` — MESSAGE-driven instances in the post-D13
+        world. Step 1 is skipped (no JobItem to UPDATE); Steps 2+3
+        (instance status + lock release) ALWAYS run; downstream
+        ``notify_watchers`` and ``_trigger_next_job`` are skipped
+        (no JobItem to notify watchers of, and the next job, if any,
+        is claimed by the WorkerPool path).
+
+    ``instance_id`` is always set (even when ``job_id`` is ``None``) —
+    it is the canonical identifier the finalize chain operates on.
+    """
+
+    instance_id: str
+    job_id: str | None
+
+
 class _FinalizeJobResult(NamedTuple):
     """Result of the sync DB half of ``_finalize_job`` (H15 fix).
 
@@ -466,70 +505,78 @@ class JobFeedbackObserver:
 
     async def _get_processing_job_for_instance(
         self, instance_id: str
-    ) -> JobItem | None:
-        """Get the PROCESSING job for an instance, with stale-job defense.
+    ) -> _ProcessingJobContext | None:
+        """Return the finalize context for ``instance_id``, or ``None``.
 
-        Shared lookup used by the lifecycle-event path
-        (:meth:`_process_event`). The historical bus-callback
-        (``_retrigger_parent_finalize``) was removed in Phase 1; the
-        lifecycle-event path is now the sole consumer of this helper.
+        Phase 2.5 (2026-06-27, D13 consumption-site rewrite). Replaced
+        the pre-D13 ``JobItem | None`` return type with
+        :class:`_ProcessingJobContext` — a lightweight NamedTuple
+        carrying ``instance_id`` and ``job_id`` (``None`` when no
+        JobItem exists for the instance).
 
         Behavior:
-          1. First lookup via the job queue service wrapper (functionally
-             identical to ``await asyncio.to_thread(self._job_repo.get_by_instance,
-             instance_id)`` — the service layer just adds the
-             ``asyncio.to_thread`` indirection required to keep sync DB calls
-             off the event loop).
-          2. If the returned row is already PROCESSING, return it directly —
-             the happy path skips the re-query entirely.
-          3. Otherwise (stale CANCELLED / COMPLETED / FAILED row from a prior
-             cycle), re-query the repository for the active (PENDING or
-             PROCESSING) row. Only a PROCESSING row is considered "safe to
-             finalize" — a PENDING row would fail ``atomic_transition`` from
-             PROCESSING and is treated as "no active job".
-          4. Returns ``None`` when no PROCESSING job exists for the instance.
-             Callers use this to skip finalization silently.
 
-        Phase 2 audit (2026-06-25, pause/resume redesign):
-          PAUSED jobs are EXCLUDED by construction — both the happy path
-          (``job.status == JobStatus.PROCESSING.value`` check on line 518
-          below) and the defense-in-depth re-query (``active_job.status ==
-          JobStatus.PROCESSING.value`` check on line 532) require the job
-          to be in PROCESSING status. PAUSED jobs (introduced in Phase 1)
-          are filtered out automatically: a paused instance has no
-          PROCESSING job visible to this helper, so ``_process_event``
-          short-circuits with ``job is None`` and never reaches
-          ``_finalize_job``. This is the correct observable behavior —
-          pausing an instance must NOT trigger premature job finalization
-          via the lifecycle-event path.
+          1. Look up the most-recent ``JobItem`` for the instance via
+             the job queue service wrapper. ``get_by_instance`` orders
+             by ``created_at DESC`` so the freshest row comes first.
+          2. If a PROCESSING row is found → return ``_ProcessingJobContext(
+             instance_id, job.job_id)`` (TASK-type job or legacy
+             pre-D13 MESSAGE JobItem that still exists). Callers will
+             run the full Step 1 (JobItem UPDATE) → Step 2 (instance
+             status) → Step 3 (lock release) cascade.
+          3. Otherwise (no PROCESSING row) → return
+             ``_ProcessingJobContext(instance_id, job_id=None)`` — the
+             post-D13 MESSAGE path. ``_finalize_job_db_sync`` will
+             skip Step 1 (no JobItem to UPDATE) but still run Steps 2+3
+             (instance status + lock release are critical).
+          4. If no JobItem row exists at all (only Task rows; pure
+             post-D13 path) → same as case 3, return the context with
+             ``job_id=None``. The observer's terminal chain
+             (Steps 2+3) is the authoritative transition path for the
+             instance — the absence of a JobItem does not mean the
+             instance should stay RUNNING forever.
 
-        The re-query is defense-in-depth only: in production, the
-        ``ORDER BY created_at DESC, job_id`` ordering in
-        :meth:`JobRepository.get_by_instance` (Fix 1 of the
-        fix/revive-stale-job-lookup branch) already returns the active row in
-        the terminate→revive scenario, since ``JobItem.created_at`` is set
-        ONCE at row insert and NEVER updated by transitions — the revived
-        PROCESSING job ALWAYS has a newer ``created_at`` than the stale
-        CANCELLED job left behind. The re-query here future-proofs against
-        manual DB operations or synthetic test mocks where that ordering may
-        not hold.
+        Stale-job defense (preserved from pre-D13): if the freshest
+        row is in a non-PROCESSING terminal status (CANCELLED /
+        COMPLETED / FAILED / DEAD_LETTER), re-query
+        ``get_active_by_instance`` to find any still-active row. If
+        no active row exists, return the no-JobItem context (case 3
+        above) — the instance should still finalize even without a
+        JobItem, because the Task row drives the instance's
+        lifecycle post-D13.
+
+        Phase 2 audit (2026-06-25, pause/resume redesign) carries
+        forward: PAUSED jobs (introduced in Phase 1) are excluded by
+        construction — the ``status == JobStatus.PROCESSING.value``
+        checks in this method require PROCESSING status. A paused
+        instance has no PROCESSING job visible to this helper, so
+        ``_process_event`` falls into case 3 (no JobItem context) and
+        the lifecycle event short-circuits via the no-active-job
+        branch downstream.
 
         Args:
             instance_id: The instance ID to look up.
 
         Returns:
-            The active PROCESSING :class:`JobItem`, or ``None`` if no such
-            job exists.
+            A :class:`_ProcessingJobContext` carrying ``instance_id``
+            and ``job_id`` (``None`` when no JobItem exists for the
+            instance). Returns ``None`` only when the lookup itself
+            raises — callers treat this as "no finalize context
+            available".
         """
         # First lookup via the existing service wrapper. Equivalent to
         # ``await asyncio.to_thread(self._job_repo.get_by_instance, instance_id)``
         # — preserved as the service call so the existing test mock surface
         # (``mock_jqs.get_job_by_instance``) keeps working.
         job = await self._job_queue_service.get_job_by_instance(instance_id)
-        if job is None:
-            return None
-        if job.status == JobStatus.PROCESSING.value:
-            return job
+        if job is not None and job.status == JobStatus.PROCESSING.value:
+            # Happy path: PROCESSING JobItem exists. Pre-D13
+            # returned the JobItem directly; post-D13 we wrap it in
+            # the context so downstream code (which uses ``job_id``
+            # not the whole JobItem) keeps working.
+            return _ProcessingJobContext(
+                instance_id=instance_id, job_id=job.job_id
+            )
         # Defense-in-depth: future-proofing against manual DB operations or
         # synthetic test mocks where created_at ordering may not reflect the
         # active job. The real terminate→revive scenario is already covered
@@ -537,15 +584,25 @@ class JobFeedbackObserver:
         # JobRepository.get_by_instance — created_at is immutable post-insert,
         # so the revived PROCESSING row always sorts after the stale
         # CANCELLED row.
-        active_job = await asyncio.to_thread(
-            self._job_repo.get_active_by_instance, instance_id
-        )
-        if (
-            active_job is not None
-            and active_job.status == JobStatus.PROCESSING.value
-        ):
-            return active_job
-        return None
+        if job is not None:
+            active_job = await asyncio.to_thread(
+                self._job_repo.get_active_by_instance, instance_id
+            )
+            if (
+                active_job is not None
+                and active_job.status == JobStatus.PROCESSING.value
+            ):
+                return _ProcessingJobContext(
+                    instance_id=instance_id, job_id=active_job.job_id
+                )
+
+        # Post-D13 MESSAGE path (Task 2.5.3): no JobItem exists for the
+        # instance. The terminal chain must STILL run — Steps 2+3
+        # (instance status + lock release) are critical and depend on
+        # this finalize call reaching them. ``job_id=None`` tells
+        # ``_finalize_job_db_sync`` to skip Step 1 (no JobItem to
+        # UPDATE) and run Steps 2+3 unconditionally.
+        return _ProcessingJobContext(instance_id=instance_id, job_id=None)
 
     async def handle_correlation_complete(
         self, parent_id: str, terminal_status: str
@@ -577,15 +634,21 @@ class JobFeedbackObserver:
             parent_id: The parent instance ID whose correlations just completed.
             terminal_status: ``"completed"`` or ``"error"``.
         """
-        job = await self._get_processing_job_for_instance(parent_id)
-        if job is None:
+        ctx = await self._get_processing_job_for_instance(parent_id)
+        if ctx is None:
             logger.info(
                 f"Bus callback: no active PROCESSING job for instance "
                 f"{parent_id[:8]}..., skipping"
             )
             return
 
-        await self._finalize_job(job, parent_id, terminal_status, error=None)
+        # Phase 2.5 (Task 2.5.3): ctx is now a _ProcessingJobContext
+        # (instance_id + job_id). ``job_id`` may be ``None`` for
+        # post-D13 MESSAGE-driven parents — ``_finalize_job`` and
+        # ``_finalize_job_db_sync`` both accept ``job_id=None`` and
+        # skip Step 1 (JobItem UPDATE) while still running Steps 2+3
+        # (instance status + lock release).
+        await self._finalize_job(ctx, parent_id, terminal_status, error=None)
 
     async def _admit_via_worker_pool(self, job) -> None:
         """C6: Route a JobItem through the WorkerPool.
@@ -777,9 +840,18 @@ class JobFeedbackObserver:
         # helper encapsulates the get_by_instance + optional re-query for
         # terminate→revive scenarios, matching the protection that
         # the bus callback already had).
-        job = await self._get_processing_job_for_instance(instance_id)
-        if job is None:
-            return  # No active PROCESSING job for this instance
+        #
+        # Phase 2.5 (Task 2.5.6): the helper now returns a
+        # :class:`_ProcessingJobContext` (instance_id + job_id) rather
+        # than a ``JobItem | None``. The context carries ``job_id=None``
+        # when no ``JobItem`` exists for the instance (post-D13 MESSAGE
+        # path) — we still proceed with finalize in that case (the
+        # instance status transition + lock release are critical).
+        # The helper ONLY returns ``None`` when the lookup itself
+        # raises; callers treat ``None`` as "skip silently".
+        ctx = await self._get_processing_job_for_instance(instance_id)
+        if ctx is None:
+            return  # Lookup raised; skip silently.
 
         # Phase 2: decide between in_progress and terminal based on bus state.
         if status in (InstanceStatus.COMPLETED.value, InstanceStatus.ERROR.value):
@@ -797,7 +869,28 @@ class JobFeedbackObserver:
                     # Race #1 fix: no LLM fetch, no TOCTOU — we simply
                     # notify watchers and let the report Task drive
                     # the next finalize attempt.
-                    await self._emit_in_progress(job, instance_id)
+                    #
+                    # Phase 2.5: ``_emit_in_progress`` requires a
+                    # ``job`` argument for the ``job_id`` it passes to
+                    # ``notify_watchers``. When ``ctx.job_id is None``
+                    # (post-D13 MESSAGE path) we skip the
+                    # in_progress emission — there is no JobItem to
+                    # notify watchers of. The lifecycle event will
+                    # fire again when children resolve and bus_pending
+                    # drops to 0; the terminal transition will then
+                    # proceed without in_progress. This is benign —
+                    # the bus still tracks the per-parent pending count
+                    # and will not finalize until all children resolve.
+                    if ctx.job_id is None:
+                        logger.debug(
+                            f"Skipping in_progress emit for "
+                            f"{instance_id[:8]}... — no JobItem to "
+                            f"notify (post-D13 MESSAGE path); "
+                            f"bus_pending={bus_pending} will resolve "
+                            f"via subsequent lifecycle event"
+                        )
+                        return
+                    await self._emit_in_progress(ctx, instance_id)
                     return
                 # bus_pending == 0: no pending watchers in bus.
                 # Fall through to the shared terminal transition. This handles:
@@ -848,8 +941,14 @@ class JobFeedbackObserver:
         status_to_finalize, error_for_finalize = _resolve_finalize_status(
             bus, instance_id, status, error
         )
+        # Phase 2.5 (Task 2.5.6): pass the _ProcessingJobContext to
+        # ``_finalize_job``. ``ctx.job_id`` may be ``None`` (post-D13
+        # MESSAGE path) — ``_finalize_job_db_sync`` handles that by
+        # skipping Step 1 (no JobItem UPDATE) and running Steps 2+3
+        # (instance status + lock release) unconditionally. The
+        # terminal transition fires regardless.
         await self._finalize_job(
-            job, instance_id, status_to_finalize, error=error_for_finalize
+            ctx, instance_id, status_to_finalize, error=error_for_finalize
         )
         # Phase 1: clear the sticky error flag AFTER finalize so a
         # future revive / re-spawn of the same instance id does not
@@ -860,7 +959,7 @@ class JobFeedbackObserver:
             bus.clear_parent_error(instance_id)
 
     async def _emit_in_progress(
-        self, job, instance_id: str
+        self, ctx: _ProcessingJobContext, instance_id: str
     ) -> None:
         """Emit an ``in_progress`` watcher notification.
 
@@ -868,8 +967,16 @@ class JobFeedbackObserver:
         transition will still fire via the bus completion callback (or the
         shared terminal path) regardless of whether this notification succeeds.
 
+        Phase 2.5 (Task 2.5.3 + Task 2.5.6): the parameter is now a
+        :class:`_ProcessingJobContext` rather than a ``JobItem``. The
+        ``job_id`` field is passed to ``notify_watchers``. When
+        ``ctx.job_id is None`` (post-D13 MESSAGE path), the caller
+        skips this emission entirely (no JobItem to notify watchers of).
+
         Args:
-            job: The JobItem for the parent instance.
+            ctx: The finalize context. ``ctx.job_id`` is required by
+                this method (callers must skip emission when
+                ``ctx.job_id is None``).
             instance_id: The parent instance ID (for LLM checkpoint fetch).
         """
         try:
@@ -879,7 +986,7 @@ class JobFeedbackObserver:
                 )
             )
             await self._job_queue_service.notify_watchers(
-                job.job_id,
+                ctx.job_id,
                 status="in_progress",
                 progress=progress_text,
             )
@@ -891,7 +998,7 @@ class JobFeedbackObserver:
 
     async def _finalize_job(
         self,
-        job,
+        ctx: _ProcessingJobContext,
         instance_id: str,
         terminal_status: str,
         error: str | None = None,
@@ -907,6 +1014,19 @@ class JobFeedbackObserver:
         EITHER the report Task's emitted ``instance_lifecycle``
         event (PROCESS_REPORT drove a parent graph turn) OR the
         original message Task's emitted event (no children).
+
+        Phase 2.5 (2026-06-27, D13 consumption-site rewrite): the
+        ``job`` parameter is now a :class:`_ProcessingJobContext`
+        (instance_id + job_id) rather than a ``JobItem``. When
+        ``ctx.job_id is None`` (post-D13 MESSAGE path — no
+        ``JobItem`` exists for the message-driven instance),
+        ``_finalize_job_db_sync`` skips Step 1 (JobItem UPDATE)
+        and runs Steps 2+3 (instance status + lock release)
+        unconditionally. The downstream side effects
+        (``notify_watchers``, ``_trigger_next_job``) are also
+        skipped — there is no JobItem to notify watchers of, and
+        any follow-up work is claimed via the WorkerPool path,
+        not via the JobQueue handoff.
 
         The method is a no-op (returns silently) for unknown terminal_status
         values. Race conditions (job already transitioned by another actor) are
@@ -935,9 +1055,16 @@ class JobFeedbackObserver:
         raises, the method attempts a fail-safe ``atomic_transition`` to FAILED
         via ``asyncio.to_thread`` (C1 TOCTOU invariant does not apply here —
         the CM has already cleaned up its pending state for this parent).
+        When ``ctx.job_id is None``, the W3 fail-safe is skipped — there is
+        no JobItem to transition. The instance status update from Step 2
+        has already committed inside ``_finalize_job_db_sync``, so the
+        observable failure mode is just the missing W3 transition (no
+        PROCESSING row to flip).
 
         Args:
-            job: The JobItem to transition (must be in PROCESSING).
+            ctx: The finalize context. ``ctx.job_id`` may be ``None``
+                for post-D13 MESSAGE-driven instances (no JobItem
+                exists).
             instance_id: The parent instance ID.
             terminal_status: ``"completed"`` or ``"error"``.
             error: Error message for FAILED transitions (ignored for COMPLETED).
@@ -1022,10 +1149,19 @@ class JobFeedbackObserver:
                 # must wait until finalization has committed. This is
                 # the same critical-section shape the previous CM-based
                 # code used (``async with cm._get_lock(instance_id)``).
+                #
+                # Phase 2.5 (Task 2.5.4): ``_finalize_job_db_sync``
+                # now accepts ``job_id=None`` and skips Step 1
+                # (JobItem UPDATE) when no ``JobItem`` exists for the
+                # instance — the post-D13 MESSAGE path. The bus lock
+                # is still acquired regardless of ``ctx.job_id``
+                # because the lock's purpose is to serialize against
+                # ``bus.watch()`` which is orthogonal to the
+                # JobItem / Task distinction.
                 async with await bus._get_parent_lock(instance_id):
                     db_result = await asyncio.to_thread(
                         self._finalize_job_db_sync,
-                        job.job_id,
+                        ctx.job_id,
                         instance_id,
                         terminal_status,
                         result_summary,
@@ -1036,7 +1172,7 @@ class JobFeedbackObserver:
                 # gate inside ``_finalize_job_db_sync`` is the only defence.
                 db_result = await asyncio.to_thread(
                     self._finalize_job_db_sync,
-                    job.job_id,
+                    ctx.job_id,
                     instance_id,
                     terminal_status,
                     result_summary,
@@ -1056,8 +1192,26 @@ class JobFeedbackObserver:
             # skip / gate_deferred). Skipped paths mean the job was not
             # moved to COMPLETED by us, and gate-deferred paths already
             # schedule a bus re-arm for the wave 2 case.
+            #
+            # Phase 2.5 (Task 2.5.7): the re-arm is **conditional on
+            # ``ctx.job_id is not None``**. In the post-D13 MESSAGE
+            # path, there is no ``JobItem`` to re-arm — the
+            # ``DependencyBus``'s own watcher/generation mechanism is
+            # the authoritative recovery path for late children: a
+            # late child's ``DependencyBus.watch`` that lands during
+            # the critical section bumps ``bus.generation``, and the
+            # bus's completion-callback (``handle_correlation_complete``)
+            # drives a new finalize cycle on the next lifecycle event.
+            # The JobItem-only re-arm below is skipped when no
+            # ``JobItem`` exists. The instance-level side effects
+            # (Steps 2+3 in ``_finalize_job_db_sync``) have already
+            # committed inside the WriteGuardSession; the per-instance
+            # lock release is already done — there is nothing further
+            # to re-arm at the JobItem layer. The bus's own
+            # watcher/generation state IS the re-arm signal.
             if (
                 bus is not None
+                and ctx.job_id is not None
                 and not db_result.skip
                 and not db_result.gate_deferred
             ):
@@ -1083,13 +1237,13 @@ class JobFeedbackObserver:
                         f"detected generation change for instance="
                         f"{instance_id[:8]} (pre_gen={pre_gen}, "
                         f"post_gen={post_gen}). Re-arming job "
-                        f"{job.job_id[:8]} from COMPLETED to PROCESSING."
+                        f"{ctx.job_id[:8]} from COMPLETED to PROCESSING."
                     )
                     rearmed = False
                     try:
                         await asyncio.to_thread(
                             self._job_repo.atomic_transition,
-                            job_id=job.job_id,
+                            job_id=ctx.job_id,
                             from_status=JobStatus.COMPLETED.value,
                             to_status=JobStatus.PROCESSING.value,
                         )
@@ -1103,7 +1257,7 @@ class JobFeedbackObserver:
                         # actually in.
                         logger.info(
                             f"Observer: re-arm skipped — job "
-                            f"{job.job_id[:8]} no longer COMPLETED "
+                            f"{ctx.job_id[:8]} no longer COMPLETED "
                             f"(current: {ite.from_status} → "
                             f"{ite.to_status})"
                         )
@@ -1114,7 +1268,7 @@ class JobFeedbackObserver:
                         # better than a partially-finalized state.
                         logger.warning(
                             f"Observer: re-arm failed for job "
-                            f"{job.job_id[:8]} "
+                            f"{ctx.job_id[:8]} "
                             f"(COMPLETED → PROCESSING): {rearm_exc}. "
                             f"The late child may be orphaned."
                         )
@@ -1167,7 +1321,8 @@ class JobFeedbackObserver:
                 # itself encodes the re-arm signal.
                 logger.debug(
                     f"Observer: _finalize_job gate-deferred for job "
-                    f"{job.job_id[:8]}... instance {instance_id[:8]}... — "
+                    f"{ctx.job_id[:8] if ctx.job_id else 'no_job'}... "
+                    f"instance {instance_id[:8]}... — "
                     f"bus re-arm via orphan-race generation check "
                     f"(Phase 5: bus is the SOLE completion authority)"
                 )
@@ -1188,55 +1343,64 @@ class JobFeedbackObserver:
             # set would NEVER be drained for watch-based parents — the
             # completion callback would never fire and the parent would
             # hang in ``PROCESSING`` forever.
+            #
+            # Phase 2.5 (Task 2.5.4): the watcher fetch is conditional
+            # on ``ctx.job_id is not None`` — post-D13 MESSAGE-driven
+            # instances have no ``JobItem``, so there is no
+            # ``JobWatcher`` rows to fetch.
             terminal_watchers: list[Any] = []
-            try:
-                # ``JobQueueService`` holds the watcher repo (set via
-                # ``set_watcher_repo`` in ``daemon/api.py``). When the
-                # service is mocked in tests, this attribute is typically
-                # not set — ``getattr`` returns ``None`` and we skip the
-                # fetch cleanly. Defensive: a missing or non-callable
-                # ``get_watchers_for_job`` is also treated as "no repo".
-                watcher_repo = getattr(
-                    self._job_queue_service, "_watcher_repo", None
-                )
-                if watcher_repo is not None and hasattr(
-                    watcher_repo, "get_watchers_for_job"
-                ):
-                    terminal_watchers = await asyncio.to_thread(
-                        watcher_repo.get_watchers_for_job, job.job_id
+            if ctx.job_id is not None:
+                try:
+                    # ``JobQueueService`` holds the watcher repo (set via
+                    # ``set_watcher_repo`` in ``daemon/api.py``). When the
+                    # service is mocked in tests, this attribute is typically
+                    # not set — ``getattr`` returns ``None`` and we skip the
+                    # fetch cleanly. Defensive: a missing or non-callable
+                    # ``get_watchers_for_job`` is also treated as "no repo".
+                    watcher_repo = getattr(
+                        self._job_queue_service, "_watcher_repo", None
                     )
-            except Exception as e:
-                # Defensive: never let a watcher-repo failure abort the
-                # post-commit outbox. Log at WARNING and continue with
-                # an empty list (the watcher notifications already fired;
-                # we just won't drive CM resolution for them).
-                logger.warning(
-                    f"Observer: pre-fetch watchers failed for job "
-                    f"{job.job_id[:8]}...: {e}"
-                )
+                    if watcher_repo is not None and hasattr(
+                        watcher_repo, "get_watchers_for_job"
+                    ):
+                        terminal_watchers = await asyncio.to_thread(
+                            watcher_repo.get_watchers_for_job, ctx.job_id
+                        )
+                except Exception as e:
+                    # Defensive: never let a watcher-repo failure abort the
+                    # post-commit outbox. Log at WARNING and continue with
+                    # an empty list (the watcher notifications already fired;
+                    # we just won't drive CM resolution for them).
+                    logger.warning(
+                        f"Observer: pre-fetch watchers failed for job "
+                        f"{ctx.job_id[:8]}...: {e}"
+                    )
 
             # notify_watchers (terminal notification) — fires AFTER commit so
-            # watchers see a consistent state.
-            if db_result.terminal_status == InstanceStatus.COMPLETED.value:
-                try:
-                    await self._job_queue_service.notify_watchers(
-                        job.job_id, "completed"
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Observer: notify_watchers failed for job "
-                        f"{job.job_id[:8]}...: {e}"
-                    )
-            elif db_result.terminal_status == InstanceStatus.ERROR.value:
-                try:
-                    await self._job_queue_service.notify_watchers(
-                        job.job_id, "failed", db_result.error_message
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"Observer: notify_watchers failed for job "
-                        f"{job.job_id[:8]}...: {e}"
-                    )
+            # watchers see a consistent state. Skipped when no JobItem
+            # exists (post-D13 MESSAGE path) — there are no watchers
+            # to notify.
+            if ctx.job_id is not None:
+                if db_result.terminal_status == InstanceStatus.COMPLETED.value:
+                    try:
+                        await self._job_queue_service.notify_watchers(
+                            ctx.job_id, "completed"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Observer: notify_watchers failed for job "
+                            f"{ctx.job_id[:8]}...: {e}"
+                        )
+                elif db_result.terminal_status == InstanceStatus.ERROR.value:
+                    try:
+                        await self._job_queue_service.notify_watchers(
+                            ctx.job_id, "failed", db_result.error_message
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Observer: notify_watchers failed for job "
+                            f"{ctx.job_id[:8]}...: {e}"
+                        )
 
             # B4: Resolve watched jobs. The bus is task-keyed, not
             # job-keyed, so there is no bus equivalent for job-level
@@ -1263,7 +1427,7 @@ class JobFeedbackObserver:
                 # observability; if no watchers, no action.
                 logger.debug(
                     f"Observer: watcher {watcher.instance_id[:8]}... "
-                    f"resolved for job {job.job_id[:8]}... "
+                    f"resolved for job {ctx.job_id[:8]}... "
                     f"(terminal_status={db_result.terminal_status}, "
                     f"cm_status=removed-phase5)"
                 )
@@ -1274,6 +1438,16 @@ class JobFeedbackObserver:
             # by whoever set the instance terminal first (CM-disabled inline cascade
             # or a prior callback). If the instance row was missing, there is no
             # consumer to notify.
+            #
+            # Phase 2.5 (Task 2.5.4): this fires regardless of
+            # ``ctx.job_id`` — Steps 2+3 (instance status + lock release)
+            # committed inside ``_finalize_job_db_sync`` already, so
+            # the instance-side fan-out must run to keep
+            # ``CompletionRegistry`` / SSE / lifecycle event in sync
+            # with the DB. The ``job_id=None`` path is benign — the
+            # dispatcher's inputs are ``instance_id``,
+            # ``terminal_status``, ``result_summary``, etc., none of
+            # which depend on the JobItem.
             if not db_result.instance_was_terminal:
                 await self._dispatch_instance_post_commit_side_effects(
                     instance_id=instance_id,
@@ -1285,10 +1459,20 @@ class JobFeedbackObserver:
                 )
 
             # ─── Trigger next job (zero-delay handoff) ───
-            await self._trigger_next_job(job)
+            # Phase 2.5 (Task 2.5.4): skipped when ``ctx.job_id is
+            # None``. ``_trigger_next_job`` requires a ``JobItem`` to
+            # look up ``project_id`` and find the next pending job in
+            # the same project. Post-D13 MESSAGE-driven instances have
+            # no JobItem; the next work (if any) is picked up by the
+            # WorkerPool via its own claim loop, not by the JobQueue
+            # handoff. Skipping here is correct, not lossy.
+            if ctx.job_id is not None:
+                await self._trigger_next_job_by_id(
+                    ctx.job_id, instance_id
+                )
 
             logger.info(
-                f"Observer: finalized job {job.job_id[:8]}... "
+                f"Observer: finalized job {ctx.job_id[:8] if ctx.job_id else 'no_job'}... "
                 f"status={db_result.terminal_status} for instance {instance_id[:8]}... "
                 f"(released {db_result.locks_released} lock(s))"
             )
@@ -1298,7 +1482,7 @@ class JobFeedbackObserver:
             # previous bus callback) already transitioned the job. Expected —
             # skip silently. This is the primary idempotency mechanism.
             logger.debug(
-                f"Race condition: job {job.job_id[:8]}... already transitioned "
+                f"Race condition: job {ctx.job_id[:8] if ctx.job_id else 'no_job'}... already transitioned "
                 f"(current: {e.from_status} -> {e.to_status}), skipping"
             )
             return
@@ -1350,7 +1534,7 @@ class JobFeedbackObserver:
             raise
         except Exception as e:
             logger.error(
-                f"Failed to finalize job {job.job_id[:8]}... "
+                f"Failed to finalize job {ctx.job_id[:8] if ctx.job_id else 'no_job'}... "
                 f"status={terminal_status}: {e}",
                 exc_info=True,
             )
@@ -1362,21 +1546,41 @@ class JobFeedbackObserver:
             # DB off the event loop (C1 TOCTOU invariant does NOT apply here —
             # the primary finalization has already failed, so there is no
             # ``register_message_send`` race to defend against).
-            try:
-                await asyncio.to_thread(
-                    self._job_repo.atomic_transition,
-                    job_id=job.job_id,
-                    from_status=JobStatus.PROCESSING.value,
-                    to_status=JobStatus.FAILED.value,
-                    completed_at=datetime.now(timezone.utc).isoformat(),
-                    error_message=f"Job finalization failed: {e}",
+            #
+            # Phase 2.5 (Task 2.5.4): the W3 fail-safe is conditional on
+            # ``ctx.job_id is not None``. There is no ``JobItem`` to
+            # transition when ``ctx.job_id is None`` — the post-D13
+            # MESSAGE path. The instance status update from
+            # ``_finalize_job_db_sync`` Step 2 has already committed
+            # inside the WriteGuardSession (before any failure would
+            # have surfaced here), so the observable failure mode for
+            # the no-JobItem path is just the missing W3 transition —
+            # no PROCESSING row exists to flip. Logged at DEBUG so the
+            # absence is visible in observability without an ERROR
+            # log line for an absent JobItem.
+            if ctx.job_id is not None:
+                try:
+                    await asyncio.to_thread(
+                        self._job_repo.atomic_transition,
+                        job_id=ctx.job_id,
+                        from_status=JobStatus.PROCESSING.value,
+                        to_status=JobStatus.FAILED.value,
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        error_message=f"Job finalization failed: {e}",
+                    )
+                    logger.info(
+                        f"Observer: fail-safe transitioned job "
+                        f"{ctx.job_id[:8]}... to FAILED after finalization error"
+                    )
+                except Exception:
+                    pass  # atomic_transition itself failed — nothing more we can do
+            else:
+                logger.debug(
+                    f"Observer: W3 fail-safe skipped — no JobItem "
+                    f"for instance {instance_id[:8]}... (post-D13 MESSAGE path); "
+                    f"instance status was already committed by "
+                    f"_finalize_job_db_sync Step 2"
                 )
-                logger.info(
-                    f"Observer: fail-safe transitioned job "
-                    f"{job.job_id[:8]}... to FAILED after finalization error"
-                )
-            except Exception:
-                pass  # atomic_transition itself failed — nothing more we can do
             return
 
     async def _process_resume_finalize(
@@ -1427,6 +1631,13 @@ class JobFeedbackObserver:
             job_id: The job_id (for logging/fallback; the
                 authoritative job is looked up via
                 :meth:`_get_processing_job_for_instance`).
+                Phase 2.5 (Task 2.5.2): after D13, ``job_id`` is
+                the WorkerPool Task ID (a stringified int), NOT a
+                ``JobItem.job_id``. The lookup helper may return
+                ``ctx.job_id=None`` when no JobItem exists for the
+                instance — the terminal transition still fires
+                through ``_finalize_job_db_sync`` Steps 2+3 (instance
+                status + lock release).
             result_summary: Optional result text from the graph turn.
                 The current ``_finalize_job`` API does not accept
                 ``result_summary`` from the caller (it does its own
@@ -1445,15 +1656,24 @@ class JobFeedbackObserver:
                 "The bus must be initialized (see ADR-011)."
             )
 
-        # Look up the active PROCESSING job. If None, the job is
-        # already finalized by a racing event-driven finalize (or a
-        # terminate). Return silently — that is the correct
-        # observable behaviour.
-        job = await self._get_processing_job_for_instance(instance_id)
-        if job is None:
+        # Look up the finalize context for this instance. Phase 2.5
+        # (Task 2.5.5): the helper now returns a
+        # :class:`_ProcessingJobContext` (instance_id + job_id) rather
+        # than a ``JobItem | None``. The ``ctx`` is ``None`` ONLY when
+        # the lookup itself raises — callers treat ``None`` as "skip
+        # silently". When ``ctx.job_id is None`` (post-D13 MESSAGE
+        # path), we still proceed with finalize — the instance status
+        # transition + lock release are critical and depend on this
+        # finalize call reaching them. The pre-D13 short-circuit
+        # (``if job is None: return``) is gone because in the
+        # post-D13 world, ``ctx`` is non-None whenever the instance
+        # row exists (the helper returns a context with
+        # ``job_id=None`` when no JobItem exists, instead of None).
+        ctx = await self._get_processing_job_for_instance(instance_id)
+        if ctx is None:
             logger.debug(
-                f"_process_resume_finalize: no PROCESSING job for instance "
-                f"{instance_id[:8]}... — already finalized by racing event"
+                f"_process_resume_finalize: lookup failed for instance "
+                f"{instance_id[:8]}... — skipping silently"
             )
             return
 
@@ -1464,9 +1684,25 @@ class JobFeedbackObserver:
         # skip the thread-hop when the result is obvious. Even if a
         # race makes this count stale by the time the sync helper
         # runs, the in-session re-check closes the gap.
+        #
+        # Phase 2.5 (Task 2.5.5): ``_emit_in_progress`` requires a
+        # ``job_id``; when ``ctx.job_id is None`` (post-D13 MESSAGE
+        # path) we skip the in_progress emission — there is no
+        # JobItem to notify watchers of. The lifecycle event will
+        # fire again when children resolve and bus_pending drops to
+        # 0; the terminal transition will then proceed without
+        # in_progress.
         bus_pending = await bus.count_pending_for_target(instance_id)
         if bus_pending > 0:
-            await self._emit_in_progress(job, instance_id)
+            if ctx.job_id is None:
+                logger.debug(
+                    f"Skipping in_progress emit for "
+                    f"{instance_id[:8]}... — no JobItem to notify "
+                    f"(post-D13 MESSAGE path); bus_pending={bus_pending} "
+                    f"will resolve via subsequent lifecycle event"
+                )
+                return
+            await self._emit_in_progress(ctx, instance_id)
             return
 
         # REUSE _finalize_job — do NOT reimplement finalize logic.
@@ -1482,7 +1718,7 @@ class JobFeedbackObserver:
         # _process_event path which also passes the string form via
         # _resolve_finalize_status → _finalize_job. The method maps
         # the string to InstanceStatus.COMPLETED.value internally.
-        await self._finalize_job(job, instance_id, "completed", error=None)
+        await self._finalize_job(ctx, instance_id, "completed", error=None)
 
     async def _finalize_instance(
         self,
@@ -1777,7 +2013,7 @@ class JobFeedbackObserver:
 
     def _finalize_job_db_sync(
         self,
-        job_id: str,
+        job_id: str | None,
         instance_id: str,
         terminal_status: str,
         result_summary: str | None,
@@ -1806,6 +2042,19 @@ class JobFeedbackObserver:
         If any step raises, none of them commit (the
         ``WriteGuardSession.__exit__`` rolls back via the underlying
         ``Session.close``).
+
+        Phase 2.5 (Task 2.5.4, D13 consumption-site rewrite): the
+        ``job_id`` parameter is now ``str | None``. When ``job_id is
+        None`` (post-D13 MESSAGE path — no ``JobItem`` exists for the
+        instance), Step 1 is skipped entirely and Steps 2+3 still run.
+        This is the **least disruptive** option per the plan: the
+        instance transition (Step 2) and lock release (Step 3) are
+        critical — they MUST fire even without a JobItem. The JobItem
+        UPDATE (Step 1) is redundant in the no-JobItem case (there is
+        nothing to UPDATE). The bus gate (premature-finalization
+        defense) and the in-session gate are preserved regardless
+        of ``job_id`` — the gates protect the instance, not the
+        JobItem.
 
         Phase 2 audit (2026-06-25, pause/resume redesign):
           PAUSED jobs are EXCLUDED by the ``WHERE JobItem.status ==
@@ -1838,6 +2087,8 @@ class JobFeedbackObserver:
             during the callback (C1 abort). The bus will fire the callback
             again when those resolve.
           * Job not found (deleted concurrently).
+          * ``job_id is None`` AND ``Step 2`` (instance row) is also
+            missing — nothing to update at all.
 
         Raises ``InvalidTransitionError`` for the concurrent-transition
         case (job status no longer PROCESSING — race with another actor).
@@ -1847,7 +2098,9 @@ class JobFeedbackObserver:
         fail-safe transition.
 
         Args:
-            job_id: The job to transition.
+            job_id: The job to transition. ``None`` skips Step 1 (no
+                ``JobItem`` exists for the instance — post-D13 MESSAGE
+                path). Steps 2+3 still run.
             instance_id: The parent instance ID (instance update + lock release).
             terminal_status: ``"completed"`` or ``"error"``.
             result_summary: Pre-fetched result summary for the COMPLETED path.
@@ -2074,52 +2327,72 @@ class JobFeedbackObserver:
             # WriteGuardSession so it commits with steps 2/3 below. The UPDATE
             # uses the same ``status = :from_status`` SQL guard — concurrent
             # writers cannot both observe the predicate as true.
-            update_values: dict[str, Any] = {
-                "status": to_status,
-                "completed_at": now,
-            }
-            if terminal_status == InstanceStatus.COMPLETED.value:
-                summary = result_summary or "Job completed (no agent response captured)"
-                update_values["result_summary"] = summary
+            #
+            # Phase 2.5 (Task 2.5.4): Step 1 is **skipped** when
+            # ``job_id is None`` — the post-D13 MESSAGE path where no
+            # ``JobItem`` exists for the instance. Steps 2+3 (instance
+            # status + lock release) still run unconditionally. The
+            # ``InvalidTransitionError`` short-circuit (status-mismatch
+            # on concurrent transition) does not apply in this branch
+            # — there is no JobItem to mismatch on. The conditional
+            # ``job_id is None`` is captured into a local flag so the
+            # subsequent ``_FinalizeJobResult`` carries the correct
+            # ``skip`` value.
+            if job_id is not None:
+                update_values: dict[str, Any] = {
+                    "status": to_status,
+                    "completed_at": now,
+                }
+                if terminal_status == InstanceStatus.COMPLETED.value:
+                    summary = result_summary or "Job completed (no agent response captured)"
+                    update_values["result_summary"] = summary
+                else:
+                    update_values["error_message"] = error_message or "Unknown error"
+
+                stmt = (
+                    sqlmodel_update(JobItem)
+                    .where(JobItem.job_id == job_id)
+                    .where(JobItem.status == JobStatus.PROCESSING.value)
+                    .values(**update_values)
+                )
+                result = session.exec(stmt)
+
+                if result.rowcount == 0:
+                    # UPDATE matched no rows. Disambiguate with a follow-up SELECT.
+                    existing = session.get(JobItem, job_id)
+                    if existing is None:
+                        # Job gone — idempotency skip (no side effects).
+                        logger.debug(
+                            f"Observer: job {job_id[:8]}... not found during "
+                            f"finalize (deleted concurrently), skipping"
+                        )
+                        return _FinalizeJobResult(
+                            skip=True,
+                            terminal_status=None,
+                            job_id=None,
+                            instance_id=None,
+                            parent_id=None,
+                            agent_id=None,
+                            result_summary=None,
+                            error_message=None,
+                            locks_released=0,
+                            instance_was_terminal=False,
+                        )
+                    # Status mismatch — concurrent transition. Raise so the
+                    # caller treats it as the idempotency-race case (DEBUG log,
+                    # silent return).
+                    raise InvalidTransitionError(
+                        job_id=job_id,
+                        from_status=existing.status,
+                        to_status=to_status,
+                    )
             else:
-                update_values["error_message"] = error_message or "Unknown error"
-
-            stmt = (
-                sqlmodel_update(JobItem)
-                .where(JobItem.job_id == job_id)
-                .where(JobItem.status == JobStatus.PROCESSING.value)
-                .values(**update_values)
-            )
-            result = session.exec(stmt)
-
-            if result.rowcount == 0:
-                # UPDATE matched no rows. Disambiguate with a follow-up SELECT.
-                existing = session.get(JobItem, job_id)
-                if existing is None:
-                    # Job gone — idempotency skip (no side effects).
-                    logger.debug(
-                        f"Observer: job {job_id[:8]}... not found during "
-                        f"finalize (deleted concurrently), skipping"
-                    )
-                    return _FinalizeJobResult(
-                        skip=True,
-                        terminal_status=None,
-                        job_id=None,
-                        instance_id=None,
-                        parent_id=None,
-                        agent_id=None,
-                        result_summary=None,
-                        error_message=None,
-                        locks_released=0,
-                        instance_was_terminal=False,
-                    )
-                # Status mismatch — concurrent transition. Raise so the
-                # caller treats it as the idempotency-race case (DEBUG log,
-                # silent return).
-                raise InvalidTransitionError(
-                    job_id=job_id,
-                    from_status=existing.status,
-                    to_status=to_status,
+                # Phase 2.5 (Task 2.5.4): no JobItem to update.
+                # Fall through to Steps 2+3 unconditionally.
+                logger.debug(
+                    f"Observer: Step 1 (JobItem UPDATE) skipped — "
+                    f"no JobItem for instance {instance_id[:8]}... "
+                    f"(post-D13 MESSAGE path); proceeding to Steps 2+3"
                 )
 
             # ─── Step 2: Instance status update ───
@@ -2168,7 +2441,7 @@ class JobFeedbackObserver:
             session.commit()
 
         logger.info(
-            f"Observer: finalized job {job_id[:8]}... status={terminal_status} "
+            f"Observer: finalized job {job_id[:8] if job_id else 'no_job'}... status={terminal_status} "
             f"for instance {instance_id[:8]}... (released {released} lock(s), "
             f"instance_was_terminal={instance_was_terminal})"
         )
@@ -2185,6 +2458,55 @@ class JobFeedbackObserver:
             locks_released=released,
             instance_was_terminal=instance_was_terminal,
         )
+
+    async def _trigger_next_job_by_id(
+        self, job_id: str, instance_id: str
+    ) -> None:
+        """Look up the JobItem by ID and run ``_trigger_next_job``.
+
+        Phase 2.5 (Task 2.5.4): the post-commit outbox in
+        ``_finalize_job`` now operates on a :class:`_ProcessingJobContext`
+        (which carries only ``job_id``, not the full ``JobItem``). The
+        JobItem is needed by ``_trigger_next_job`` because that method
+        reads ``job.project_id`` to find the next pending job in the
+        same project.
+
+        This helper looks up the JobItem by ``job_id`` (best-effort)
+        and delegates. If the lookup fails — e.g. the JobItem was
+        deleted concurrently, or the caller passed ``job_id=None``
+        (handled by the caller; this method asserts non-None) — we
+        skip the trigger and log at DEBUG. The :class:`JobProcessor`
+        polling loop is the safety net that picks up the next pending
+        job even if this handoff fails.
+
+        Args:
+            job_id: The completed job's ID. Must be non-None.
+            instance_id: The instance ID (for logging).
+        """
+        if job_id is None:
+            logger.debug(
+                f"Observer: _trigger_next_job_by_id skipped — "
+                f"job_id is None for instance {instance_id[:8]}..."
+            )
+            return
+        try:
+            job = await asyncio.to_thread(
+                self._job_repo.get, job_id
+            )
+        except Exception as e:
+            logger.warning(
+                f"Observer: failed to look up JobItem "
+                f"{job_id[:8]}... for next-job handoff: {e}"
+            )
+            return
+        if job is None:
+            logger.debug(
+                f"Observer: JobItem {job_id[:8]}... not found "
+                f"during next-job handoff (deleted concurrently); "
+                f"JobProcessor safety net will pick up the next pending job"
+            )
+            return
+        await self._trigger_next_job(job)
 
     async def _trigger_next_job(self, job) -> None:
         """Admit and spawn the next pending job for the same project.

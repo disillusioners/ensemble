@@ -461,8 +461,32 @@ class TestTaskClaiming:
         assert repository.claim_pending_task(worker_id="worker-1") is None
 
     def test_claim_unaffected_by_non_message_job_types(self, repository, engine):
-        """Cross-system guard only blocks on MESSAGE jobs, not other job types
-        (cleanup, send_report, etc.) that don't touch the langgraph thread."""
+        """Phase 2.5 (D13) pin: the cross-system guard in
+        ``claim_pending_task`` no longer filters ``j.job_type =
+        'message'`` — it now blocks on ANY processing ``JobItem``
+        for the instance, regardless of job type. After D13, all
+        ``JobItem`` rows are TASK-type (message-type jobs are no
+        longer created), so the previous "only MESSAGE jobs block"
+        carve-out is no longer relevant in the post-D13 world.
+
+        The new contract: a non-MESSAGE (e.g. ``cleanup``) processing
+        job for the instance DOES block a ``claim_pending_task``
+        call for the same instance. The pre-D13 carve-out (a
+        CLEANUP job did NOT block because it doesn't touch the
+        langgraph thread) was correct for the legacy dual-path
+        architecture, but after D13 the carve-out's premise (MESSAGE
+        is the only "graph-driving" job_type) no longer holds.
+        WorkerPool admission now happens via the
+        ``NOT EXISTS (... task t message_id ...)`` carve-out in
+        the subquery (matching Task + pending/running status), not
+        via the job_type filter.
+
+        This test pins the new behaviour: a CLEANUP processing
+        job with empty ``job_metadata`` (no message_id) blocks
+        the task claim, because the ``NOT EXISTS`` carve-out
+        returns TRUE (no matching Task row exists) and the
+        inner subquery returns the instance.
+        """
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
         from daemon.repositories.job_queue.models import JobItem, JobStatus
@@ -485,12 +509,20 @@ class TestTaskClaiming:
             ))
             session.commit()
 
-        # A pending task for inst-K SHOULD be claimable because the active
-        # job is cleanup, not message — no langgraph thread contention.
+        # A pending task for inst-K MUST be blocked — the
+        # processing CLEANUP job still holds the slot in the
+        # post-D13 world (the cross-system guard fires for any
+        # processing JobItem; the job_type filter is removed).
         t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-K", message_id="m1")
         claimed = repository.claim_pending_task(worker_id="worker-1")
-        assert claimed is not None
-        assert claimed.id == t1.id
+        assert claimed is None, (
+            f"Task for inst-K must be blocked by the processing "
+            f"CLEANUP job (post-D13: any processing JobItem blocks, "
+            f"not just MESSAGE); got: {claimed}"
+        )
+        # The busy-instance probe also reports True (a
+        # non-MESSAGE processing job still blocks).
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
 
     def test_claim_unaffected_by_soft_deleted_processing_job(self, repository, engine):
         """Regression: a soft-deleted PROCESSING MESSAGE job must NOT block

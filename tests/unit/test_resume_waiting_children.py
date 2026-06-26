@@ -1,10 +1,16 @@
 """Tests for resume_processing_job new queue flow behavior.
 
 The new implementation routes based on instance type:
-- Child instances (no old_jobs): enqueue_message() via WorkerPool
-- Root instances (has old_jobs): resume existing PROCESSING job from checkpoint via _process_message_with_tracking
+- Child instances (no PAUSED/RUNNING PROCESS_MESSAGE Task): enqueue_message() via WorkerPool
+- Root instances (has PAUSED/RUNNING PROCESS_MESSAGE Task): resume existing Task from checkpoint via _process_message_with_tracking
 
 The waiting_for > 0 check is now handled by JobFeedbackObserver, not resume_processing_job.
+
+Phase 2.5 (D13 / Phase 2 migration): the root-vs-child routing decision
+moved off the legacy ``JobRepository.find_processing_message_jobs_by_instance``
+(no MESSAGE ``JobItem`` rows exist post-D13) onto the new
+``TaskRepository.find_paused_or_running_by_instance`` primitive (Task 2.5.2).
+These tests mock the new primitive on ``manager._task_repo``.
 """
 
 import uuid
@@ -49,12 +55,50 @@ class MockAsyncMessageResult:
         self.status = "queued"
 
 
-class MockJob:
-    """Mock job returned by find_processing_message_jobs_by_instance."""
+class MockTask:
+    """Mock task returned by ``TaskRepository.find_paused_or_running_by_instance``.
 
-    def __init__(self, job_id: str = "test-job-123", message_id: str = "test-msg-456"):
-        self.job_id = job_id
-        self.job_metadata = {"message_id": message_id}
+    Phase 2.5 (D13): the legacy ``MockJob`` (which simulated a ``JobItem``
+    row) has been replaced by ``MockTask`` (simulating a WorkerPool ``Task``
+    row). ``resume_processing_job`` now branches on the presence of a
+    PAUSED/RUNNING ``PROCESS_MESSAGE`` task — pre-D13 it branched on the
+    presence of a PROCESSING MESSAGE ``JobItem``.
+
+    ``task_id`` is intentionally a string (not an int) so the legacy
+    ``job_id`` assertions (``result["job_id"] == "job-..."``) keep
+    working unchanged — ``resume_processing_job`` derives
+    ``old_job_id = str(existing_task.id)``.
+    """
+
+    def __init__(
+        self,
+        task_id: str | None = None,
+        task_type: str = "process_message",
+        status: str = "running",
+        message_id: str | None = "test-msg-456",
+        # Backwards-compat: pre-D13 callers used ``job_id=`` instead of
+        # ``task_id=``. Accept both so existing test bodies do not need
+        # to be rewritten. ``job_id`` wins when both are supplied.
+        job_id: str | None = None,
+    ):
+        self.id = job_id if job_id is not None else (task_id or "test-job-123")
+        self.task_type = task_type
+        self.instance_id = "test-instance"
+        self.message_id = message_id
+        self.status = status
+        self.worker_id = "worker-0"
+
+
+class MockJob(MockTask):
+    """Backwards-compatibility alias — old name in pre-D13 tests.
+
+    The previous version of this test suite used ``MockJob`` to stand in
+    for the ``JobItem`` returned by the removed
+    ``find_processing_message_jobs_by_instance`` method. After D13 the
+    equivalent primitive returns a ``Task`` row instead, so
+    ``MockJob = MockTask`` keeps the existing test bodies
+    (``MockJob(...)``) working without renaming every call site.
+    """
 
 
 @pytest.fixture
@@ -64,6 +108,21 @@ def mock_job_queue_service():
     service._repository = MagicMock()
     service.complete_job = AsyncMock()
     return service
+
+
+@pytest.fixture
+def mock_task_repository():
+    """Create mock ``TaskRepository`` (Phase 2.5 / D13 routing primitive).
+
+    ``resume_processing_job`` routes root-vs-child by calling
+    ``self._task_repo.find_paused_or_running_by_instance(instance_id)``.
+    Tests override ``find_paused_or_running_by_instance.return_value`` to
+    flip the routing: a non-None ``Task`` → root path (checkpoint
+    resume); ``None`` → child path (WorkerPool enqueue).
+    """
+    repo = MagicMock()
+    repo.find_paused_or_running_by_instance = MagicMock(return_value=None)
+    return repo
 
 
 @pytest.fixture
@@ -83,12 +142,21 @@ def mock_instance_repository():
 
 
 @pytest.fixture
-def mock_manager(mock_job_queue_service, mock_queue_repository, mock_instance_repository):
+def mock_manager(
+    mock_job_queue_service,
+    mock_queue_repository,
+    mock_instance_repository,
+    mock_task_repository,
+):
     """Create mock manager with all required dependencies."""
     manager = MagicMock()
     manager._job_queue_service = mock_job_queue_service
     manager._queue_repository = mock_queue_repository
     manager._instance_repository = mock_instance_repository
+    # Phase 2.5 (Task 2.5.2): the root-vs-child routing decision moved
+    # off ``JobRepository.find_processing_message_jobs_by_instance`` onto
+    # ``TaskRepository.find_paused_or_running_by_instance``.
+    manager._task_repo = mock_task_repository
     # Mock enqueue_message for WorkerPool path
     manager.enqueue_message = AsyncMock(return_value=MockAsyncMessageResult())
     # Mock _process_message_with_tracking for JobQueue path (root instances)
@@ -112,6 +180,7 @@ def instance_manager(mock_manager):
     manager._job_queue_service = mock_manager._job_queue_service
     manager._queue_repository = mock_manager._queue_repository
     manager._instance_repository = mock_manager._instance_repository
+    manager._task_repo = mock_manager._task_repo
     manager.enqueue_message = mock_manager.enqueue_message
     manager._process_message_with_tracking = mock_manager._process_message_with_tracking
     manager._process_child_completion_and_notify_parent = mock_manager._process_child_completion_and_notify_parent
@@ -139,9 +208,13 @@ class TestResumeQueueFlow:
         job_id = "job-abc-789"
         message_id = "msg-xyz-456"
 
-        # Setup: old_jobs returns a PROCESSING job
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id=message_id)]
+        # Setup: TaskRepository reports a PAUSED/RUNNING PROCESS_MESSAGE
+        # task for this instance → root path (checkpoint resume). The
+        # legacy ``find_processing_message_jobs_by_instance`` mock has
+        # been removed; the new primitive lives on ``_task_repo``
+        # (Task 2.5.2).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=MockJob(job_id=job_id, message_id=message_id)
         )
 
         # Instance is complete (waiting_for=0)
@@ -173,12 +246,13 @@ class TestResumeQueueFlow:
     async def test_child_instance_no_old_jobs_enqueues_via_workerpool(
         self, instance_manager, mock_manager
     ):
-        """Child instance (no old_jobs) with silent=False should enqueue via WorkerPool."""
+        """Child instance (no PAUSED/RUNNING Task) with silent=False should enqueue via WorkerPool."""
         instance_id = "child-instance-456"
 
-        # Setup: no old jobs (child instance uses WorkerPool)
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Setup: TaskRepository reports NO PAUSED/RUNNING PROCESS_MESSAGE
+        # task for this instance → child path (WorkerPool enqueue).
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         result = await instance_manager.resume_processing_job(
@@ -206,8 +280,9 @@ class TestResumeQueueFlow:
         """silent=True for child instance skips enqueue entirely."""
         instance_id = "child-instance-silent"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         result = await instance_manager.resume_processing_job(
@@ -230,8 +305,9 @@ class TestResumeQueueFlow:
         """silent=False should pass resume_mode=True to enqueue (always True for resume ops)."""
         instance_id = "child-instance-non-silent"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task for this instance.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         await instance_manager.resume_processing_job(
@@ -246,17 +322,24 @@ class TestResumeQueueFlow:
     async def test_multiple_old_jobs_uses_first_job(
         self, instance_manager, mock_manager
     ):
-        """Multiple old jobs: first one is used for resume, others are CANCELLED (W4)."""
+        """Multiple old jobs: first one is used for resume, others are CANCELLED (W4).
+
+        Phase 2.5 (D13): the new routing primitive returns a single Task
+        row (the first PAUSED/RUNNING PROCESS_MESSAGE Task). The
+        "first one is used" assertion is preserved — the post-D13 code
+        derives ``old_job_id = str(existing_task.id)`` from whichever
+        Task the repository returns.
+        """
         instance_id = "parent-instance-multi"
         job_id_1 = "job-1-123"
         job_id_2 = "job-2-456"
 
-        # Setup: multiple old jobs
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[
-                MockJob(job_id=job_id_1, message_id="msg-1"),
-                MockJob(job_id=job_id_2, message_id="msg-2"),
-            ]
+        # Setup: the first PAUSED/RUNNING PROCESS_MESSAGE task for this
+        # instance. (Pre-D13 mock returned a list; the new primitive
+        # returns a single Task — the "extra" sibling is no longer
+        # queried because the task is the canonical source of truth.)
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=MockJob(job_id=job_id_1, message_id="msg-1")
         )
 
         # Instance is complete (waiting_for=0)
@@ -274,20 +357,20 @@ class TestResumeQueueFlow:
 
         # Should return immediately with "resuming" status
         assert result["status"] == "resuming"
-        assert result["job_id"] == job_id_1  # First job is used
+        assert result["job_id"] == job_id_1  # First (only) task is used
 
         # Should NOT call _process_message_with_tracking synchronously
         mock_manager._process_message_with_tracking.assert_not_called()
 
-        # W4: Should cancel extra job synchronously (this is still synchronous)
-        mock_manager._job_queue_service.complete_job.assert_called_once()
-        calls = mock_manager._job_queue_service.complete_job.call_args_list
+        # Phase 2.5 (D13): the new routing primitive returns a single
+        # Task row, so there are no "extra" siblings to cancel. The
+        # legacy ``complete_job(job_id_2, CANCELLED)`` call that this
+        # test used to assert no longer fires — the task is the
+        # canonical source of truth and a single PROCESS_MESSAGE task
+        # owns the resume path.
+        mock_manager._job_queue_service.complete_job.assert_not_called()
 
-        # Only the extra job is cancelled synchronously
-        assert calls[0][0][0] == job_id_2
-        assert calls[0][0][1] == DemandState.CANCELLED
-
-        # The primary job is completed in background, not here
+        # The primary task is completed in background, not here
 
     @pytest.mark.asyncio
     async def test_enqueue_failure_returns_none(
@@ -296,8 +379,9 @@ class TestResumeQueueFlow:
         """When enqueue fails, should return None."""
         instance_id = "child-instance-fail"
 
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[]
+        # Child path: no PAUSED/RUNNING PROCESS_MESSAGE task.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=None
         )
 
         # Simulate enqueue failure
@@ -317,9 +401,9 @@ class TestResumeQueueFlow:
         instance_id = "parent-waiting-for"
         job_id = "job-waiting-123"
 
-        # Has old_jobs
-        mock_manager._job_queue_service._repository.find_processing_message_jobs_by_instance = MagicMock(
-            return_value=[MockJob(job_id=job_id, message_id="msg-1")]
+        # Root path: PAUSED/RUNNING PROCESS_MESSAGE task exists.
+        mock_manager._task_repo.find_paused_or_running_by_instance = MagicMock(
+            return_value=MockJob(job_id=job_id, message_id="msg-1")
         )
 
         # With waiting_for > 0, job should stay PROCESSING

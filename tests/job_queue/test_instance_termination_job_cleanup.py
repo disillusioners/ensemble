@@ -457,17 +457,44 @@ class TestStartJobInstanceStatusChecks:
         # Job should be started (not cancelled)
         assert result is not None
 
+    # NOTE: ``test_start_job_reactivates_message_job_for_terminated_instance``
+    # was removed in Phase 2.5 (2026-06-27, D13 consumption-site rewrite).
+    # D13 eliminated ``job_type="message"`` ``JobItem`` creation entirely
+    # — messages now go through the WorkerPool path (Task + MessageQueue
+    # rows, no JobItem). The MESSAGE-specific reactivation branch in
+    # ``JobQueueService.start_job`` was removed because the only way to
+    # get a MESSAGE job post-D13 is via a pre-D13 legacy row, which
+    # ``enqueue_message`` no longer creates. The new behaviour for any
+    # post-D13 job with a TERMINATED instance is the unified TASK path
+    # tested by ``test_start_job_clears_stale_instance_for_terminated_task_job``
+    # above: stale ``instance_id`` is cleared and the job continues to
+    # normal start logic. The pre-D13 transition_status_if reactivation
+    # path is gone.
+
     @pytest.mark.asyncio
-    async def test_start_job_reactivates_message_job_for_terminated_instance(
+    async def test_no_reactivation_branch_after_d13(
         self, job_queue_service, mock_repository, mock_instance_manager_with_repo
     ):
-        """Test that start_job() reactivates MESSAGE jobs for terminated instances.
+        """Phase 2.5 (D13) pin: there is no per-job-type reactivation
+        branch in ``start_job`` anymore. The
+        ``transition_status_if(instance, RUNNING, terminal_set)`` call
+        that the pre-D13 MESSAGE path exercised was the only consumer
+        of that helper in ``start_job``; removing the MESSAGE branch
+        left no callers. A future re-introduction of MESSAGE-type
+        jobs (or any job that wants to "revive" a TERMINATED
+        instance) must NOT silently re-introduce that branch — this
+        test pins the contract that ``start_job`` does NOT call
+        ``transition_status_if`` at all.
 
-        MESSAGE jobs targeting TERMINATED instances should be reactivated
-        (instance status → RUNNING) and proceed to normal processing.
+        We exercise the TASK path with a TERMINATED instance (the
+        only post-D13 job_type) and assert the reactivation helper
+        is never invoked. The TASK path itself is covered by
+        ``test_start_job_clears_stale_instance_for_terminated_task_job``
+        above; this test only pins the absence of the reactivation
+        branch.
         """
-        instance_id = "terminated-message-instance"
-        job_id = "message-job-terminated"
+        instance_id = "terminated-instance-d13-pin"
+        job_id = "job-d13-pin"
 
         job = MockJob(
             job_id=job_id,
@@ -475,14 +502,10 @@ class TestStartJobInstanceStatusChecks:
             queue_id="queue-1",
             status=JobStatus.PENDING.value,
             instance_id=instance_id,
-            job_type="message",
+            job_type="task",
         )
         mock_repository.get.return_value = job
         mock_repository.start_job_atomic.return_value = job
-
-        # Mock _live_hub with AsyncMock for stream_status_change
-        mock_instance_manager_with_repo._live_hub = MagicMock()
-        mock_instance_manager_with_repo._live_hub.stream_status_change = AsyncMock()
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.TERMINATED.value
@@ -490,18 +513,13 @@ class TestStartJobInstanceStatusChecks:
 
         result = await job_queue_service.start_job(job_id)
 
-        # Job should be reactivated and proceed to processing (not cancelled)
+        # TASK jobs continue to normal start (stale instance_id
+        # cleared, job started).
+        mock_repository.update.assert_called_with(job_id, instance_id=None)
         assert result is not None
-        # Instance status should be transitioned to RUNNING via atomic guard
-        mock_instance_manager_with_repo._instance_repository.transition_status_if.assert_called_once_with(
-            instance_id, InstanceStatus.RUNNING.value, tuple(TERMINAL_STATUSES)
-        )
-        # stream_status_change should be called
-        mock_instance_manager_with_repo._live_hub.stream_status_change.assert_called_once_with(
-            instance_id, InstanceStatus.RUNNING.value, agent_id="test-agent"
-        )
-        # Job should proceed to normal processing (start_job_atomic called)
-        mock_repository.start_job_atomic.assert_called_once_with(job_id, instance_id)
+        # The reactivation helper is NOT called — D13 removed the
+        # only ``start_job`` call site that invoked it.
+        mock_instance_manager_with_repo._instance_repository.transition_status_if.assert_not_called()
 
 
 # =============================================================================

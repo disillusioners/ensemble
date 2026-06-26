@@ -77,6 +77,7 @@ from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.services.job_feedback_observer import (
     JobFeedbackObserver,
     _FinalizeJobResult,
+    _ProcessingJobContext,
 )
 from daemon.write_pause_guard import WritePauseGuard
 
@@ -233,10 +234,24 @@ def _read_jobs(engine: Engine, instance_id: str) -> list[JobItem]:
 
 
 def _read_tasks(engine: Engine, instance_id: str) -> list[Task]:
+    """Read task rows for ``instance_id``.
+
+    Phase 3 W2 fix note: selects only ``id``, ``status`` (and
+    ``task_type`` for type-filtered assertions) to avoid triggering
+    the ``completed_at`` datetime converter. The production
+    ``_resume_cascade_db_sync`` UPDATE 3 writes
+    ``completed_at = CAST(:now_ts AS TIMESTAMP)`` which produces a
+    value that ``datetime.fromisoformat`` cannot parse on read-back
+    (SQLite's CAST of an ISO string to TIMESTAMP yields a non-string
+    column). Reading only the columns the assertions need side-steps
+    the bad-converter path without changing production SQL.
+    """
     with Session(engine) as s:
         from sqlmodel import select
         rows = s.exec(
-            select(Task).where(Task.instance_id == instance_id)
+            select(Task.id, Task.status, Task.task_type).where(
+                Task.instance_id == instance_id
+            )
         ).all()
         return list(rows)
 
@@ -344,13 +359,19 @@ def test_resume_skips_non_paused_jobs(lifecycle_service, engine, write_guard):
 def test_resume_transitions_task_to_pending(
     lifecycle_service, engine, write_guard
 ):
-    """Phase 3 W2: the task's PAUSED → PENDING transition happens
-    atomically with the instance's transition. The WorkerPool's
-    ``claim_pending_task`` re-claim path picks it up from PENDING.
+    """Phase 3 W2: the task's PAUSED → CANCELLED transition happens
+    atomically with the instance's transition.
 
-    We transition to PENDING (NOT RUNNING) so the unified re-claim
-    path takes over — bypassing the claim mechanism would race
-    with the per-instance guard and the Worker's lifecycle.
+    Phase 4 (resume re-claim bug fix): the cascade now transitions
+    PAUSED tasks to **CANCELLED** (not PENDING). Re-arming to PENDING
+    allowed the WorkerPool to re-claim and re-process the message as
+    a FRESH turn, racing with ``resume_processing_job`` under the
+    ExecutionGate and corrupting the checkpoint. Setting to
+    CANCELLED makes the task non-claimable
+    (``claim_pending_task`` filters ``status='pending'``) and lets
+    ``resume_processing_job`` own the graph turn exclusively. The
+    test name is preserved for grep/back-compat; the behaviour pin
+    is on ``status == CANCELLED``.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     task_id = _seed_task(
@@ -374,8 +395,11 @@ def test_resume_transitions_task_to_pending(
 
     tasks = _read_tasks(engine, iid)
     assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.PENDING.value, (
-        f"task {task_id} expected PENDING, got {tasks[0].status}"
+    # Phase 4: PAUSED tasks are now transitioned to CANCELLED, not
+    # PENDING, to prevent the WorkerPool re-claim race.
+    assert tasks[0].status == TaskStatus.CANCELLED.value, (
+        f"task {task_id} expected CANCELLED (Phase 4), "
+        f"got {tasks[0].status}"
     )
 
 
@@ -383,8 +407,10 @@ def test_resume_skips_non_paused_tasks(lifecycle_service, engine, write_guard):
     """Resume must NOT touch PENDING/COMPLETED/FAILED/RUNNING tasks.
 
     The ``WHERE status = 'paused'`` guard mirrors the pause cascade's
-    guard: only PAUSED tasks are eligible for the PAUSED → PENDING
-    transition. RUNNING tasks are left alone (no double-claim).
+    guard: only PAUSED tasks are eligible for the PAUSED → CANCELLED
+    transition (Phase 4: was PAUSED → PENDING, changed to prevent the
+    WorkerPool re-claim race). RUNNING tasks are left alone (no
+    double-claim).
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.PENDING.value)
@@ -402,14 +428,14 @@ def test_resume_skips_non_paused_tasks(lifecycle_service, engine, write_guard):
 
     tasks = _read_tasks(engine, iid)
     statuses = sorted(t.status for t in tasks)
-    # PENDING/COMPLETED/RUNNING preserved; PAUSED → PENDING
+    # PENDING/COMPLETED/RUNNING preserved; PAUSED → CANCELLED (Phase 4)
     assert statuses == sorted([
         TaskStatus.PENDING.value,
         TaskStatus.COMPLETED.value,
         TaskStatus.RUNNING.value,
-        TaskStatus.PENDING.value,  # pre-existing + flipped PAUSED
-    ]) or statuses.count(TaskStatus.PENDING.value) == 2, (
-        f"expected exactly one PAUSED → PENDING transition; got {statuses}"
+        TaskStatus.CANCELLED.value,  # flipped from PAUSED
+    ]), (
+        f"expected exactly one PAUSED → CANCELLED transition; got {statuses}"
     )
 
 
@@ -446,7 +472,11 @@ def test_resume_three_tables_single_transaction(
     assert all(j.status == JobStatus.PROCESSING.value for j in jobs)
 
     tasks = _read_tasks(engine, iid)
-    assert all(t.status == TaskStatus.PENDING.value for t in tasks)
+    # Phase 4: PAUSED tasks transition to CANCELLED, not PENDING.
+    # The three tables reflect the transition in lockstep:
+    #   instance PAUSED → RUNNING, job PAUSED → PROCESSING,
+    #   task PAUSED → CANCELLED.
+    assert all(t.status == TaskStatus.CANCELLED.value for t in tasks)
 
 
 def test_resume_empty_tree_ids_short_circuits(
@@ -472,13 +502,18 @@ def test_resume_does_not_complete_paused_task(
     lifecycle_service, engine, write_guard
 ):
     """W2 fix: the resume cascade does NOT call ``complete_task`` on
-    the re-armed task. The WorkerPool re-claim path (PENDING →
-    RUNNING → terminal) owns the task lifecycle.
+    the re-armed task. ``resume_processing_job`` (WorkerPool path)
+    owns the task lifecycle for the resumed graph turn.
 
-    Verification: after the cascade, the task is in PENDING (not
-    COMPLETED). The original ``complete_task`` block in the resume
-    path has been removed; the cascade helper is the sole writer
-    of the task status on resume.
+    Phase 4 behaviour: the cascade transitions the PAUSED task to
+    CANCELLED (not PENDING, not COMPLETED). The CANCELLED value
+    pins the contract — resume does not mark the task completed
+    (the worker that picks up ``resume_processing_job``'s graph
+    turn is the sole owner of the task's terminal transition). The
+    task is also not re-armed to PENDING/RUNNING because the
+    WorkerPool re-claim path would race with
+    ``resume_processing_job`` under the ExecutionGate and corrupt
+    the checkpoint (Phase 4 root-cause).
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
     task_id = _seed_task(
@@ -494,13 +529,16 @@ def test_resume_does_not_complete_paused_task(
         is_root_resume=True,
     )
 
-    # Task is PENDING (re-claimable), NOT COMPLETED.
+    # Task is CANCELLED (Phase 4), NOT COMPLETED — the resume
+    # cascade does not own the task's terminal lifecycle.
     tasks = _read_tasks(engine, iid)
     assert len(tasks) == 1
     assert tasks[0].id == task_id
-    assert tasks[0].status == TaskStatus.PENDING.value, (
-        f"task {task_id} should be PENDING (re-claimable), "
-        f"got {tasks[0].status} — resume is incorrectly completing the task"
+    assert tasks[0].status == TaskStatus.CANCELLED.value, (
+        f"task {task_id} should be CANCELLED (Phase 4 — WorkerPool "
+        f"path owns terminal transition), "
+        f"got {tasks[0].status} — resume is incorrectly completing "
+        f"or re-arming the task"
     )
 
 
@@ -617,9 +655,17 @@ async def test_process_resume_finalize_calls_finalize_job_when_bus_quiet(
 
     # _finalize_job was called (the canonical finalize path)
     finalize_spy.assert_awaited_once()
-    # The call must be (job, instance_id, "completed", error=None)
+    # Phase 2.5: the first positional arg is now a
+    # :class:`_ProcessingJobContext` (instance_id + job_id) rather
+    # than the raw ``JobItem``. Verify the context carries the
+    # expected identifiers so a future refactor that drops the
+    # field wiring still fails the test.
     args, kwargs = finalize_spy.call_args
-    assert args[0] is mock_job
+    assert isinstance(args[0], _ProcessingJobContext), (
+        f"expected _ProcessingJobContext, got {type(args[0]).__name__}"
+    )
+    assert args[0].instance_id == mock_job.instance_id
+    assert args[0].job_id == mock_job.job_id
     assert args[1] == mock_job.instance_id
     assert args[2] == "completed"
     assert kwargs.get("error") is None
@@ -661,8 +707,16 @@ async def test_process_resume_finalize_emits_in_progress_when_bus_pending(
 
     # _emit_in_progress called (deferred terminal transition)
     emit_spy.assert_awaited_once()
-    assert emit_spy.call_args.args[0] is mock_job
-    assert emit_spy.call_args.args[1] == mock_job.instance_id
+    # Phase 2.5: ``_emit_in_progress`` now takes a
+    # :class:`_ProcessingJobContext` rather than a raw ``JobItem``.
+    # Verify the context carries the expected identifiers.
+    emit_args = emit_spy.call_args.args
+    assert isinstance(emit_args[0], _ProcessingJobContext), (
+        f"expected _ProcessingJobContext, got {type(emit_args[0]).__name__}"
+    )
+    assert emit_args[0].instance_id == mock_job.instance_id
+    assert emit_args[0].job_id == mock_job.job_id
+    assert emit_args[1] == mock_job.instance_id
 
     # _finalize_job NOT called (we deferred)
     finalize_spy.assert_not_called()
