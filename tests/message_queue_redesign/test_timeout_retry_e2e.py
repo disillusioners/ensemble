@@ -594,12 +594,12 @@ class TestDefaultConfigValues:
         # Load ServicesConfig with no custom values
         config = ServicesConfig()
 
-        # Verify defaults
-        assert config.task_timeout_minutes == 60.0
+        # Verify defaults (updated 2026-06-26: bumped for 2h graph ceiling)
+        assert config.task_timeout_minutes == 125.0
         assert config.max_task_retries == 3
         assert config.task_retry_backoff_base == 60
         assert config.task_retry_backoff_max == 3600
-        assert config.stale_task_cancel_grace_seconds == 10
+        assert config.stale_task_cancel_grace_seconds == 30
 
     def test_default_config_values_in_worker_pool(self):
         """WorkerPool works with default config values."""
@@ -619,7 +619,10 @@ class TestDefaultConfigValues:
         pool.start()
         try:
             for worker in pool._workers:
-                assert worker._timeout_minutes == 60.0
+                # Updated 2026-06-26: task_timeout_minutes default bumped
+                # 60.0 -> 125.0 to give a 5 min grace over the new 2h
+                # graph_timeout_minutes.
+                assert worker._timeout_minutes == 125.0
                 assert worker._max_retries == 3
                 assert worker._retry_backoff_base == 60
                 assert worker._retry_backoff_max == 3600

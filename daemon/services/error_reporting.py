@@ -679,26 +679,51 @@ class ErrorReportingService:
                 except Exception as e:
                     logger.warning(f"Failed to emit status_change for error instance: {e}")
             
-            # Step 4: Enqueue error report message to parent (outside transaction)
-            error_report = f"⚠️ {agent_name} encountered an error:\n\n**Error Type:** {error_type}\n**Severity:** {severity}\n**Details:** {truncated_error}"
-            
-            msg = await asyncio.to_thread(
-                self._queue_repository.enqueue,
+            # Step 4: Enqueue error report message to parent.
+            #
+            # BUG FIX (2026-06-26, orphan-error-report bug): the previous
+            # implementation called ``self._queue_repository.enqueue(...)``
+            # directly, which only inserts into ``message_queue``. The
+            # ``task`` row that the worker pool's ``claim_pending_task``
+            # polls for was never created, so the error report sat in
+            # ``message_queue.status='ready'`` forever with no worker ever
+            # picking it up. The parent instance stayed in
+            # ``waiting_children`` indefinitely even though all children
+            # had completed.
+            #
+            # The fix routes through ``manager.enqueue_message`` which
+            # goes through ``_prepare_enqueued_message`` (atomic
+            # MessageQueue + Task insert in a single transaction) and
+            # wakes the worker pool via ``notify_work()``. This mirrors
+            # the working ``internal_report:`` path in
+            # ``child_reports._create_completion_report`` and the
+            # user-message path in ``instance_messaging.enqueue_message``.
+            # ``dispatch_path='workerpool'`` matches the system-message
+            # convention used by the completion-report path.
+            error_report = (
+                f"⚠️ {agent_name} encountered an error:\n\n"
+                f"**Error Type:** {error_type}\n"
+                f"**Severity:** {severity}\n"
+                f"**Details:** {truncated_error}"
+            )
+
+            result = await self._manager.enqueue_message(
                 instance_id=parent_id,
-                content=error_report,
+                message=error_report,
                 source=f"internal_error_report:{instance_id}",
-                priority=1,  # Normal priority
-                message_metadata={
-                    "type": "error_report", 
+                priority=1,
+                metadata={
+                    "type": "error_report",
                     "child_instance_id": instance_id,
                     "error_type": error_type,
                     "error": truncated_error,
                     "original_message_id": message_id,
                     "severity": severity,
                     "recoverable": error_type in RECOVERABLE_ERROR_TYPES,
-                }
+                },
+                dispatch_path="workerpool",
             )
-            report_message_id = msg.message_id
+            report_message_id = result.message_id
             
             # Step 5: Broadcast child_failed SSE event with null guard
             if self._manager._live_hub:

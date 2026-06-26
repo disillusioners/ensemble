@@ -203,10 +203,35 @@ class ProcessMessageProcessor(BaseProcessor):
         # LLM context, duplicate SSE output).
         # A COMPLETED message has nothing left to process, so we treat
         # the task as a successful no-op and let the worker complete it.
+        #
+        # BUG FIX (2026-06-26, orphan-retry-task bug): the previous
+        # implementation returned ``{success: True, skipped: True}``
+        # directly without invoking the success callback, so
+        # ``task_repo.complete_task(...)`` was never called for this
+        # path. The task stayed in ``running`` status indefinitely and
+        # was eventually flagged stale by ``StaleTaskRecovery``, which
+        # would force-cancel it and create a phantom retry task. After
+        # 3 retries, the recovery service would permanently fail the
+        # task and fire a spurious error report to the parent — even
+        # though the underlying message and the actual agent work had
+        # already completed successfully. We now mark the task as
+        # ``completed`` synchronously here, before returning, so the
+        # worker pool's success counter increments and the recovery
+        # service never touches it. The status-guard in
+        # ``TaskRepository.complete_task`` (``WHERE status = 'running'``)
+        # makes this a no-op if the task has already been transitioned
+        # by a concurrent writer (e.g. recovery). The worker's own
+        # heartbeat thread will be stopped by ``_process_with_timeout``'s
+        # ``finally`` block once this method returns.
         if message.status == MessageStatus.COMPLETED.value:
             logger.info(
                 f"Task {task.id}: message {task.message_id[:8]}... already "
                 f"COMPLETED — skipping graph turn (resume re-claim no-op)"
+            )
+            await asyncio.to_thread(
+                self._task_repo.complete_task,
+                task.id,
+                {"success": True, "message_id": task.message_id, "skipped": True},
             )
             return {
                 "success": True,

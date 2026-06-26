@@ -93,18 +93,28 @@ compaction:
 
 # Worker Pool and Background Services
 services:
-  # task_timeout_minutes: Task-level hard timeout. Must cover all LLM attempts.
-  #   With 3 timeout retries (3 × 660s ≈ 33 min) + transient retry overhead (~40s):
-  #   Total ≈ 34 min, well within the 60 min budget.
-  task_timeout_minutes: 60
+  # task_timeout_minutes: Task-level hard timeout. Must cover all LLM attempts
+  #   AND the graph_timeout below. Set 5 min above graph_timeout so the
+  #   CancellationToken path usually fires before the thread-side safety net.
+  #   With 3 timeout retries (3 × 660s ≈ 33 min) + transient retry overhead
+  #   (~40s) + headroom for long-running multi-phase tasks: 125 min total.
+  task_timeout_minutes: 125
   max_task_retries: 3  # Max retry attempts (0 = no retry)
   task_retry_backoff_base: 60  # Base backoff in seconds (1 min)
   task_retry_backoff_max: 3600  # Max backoff in seconds (1 hour)
-  stale_task_cancel_grace_seconds: 10  # Grace period for worker shutdown
+  # Grace period between request_cancel and force_cancel for stale tasks.
+  #   30s gives a long-running graph time to flush its final checkpoint
+  #   token before the recovery sweeper force-cancels and creates a retry.
+  stale_task_cancel_grace_seconds: 30
   # graph_timeout_minutes: Hard timeout for LangGraph execution (MainLoopBridge).
-  #   This is the safety net if the graph hangs indefinitely.
-  #   Default: 55 min. Set to 0 to disable.
-  graph_timeout_minutes: 55
+  #   This is the safety net if the graph hangs indefinitely. Bumped from
+  #   55 to 120 min so long-running tasks (e.g. multi-phase refactors that
+  #   spawn several explorer children and run dozens of LLM turns) can
+  #   complete. If the safety net still fires within a few seconds of
+  #   natural completion, worker_pool._handle_cancellation now detects the
+  #   already-COMPLETED message and skips the retry, eliminating the
+  #   orphan-retry chain. Set to 0 to disable.
+  graph_timeout_minutes: 120
 
 # Job System Settings
 job_system:

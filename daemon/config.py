@@ -248,8 +248,13 @@ class ServicesConfig(BaseSettings):
     
     # Task timeout and retry configuration
     task_timeout_minutes: float = Field(
-        default=60.0,
-        description="Maximum time a task can run before being cancelled (minutes). Set to 0 to disable timeout."
+        default=125.0,
+        description=(
+            "Maximum time a task can run before being cancelled (minutes). "
+            "This is the OUTER ceiling enforced via CancellationToken; "
+            "should be >= graph_timeout_minutes + small grace. Set to 0 to "
+            "disable timeout."
+        )
     )
     max_task_retries: int = Field(
         default=3,
@@ -264,17 +269,25 @@ class ServicesConfig(BaseSettings):
         description="Maximum delay between retries (seconds). Default: 1 hour."
     )
     stale_task_cancel_grace_seconds: int = Field(
-        default=10,
-        description="Seconds to wait for graceful shutdown after requesting task cancellation in stale task recovery."
+        default=30,
+        description=(
+            "Seconds to wait for graceful shutdown after requesting task "
+            "cancellation in stale task recovery. Increased from 10s to 30s "
+            "so a long-running graph can flush its final checkpoint token "
+            "before the recovery sweeper force-cancels and creates a retry."
+        ),
     )
     stale_task_recovery_threshold_minutes: int = Field(
-        default=5,
+        default=10,
         description=(
             "Minutes after which a RUNNING task is considered stale and "
             "recovered (transitioned to CANCELLED, with a retry task). "
             "Sized to limit how long sibling tasks for the same instance "
             "are blocked when a worker crashes (Fix B makes sibling-block "
-            "the dominant visible symptom). Lower than task_timeout_minutes."
+            "the dominant visible symptom). Lower than task_timeout_minutes. "
+            "Increased from 5 to 10 min to accommodate the longer 2h graph "
+            "ceiling; the task's heartbeat is still refreshed every 30s so a "
+            "live task's heartbeat is at most one interval old."
         ),
     )
     task_heartbeat_interval_seconds: int = Field(
@@ -303,8 +316,20 @@ class ServicesConfig(BaseSettings):
         ),
     )
     graph_timeout_minutes: float = Field(
-        default=55.0,
-        description="Hard timeout for LangGraph execution via MainLoopBridge (minutes). Set to 0 to disable."
+        default=120.0,
+        description=(
+            "Hard timeout for LangGraph execution via MainLoopBridge (minutes). "
+            "Increased from 55 to 120 min so long-running tasks (e.g. multi-"
+            "phase refactors that spawn several explorer children and run "
+            "dozens of LLM turns) can complete without hitting the safety "
+            "net. The CancellationToken path (task_timeout_minutes, "
+            "default 125 min) remains 5 min longer so a graceful "
+            "OperationCancelledError usually fires before the thread-side "
+            "TimeoutError; if the coroutine still completes within a few "
+            "seconds of the safety timeout, the worker_pool's "
+            "_handle_cancellation path now detects the already-COMPLETED "
+            "message and skips the retry. Set to 0 to disable."
+        ),
     )
 
 

@@ -455,6 +455,68 @@ class Worker(threading.Thread):
     ) -> None:
         """Handle task cancellation — schedule retry or permanent fail."""
         if reason == CancellationReason.TIMEOUT:
+            # BUG FIX (2026-06-26, timeout-orphan race): the underlying
+            # ``_run()`` coroutine may complete successfully *after*
+            # ``MainLoopBridge.run_async(_run(), timeout=...)`` raises
+            # ``TimeoutError`` to the worker thread. ``future.result(timeout)``
+            # is a sync thread-side check; the coroutine itself keeps
+            # running on the event loop and can finish a few seconds
+            # later. When it does, it calls ``on_success`` →
+            # ``task_repo.complete_task(...)``, but the task row's
+            # ``WHERE status = 'running'`` guard silently no-ops because
+            # ``schedule_retry`` (called below) already flipped the task
+            # to ``cancelled``. The underlying message gets marked
+            # ``completed``, the bus emits terminal — but the retry task
+            # is born orphaned. When the retry worker later claims it,
+            # ``ProcessMessageProcessor`` no-ops on the already-completed
+            # message (return path skips ``on_success``), so the retry
+            # task itself never transitions out of ``running`` — recovery
+            # picks it up, retries, and eventually permanently-fails a
+            # task whose work was actually successful, producing a
+            # spurious error report to the parent.
+            #
+            # Defensive check: if the message is already in ``completed``
+            # status (the underlying coroutine succeeded despite the
+            # thread-side timeout), do NOT create a retry task. We mark
+            # the current task as complete via the same guarded UPDATE
+            # ``complete_task`` uses — if the underlying coroutine
+            # already committed a complete transition (status guard
+            # ``WHERE status='running'`` would no-op), this is a no-op.
+            # This eliminates the entire orphan-retry chain at its
+            # source.
+            if task.message_id:
+                try:
+                    msg = self._task_processor._message_repo.get(
+                        task.message_id
+                    )
+                except Exception:
+                    msg = None
+                if msg is not None and msg.status == "completed":
+                    logger.warning(
+                        f"Worker {self.worker_id}: timeout fired for task "
+                        f"{task.id} but message {task.message_id[:8]}... is "
+                        f"already COMPLETED — underlying coroutine "
+                        f"finished after the thread-side timeout. "
+                        f"Skipping retry creation to avoid orphan."
+                    )
+                    try:
+                        self._task_processor._task_repo.complete_task(
+                            task.id,
+                            {
+                                "success": True,
+                                "message_id": task.message_id,
+                                "skipped": True,
+                            },
+                        )
+                    except Exception as e:
+                        logger.debug(
+                            f"Worker {self.worker_id}: complete_task on "
+                            f"already-completed task {task.id} returned "
+                            f"no-op ({e})"
+                        )
+                    self._tasks_completed += 1
+                    return
+
             # Try to schedule a retry
             retry_task = self._task_processor._task_repo.schedule_retry(
                 task_id=task.id,
