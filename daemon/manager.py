@@ -3207,12 +3207,8 @@ class InstanceManager:
                 logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")
                 # Mark the Task as FAILED on failure. Phase 2.5: there is
                 # no JobItem to complete — ``old_job_id`` is the Task ID.
-                # ``_resume_cascade_db_sync`` transitions PAUSED → PENDING
-                # so the WorkerPool can re-claim; the per-instance guard
-                # blocks that re-claim while we're inside the
-                # ExecutionGate. Once we exit the gate (this handler
-                # runs), we explicitly transition the task to FAILED so
-                # the per-instance guard releases — otherwise the next
+                # We explicitly transition the task to FAILED so the
+                # per-instance guard releases — otherwise the next
                 # ``job_continue`` call is blocked by
                 # ``has_inflight_task`` (which counts PENDING + RUNNING
                 # tasks for the instance, see Task 2.5.8).

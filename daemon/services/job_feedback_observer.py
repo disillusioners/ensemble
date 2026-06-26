@@ -604,52 +604,6 @@ class JobFeedbackObserver:
         # UPDATE) and run Steps 2+3 unconditionally.
         return _ProcessingJobContext(instance_id=instance_id, job_id=None)
 
-    async def handle_correlation_complete(
-        self, parent_id: str, terminal_status: str
-    ) -> None:
-        """Called by the DependencyBus when ALL message responses are resolved.
-
-        This is the SOLE terminal-transition path for a parent that has children
-        tracked by the bus. The bus only invokes this callback when its
-        per-parent pending set reaches zero (inside its lock; the callback
-        itself runs AFTER the lock is released — W1 fix).
-
-        Phase 2: the bus's pending count is authoritative and updated
-        atomically under its per-parent lock, so there is no TOCTOU
-        window between "is everything resolved?" and "transition the
-        job to terminal" (Race #1 is eliminated).
-
-        The callback contract:
-          * ``parent_id`` — the parent instance whose children have all responded.
-          * ``terminal_status`` — ``"completed"`` (all children responded cleanly)
-            or ``"error"`` (at least one child errored; conservative rule from
-            the bus's terminal-status determination).
-
-        **N4 constraint**: this method runs outside the per-parent lock. It MUST
-        NOT trigger any duplicate finalization for the same ``parent_id`` —
-        re-entering would deadlock. All terminal logic below is self-contained
-        and touches the DB / job queue / lock repo only, never the bus.
-
-        Args:
-            parent_id: The parent instance ID whose correlations just completed.
-            terminal_status: ``"completed"`` or ``"error"``.
-        """
-        ctx = await self._get_processing_job_for_instance(parent_id)
-        if ctx is None:
-            logger.info(
-                f"Bus callback: no active PROCESSING job for instance "
-                f"{parent_id[:8]}..., skipping"
-            )
-            return
-
-        # Phase 2.5 (Task 2.5.3): ctx is now a _ProcessingJobContext
-        # (instance_id + job_id). ``job_id`` may be ``None`` for
-        # post-D13 MESSAGE-driven parents — ``_finalize_job`` and
-        # ``_finalize_job_db_sync`` both accept ``job_id=None`` and
-        # skip Step 1 (JobItem UPDATE) while still running Steps 2+3
-        # (instance status + lock release).
-        await self._finalize_job(ctx, parent_id, terminal_status, error=None)
-
     async def _admit_via_worker_pool(self, job) -> None:
         """C6: Route a JobItem through the WorkerPool.
 
@@ -1200,8 +1154,8 @@ class JobFeedbackObserver:
             # the authoritative recovery path for late children: a
             # late child's ``DependencyBus.watch`` that lands during
             # the critical section bumps ``bus.generation``, and the
-            # bus's completion-callback (``handle_correlation_complete``)
-            # drives a new finalize cycle on the next lifecycle event.
+            # bus's own watcher/generation state drives a new finalize
+            # cycle on the next lifecycle event.
             # The JobItem-only re-arm below is skipped when no
             # ``JobItem`` exists. The instance-level side effects
             # (Steps 2+3 in ``_finalize_job_db_sync``) have already
