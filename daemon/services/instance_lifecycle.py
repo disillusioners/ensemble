@@ -319,8 +319,28 @@ class InstanceLifecycleService:
             return stored_mcp_tool_names
         return []
 
-    def _build_llm_config(self, metadata: "AgentMetadata | None" = None) -> dict:
-        """Build LLM config dict with optional per-agent model override."""
+    def _build_llm_config(
+        self,
+        metadata: "AgentMetadata | None" = None,
+        override_model: str | None = None,
+    ) -> dict:
+        """Build LLM config dict with optional per-agent and per-spawn overrides.
+
+        Priority (highest wins):
+            1. ``override_model`` (spawn_instance tool param) — caller-validated
+               against ``config.llm.allowed_models`` before being passed in.
+            2. ``metadata.llm_model`` (meta.json field) — agent-level default.
+            3. ``self._config.llm.model`` (env ``OPENAI_MODEL`` / config.yaml).
+
+        Args:
+            metadata: Optional agent metadata providing the ``llm_model`` field.
+            override_model: Optional highest-priority model override from the
+                ``spawn_instance`` tool. Should be pre-validated by
+                :meth:`_resolve_model_override` before being passed in.
+
+        Returns:
+            The LLM config dict with the resolved ``model`` key.
+        """
         llm_config = {
             "base_url": self._config.llm.base_url,
             "api_key": self._config.llm.api_key,
@@ -329,18 +349,64 @@ class InstanceLifecycleService:
             "temperature": self._config.llm.temperature,
             "request_timeout": self._config.llm.request_timeout,
         }
+        # Priority 2: meta.json llm_model (agent-level default)
         if metadata and metadata.llm_model and metadata.llm_model.strip():
             llm_config["model"] = metadata.llm_model.strip()
+        # Priority 1: spawn-time override (highest — wins over meta.json + env)
+        if override_model and override_model.strip():
+            llm_config["model"] = override_model.strip()
         return llm_config
 
+    def _resolve_model_override(self, model: str | None) -> str | None:
+        """Validate a caller-supplied model override against ``allowed_models``.
+
+        Rules (silent fallback — never raises):
+            * ``None`` / empty / whitespace → ``None`` (no override).
+            * ``allowed_models`` empty → ``model`` returned as-is (all allowed).
+            * ``allowed_models`` non-empty → exact match (case-insensitive)
+              against any entry. Match → ``model``. No match → ``None``
+              (silent fallback; matches the task spec "do NOT error").
+
+        Args:
+            model: Caller-supplied override model (may be None or whitespace).
+
+        Returns:
+            The validated model name to use as the highest-priority override,
+            or ``None`` if no override should be applied.
+        """
+        if not model or not model.strip():
+            return None
+
+        candidate = model.strip()
+        allowed = getattr(self._config.llm, "allowed_models", None) or []
+        if not allowed:
+            # Empty list = unrestricted; pass through.
+            return candidate
+
+        lowered = candidate.lower()
+        for pattern in allowed:
+            if not pattern:
+                continue
+            if pattern.lower() == lowered:
+                return candidate
+
+        # Non-empty list + no match → silently fall back to None (no error).
+        logger.debug(
+            f"spawn_instance: model override '{candidate}' is not in "
+            f"config.llm.allowed_models ({allowed}); silently falling "
+            f"back to default model."
+        )
+        return None
+
     def spawn_instance(
-        self, 
+        self,
         agent_id: str,
-        instance_id: str | None = None, 
+        instance_id: str | None = None,
         parent_id: str | None = None,
         project_id: str | None = None,
         instance_name: str | None = None,
         invoked_as_tool: bool = False,
+        model: str | None = None,
     ) -> str:
         """Create a new agent instance.
 
@@ -351,6 +417,12 @@ class InstanceLifecycleService:
             project_id: Optional project ID for project context.
             instance_name: Optional short name for the instance.
             invoked_as_tool: If True, marks instance as invoked-as-tool (default: False).
+            model: Optional LLM model override for this instance. If provided and
+                in ``config.llm.allowed_models`` (exact match, case-insensitive),
+                it takes the HIGHEST priority over meta.json's ``llm_model`` and
+                ``OPENAI_MODEL``. If the list is non-empty and ``model`` is not
+                allowed, the override is silently ignored and the default model
+                is used (no error).
 
         Returns:
             The instance_id of the newly created instance.
@@ -370,6 +442,10 @@ class InstanceLifecycleService:
         if metadata is None:
             raise ValueError(f"Agent not found: {resolved_agent_id}")
         resolved_agent_dir = str(metadata.path)
+
+        # Resolve and validate the spawn-time model override (silent fallback
+        # to None if not in allowed_models — never raises).
+        validated_model_override = self._resolve_model_override(model)
         
         # Validate instance_id format or auto-generate
         if instance_id is None or not _UUID_PATTERN.match(instance_id):
@@ -416,8 +492,12 @@ class InstanceLifecycleService:
         from ..manager import create_instance_tools
         tools = create_instance_tools(self._manager, instance_id, resolved_agent_id)
 
-        # Build LLM config
-        llm_config = self._build_llm_config(metadata)
+        # Build LLM config (override_model takes HIGHEST priority over
+        # metadata.llm_model and env OPENAI_MODEL — see _build_llm_config).
+        llm_config = self._build_llm_config(
+            metadata,
+            override_model=validated_model_override,
+        )
 
         # Build retry config from queue settings
         retry_config = {
@@ -464,6 +544,13 @@ class InstanceLifecycleService:
         # Mark as invoked-as-tool if requested
         if invoked_as_tool:
             instance_metadata["invoked_as_tool"] = True
+
+        # Persist the validated spawn-time model override so
+        # ``restore_instance`` can re-apply it after a daemon restart.
+        # Stored only when an override was actually applied (validated is
+        # truthy) — prevents metadata bloat for the common no-override case.
+        if validated_model_override:
+            instance_metadata["model_override"] = validated_model_override
         
         # Store MCP tool names for cache key consistency
         if mcp_tool_names:
@@ -1323,8 +1410,15 @@ class InstanceLifecycleService:
         from ..manager import create_instance_tools
         tools = create_instance_tools(self._manager, instance_id, resolved_agent_id)
 
-        # Build LLM config
-        llm_config = self._build_llm_config(agent_meta)
+        # Build LLM config — restore spawn-time model override if one was
+        # persisted (highest priority over env + meta.json's llm_model).
+        stored_override = None
+        if meta.instance_metadata:
+            stored_override = meta.instance_metadata.get("model_override")
+        llm_config = self._build_llm_config(
+            agent_meta,
+            override_model=stored_override,
+        )
 
         # Build retry config from queue settings
         retry_config = {

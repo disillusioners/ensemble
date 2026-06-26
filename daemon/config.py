@@ -105,6 +105,52 @@ class LLMConfig(BaseSettings):
             return [item.strip() for item in stripped.split(",") if item.strip()]
         return value
 
+    # Models allowed as instance model overrides at spawn time. Exact match
+    # (case-insensitive) is performed against the override model name;
+    # a match against ANY entry is sufficient. Empty list = all models
+    # allowed (no restriction). Override via OPENAI_ALLOWED_MODELS env var,
+    # e.g.   OPENAI_ALLOWED_MODELS="gpt-4,gpt-4o"
+    # The NoDecode annotation prevents pydantic-settings from auto-JSON-decoding
+    # the env value, so our field_validator can handle comma-separated input.
+    allowed_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Allowed model names (case-insensitive exact match) for instance "
+            "model overrides at spawn time. Empty list = all models allowed "
+            "(no restriction). Default: []."
+        ),
+    )
+
+    @field_validator("allowed_models", mode="before")
+    @classmethod
+    def _parse_allowed_models(cls, value: Any) -> Any:
+        """Accept comma-separated strings (and JSON arrays) from env / YAML.
+
+        The ``NoDecode`` annotation prevents pydantic-settings from
+        auto-parsing env values, so we handle both forms here:
+          - ``"gpt-4,gpt-4o"`` → ``["gpt-4", "gpt-4o"]``
+          - ``'["gpt-4", "gpt-4o"]'`` → ``["gpt-4", "gpt-4o"]``
+          - ``["gpt-4", "gpt-4o"]`` → unchanged (passthrough)
+          - ``""`` or whitespace → ``[]``
+        """
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            # JSON array form
+            if stripped.startswith("[") and stripped.endswith("]"):
+                import json
+                try:
+                    parsed = json.loads(stripped)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except json.JSONDecodeError:
+                    pass
+                # Fall through to comma-split
+            # Comma-separated form (also covers "a, b , c")
+            return [item.strip() for item in stripped.split(",") if item.strip()]
+        return value
+
     @model_validator(mode="after")
     def set_title_model_fallback(self) -> "LLMConfig":
         """Ensure model_title and model_keywords fall back to model if not set or empty."""

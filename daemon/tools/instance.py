@@ -417,21 +417,33 @@ def create_job_tools_if_available(manager, current_instance_id: str, agent_id: s
 
 class SpawnInstanceInput(BaseModel):
     """Input model for spawn_instance tool."""
-    
+
     agent_id: Annotated[str, Field(
         description="Agent ID (e.g., 'developer', 'leader')"
     )]
-    
+
     project_id: Annotated[str | None, Field(
         default=None,
         description="Optional project ID for context injection. Pass None or 'null' if no project context is needed."
     )] = None
-    
+
     instance_name: Annotated[str | None, Field(
         default=None,
         description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b'). Used in completion reports."
     )] = None
-    
+
+    model: Annotated[str | None, Field(
+        default=None,
+        description=(
+            "Optional LLM model to use for this instance. If provided AND in the "
+            "allowed models list (config.llm.allowed_models), it overrides the "
+            "default model with HIGHEST priority — overriding meta.json's "
+            "llm_model and the env OPENAI_MODEL. If the list is non-empty and "
+            "this model is NOT in it, the override is silently ignored and the "
+            "default model is used."
+        ),
+    )] = None
+
     @model_validator(mode='after')
     def validate_params(self):
         """Require agent_id."""
@@ -460,18 +472,23 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     
     @register_tool_category("instance")
     @tool(args_schema=SpawnInstanceInput)
-    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None) -> str:
+    async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None) -> str:
         """Spawn a new agent instance and return its instance_id.
-        
-        IMPORTANT: After spawning, you MUST use send_message(instance_id, message) 
+
+        IMPORTANT: After spawning, you MUST use send_message(instance_id, message)
         to communicate with the new instance. The spawned instance will not do anything
         until you send it a message.
-        
+
         Args:
             agent_id: Agent ID to spawn (e.g., 'developer', 'leader').
             project_id: Optional project ID for context injection. Use None or 'null' if no project context is needed.
             instance_name: Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').
-        
+            model: Optional LLM model override. If provided and in the allowed models
+                list (config.llm.allowed_models), it overrides the default model with
+                the HIGHEST priority — above meta.json's llm_model and the env OPENAI_MODEL.
+                If the list is non-empty and the model is not in it, the override is
+                silently ignored and the default model is used.
+
         Returns:
             The instance_id of the newly spawned instance. Use this with send_message().
         """
@@ -480,13 +497,14 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
             if project_id is None:
                 project_id = _get_instance_project_id(manager, current_instance_id)
                 project_id = normalize_project_id(project_id)
-            
+
             new_instance_id = manager.spawn_instance(
                 agent_id=agent_id,
                 instance_id=None,
                 parent_id=current_instance_id,
                 project_id=project_id,
                 instance_name=instance_name,
+                model=model,
             )
             return (
                 f"Successfully spawned instance: {new_instance_id}\n"
