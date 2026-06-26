@@ -22,16 +22,39 @@ DEFAULT_RETRY_BACKOFF_MAX = 3600
 
 class StaleTaskRecovery:
     """Background service that recovers stale tasks using 5-step protocol.
-    
+
     5-Step Recovery Protocol:
     1. Find stale running tasks (past threshold, not yet cancelled)
     2. Request cancellation (set cancel_requested flag)
     3. Wait briefly for graceful shutdown (grace period)
     4. Force cancel tasks still running after grace period
     5. Schedule retry for cancelled tasks (if under max retries)
-    
+
     This replaces the old "reset to pending" approach which caused
     duplicate processing.
+
+    **Bus integration — permanent-fail coverage (verified 2026-06-27)**:
+    The 4 permanent-fail branches (here in ``recover_stale_tasks`` and
+    ``recover_on_startup``) all invoke the ``on_task_permanently_failed``
+    callback, which the manager wires to
+    ``ErrorReportingService._send_error_report``. That service
+    already drives the DependencyBus terminal hook via
+    ``child_reports._emit_terminal_via_bus(status="error")`` (or, in
+    its defensive fallback, ``bus.emit_terminal(...)`` with an
+    ``Outcome(status="error")``) — so watchers for the failed task
+    id are transitioned PENDING → FIRED and the parent is notified.
+
+    No additional ``bus.cancel_for_source`` call is needed here:
+    ``cancel_for_source`` is for the cancel-and-retry path (where the
+    retry has a NEW task id and the original watcher must be
+    released as CANCELLED) — that path is already covered by
+    :meth:`_notify_bus_of_cancel_and_retry`. The permanent-fail path
+    has no retry, so the parent needs the bus emission (PENDING →
+    FIRED) to unblock its completion gate, not a cancellation.
+
+    See ``error_reporting._send_error_report`` lines around the
+    ``_emit_terminal_via_bus(status="error")`` invocation for the
+    full coverage chain.
     """
     
     def __init__(

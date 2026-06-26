@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, create_engine
 
@@ -27,9 +29,24 @@ import daemon.repositories.dependency_bus.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401
 import daemon.repositories.event.models  # noqa: F401
 
+# NOTE: ``daemon.repositories.task.models`` is intentionally NOT imported at
+# module level. Doing so would register the ``task`` table on
+# ``SQLModel.metadata`` globally, which would cause the
+# ``bus_repo`` fixture's ``create_all()`` to create an empty ``task`` table
+# for ALL tests in this file — and the bus's startup sweep would then
+# classify every existing-test watcher as an orphan (empty task table ⇒
+# ``source_task_id NOT IN (...)`` matches every PENDING watcher).
+#
+# Phase 1's orphan-sweep tests need the ``task`` table to exist so the
+# sweep's IN-subquery runs (rather than failing-open with "no such
+# table"). They use the ``bus_repo_with_task`` fixture below, which
+# creates the ``task`` table via raw SQL on a per-test fresh engine
+# without registering the Task model globally.
+
 from daemon.repositories.dependency_bus import (
     DependencyWatcher,
     DependencyWatcherRepository,
+    DependencyWatcherState,
 )
 from daemon.services.dependency_bus import (
     DependencyBus,
@@ -38,7 +55,6 @@ from daemon.services.dependency_bus import (
     get_dependency_bus,
     set_dependency_bus,
 )
-import pytest
 
 # Phase 5: tests/test_dependency_bus.py previously had a mirror-test helper
 # (``_make_cm_for_mirror_test``) and a CM-vs-bus equivalence test class
@@ -75,6 +91,146 @@ def make_outcome(
     return Outcome(status=status, error=error, summary=summary)
 
 
+def _insert_task(engine, instance_id: str, status: str) -> int:
+    """Insert a ``task`` row with the given status; return the integer id.
+
+    Helper for Phase 1 orphan-sweep tests — the sweep's IN-subquery
+    filters against the ``task`` table, so the unit tests must
+    fabricate ``task`` rows with explicit statuses (running / pending /
+    paused / cancelled / failed) to exercise the active-task predicate.
+
+    Uses a raw INSERT (not ``Session.add(Task(...))``) so the Task model
+    is not registered on ``SQLModel.metadata`` — see the module-level
+    NOTE in the imports section. The schema below mirrors what
+    ``Task.__table_args__`` would produce; if the model evolves, this
+    helper must be updated in lockstep.
+
+    Args:
+        engine: SQLAlchemy ``Engine`` bound to the test database
+            (must have the ``task`` table — see
+            ``bus_repo_with_task`` fixture).
+        instance_id: Parent instance id for the task. Required by
+            the schema.
+        status: One of ``TaskStatus`` lowercase values
+            (``"running"``, ``"pending"``, ``"paused"``,
+            ``"completed"``, ``"failed"``, ``"cancelled"``).
+
+    Returns:
+        The integer id of the newly-inserted ``task`` row, returned
+        via SQLite's ``lastrowid`` from the INSERT statement.
+    """
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                "INSERT INTO task "
+                "(task_type, instance_id, status, created_at, version) "
+                "VALUES (:ttype, :iid, :status, :created_at, :version)"
+            ),
+            {
+                "ttype": "process_message",
+                "iid": instance_id,
+                "status": status,
+                "created_at": now,
+                "version": 0,
+            },
+        )
+        # SQLite's lastrowid; matches the autoincrement integer id
+        # used by the Task model when registered.
+        return int(result.lastrowid)
+
+
+# -------------------------------------------------------------------------
+# Phase 1 orphan-sweep fixtures
+# -------------------------------------------------------------------------
+
+
+_TASK_SCHEMA_DDL = (
+    "CREATE TABLE IF NOT EXISTS task ("
+    "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "  task_type VARCHAR NOT NULL DEFAULT 'process_message',"
+    "  instance_id VARCHAR NOT NULL,"
+    "  message_id VARCHAR,"
+    "  status VARCHAR NOT NULL DEFAULT 'pending',"
+    "  worker_id VARCHAR,"
+    "  retry_count INTEGER NOT NULL DEFAULT 0,"
+    "  next_retry_at VARCHAR,"
+    "  cancel_requested BOOLEAN NOT NULL DEFAULT 0,"
+    "  cancel_requested_at VARCHAR,"
+    "  retry_scheduled BOOLEAN NOT NULL DEFAULT 0,"
+    "  result TEXT,"
+    "  error TEXT,"
+    "  created_at DATETIME NOT NULL,"
+    "  started_at DATETIME,"
+    "  completed_at DATETIME,"
+    "  last_heartbeat_at DATETIME,"
+    "  version INTEGER NOT NULL DEFAULT 0"
+    ")"
+)
+_TASK_INDEXES_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_task_status_created "
+    "ON task (status, created_at)",
+    "CREATE INDEX IF NOT EXISTS ix_task_instance_id "
+    "ON task (instance_id)",
+    "CREATE INDEX IF NOT EXISTS ix_task_message_id "
+    "ON task (message_id)",
+    "CREATE INDEX IF NOT EXISTS ix_task_status "
+    "ON task (status)",
+    "CREATE INDEX IF NOT EXISTS ix_task_worker_id "
+    "ON task (worker_id)",
+    "CREATE INDEX IF NOT EXISTS ix_task_last_heartbeat_at "
+    "ON task (last_heartbeat_at)",
+)
+
+
+@pytest.fixture
+def bus_repo_with_task(bus_repo):
+    """Variant of ``bus_repo`` that ALSO has the ``task`` table created.
+
+    Required for the Phase 1 orphan-sweep tests, which exercise the
+    sweep's IN-subquery against ``task``. The ``bus_repo`` fixture
+    alone is insufficient: when the ``task`` table doesn't exist,
+    ``_sweep_orphan_watchers`` fails open with a "no such table"
+    exception and returns 0 — so the orphan tests would never see
+    any cancellation.
+
+    Implementation note — why this is a separate fixture rather than
+    a module-level Task import:
+
+    Importing ``daemon.repositories.task.models`` at the top of this
+    file would register the ``task`` table on ``SQLModel.metadata``
+    globally, causing the ``bus_repo`` fixture's
+    ``SQLModel.metadata.create_all(eng)`` to create an empty ``task``
+    table for EVERY test in this file (including existing ones).
+    The bus's startup sweep would then classify every existing-test
+    PENDING watcher as an orphan (empty task table ⇒ ``source_task_id
+    NOT IN (...)`` matches every row), breaking ``TestRestartSurvival``
+    and other tests that rely on PENDING watchers surviving
+    ``bus.start()``.
+
+    Per-test raw-SQL DDL avoids that: the ``task`` table only exists
+    on engines created by this fixture, and the existing
+    ``bus_repo`` fixture is unaffected. The schema is hand-written
+    to match ``daemon.repositories.task.models.Task.__table_args__``
+    — keep the two in sync if the model evolves.
+
+    Returns:
+        The same :class:`DependencyWatcherRepository` instance from
+        ``bus_repo``, but bound to an engine that now also has the
+        ``task`` table created.
+    """
+    engine = bus_repo.engine
+    with engine.begin() as conn:
+        conn.execute(text(_TASK_SCHEMA_DDL))
+        # SQLite executes one statement per cursor; iterate the DDL
+        # tuple rather than chaining via ";" (which Python's sqlite3
+        # driver rejects with "You can only execute one statement
+        # at a time").
+        for ddl in _TASK_INDEXES_DDL:
+            conn.execute(text(ddl))
+    return bus_repo
+
+
 # -------------------------------------------------------------------------
 # Fixtures
 # -------------------------------------------------------------------------
@@ -87,13 +243,37 @@ def bus_repo():
     StaticPool + check_same_thread=False is REQUIRED: asyncio.to_thread
     shares the connection with the main thread, and :memory: databases are
     connection-scoped by default.
+
+    Only the ``dependency_watchers`` table is created on the engine.
+    Why not the full ``SQLModel.metadata.create_all``? Transitive
+    imports register many tables on ``SQLModel.metadata`` — including
+    the ``task`` table (transitively via
+    ``daemon/repositories/__init__.py``, which re-exports
+    ``daemon.repositories.task.models``). An empty ``task``
+    table causes the bus's startup ``_sweep_orphan_watchers`` sweep to
+    classify every PENDING watcher as an orphan (the sweep's
+    IN-subquery ``source_task_id NOT IN (SELECT id FROM task WHERE
+    status IN ('running','pending','paused'))`` matches every row when
+    the ``task`` table is empty), which breaks pre-existing tests
+    that rely on PENDING watchers surviving ``bus.start()``.
+
+    Phase 1's orphan-sweep tests need the ``task`` table to exist
+    so the sweep actually runs (rather than failing-open with
+    "no such table") — they use the ``bus_repo_with_task`` fixture,
+    which creates the table via raw SQL on top of this fixture's
+    engine.
     """
     eng = create_engine(
         "sqlite:///:memory:",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    SQLModel.metadata.create_all(eng)
+    # Create ONLY the dependency_watchers table. Other models'
+    # tables (task, instance, event, ...) are intentionally NOT
+    # created here — see the docstring above for the rationale.
+    watcher_table = SQLModel.metadata.tables.get("dependency_watchers")
+    if watcher_table is not None:
+        watcher_table.create(eng, checkfirst=True)
     return DependencyWatcherRepository(eng)
 
 
@@ -1823,4 +2003,423 @@ class TestBusSoleAuthority:
             "the retrigger gate's release condition is satisfied "
             "exactly once (the second fire observes count == 0 "
             "AFTER its own transition, the first observes count == 1)."
+        )
+
+
+# -------------------------------------------------------------------------
+# TestOrphanSweep (Phase 1 — orphan watcher defense-in-depth)
+# -------------------------------------------------------------------------
+#
+# Phase 1 of the architecture migration (2026-06-27): the bus gets a
+# defense-in-depth startup sweep that cancels PENDING watchers whose
+# ``source_task_id`` no longer corresponds to an active task. The
+# sweep is implemented as an atomic conditional UPDATE in
+# :meth:`DependencyBus._sweep_orphan_watchers`:
+#
+#   ``UPDATE dependency_watchers SET state = 'CANCELLED', fired_at = :now
+#    WHERE state = 'PENDING'
+#    AND source_task_id NOT IN (
+#      SELECT id FROM task WHERE status IN ('running', 'pending', 'paused')
+#    )``
+#
+# These tests pin the unit-level contracts against an in-memory SQLite
+# engine + a real ``DependencyBus``. The PG equivalent (with a real
+# ``bus.start()`` → ``_sweep_orphan_watchers`` path) lives in
+# ``tests/postgres/test_06f500af_bug_class_eliminated_pg.py``.
+#
+# Active-task predicate: running/pending/paused tasks EXCLUDE their
+# watchers from the sweep. Paused tasks are intentionally preserved
+# for resume semantics (Decision 2 of the Pause/Resume redesign).
+#
+# State value casing: ``dependency_watchers.state`` uses UPPERCASE
+# values ('PENDING', 'FIRED', 'CANCELLED'); ``task.status`` uses
+# lowercase ('running', 'pending', 'paused'). The mixed casing in
+# the sweep SQL is intentional and matches the actual on-disk column
+# values — see ``dependency_bus.py:_sweep_orphan_watchers``.
+# -------------------------------------------------------------------------
+
+
+class TestOrphanSweep:
+    """Phase 1 (2026-06-27): orphan watcher defense-in-depth sweep.
+
+    Pins the unit-level contracts of
+    :meth:`DependencyBus._sweep_orphan_watchers` against an in-memory
+    SQLite engine. The five tests cover the four state-machine
+    contracts (orphan cancelled, active exempt, idempotent, mixed
+    batch) plus the repository primitive
+    :meth:`DependencyWatcherRepository.fetch_all_pending` that the
+    sweep's audit path relies on.
+    """
+
+    @pytest.mark.asyncio
+    async def test_orphan_pending_watcher_gets_cancelled(
+        self, bus_repo_with_task, bus
+    ):
+        """A PENDING watcher whose ``source_task_id`` points to a
+        non-existent task is transitioned to CANCELLED by the sweep.
+
+        This is the core 06f500af bug-class invariant: an orphan
+        PENDING watcher would otherwise keep
+        ``count_pending_for_target(parent) > 0`` forever and strand
+        the parent in ``waiting_children`` (the production incident
+        pattern recorded in commit 06f500af).
+
+        Steps:
+          1. Insert a PENDING ``DependencyWatcher`` whose
+             ``source_task_id`` does NOT exist in the ``task`` table.
+          2. Call ``bus._sweep_orphan_watchers()`` directly (bypasses
+             ``start()`` to keep the test focused on the sweep
+             itself).
+          3. Assert: the sweep returned 1 (the orphan was cancelled).
+          4. Assert: the watcher is no longer in the PENDING set
+             (transitions to CANCELLED).
+          5. Assert: ``count_pending_for_target(parent) == 0`` — the
+             parent's gate can fire.
+
+        Pre-Phase-1: there is no sweep, so the orphan stays PENDING
+        and assertion 5 fails — the parent is stuck forever.
+        """
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-orphan-sweep"
+        # Source task id that does NOT exist in the ``task`` table.
+        orphan_source = "9999"
+
+        # Insert the orphan PENDING watcher directly via the repo.
+        watcher = DependencyWatcher(
+            source_task_id=orphan_source,
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+        )
+        bus_repo.insert(watcher)
+
+        # Sanity: the watcher landed as PENDING.
+        pending_before = bus_repo.fetch_pending_for_source(orphan_source)
+        assert len(pending_before) == 1
+        assert pending_before[0].state == DependencyWatcherState.PENDING.value
+
+        # Sweep — direct call. Returns the number of orphans cancelled.
+        swept = await bus._sweep_orphan_watchers()
+        assert swept == 1, (
+            f"orphan sweep must cancel exactly 1 watcher "
+            f"(source_task_id={orphan_source} has no active task); "
+            f"got swept={swept}"
+        )
+
+        # The watcher must no longer be PENDING (it transitioned to
+        # CANCELLED). Use ``fetch_all_pending`` (the read primitive
+        # the sweep's audit path mirrors) to verify.
+        all_pending_after = bus_repo.fetch_all_pending()
+        pending_ids = {w.watch_id for w in all_pending_after}
+        assert watcher.watch_id not in pending_ids, (
+            f"orphan watcher {watcher.watch_id} must be cancelled "
+            f"(no longer in the PENDING set after sweep)"
+        )
+
+        # And the parent's pending-children count drops to 0 — its
+        # completion gate can now fire.
+        assert bus.count_pending_for_target_sync(parent_id) == 0, (
+            "parent's count_pending_for_target must drop to 0 after "
+            "the orphan sweep, releasing the completion gate"
+        )
+
+    @pytest.mark.asyncio
+    async def test_active_tasks_watchers_not_cancelled(
+        self, bus_repo_with_task, bus
+    ):
+        """PENDING watchers for running/pending/paused tasks must NOT
+        be cancelled by the sweep.
+
+        Critical: paused tasks MUST keep their watchers intact for
+        resume semantics (Decision 2 of the Pause/Resume redesign —
+        bus watchers survive pause). Without the paused-exemption in
+        the SQL ``IN``-list, the sweep would wrongly cancel
+        watchers for tasks that may resume later, causing missed
+        child completion reports when the parent resumes.
+
+        Steps:
+          1. Insert Task rows with statuses: running, pending, paused.
+          2. Register a PENDING watcher on each task id.
+          3. Call sweep.
+          4. Assert: sweep returned 0 (no orphans — all 3 tasks are
+             active).
+          5. Assert: all 3 watchers remain PENDING (count is 3).
+        """
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-active"
+        instance_id = "instance-active"
+
+        # Insert one Task per active status — each gets a PENDING
+        # watcher keyed on its id. Status strings match the TaskStatus
+        # enum values (lowercase) — the enum class is intentionally
+        # not imported here (see module-level NOTE); the literal
+        # strings match ``daemon.repositories.task.models.TaskStatus``.
+        running_id = _insert_task(
+            bus_repo.engine, instance_id, "running"
+        )
+        pending_id = _insert_task(
+            bus_repo.engine, instance_id, "pending"
+        )
+        paused_id = _insert_task(
+            bus_repo.engine, instance_id, "paused"
+        )
+
+        for src_id in (running_id, pending_id, paused_id):
+            bus_repo.insert(
+                DependencyWatcher(
+                    source_task_id=str(src_id),
+                    target_instance_id=parent_id,
+                    follow_up_payload=make_fu(
+                        target_id=parent_id
+                    ).to_payload(),
+                )
+            )
+
+        # Sweep — must be a no-op for active tasks.
+        swept = await bus._sweep_orphan_watchers()
+        assert swept == 0, (
+            f"sweep must NOT cancel watchers for active tasks "
+            f"(running/pending/paused); got swept={swept}"
+        )
+
+        # All 3 watchers must remain PENDING.
+        for src_id in (running_id, pending_id, paused_id):
+            pending_rows = bus_repo.fetch_pending_for_source(str(src_id))
+            assert len(pending_rows) == 1, (
+                f"watcher for task {src_id} must remain PENDING "
+                f"after sweep (active-task predicate exempts it)"
+            )
+            assert (
+                pending_rows[0].state
+                == DependencyWatcherState.PENDING.value
+            ), (
+                f"watcher for task {src_id} must remain PENDING "
+                f"(state check); got state={pending_rows[0].state}"
+            )
+
+        # Parent's pending count is unchanged (still 3).
+        assert bus.count_pending_for_target_sync(parent_id) == 3
+
+    @pytest.mark.asyncio
+    async def test_sweep_is_idempotent(self, bus_repo_with_task, bus):
+        """Calling sweep twice is safe: first cancels, second is a no-op.
+
+        Idempotency is a load-bearing property — ``bus.start()`` calls
+        the sweep on every boot, and a future second invocation (e.g.
+        from a maintenance hook or a manual operator action) must not
+        raise or double-cancel an already-CANCELLED row.
+
+        Steps:
+          1. Insert an orphan PENDING watcher.
+          2. First sweep: returns 1, the watcher is CANCELLED.
+          3. Second sweep: returns 0 (nothing left to cancel), no error.
+
+        The guarded UPDATE (``WHERE state='PENDING'``) is what makes
+        this safe — the second call's UPDATE matches zero rows and
+        reports ``rowcount == 0``.
+        """
+        bus_repo = bus_repo_with_task
+        parent_id = "parent-idempotent"
+        orphan_source = "8888"
+
+        # Insert the orphan.
+        watcher = DependencyWatcher(
+            source_task_id=orphan_source,
+            target_instance_id=parent_id,
+            follow_up_payload=make_fu(target_id=parent_id).to_payload(),
+        )
+        bus_repo.insert(watcher)
+
+        # First sweep: cancels the orphan.
+        swept_first = await bus._sweep_orphan_watchers()
+        assert swept_first == 1, (
+            f"first sweep must cancel the orphan; got swept={swept_first}"
+        )
+
+        # The watcher must no longer be PENDING.
+        all_pending_after_first = bus_repo.fetch_all_pending()
+        pending_ids_after_first = {
+            w.watch_id for w in all_pending_after_first
+        }
+        assert watcher.watch_id not in pending_ids_after_first, (
+            "orphan watcher must be cancelled (no longer PENDING) "
+            "after the first sweep"
+        )
+
+        # Second sweep: nothing left to sweep. The guarded UPDATE
+        # (``WHERE state='PENDING'``) matches zero rows, returns 0.
+        swept_second = await bus._sweep_orphan_watchers()
+        assert swept_second == 0, (
+            f"second sweep must return 0 (no PENDING orphans left); "
+            f"got swept={swept_second}"
+        )
+
+        # Parent's pending count is still 0 — no spurious regressions.
+        assert bus.count_pending_for_target_sync(parent_id) == 0
+
+    @pytest.mark.asyncio
+    async def test_mixed_scenario(self, bus_repo_with_task, bus):
+        """Mixed batch: 1 orphan + 2 running-task + 1 paused-task watcher.
+
+        The sweep must cancel exactly 1 (the orphan) and leave the 3
+        active-task watchers intact. This is the realistic scenario:
+        the bus accumulates a mix of pending watchers across restart
+        cycles, and the sweep must distinguish active from orphan
+        without false positives.
+
+        Steps:
+          1. Insert 1 orphan watcher (no corresponding ``task`` row).
+          2. Insert 2 watchers on a running task.
+          3. Insert 1 watcher on a paused task.
+          4. Sweep.
+          5. Assert: 1 cancelled (the orphan); 3 remain PENDING.
+
+        The two running-task watchers share a parent (siblings
+        watching the same child from the same parent). The paused-task
+        watcher targets a different parent. This mirrors the
+        production fan-in shape from the 06f500af incident.
+        """
+        bus_repo = bus_repo_with_task
+        parent_running = "parent-running-mixed"
+        parent_paused = "parent-paused-mixed"
+        parent_orphan = "parent-orphan-mixed"
+        instance_id = "instance-mixed"
+
+        # 1 orphan watcher (no corresponding task row).
+        orphan_watcher = DependencyWatcher(
+            source_task_id="7777",
+            target_instance_id=parent_orphan,
+            follow_up_payload=make_fu(target_id=parent_orphan).to_payload(),
+        )
+        bus_repo.insert(orphan_watcher)
+
+        # 2 watchers on a running task (same parent, siblings).
+        running_task_id = _insert_task(
+            bus_repo.engine, instance_id, "running"
+        )
+        for i in range(2):
+            bus_repo.insert(
+                DependencyWatcher(
+                    source_task_id=str(running_task_id),
+                    target_instance_id=parent_running,
+                    follow_up_payload=make_fu(
+                        target_id=parent_running, message=f"running-{i}"
+                    ).to_payload(),
+                )
+            )
+
+        # 1 watcher on a paused task (different parent).
+        paused_task_id = _insert_task(
+            bus_repo.engine, instance_id, "paused"
+        )
+        bus_repo.insert(
+            DependencyWatcher(
+                source_task_id=str(paused_task_id),
+                target_instance_id=parent_paused,
+                follow_up_payload=make_fu(
+                    target_id=parent_paused
+                ).to_payload(),
+            )
+        )
+
+        # Sanity: 4 PENDING watchers before the sweep.
+        all_pending_before = bus_repo.fetch_all_pending()
+        assert len(all_pending_before) == 4, (
+            f"setup: expected 4 PENDING watchers before sweep; "
+            f"got {len(all_pending_before)}"
+        )
+
+        # Sweep — must cancel ONLY the 1 orphan.
+        swept = await bus._sweep_orphan_watchers()
+        assert swept == 1, (
+            f"sweep must cancel exactly 1 (the orphan); "
+            f"running/paused watchers must be preserved; "
+            f"got swept={swept}"
+        )
+
+        # Orphan is gone from PENDING; the 3 active watchers remain.
+        all_pending_after = bus_repo.fetch_all_pending()
+        assert len(all_pending_after) == 3, (
+            f"after sweep: expected 3 PENDING (the 3 active-task "
+            f"watchers); got {len(all_pending_after)}"
+        )
+        remaining_ids = {w.watch_id for w in all_pending_after}
+        assert orphan_watcher.watch_id not in remaining_ids, (
+            "orphan watcher must be removed from PENDING set"
+        )
+
+        # Per-parent counts: orphan parent has 0 (released), running
+        # parent has 2 (both siblings intact), paused parent has 1
+        # (exempt from sweep).
+        assert (
+            bus.count_pending_for_target_sync(parent_orphan) == 0
+        ), "orphan parent's pending count must drop to 0"
+        assert (
+            bus.count_pending_for_target_sync(parent_running) == 2
+        ), "running-task parent's 2 sibling watchers must survive the sweep"
+        assert (
+            bus.count_pending_for_target_sync(parent_paused) == 1
+        ), "paused-task parent's watcher must survive the sweep"
+
+    def test_fetch_all_pending_returns_only_pending(self, bus_repo):
+        """``DependencyWatcherRepository.fetch_all_pending()`` returns
+        only PENDING watchers (FIRED and CANCELLED are excluded).
+
+        This is the read primitive the bus's startup sweep logic
+        mirrors. Verifying the filter works correctly here ensures
+        the audit path (``fetch_all_pending`` → manual review) and
+        the sweep itself stay consistent on the underlying
+        ``state = 'PENDING'`` predicate.
+
+        Steps:
+          1. Insert one watcher in each state: PENDING, FIRED, CANCELLED.
+          2. Call ``bus_repo.fetch_all_pending()``.
+          3. Assert: only the PENDING watcher is returned.
+        """
+        # Insert one watcher per state. The default ``state`` on the
+        # model is PENDING, but we set it explicitly for clarity and
+        # so a future default change doesn't silently break this test.
+        pending_w = DependencyWatcher(
+            source_task_id="src-pending-test",
+            target_instance_id="parent-pending-test",
+            follow_up_payload=make_fu(
+                target_id="parent-pending-test"
+            ).to_payload(),
+            state=DependencyWatcherState.PENDING.value,
+        )
+        fired_w = DependencyWatcher(
+            source_task_id="src-fired-test",
+            target_instance_id="parent-fired-test",
+            follow_up_payload=make_fu(
+                target_id="parent-fired-test"
+            ).to_payload(),
+            state=DependencyWatcherState.FIRED.value,
+        )
+        cancelled_w = DependencyWatcher(
+            source_task_id="src-cancelled-test",
+            target_instance_id="parent-cancelled-test",
+            follow_up_payload=make_fu(
+                target_id="parent-cancelled-test"
+            ).to_payload(),
+            state=DependencyWatcherState.CANCELLED.value,
+        )
+        bus_repo.insert(pending_w)
+        bus_repo.insert(fired_w)
+        bus_repo.insert(cancelled_w)
+
+        # fetch_all_pending returns ONLY the PENDING one.
+        result = bus_repo.fetch_all_pending()
+        result_ids = {w.watch_id for w in result}
+
+        assert len(result) == 1, (
+            f"fetch_all_pending must return only PENDING watchers; "
+            f"got {len(result)} (expected 1)"
+        )
+        assert pending_w.watch_id in result_ids, (
+            "the PENDING watcher must be in the result"
+        )
+        assert fired_w.watch_id not in result_ids, (
+            "FIRED watcher must be excluded from the result"
+        )
+        assert cancelled_w.watch_id not in result_ids, (
+            "CANCELLED watcher must be excluded from the result"
         )

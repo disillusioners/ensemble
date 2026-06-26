@@ -83,6 +83,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from sqlalchemy import text
 from sqlmodel import Session, select
 
 from daemon.repositories.dependency_bus import (
@@ -1039,9 +1040,22 @@ class DependencyBus:
         self._running = True
         warmed = await self._warm_cache()
         recovered = await self._recover_fired_unsent()
+        # Defense-in-depth orphan sweep (Phase 1, 2026-06-27):
+        # runs AFTER _warm_cache and _recover_fired_unsent but
+        # BEFORE the bus starts processing new events. Any PENDING
+        # watchers whose source_task_id no longer corresponds to an
+        # active task (i.e. accumulated from a prior crash window
+        # where the task was force-cancelled or completed without
+        # the bus being notified) are transitioned to CANCELLED
+        # here, so the startup window doesn't see parents stuck in
+        # waiting_children. Fail-open: a DB error logs a WARNING
+        # and startup continues — see _sweep_orphan_watchers
+        # docstring for the rationale.
+        swept = await self._sweep_orphan_watchers()
         logger.info(
             f"bus start: warmed={warmed} pending watchers, "
-            f"recovered={len(recovered)} fired-but-unsent watchers",
+            f"recovered={len(recovered)} fired-but-unsent watchers, "
+            f"swept={swept} orphan pending watcher(s)",
             extra={"completion_delivery_path": "bus"},
         )
         return recovered
@@ -1379,6 +1393,139 @@ class DependencyBus:
             (row.watch_id, FollowUp.from_payload(row.follow_up_payload))
             for row in rows
         ]
+
+    async def _sweep_orphan_watchers(self) -> int:
+        """Cancel orphan PENDING watchers whose source task is gone.
+
+        Defense-in-depth sweep (Phase 1 of the orphan-watcher
+        remediation, 2026-06-27): a PENDING watcher whose
+        ``source_task_id`` no longer corresponds to an active
+        task is an **orphan** — its FollowUp can never fire (no
+        terminal event will ever emit on a missing task id) but
+        ``count_pending_for_target(parent)`` keeps it counted as
+        pending, blocking the parent from reaching COMPLETED
+        forever. This is the production incident pattern recorded
+        in commit 06f500af and analyzed in the
+        ``cancel_for_source`` docstring.
+
+        The sweep uses a **single atomic conditional UPDATE** —
+        NOT a read-then-update loop — to eliminate the TOCTOU
+        race window where a concurrent ``emit_terminal`` could
+        land between the read and the transition (W2 feedback in
+        the plan). The conditional subquery
+        ``source_task_id NOT IN (SELECT id FROM task WHERE
+        status IN ('running', 'pending', 'paused'))`` filters at
+        UPDATE time so a concurrent ``emit_terminal`` that flips
+        a task to COMPLETED/FAILED in the same window is
+        evaluated atomically by the DB engine.
+
+        **Active-task predicate (the IN-list)** — a task counts
+        as "active" when its status is ``running``, ``pending``,
+        or ``paused``. The ``paused`` case is INTENTIONAL:
+        paused tasks have legitimately PENDING watchers that
+        must be preserved for resume semantics (Decision 2 of the
+        Pause/Resume redesign — bus watchers survive pause).
+        COMPLETED / FAILED / CANCELLED tasks have already emitted
+        (or will never emit) their terminal events, so any
+        PENDING watchers keyed on those task ids are orphans
+        and must be cancelled.
+
+        **State value casing** — ``dependency_watchers.state``
+        uses UPPERCASE enum string values (``'PENDING'``,
+        ``'FIRED'``, ``'CANCELLED'`` — see
+        :class:`DependencyWatcherState`), while ``task.status``
+        uses lowercase enum string values (``'pending'``,
+        ``'running'``, ``'paused'``, ``'completed'``,
+        ``'failed'``, ``'cancelled'`` — see
+        :class:`daemon.repositories.task.models.TaskStatus`).
+        The mixed casing in the SQL is intentional and matches
+        the actual on-disk column values; a single case style
+        would silently match zero rows.
+
+        **Fail-open** — startup sweep is best-effort
+        defense-in-depth. A DB error during the sweep MUST NOT
+        crash the daemon startup (the bus is already wired with
+        ``_warm_cache`` + ``_recover_fired_unsent`` — losing the
+        sweep just leaves the existing orphan in place; the
+        process can still serve requests and a future restart
+        will sweep again). On error the method logs a WARNING
+        and returns 0.
+
+        The sweep is called from :meth:`start` AFTER
+        :meth:`_warm_cache` and :meth:`_recover_fired_unsent`
+        complete and BEFORE the bus starts processing new events
+        — so orphans cleaned here do not interfere with the
+        cache snapshot (the cache is read-from-DB next, not
+        populated here).
+
+        Returns:
+            The number of orphan PENDING watchers transitioned
+            to CANCELLED. Returns 0 when no orphans exist (the
+            common case) or when the sweep fails (the DB error
+            is logged and startup continues).
+        """
+        cancelled_state = DependencyWatcherState.CANCELLED.value
+        pending_state = DependencyWatcherState.PENDING.value
+        fired_at_iso = self._now_iso()
+
+        def _sweep_atomic() -> int:
+            """Atomic conditional UPDATE — dialect-portable (SQLite + PG).
+
+            Uses ``sqlalchemy.text()`` with bound parameters
+            (``:cancelled_state``,``:pending_state``,``:now``) so the
+            runtime substitutes the correct bind-param syntax for the
+            active dialect (``?`` for SQLite, ``$1``/``$2``/``$3`` for
+            PostgreSQL via psycopg/asyncpg). The IN-list for active
+            statuses is intentionally embedded as a string literal
+            (no user input flows through it) — this avoids having to
+            bind a variable number of params and keeps the query
+            plan stable.
+            """
+            stmt = text(
+                "UPDATE dependency_watchers "
+                "SET state = :cancelled_state, fired_at = :now "
+                "WHERE state = :pending_state "
+                "AND source_task_id NOT IN ("
+                "  SELECT id FROM task "
+                "  WHERE status IN ('running', 'pending', 'paused')"
+                ")"
+            )
+            with Session(self._repo.engine) as session:
+                result = session.execute(
+                    stmt,
+                    {
+                        "cancelled_state": cancelled_state,
+                        "pending_state": pending_state,
+                        "now": fired_at_iso,
+                    },
+                )
+                session.commit()
+                return int(result.rowcount or 0)
+
+        try:
+            rowcount = await asyncio.to_thread(_sweep_atomic)
+        except Exception as sweep_err:
+            # Fail-open: log the error and let startup continue.
+            # The orphan watcher(s) will remain in PENDING state
+            # and block their parent's completion — same pre-sweep
+            # behavior. A future restart will sweep again.
+            logger.warning(
+                f"sweep_orphan_watchers: DB error during orphan "
+                f"sweep (sweep failed, startup continues): {sweep_err}"
+            )
+            return 0
+
+        if rowcount > 0:
+            logger.info(
+                f"sweep_orphan_watchers: cancelled {rowcount} orphan "
+                f"PENDING watcher(s) (source_task_id no longer "
+                f"corresponds to an active task)"
+            )
+        else:
+            logger.debug(
+                "sweep_orphan_watchers: no orphan PENDING watchers found"
+            )
+        return rowcount
 
     async def mark_enqueued(self, watch_id: str) -> None:
         """Stamp a FIRED watcher as successfully enqueued.

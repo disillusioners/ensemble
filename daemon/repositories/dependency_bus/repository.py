@@ -194,6 +194,38 @@ class DependencyWatcherRepository:
             )
             return list(session.exec(stmt))
 
+    def fetch_all_pending(self) -> list[DependencyWatcher]:
+        """Return ALL PENDING watchers (unfiltered by source/target).
+
+        Startup sweep primitive: used by
+        :meth:`DependencyBus._sweep_orphan_watchers` to find
+        orphaned PENDING watchers whose ``source_task_id`` no
+        longer corresponds to an active task (orphan watchers
+        can otherwise block parent completion forever — see the
+        06f500af incident docstring on
+        :meth:`DependencyBus.cancel_for_source`).
+
+        Unlike :meth:`fetch_pending_for_source` /
+        :meth:`fetch_pending_for_target` (which hit the
+        composite indexes for a single key), this is an
+        unfiltered full scan filtered by state. The query is
+        expected to be called ONCE per daemon startup from
+        :meth:`DependencyBus.start`, never on the hot path —
+        so the index choice does not matter and the
+        ``(state)``-only filter is intentional.
+
+        Returns:
+            List of all PENDING :class:`DependencyWatcher` rows
+            across every source/target. Empty list when no
+            PENDING watchers exist (the common case after a
+            clean restart with no in-flight FollowUps).
+        """
+        with Session(self.engine) as session:
+            stmt = select(DependencyWatcher).where(
+                DependencyWatcher.state == _PENDING_STATE
+            )
+            return list(session.exec(stmt))
+
     def count_pending_for_target(self, target_instance_id: str) -> int:
         """Return the PENDING watcher COUNT for a given parent instance id.
 

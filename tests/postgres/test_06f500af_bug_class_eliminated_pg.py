@@ -22,8 +22,8 @@ The Two-Layer Fix
 Eliminating the 06f500af bug class requires fixes at two distinct layers,
 each gated by a separate phase of the architecture migration:
 
-  * **Phase 1 — ``_sweep_orphan_watchers()`` startup sweep** (xfail
-    Scenarios 1 + 2). Adds an atomic ``UPDATE dependency_watchers SET
+  * **Phase 1 — ``_sweep_orphan_watchers()`` startup sweep** (Scenarios
+    1 + 2, now green). Adds an atomic ``UPDATE dependency_watchers SET
     state='cancelled' WHERE state='pending' AND source_task_id NOT IN
     (SELECT id FROM task WHERE status IN ('running','pending','paused'))``
     to ``DependencyBus.start()``. This catches any PENDING watcher whose
@@ -43,20 +43,21 @@ each gated by a separate phase of the architecture migration:
     bugs. See
     ``.agents/shared/planning/finish-architecture-migration/phase2-plan.md``.
 
-Why These Tests Are Xfail
--------------------------
+Why These Tests Were Xfail
+--------------------------
 Per the Phase 0 plan (``.agents/shared/planning/finish-architecture-migration/phase0-plan.md``),
-all three scenarios are marked ``@pytest.mark.xfail`` so CI stays green
-while the implementation phases land:
+all three scenarios started life as ``@pytest.mark.xfail`` so CI stayed
+green while the implementation phases landed. Status as of Phase 1
+(2026-06-27):
 
   * Scenario 1 (``test_orphan_watcher_cancelled_on_startup_sweep``)
-    will be un-xfail'd when Phase 1's ``_sweep_orphan_watchers()`` is
+    — **un-xfail'd**. Phase 1's ``_sweep_orphan_watchers()`` is
     implemented and wired into ``DependencyBus.start()``.
   * Scenario 2 (``test_paused_task_watcher_not_cancelled_by_sweep``)
-    will be un-xfail'd alongside Scenario 1 (same Phase 1 work — the
+    — **un-xfail'd** alongside Scenario 1 (same Phase 1 work — the
     paused exemption is part of the same SQL filter).
-  * Scenario 3 (``test_d13_single_record_invariant``) will be un-xfail'd
-    when Phase 2's D13 changes land.
+  * Scenario 3 (``test_d13_single_record_invariant``) — still
+    ``xfail``; will be un-xfail'd when Phase 2's D13 changes land.
 
 References
 ----------
@@ -284,17 +285,10 @@ def _insert_task(
 
 
 # =============================================================================
-# Scenario 1: Orphan watcher cancelled on startup sweep (xfail — Phase 1)
+# Scenario 1: Orphan watcher cancelled on startup sweep (Phase 1 — green)
 # =============================================================================
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Phase 1: startup sweep (_sweep_orphan_watchers) not yet implemented "
-        "in bus.start() — orphan watcher stays PENDING instead of CANCELLED."
-    ),
-)
 @pytest.mark.asyncio
 async def test_orphan_watcher_cancelled_on_startup_sweep(
     bus, bus_repo, pg_engine, instance_id
@@ -384,18 +378,10 @@ async def test_orphan_watcher_cancelled_on_startup_sweep(
 
 
 # =============================================================================
-# Scenario 2: Paused task exempt from sweep (xfail — Phase 1)
+# Scenario 2: Paused task exempt from sweep (Phase 1 — green)
 # =============================================================================
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Phase 1: startup sweep not yet implemented — paused-exemption "
-        "regression guard is implicitly satisfied today (no sweep = no "
-        "cancellation) but will become load-bearing once Phase 1 lands."
-    ),
-)
 @pytest.mark.asyncio
 async def test_paused_task_watcher_not_cancelled_by_sweep(
     bus, bus_repo, pg_engine, instance_id
