@@ -1748,30 +1748,7 @@ Provide a concise summary:"""
                     )
             return
 
-        # Root carve-out (F5/F6): the WAITING_CHILDREN write was
-        # suppressed because there is no active MESSAGE job
-        # (stale/duplicate from task-claim race). The instance stays in
-        # its current (non-terminal) status — we do NOT emit a
-        # "completed" SSE, do NOT publish a lifecycle "completed"
-        # event, and do NOT trigger title generation. We DO signal
-        # CompletionRegistry so any ``invoke_agent_and_wait()``
-        # callers do not hang. ``complete()`` is idempotent (see
-        # ``CompletionRegistry.complete`` — duplicate calls return
-        # False but are safe) and buffers the result if no event
-        # exists yet.
-        if outcome == "root_skipped_terminal_job":
-            try:
-                from .completion_registry import get_completion_registry
-                get_completion_registry().complete(instance_id, result=last_content)
-                logger.info(
-                    f"Root {instance_id[:8]}... carve-out fired (no active job), "
-                    f"CompletionRegistry signaled"
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to signal CompletionRegistry for {instance_id[:8]}...: {e}"
-                )
-            return
+        # Phase 5: "root_skipped_terminal_job" outcome removed — guard is gone
 
         # Root completed: commit + SSE + CompletionRegistry + lifecycle + title
         if outcome == "root_completed":

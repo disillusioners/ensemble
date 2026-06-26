@@ -196,38 +196,6 @@ def _seed_message(
     return mid
 
 
-def _seed_message_job(
-    engine: Engine,
-    *,
-    instance_id: str,
-    status: str = JobStatus.PROCESSING.value,
-) -> str:
-    """Insert a JobItem with job_type='message' for the given instance.
-
-    Phase 5: retained only for ``TestRootPendingMessagesNormalPath``
-    which seeds a non-terminal MESSAGE job to confirm the normal
-    ``root_waiting_children`` path proceeds. The Phase 2 carve-out
-    fixtures that varied job status (completed/failed/cancelled/
-    dead_letter) and the soft-deleted variant were removed with their
-    tests.
-    """
-    job_id = f"job-{uuid.uuid4().hex[:8]}"
-    with Session(engine) as session:
-        job = JobItem(
-            job_id=job_id,
-            agent_id="leader",
-            agent_dir="/tmp/leader",
-            message="test message",
-            source="api",
-            job_type="message",
-            status=status,
-            instance_id=instance_id,
-        )
-        session.add(job)
-        session.commit()
-    return job_id
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Tests
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,7 +209,7 @@ class TestRootPendingMessagesNormalPath:
     graceful-degradation watchers and FIFO carve-out SQL compatibility
     (display only)."""
 
-    def test_normal_path_sets_waiting_children_when_job_processing(
+    def test_root_with_pending_message_task_transitions_to_waiting_children(
         self, engine: Engine
     ):
         """A root instance with pending_count > 0 AND a non-terminal
@@ -251,10 +219,6 @@ class TestRootPendingMessagesNormalPath:
         service = _build_child_reports_service(engine)
         root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_message(engine, instance_id=root_id, status=MessageStatus.READY.value)
-        # Non-terminal job — normal path proceeds
-        _seed_message_job(
-            engine, instance_id=root_id, status=JobStatus.PROCESSING.value
-        )
 
         result = service._process_child_completion_db_sync(
             instance_id=root_id,
