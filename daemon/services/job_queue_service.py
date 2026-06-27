@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from daemon.manager import InstanceManager
     from daemon.services.dispatch_event_bus import DispatchEventBus
+    from daemon.services.work_resolver import WorkRecord
 
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
@@ -23,6 +24,8 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.work_notifier import notify_work_watchers
+from daemon.services.work_status import is_terminal as _work_status_is_terminal
 from daemon.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -133,6 +136,16 @@ class JobQueueService:
         self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
         self._project_repo: Any | None = None  # Project repository for pause state checks
         self._watcher_repo: Any | None = None  # Repository for job watchers
+        self._work_resolver: Any | None = None  # WorkResolverService for work_id → WorkRecord
+        # Virtual job resolver flag (Phase 2 Batch 4a, 2026-06-27,
+        # feature/virtual-job-management-surface). Tools branch on this to
+        # route ``job_get`` / ``job_list`` / ``job_cancel`` / ``watch_job``
+        # through the WorkResolverService (``get_work`` / ``list_work`` /
+        # kind-aware cancel) or fall back to the legacy JobItem-only
+        # primitives (``get_job`` / ``list_jobs`` / ``cancel_job``).
+        # Default ``True`` so the new surface is exercised in dev/test from
+        # day one; ``set_config`` writes the real value at startup.
+        self._use_virtual_job_resolver: bool = True
     
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine for auto-retry functionality.
@@ -176,21 +189,66 @@ class JobQueueService:
     
     def set_config(self, config: Any) -> None:
         """Set job system config for TTL and other settings.
-        
+
         Args:
             config: JobSystemConfig instance with idempotency_key_ttl_hours and other settings.
         """
         if hasattr(config, 'idempotency_key_ttl_hours'):
             self._idempotency_key_ttl_hours = config.idempotency_key_ttl_hours
+        # Phase 2 (Batch 4a) — capture the ``use_virtual_job_resolver`` kill
+        # switch so tools can branch cleanly. Default-on (matching the
+        # JobSystemConfig default) but defensively checked via ``hasattr``
+        # so older test doubles that pass a partial config object don't
+        # blow up on the attribute lookup.
+        if hasattr(config, 'use_virtual_job_resolver'):
+            self._use_virtual_job_resolver = config.use_virtual_job_resolver
     
     def set_watcher_repo(self, watcher_repo: Any) -> None:
         """Set the watcher repository for job event notifications.
-        
+
         Args:
             watcher_repo: The JobWatcherRepository instance.
         """
         self._watcher_repo = watcher_repo
-    
+
+    def set_work_resolver(self, work_resolver: Any) -> None:
+        """Set the WorkResolverService for kind-agnostic notification routing.
+
+        Phase 2 (Batch 2) of feature/virtual-job-management-surface:
+        ``notify_watchers`` delegates to ``daemon.services.work_notifier.
+        notify_work_watchers`` which needs the resolver to look up
+        ``agent_id`` / ``result_summary`` / ``error`` for both Task and
+        JobItem work from a single ``work_id``.
+
+        Args:
+            work_resolver: The WorkResolverService instance.
+        """
+        self._work_resolver = work_resolver
+
+    @property
+    def use_virtual_job_resolver(self) -> bool:
+        """Return the kill-switch for the virtual-job read API.
+
+        Phase 2 (Batch 4a, 2026-06-27) of
+        ``feature/virtual-job-management-surface``. Tools in
+        ``daemon/tools/job_queue.py`` branch on this to decide whether to
+        route through ``self.get_work`` / ``self._work_resolver.list_work``
+        (kind-agnostic) or fall back to the legacy JobItem-only
+        primitives (``get_job`` / ``list_jobs`` / ``cancel_job``).
+
+        Mirrors the ``JobSystemConfig.use_virtual_job_resolver`` flag
+        (env ``ENSEMBLE_JOB_SYSTEM_USE_VIRTUAL_JOB_RESOLVER``), which
+        ``daemon/api.py`` wires through :meth:`set_config` at startup.
+        Defaults to ``True`` so the new surface is exercised in dev/test
+        from day one.
+
+        Returns:
+            The flag value as captured by the last :meth:`set_config`
+            call. ``True`` if no config has been wired yet (matches the
+            ``JobSystemConfig`` default and the constructor default).
+        """
+        return getattr(self, "_use_virtual_job_resolver", True)
+
     async def notify_watchers(
         self,
         job_id: str,
@@ -203,21 +261,77 @@ class JobQueueService:
         Returns number of watchers notified.
         Safe to call even if no watchers exist (returns 0).
         If watching instance is not running, message queues in DB for later delivery.
+
+        Phase 2 (Batch 2) of feature/virtual-job-management-surface:
+        delegates to :func:`daemon.services.work_notifier.notify_work_watchers`
+        so terminal notifications share one code path with the new
+        task-terminal sites (``worker_pool``, ``stale_task_recovery``,
+        ``task_processor.on_success``, ``manager._resume_processing_background``
+        failure path). The ``job_id`` parameter is the ``work_id`` —
+        for job-spawned work (this method's call sites in
+        ``job_feedback_observer``) the JobItem PK is itself the work_id,
+        so the two are interchangeable here.
+
+        The notification format (the ``[JOB_EVENT]`` block) and the
+        ``source`` prefix are byte-for-byte identical to the prior
+        implementation — the orchestrator's parser contract depends on
+        both.
         """
         if self._watcher_repo is None or self._instance_manager is None:
             return 0
+        # ``_work_resolver`` is set via the ``set_work_resolver``
+        # setter by ``daemon/api.py`` after construction. Use
+        # ``getattr`` with a default so partial-wiring test doubles
+        # that build via ``JobQueueService.__new__`` (skipping
+        # ``__init__``) do not crash on the attribute lookup.
+        work_resolver = getattr(self, "_work_resolver", None)
+        if work_resolver is None:
+            # Backwards-compat: if no resolver is wired (older test
+            # doubles, or a partial init), fall back to the legacy
+            # JobItem-only path so the notification still fires with
+            # whatever the JobItem carries. Phase 3 will tighten this
+            # to a hard error once every wiring site sets the resolver.
+            return await self._notify_watchers_legacy(
+                job_id, status, error, progress
+            )
 
+        # Delegate to the centralized helper. The helper atomically
+        # claims watchers via DELETE...RETURNING, resolves the work
+        # record through ``self._work_resolver``, builds the
+        # ``[JOB_EVENT]`` payload, and enqueues per-watcher. The
+        # ``progress=`` kwarg is forwarded so the legacy
+        # ``in_progress`` callers (job_feedback_observer) keep working.
+        return await notify_work_watchers(
+            job_id,
+            status,
+            error=error,
+            instance_manager=self._instance_manager,
+            work_resolver=work_resolver,
+            watcher_repo=self._watcher_repo,
+            progress=progress,
+        )
+
+    async def _notify_watchers_legacy(
+        self,
+        job_id: str,
+        status: str,
+        error: str | None = None,
+        progress: str | None = None,
+    ) -> int:
+        """Legacy JobItem-only notification path used when no resolver is wired.
+
+        Phase 2 (Batch 2): retained for tests / partial-wiring
+        scenarios. Production code paths go through
+        :func:`notify_work_watchers` via ``self.notify_watchers``.
+        Kept as a private helper to make the fallback explicit.
+        """
         try:
-            # Wrap the sync DB read in asyncio.to_thread so SQLite WAL write
-            # contention cannot block the event loop. See the deadlock analysis
-            # in the experience docs for the full chain.
             watchers = await asyncio.to_thread(
                 self._watcher_repo.get_watchers_for_job, job_id
             )
             if not watchers:
                 return 0
 
-            # Get job for notification details
             job = await asyncio.to_thread(self._repository.get, job_id)
             if job is None:
                 return 0
@@ -227,7 +341,6 @@ class JobQueueService:
                 if status not in watcher.watch_events:
                     continue
 
-                # Build notification parts
                 status_display = status
                 if status == "completed":
                     status_display = "completed ✓"
@@ -236,9 +349,6 @@ class JobQueueService:
                 elif status == "in_progress":
                     status_display = "in progress ⟳"
                 elif status == "paused":
-                    # Pause is a non-terminal state — display with a
-                    # distinguishing icon so watcher notifications don't
-                    # look identical to terminal/active statuses.
                     status_display = "paused ⏸"
 
                 notification_parts = [f"[JOB_EVENT] Job {job_id[:8]}... {status_display}"]
@@ -254,46 +364,112 @@ class JobQueueService:
                         notification_parts.append(f"  Error: {error}")
 
                 notification = "\n".join(notification_parts)
-                
+
                 await self._instance_manager.enqueue_message(
                     instance_id=watcher.instance_id,
                     message=notification,
                     source=f"internal_agent:job_event:{job_id}:{status}",
                 )
                 notified += 1
-            
-            # Cleanup: only remove watches for terminal states.
-            # Non-terminal events (e.g., in_progress) must keep the watch alive
-            # so the watcher receives the final terminal notification later.
+
             if status in ALL_TERMINAL_STATES:
-                # Wrap the sync DB write in asyncio.to_thread so SQLite WAL
-                # contention cannot block the event loop. See the deadlock
-                # analysis in the experience docs for the full chain.
                 await asyncio.to_thread(
                     self._watcher_repo.remove_all_watches_for_job, job_id
                 )
             return notified
-            
+
         except Exception as e:
             logger.warning(f"Failed to notify watchers for job {job_id[:8]}...: {e}")
             return 0
     
     async def reconcile_terminal_watches(self) -> int:
-        """Scan for watches where job is already terminal. Notify and cleanup."""
+        """Scan for watches where work is already terminal. Notify and cleanup.
+
+        Phase 2 (Batch 3) of ``feature/virtual-job-management-surface``:
+        routes through ``self._work_resolver`` so the same reconciliation
+        sweep catches watched **Task** rows (the worker-pool side) as well
+        as watched **JobItem** rows (the dispatch-queue side). When no
+        resolver is wired (older test doubles, partial init), falls back
+        to the legacy JobItem-only path so the sweep still runs.
+
+        The terminal check uses ``daemon.services.work_status.is_terminal``
+        against the **canonical** status produced by ``resolve_work`` —
+        Task ``"running"`` is canonicalised to ``"processing"`` so
+        ``is_terminal`` returns ``False`` (correctly treating it as
+        non-terminal) and JobItem ``"completed"`` / ``"failed"`` /
+        ``"cancelled"`` / ``"dead_letter"`` all return ``True``.
+
+        Notification is delegated to :meth:`notify_watchers` (which
+        itself delegates to :func:`notify_work_watchers` when the
+        resolver is wired) so the ``[JOB_EVENT]`` format and the
+        ``source`` prefix stay byte-for-byte identical to the
+        orchestrator's parser contract.
+
+        Returns:
+            Number of watched work units that were already terminal and
+            for which watchers were notified.
+        """
         if self._watcher_repo is None:
             return 0
-        
-        terminal_states = set(ALL_TERMINAL_STATES)
-        
+
+        work_resolver = getattr(self, "_work_resolver", None)
+        if work_resolver is None:
+            # Backwards-compat: no resolver wired. Use the legacy
+            # JobItem-only path so reconcile still runs in partial-wiring
+            # scenarios (older tests, ad-hoc service construction).
+            return await self._reconcile_terminal_watches_legacy()
+
+        # New resolver-based path: walk every active watch, resolve
+        # through the resolver (Task OR JobItem), notify if the resolved
+        # record is terminal.
         all_watches = self._watcher_repo.get_all_active_watches()
         reconciled = 0
-        
+
+        for watch in all_watches:
+            record = await asyncio.to_thread(
+                work_resolver.resolve_work, watch.job_id
+            )
+            if record is None:
+                # Work was deleted between the watcher registration and
+                # the reconcile sweep — nothing to notify, but the
+                # watcher row will be cleaned up by ``notify_watchers``
+                # below when status is terminal (and skipped otherwise).
+                # We don't increment ``reconciled`` because no
+                # notification fired.
+                continue
+            if not _work_status_is_terminal(record.status):
+                continue
+            await self.notify_watchers(
+                watch.job_id, record.status, record.error
+            )
+            reconciled += 1
+
+        return reconciled
+
+    async def _reconcile_terminal_watches_legacy(self) -> int:
+        """Legacy JobItem-only reconcile path used when no resolver is wired.
+
+        Mirrors the pre-Phase-2-Batch-3 implementation of
+        :meth:`reconcile_terminal_watches` exactly — looks up each
+        watched ``job_id`` via ``self._repository.get`` (the
+        ``JobItem`` repository, not the resolver) and notifies watchers
+        when the row is in a terminal status. Kept so partial-wiring
+        scenarios (older tests that don't call ``set_work_resolver``)
+        continue to exercise the JobItem-only reconcile semantics.
+        """
+        terminal_states = set(ALL_TERMINAL_STATES)
+
+        all_watches = self._watcher_repo.get_all_active_watches()
+        reconciled = 0
+
         for watch in all_watches:
             job = await asyncio.to_thread(self._repository.get, watch.job_id)
             if job and job.status in terminal_states:
-                await self.notify_watchers(watch.job_id, job.status, job.error_message)
+                await self.notify_watchers(
+                    watch.job_id, job.status, job.error_message
+                )
                 reconciled += 1
-        
+
         return reconciled
     
     # ========== Public API ==========
@@ -562,15 +738,54 @@ class JobQueueService:
     
     async def get_job(self, job_id: str) -> JobItem | None:
         """Get job by ID.
-        
+
         Args:
             job_id: Unique job identifier.
-            
+
         Returns:
             JobItem if found, None otherwise.
         """
         return await asyncio.to_thread(self._repository.get, job_id)
-    
+
+    async def get_work(self, work_id: str) -> WorkRecord | None:
+        """Resolve a ``work_id`` to its unified :class:`WorkRecord`, or ``None``.
+
+        Phase 2 (Batch 3) of ``feature/virtual-job-management-surface``:
+        kind-agnostic read API that looks up the ``work_id`` against BOTH
+        the worker-pool ``task`` table AND the dispatch-queue
+        ``job_queue_items`` table through the ``WorkResolverService``.
+
+        The HTTP API path (:meth:`get_job`) stays JobItem-only because
+        the ``JobResponse`` schema (``daemon/routers/schemas.py``) carries
+        JobItem-specific fields (``agent_dir``, ``job_metadata``,
+        ``cancelled_at``, ``idempotency_key``, ``started_at``,
+        ``completed_at``, ``message``, ``priority``, ``source``,
+        ``retry_count``, ``max_retries``, ``failed_at``, ``next_retry_at``)
+        that the WorkRecord view-model does not yet expose. Batch 4 will
+        migrate the ``job_get`` / ``job_list`` MCP tools onto this
+        resolver path once a unified response shape lands.
+
+        Args:
+            work_id: The cross-system UUID4 work identifier (Task.work_id
+                or JobItem.job_id — both share the same column).
+
+        Returns:
+            A populated :class:`WorkRecord` if the work_id resolves to
+            either a Task row or a JobItem row, or ``None`` if neither
+            table has a match OR if no resolver has been wired yet
+            (matches the deferred-wiring pattern used elsewhere — e.g.
+            :meth:`notify_watchers` falls back to a legacy path when
+            the resolver is missing).
+        """
+        work_resolver = getattr(self, "_work_resolver", None)
+        if work_resolver is None:
+            # No resolver wired — partial-wiring / older test doubles.
+            # Returning ``None`` lets callers (Batch 4 tool code) branch
+            # cleanly on the "resolver not available" case rather than
+            # crashing on the attribute lookup.
+            return None
+        return await asyncio.to_thread(work_resolver.resolve_work, work_id)
+
     async def get_job_by_instance(self, instance_id: str) -> JobItem | None:
         """Get job by instance ID.
         

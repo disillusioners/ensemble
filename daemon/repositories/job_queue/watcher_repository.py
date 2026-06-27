@@ -9,7 +9,6 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
-from .models import JobItem, JobStatus
 from .watcher_models import JobWatcher, ALL_WATCHABLE_EVENTS
 
 logger = logging.getLogger(__name__)
@@ -175,6 +174,14 @@ class JobWatcherRepository:
     def remove_all_watches_for_job(self, job_id: str) -> int:
         """Remove all watches for a job (after terminal state reached).
 
+        Non-atomic with respect to ``get_watchers_for_job``: two
+        concurrent callers can both read a non-empty watcher list and
+        both proceed to notify. Kept for backward compatibility with
+        callers that need a fire-and-forget cleanup (e.g. reconcile
+        paths that don't notify). New terminal-state notification
+        code should use ``claim_watchers_for_job`` instead so the
+        read+notify+delete cycle is race-free.
+
         Args:
             job_id: The job ID.
 
@@ -186,6 +193,77 @@ class JobWatcherRepository:
             result = db_session.exec(stmt)
             db_session.commit()
             return result.rowcount
+
+    def claim_watchers_for_job(self, job_id: str) -> list[JobWatcher]:
+        """Atomically claim and delete all watchers for a job.
+
+        Phase 2 (Batch 1) of feature/virtual-job-management-surface:
+        replaces the read-then-delete pattern in
+        ``JobQueueService.notify_watchers`` with a single
+        ``DELETE ... RETURNING`` operation so two concurrent terminal
+        callers cannot both notify the same watcher.
+
+        Race-free contract:
+
+            * Caller A reads ``get_watchers_for_job`` (sees 2 rows),
+              is suspended before notifying.
+            * Caller B (terminal race) reads ``get_watchers_for_job``
+              (sees 2 rows), notifies, then calls ``remove_all_watches_for_job``.
+            * Caller A resumes, notifies the same 2 watchers again
+              (DOUBLE-NOTIFY), then calls ``remove_all_watches_for_job``
+              (no-op).
+
+        With this method:
+
+            * Caller A calls ``claim_watchers_for_job`` and receives
+              the 2 watcher rows (and they are deleted in the same
+              SQL operation).
+            * Caller B calls ``claim_watchers_for_job`` and receives
+              an empty list (Caller A already deleted them) — no
+              double-notify.
+
+        The atomicity comes from PostgreSQL's ``DELETE ... RETURNING``
+        and SQLite's equivalent (supported since 3.35). Both drivers
+        execute the statement as a single round-trip; there is no
+        observable interleaving on the rows between SELECT and DELETE.
+
+        Note on the RETURNING clause:
+
+            Earlier versions used ``.returning(JobWatcher)`` (passing
+            the ORM class). SQLAlchemy treats that as a single-column
+            RETURNING keyed by ``"JobWatcher"`` returning an empty
+            JobWatcher instance per row — every column (``watch_events``,
+            ``created_at``, ``instance_id``, …) is unreachable, and any
+            downstream access on the returned rows raises
+            ``AttributeError``. Phase 2 (Batch 3) hit this when wiring
+            the resolver-based ``reconcile_terminal_watches`` path:
+            ``notify_work_watchers`` would log
+            ``failed to notify watchers ...: watch_events`` and notify
+            nothing. The fix is to project the table's columns
+            (``*JobWatcher.__table__.c``) so each returned ``Row``
+            carries every populated column.
+
+        Args:
+            job_id: The job (work) ID to claim watchers for.
+
+        Returns:
+            List of JobWatcher rows that were deleted. Empty list if
+            no watchers exist (already-claimed, never-existed, or
+            cleared by a previous race winner). The caller iterates
+            this list to send notifications and the list is also the
+            authoritative count of "claimed" watchers.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                sql_delete(JobWatcher)
+                .where(JobWatcher.job_id == job_id)
+                .returning(*JobWatcher.__table__.c)
+            )
+            rows = db_session.exec(stmt).all()
+            db_session.commit()
+            return [
+                JobWatcher(**dict(row._mapping)) for row in rows
+            ]
 
     def count_watches_for_instance(self, instance_id: str) -> int:
         """Count watches for an instance.
@@ -213,53 +291,3 @@ class JobWatcherRepository:
         with SQLModelSession(self.engine) as db_session:
             stmt = select(JobWatcher)
             return list(db_session.exec(stmt).all())
-
-    def get_watched_processing_job_ids(self, watcher_instance_id: str) -> list[str]:
-        """Return job_ids that ``watcher_instance_id`` is watching AND still PROCESSING.
-
-        B1 (Phase B): Used by ``CorrelationManager.rebuild_from_db`` to
-        reconstruct the ``pending_jobs`` set on daemon restart. The CM
-        is the single source of truth for parent completion — a watched
-        job that is still in PROCESSING keeps the parent's ``is_complete``
-        returning ``False`` (mirroring an outstanding message correlation).
-        Without this rebuild hook, a daemon crash during a parent job that
-        has watched children would leave the parent's ``pending_jobs``
-        empty after restart; the first ``is_complete`` call would fire
-        the terminal transition prematurely, and the late watched
-        job's terminal event would find no PROCESSING job to resolve.
-
-        Semantics: returns the ``job_id`` (string) of every job that
-
-        1. has a ``JobWatcher`` row with ``instance_id == watcher_instance_id``
-           (i.e. this instance is actively subscribed to the job's events),
-        2. is currently in ``PROCESSING`` status, and
-        3. is not soft-deleted (``deleted_at IS NULL``).
-
-        The ``JobWatcher`` and ``JobItem`` tables are joined via
-        ``JobWatcher.job_id == JobItem.job_id``. The result is a flat
-        list of job_id strings — duplicates (a watcher can have at most
-        one row per job, enforced by the UNIQUE constraint on
-        ``(job_id, instance_id)``, so this is defensive) are de-duplicated
-        via ``dict.fromkeys`` to keep the result idempotent.
-
-        Args:
-            watcher_instance_id: The instance ID of the watcher (parent).
-
-        Returns:
-            List of job_ids (strings) for matching jobs. Empty list if the
-            watcher has no in-flight watches or all watches are already
-            terminal.
-        """
-        with SQLModelSession(self.engine) as db_session:
-            stmt = (
-                select(JobWatcher.job_id)
-                .join(JobItem, JobWatcher.job_id == JobItem.job_id)
-                .where(JobWatcher.instance_id == watcher_instance_id)
-                .where(JobItem.status == JobStatus.PROCESSING.value)
-                .where(JobItem.deleted_at.is_(None))
-            )
-            # dict.fromkeys preserves order while de-duplicating. The
-            # downstream consumer (CM.rebuild_from_db) feeds this into
-            # a set, so ordering is not semantically meaningful, but
-            # stable order helps test assertions.
-            return list(dict.fromkeys(db_session.exec(stmt).all()))

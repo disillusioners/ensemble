@@ -20,6 +20,7 @@ from daemon.repositories.message_queue.models import MessageStatus
 from daemon.services.message_processing_errors import (
     handle_message_processing_error,
 )
+from daemon.services.work_notifier import notify_work_watchers
 
 if TYPE_CHECKING:
     from daemon.repositories.task.models import Task
@@ -60,7 +61,7 @@ class ProcessMessageProcessor(BaseProcessor):
     pool) lives in this class and is supplied to the pipeline as
     :class:`PipelineCallbacks`.
     """
-
+    
     def __init__(
         self,
         instance_manager,
@@ -69,6 +70,8 @@ class ProcessMessageProcessor(BaseProcessor):
         message_repository=None,
         source_dispatcher=None,  # ResponseDispatcher for external routing
         pipeline: "MessageProcessingPipeline | None" = None,
+        work_resolver=None,  # WorkResolverService — Phase 2 Batch 2 notification
+        watcher_repo=None,  # JobWatcherRepository — Phase 2 Batch 2 notification
     ):
         """Initialize the message processor.
 
@@ -93,13 +96,19 @@ class ProcessMessageProcessor(BaseProcessor):
                 ``instance_manager``, ``source_dispatcher``, and
                 ``message_repository``. Test/extension code may
                 inject a custom pipeline.
+            work_resolver: Optional WorkResolverService — Phase 2
+                Batch 2 ``on_success`` notification routing.
+            watcher_repo: Optional JobWatcherRepository — Phase 2
+                Batch 2 ``on_success`` notification claim.
         """
         self._manager = instance_manager
         self._task_repo = task_repo
         self._event_repo = event_repo  # accepted for API compat; unused
         self._message_repo = message_repository
         self._source_dispatcher = source_dispatcher
-# Per-instance contention counters. When a task hits gate
+        self._work_resolver = work_resolver
+        self._watcher_repo = watcher_repo
+        # Per-instance contention counters. When a task hits gate
         # contention against the same sibling MESSAGE job repeatedly
         # (typical for a hot instance receiving many concurrent child
         # reports), the per-occurrence log is at DEBUG and a periodic
@@ -228,11 +237,29 @@ class ProcessMessageProcessor(BaseProcessor):
                 f"Task {task.id}: message {task.message_id[:8]}... already "
                 f"COMPLETED — skipping graph turn (resume re-claim no-op)"
             )
-            await asyncio.to_thread(
+            completed_task = await asyncio.to_thread(
                 self._task_repo.complete_task,
                 task.id,
                 {"success": True, "message_id": task.message_id, "skipped": True},
             )
+            # Phase 2 Batch 2 — fire watcher notification only if the
+            # atomic complete_task returned non-None (i.e. we won the
+            # status=running guard race). The TaskRepository's WHERE
+            # status='running' check is what makes the guard effective;
+            # without gating the notify on the return value, a recovery
+            # racing with this idempotency path could double-notify.
+            if (
+                completed_task is not None
+                and self._work_resolver is not None
+                and self._watcher_repo is not None
+            ):
+                await notify_work_watchers(
+                    work_id=completed_task.work_id,
+                    status="completed",
+                    instance_manager=self._manager,
+                    work_resolver=self._work_resolver,
+                    watcher_repo=self._watcher_repo,
+                )
             return {
                 "success": True,
                 "content": None,
@@ -391,15 +418,36 @@ class ProcessMessageProcessor(BaseProcessor):
         instance_id = task.instance_id
         message_id = task.message_id
         task_repo = self._task_repo
+        work_resolver = self._work_resolver
+        watcher_repo = self._watcher_repo
+        instance_manager = self._manager
         counts = self._contention_counts
         last_info = self._last_info_at
 
         async def on_success(result: ProcessingResult) -> None:
-            await asyncio.to_thread(
+            # Phase 2 Batch 2 — atomically transition the task, then
+            # gate the watcher notification on the non-None return.
+            # ``complete_task`` returns ``None`` when another caller
+            # already won the status=running guard (e.g. stale recovery
+            # raced us); skipping the notify in that branch is what
+            # gives us exactly-once notifications.
+            completed_task = await asyncio.to_thread(
                 task_repo.complete_task,
                 task_id,
                 {"success": True, "message_id": message_id},
             )
+            if (
+                completed_task is not None
+                and work_resolver is not None
+                and watcher_repo is not None
+            ):
+                await notify_work_watchers(
+                    work_id=completed_task.work_id,
+                    status="completed",
+                    instance_manager=instance_manager,
+                    work_resolver=work_resolver,
+                    watcher_repo=watcher_repo,
+                )
 
         async def on_error(result: ProcessingResult) -> None:
             # The pipeline already ran ``handle_message_processing_error``
@@ -538,6 +586,8 @@ class TaskProcessor:
         event_repo: "EventRepository | None" = None,
         graph_timeout_minutes: float = 40.0,
         source_dispatcher=None,  # ResponseDispatcher for external routing
+        work_resolver=None,  # WorkResolverService — Phase 2 Batch 2 notification
+        watcher_repo=None,  # JobWatcherRepository — Phase 2 Batch 2 notification
     ):
         """Initialize the task processor.
 
@@ -547,12 +597,23 @@ class TaskProcessor:
             event_repo: Optional EventRepository for event creation.
             graph_timeout_minutes: Hard timeout for LangGraph execution (MainLoopBridge).
             source_dispatcher: Optional ResponseDispatcher for external routing.
+            work_resolver: Optional WorkResolverService for ``on_success``
+                notification routing (Phase 2 Batch 2). When ``None``,
+                the ``on_success`` callback short-circuits the
+                notification call so direct-construction tests / partial
+                wiring do not crash. Wired in via ``set_work_resolver``
+                from ``daemon/api.py`` after construction.
+            watcher_repo: Optional JobWatcherRepository for the
+                ``on_success`` notification claim (Phase 2 Batch 2).
+                Same nullability contract as ``work_resolver``.
         """
         self._task_repo = task_repo
         self._instance_manager = instance_manager
         self._event_repo = event_repo
         self._graph_timeout_minutes = graph_timeout_minutes
         self._source_dispatcher = source_dispatcher
+        self._work_resolver = work_resolver
+        self._watcher_repo = watcher_repo
 
         # Create type-specific processors
         # Phase 1 (2026-06-24, report-lane decoupling): PROCESS_REPORT
@@ -570,11 +631,15 @@ class TaskProcessor:
                 instance_manager, task_repo, event_repo,
                 message_repository=instance_manager._queue_repository,
                 source_dispatcher=source_dispatcher,
+                work_resolver=work_resolver,
+                watcher_repo=watcher_repo,
             ),
             "process_report": ProcessMessageProcessor(
                 instance_manager, task_repo, event_repo,
                 message_repository=instance_manager._queue_repository,
                 source_dispatcher=source_dispatcher,
+                work_resolver=work_resolver,
+                watcher_repo=watcher_repo,
             ),
             "send_report": SendReportProcessor(
                 instance_manager, task_repo, event_repo,
@@ -625,3 +690,22 @@ class TaskProcessor:
     def get_pending_count(self) -> int:
         """Get the number of pending tasks."""
         return self._task_repo.get_pending_count()
+
+    def set_work_resolver(self, work_resolver) -> None:
+        """Late-wire the WorkResolverService for Phase 2 Batch 2 notification.
+
+        Wired by ``daemon/api.py`` AFTER ``setup_worker_pool`` returns,
+        because the resolver is constructed in ``api.py`` after the
+        worker pool (it depends on the JobRepository). The TaskProcessor
+        is constructed inside ``setup_worker_pool`` so it must accept
+        the resolver via setter rather than constructor.
+        """
+        self._work_resolver = work_resolver
+
+    def set_watcher_repo(self, watcher_repo) -> None:
+        """Late-wire the JobWatcherRepository for Phase 2 Batch 2 notification.
+
+        Same rationale as :meth:`set_work_resolver` — constructed in
+        ``api.py`` after the worker pool.
+        """
+        self._watcher_repo = watcher_repo

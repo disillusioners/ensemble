@@ -1,6 +1,8 @@
 """Job queue management tools for LangGraph agents."""
 
 import asyncio
+from dataclasses import asdict as _asdict
+from datetime import datetime
 from typing import Annotated, Any, TYPE_CHECKING
 
 from langchain_core.tools import tool
@@ -16,6 +18,7 @@ if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
     from daemon.services.job_queue_mgmt_service import JobQueueMgmtService
     from daemon.services.dead_letter_service import DeadLetterService
+    from daemon.services.work_resolver import WorkRecord, WorkResolverService
     from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
     from daemon.manager import InstanceManager
 
@@ -25,6 +28,39 @@ Create, list, and manage jobs and job queues.
 """
 
 TERMINAL_STATES = set(ALL_TERMINAL_STATES)
+
+
+def _work_record_to_dict(record: "WorkRecord") -> dict[str, Any]:
+    """Serialize a :class:`WorkRecord` to a JSON-friendly dict.
+
+    Phase 2 (Batch 4a, 2026-06-27) of
+    ``feature/virtual-job-management-surface``. Tools that route through
+    the resolver return WorkRecords instead of JobItems; agents parse
+    the dict form so we need a consistent shape.
+
+    Field naming follows the JobItem.to_dict() convention where
+    possible (``work_id`` instead of ``job_id``, ``error`` for
+    JobItem's ``error_message``); the unified surface uses
+    ``work_id`` so the same dict works whether the underlying row was a
+    Task or a JobItem. ``kind`` distinguishes the two so the agent can
+    decide which fields to render.
+
+    The ``created_at`` field is normalised to an ISO-8601 string when
+    the underlying value is a ``datetime`` (Task rows) so the output
+    shape matches what JobItem.to_dict() emits (string, not datetime).
+
+    Args:
+        record: The :class:`WorkRecord` to serialise.
+
+    Returns:
+        A plain ``dict`` mirroring the WorkRecord fields, with
+        ``created_at`` coerced to ISO string when possible.
+    """
+    data = _asdict(record)
+    created = data.get("created_at")
+    if isinstance(created, datetime):
+        data["created_at"] = created.isoformat()
+    return data
 
 # Full documentation strings for each tool
 _FULL_DOCS = {
@@ -77,8 +113,16 @@ Returns:
 
     "job_cancel": """Cancel a pending or processing job.
 
+Semantics differ by kind (Phase 2 Batch 4a):
+    * ``job`` (dispatch-queue): atomic — the row is marked CANCELLED
+      immediately and the row is gone. Use ``job_get`` to verify.
+    * ``task`` (worker-pool): cooperative — sets ``cancel_requested``
+      on the underlying Task row; the worker thread observes the flag
+      on its next heartbeat and stops gracefully. The row stays in
+      ``running`` until the worker yields.
+
 Args:
-    job_id: The job ID to cancel.
+    job_id: The work_id to cancel.
 
 Returns:
     Confirmation message or error.""",
@@ -307,6 +351,19 @@ def create_job_tools(
     async def job_get(job_id: str) -> dict:
         """Get job details by ID. Use tool_help("job_get") for details."""
         try:
+            # Phase 2 (Batch 4a) — when the virtual-job resolver is
+            # enabled, route through ``service.get_work`` so the same
+            # identifier resolves to either a Task row (worker-pool
+            # side) or a JobItem row (dispatch-queue side). The result
+            # is the unified WorkRecord view-model. With the flag OFF
+            # we fall back to the legacy JobItem-only path so the kill
+            # switch is a clean revert.
+            if job_service.use_virtual_job_resolver:
+                record = await job_service.get_work(job_id)
+                if record is None:
+                    return {"error": "Job not found"}
+                return _work_record_to_dict(record)
+
             job_item = await job_service.get_job(job_id)
             if job_item is None:
                 return {"error": "Job not found"}
@@ -314,6 +371,7 @@ def create_job_tools(
         except Exception as e:
             return {"error": f"Failed to get job: {str(e)}"}
     job_get._full_doc_ = _FULL_DOCS["job_get"]
+
 
     @register_tool_category("job")
     @tool
@@ -330,8 +388,90 @@ def create_job_tools(
     ) -> dict:
         """List jobs with optional filters. Use tool_help("job_list") for details."""
         try:
+            # Phase 2 (Batch 4a) — when the virtual-job resolver is
+            # enabled, route through ``work_resolver.list_work`` so the
+            # list is the UNION of pending jobs AND running tasks.
+            # With the flag OFF we fall back to the legacy JobItem-only
+            # ``list_jobs`` path (kill switch — reverts cleanly).
+            #
+            # Status-alias normalisation (``"running"`` → ``"processing"``
+            # etc.) runs on the input list before either branch so the
+            # natural-language aliases documented in the tool signature
+            # work for both paths. The normalised values are already in
+            # the canonical vocabulary both ``list_jobs`` (JobItem side)
+            # and ``list_work`` (resolver side) understand.
+            #
+            # The ``queue_id`` filter is JobItem-only — the Task table
+            # has no queue concept. With the resolver enabled we issue
+            # the resolver call regardless and accept that Task rows
+            # may show up that wouldn't have under the legacy list; the
+            # surface is intentionally widened (this is the whole point
+            # of the virtual job surface). Callers that want
+            # ``queue_id`` filtering semantics on the resolver path can
+            # post-filter the returned records.
+            from daemon.services.job_queue_service import normalize_statuses
+            normalised_statuses = normalize_statuses(statuses)
+
+            if job_service.use_virtual_job_resolver:
+                work_resolver: "WorkResolverService | None" = getattr(
+                    job_service, "_work_resolver", None
+                )
+                if work_resolver is None:
+                    # Resolver wired but flag is ON — degrade gracefully
+                    # to the JobItem-only list rather than crash, so a
+                    # partial-wiring daemon still serves traffic.
+                    jobs = await job_service.list_jobs(
+                        statuses=normalised_statuses,
+                        project_id=project_id,
+                        queue_id=queue_id,
+                        offset=offset,
+                        limit=limit,
+                        include_deleted=include_deleted,
+                    )
+                    result = {
+                        "jobs": [job.to_dict() for job in jobs],
+                        "count": len(jobs),
+                    }
+                    return truncate_dict_result(result, list_key="jobs", limit=limit)
+
+                records = await asyncio.to_thread(
+                    work_resolver.list_work,
+                    project_id=project_id,
+                    instance_id=None,
+                    status=normalised_statuses[0] if (
+                        normalised_statuses and len(normalised_statuses) == 1
+                    ) else None,
+                    kind=None,
+                )
+
+                # ``list_work`` only accepts a single ``status`` string
+                # — the resolver surface is intentionally narrow. When
+                # the caller supplies multiple statuses we issue the
+                # unfiltered resolver call and post-filter by the
+                # canonical status set so multi-status requests like
+                # ``statuses=["completed", "failed"]`` don't silently
+                # widen to "all records". The single-status case is
+                # already handled by the resolver-level filter above.
+                if normalised_statuses and len(normalised_statuses) > 1:
+                    allowed_statuses = set(normalised_statuses)
+                    records = [
+                        r for r in records if r.status in allowed_statuses
+                    ]
+
+                # ``list_work`` doesn't support pagination — the legacy
+                # ``list_jobs`` accepted ``offset``/``limit``/``include_deleted``.
+                # Apply them client-side: skip soft-deleted records
+                # (WorkRecords don't carry deleted_at, but Task rows
+                # never have a deleted state), apply offset, then limit.
+                page = records[offset : offset + limit]
+                result = {
+                    "jobs": [_work_record_to_dict(r) for r in page],
+                    "count": len(page),
+                }
+                return truncate_dict_result(result, list_key="jobs", limit=limit)
+
             jobs = await job_service.list_jobs(
-                statuses=statuses,
+                statuses=normalised_statuses,
                 project_id=project_id,
                 queue_id=queue_id,
                 offset=offset,
@@ -347,11 +487,68 @@ def create_job_tools(
             return {"error": f"Failed to list jobs: {str(e)}"}
     job_list._full_doc_ = _FULL_DOCS["job_list"]
 
+
     @register_tool_category("job")
     @tool
     async def job_cancel(job_id: str) -> str:
         """Cancel a pending or processing job. Use tool_help("job_cancel") for details."""
         try:
+            # Phase 2 (Batch 4a) — when the virtual-job resolver is
+            # enabled, the work_id may resolve to either a Task row
+            # (worker-pool side, requires cooperative
+            # ``cancel_requested``) or a JobItem row (dispatch-queue
+            # side, instant ``cancel_job``). The semantics differ: task
+            # cancellation sets a flag the worker thread checks on its
+            # next iteration, so the row stays RUNNING until the worker
+            # yields; JobItem cancellation is atomic and flips the row
+            # to CANCELLED immediately. The tool docstring is updated
+            # to flag this.
+            if job_service.use_virtual_job_resolver:
+                record = await job_service.get_work(job_id)
+                if record is None:
+                    return f"ERROR: Could not cancel job {job_id}. Job not found."
+
+                if record.kind == "task":
+                    # Cooperative task cancel: look up the Task by
+                    # ``work_id`` and call ``task_repo.request_cancel``
+                    # which sets ``cancel_requested=True``. The worker
+                    # thread observes the flag on its next heartbeat
+                    # and stops gracefully — the row stays RUNNING in
+                    # the meantime (this is by design; instant task
+                    # kill would orphan in-flight graph state).
+                    if manager is None or getattr(manager, "_task_repo", None) is None:
+                        return (
+                            f"ERROR: Could not cancel job {job_id}. "
+                            "Task repository not available for task-kind cancellation."
+                        )
+                    task = await asyncio.to_thread(
+                        manager._task_repo.get_by_work_id, job_id
+                    )
+                    if task is None:
+                        return (
+                            f"ERROR: Could not cancel job {job_id}. "
+                            "Task row missing despite resolver match."
+                        )
+                    cancelled = await asyncio.to_thread(
+                        manager._task_repo.request_cancel, task.id
+                    )
+                    if cancelled:
+                        return (
+                            f"Cancel requested for job {job_id[:8]}... "
+                            "(cooperative — the running task will stop at its next checkpoint)."
+                        )
+                    return (
+                        f"ERROR: Could not cancel job {job_id}. "
+                        "Task is not in a cancellable state (must be RUNNING with no cancel pending)."
+                    )
+
+                # JobItem branch — instant atomic cancel via the
+                # existing ``cancel_job`` path.
+                success = await job_service.cancel_job(job_id)
+                if success:
+                    return f"Job {job_id} cancelled successfully."
+                return f"ERROR: Could not cancel job {job_id}. Job may not be in a cancellable state."
+
             success = await job_service.cancel_job(job_id)
             if success:
                 return f"Job {job_id} cancelled successfully."
@@ -359,6 +556,7 @@ def create_job_tools(
         except Exception as e:
             return f"ERROR: Failed to cancel job {job_id}: {str(e)}"
     job_cancel._full_doc_ = _FULL_DOCS["job_cancel"]
+
 
     @register_tool_category("job")
     @tool
@@ -641,10 +839,37 @@ def create_job_tools(
             if not current_instance_id:
                 return "Error: No instance context"
 
-            # Check if job exists and its current status
-            job = await job_service.get_job(job_id)
-            if not job:
-                return f"Error: Job {job_id} not found"
+            # Phase 2 (Batch 4a) — when the virtual-job resolver is
+            # enabled, look up the work via ``service.get_work`` so the
+            # same identifier resolves whether the work is a Task row
+            # or a JobItem row. The watcher_repo key is unchanged
+            # (``job_id`` parameter — semantically ``work_id`` after
+            # this change); the row backing the watch is whatever the
+            # resolver found. With the flag OFF we fall back to the
+            # legacy JobItem-only ``get_job`` path (kill switch).
+            #
+            # Terminal detection uses the canonical status from
+            # WorkRecord (Task ``running`` canonicalises to
+            # ``processing`` so terminal check is correct on both
+            # sides).
+            from daemon.services.work_status import is_terminal as _is_terminal
+
+            record: "WorkRecord | None" = None
+            error_msg: str | None = None
+            if job_service.use_virtual_job_resolver:
+                record = await job_service.get_work(job_id)
+                if record is None:
+                    return f"Error: Job {job_id} not found"
+            else:
+                job = await job_service.get_job(job_id)
+                if not job:
+                    return f"Error: Job {job_id} not found"
+                # Build a WorkRecord-shaped shim with the JobItem fields
+                # so the terminal check + notify path below stays
+                # uniform (avoids a second branch on the legacy path).
+                record = _job_item_to_work_record_shim(job)
+
+            assert record is not None  # one of the two branches returned above
 
             # Enforce max 50 watches per instance
             count = watcher_repo.count_watches_for_instance(current_instance_id)
@@ -652,11 +877,18 @@ def create_job_tools(
                 return f"Error: Maximum watch limit (50) reached for this instance"
 
             # Terminal state check — includes dead_letter
-            if job.status in TERMINAL_STATES:
+            if _is_terminal(record.status):
                 # Register watch first, then notify (notify_watchers sends + cleans up)
                 watcher_repo.add_watch(job_id, current_instance_id, events)
-                await job_service.notify_watchers(job_id, job.status, job.error_message)
-                return f"Job {job_id[:8]}... is already {job.status}. Immediate notification sent."
+                # notify_watchers in Phase 2 Batch 2 is itself
+                # resolver-aware — it accepts the work_id (here
+                # ``job_id``) and routes through WorkResolverService.
+                # ``record.error`` carries the canonical error message
+                # regardless of which table backed the row.
+                await job_service.notify_watchers(
+                    job_id, record.status, record.error
+                )
+                return f"Job {job_id[:8]}... is already {record.status}. Immediate notification sent."
 
             # Register watch
             watcher_repo.add_watch(job_id, current_instance_id, events)
@@ -680,6 +912,7 @@ def create_job_tools(
             return f"Error watching job: {str(e)}"
     watch_job._full_doc_ = _FULL_DOCS["watch_job"]
 
+
     @register_tool_category("job")
     @tool
     async def unwatch_job(
@@ -701,6 +934,7 @@ def create_job_tools(
         except Exception as e:
             return f"Error unwatching job: {str(e)}"
     unwatch_job._full_doc_ = _FULL_DOCS["unwatch_job"]
+
 
     @register_tool_category("job")
     @tool
@@ -726,6 +960,7 @@ def create_job_tools(
             return f"Error listing watched jobs: {str(e)}"
     list_watched_jobs._full_doc_ = _FULL_DOCS["list_watched_jobs"]
 
+
     @register_tool_category("job")
     @tool
     async def watch_jobs(
@@ -746,18 +981,31 @@ def create_job_tools(
             if count + len(job_ids) > 50:
                 return f"Error: Would exceed maximum watch limit (50). Currently watching {count}, trying to add {len(job_ids)}."
 
+            from daemon.services.work_status import is_terminal as _is_terminal
+
             watched = []
             already_terminal = []
 
             for jid in job_ids:
-                job = await job_service.get_job(jid)
-                if not job:
+                # Phase 2 (Batch 4a) — resolver-aware lookup; same
+                # dual-path shape as the single-id ``watch_job`` tool.
+                record: "WorkRecord | None" = None
+                if job_service.use_virtual_job_resolver:
+                    record = await job_service.get_work(jid)
+                else:
+                    job = await job_service.get_job(jid)
+                    if job:
+                        record = _job_item_to_work_record_shim(job)
+
+                if record is None:
                     continue
 
-                if job.status in TERMINAL_STATES:
+                if _is_terminal(record.status):
                     # Register watch first, then notify (notify_watchers sends + cleans up)
                     watcher_repo.add_watch(jid, current_instance_id, events)
-                    await job_service.notify_watchers(jid, job.status, job.error_message)
+                    await job_service.notify_watchers(
+                        jid, record.status, record.error
+                    )
                     already_terminal.append(jid)
                 else:
                     watcher_repo.add_watch(jid, current_instance_id, events)
@@ -780,3 +1028,41 @@ def create_job_tools(
         job_continue,   # moved to end of non-watch tools (was index 7)
         watch_job, unwatch_job, list_watched_jobs, watch_jobs,
     ]
+
+
+def _job_item_to_work_record_shim(job: Any) -> "WorkRecord":
+    """Build a WorkRecord-shaped shim from a JobItem (legacy-path only).
+
+    Phase 2 (Batch 4a, 2026-06-27) of
+    ``feature/virtual-job-management-surface``. When the resolver flag
+    is OFF, ``watch_job`` / ``watch_jobs`` still operate on the legacy
+    JobItem-only path. The terminal-check + notify machinery now
+    expects a WorkRecord (resolver-canonical status + canonical error
+    field); building a shim here keeps the downstream branch uniform
+    with the flag-ON path instead of forking on
+    ``job_service.use_virtual_job_resolver`` again.
+
+    Args:
+        job: A JobItem row (any object with ``status`` and
+            ``error_message`` attributes; ``dataclasses.asdict`` is
+            not used because JobItem isn't a dataclass).
+
+    Returns:
+        A :class:`WorkRecord` populated with the JobItem's fields and
+        ``kind='job'`` so the canonical terminal check
+        (``work_status.is_terminal``) operates on the JobItem status
+        string (which is already in the canonical vocabulary).
+    """
+    from daemon.services.work_resolver import WorkRecord
+
+    return WorkRecord(
+        work_id=getattr(job, "job_id", ""),
+        kind="job",
+        status=getattr(job, "status", ""),
+        instance_id=getattr(job, "instance_id", None),
+        project_id=getattr(job, "project_id", None),
+        agent_id=getattr(job, "agent_id", None),
+        result_summary=getattr(job, "result_summary", None),
+        error=getattr(job, "error_message", None),
+        created_at=None,
+    )

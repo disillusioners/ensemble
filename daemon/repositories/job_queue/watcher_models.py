@@ -34,8 +34,18 @@ class JobWatcher(SQLModel, table=True):
         primary_key=True
     )
 
-    # Foreign key to job_queue_items.job_id
-    job_id: str = Field(foreign_key="job_queue_items.job_id", index=True)
+    # Phase 2 (Batch 1) of feature/virtual-job-management-surface:
+    # the FK on ``job_id`` was REMOVED so ``job_watchers`` no longer
+    # requires a matching ``job_queue_items.job_id`` row to exist. The
+    # column is semantically a ``work_id`` (UUID4 string) — a virtual
+    # job resolver correlates it with the appropriate Task/JobItem row
+    # at notification time, instead of relying on a hard SQL FK that
+    # blocked virtual (task-only) work from being watched. The SQLite
+    # counterpart lives in
+    # ``daemon/migrations/versions/20260627_000002_drop_job_watchers_fk.sql``;
+    # the PostgreSQL counterpart lives in
+    # ``daemon/manager.py::_ensure_postgres_columns`` (DROP CONSTRAINT).
+    job_id: str = Field(index=True)
 
     # Foreign key to instances.instance_id
     instance_id: str = Field(foreign_key="instances.instance_id", index=True)

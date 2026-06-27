@@ -31,6 +31,7 @@ class TestJobQueueToolRegistration:
     def test_create_job_tools_returns_17_tools(self):
         """Verify create_job_tools returns exactly 17 tools (16 original + job_continue)."""
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
 
@@ -41,6 +42,7 @@ class TestJobQueueToolRegistration:
     def test_each_tool_has_job_category(self):
         """Verify each tool has _tool_category == 'job' attribute."""
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
 
@@ -67,6 +69,7 @@ class TestJobCreateTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -185,6 +188,7 @@ class TestJobGetTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -244,6 +248,7 @@ class TestJobListTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -292,6 +297,7 @@ class TestJobCancelTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -348,6 +354,7 @@ class TestJobRetryTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -407,6 +414,7 @@ class TestJobDeleteTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -464,6 +472,7 @@ class TestJobRestoreTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -521,6 +530,7 @@ class TestQueueListTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -569,6 +579,7 @@ class TestQueueCreateTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -636,6 +647,7 @@ class TestQueueUpdateTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -764,6 +776,7 @@ class TestDlqListTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -820,6 +833,7 @@ class TestDlqReplayTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service
@@ -884,6 +898,7 @@ class TestJobContinueTool:
     @pytest.fixture
     def mock_services(self):
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         return job_service, queue_mgmt_service, dead_letter_service

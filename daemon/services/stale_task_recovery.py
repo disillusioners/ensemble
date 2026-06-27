@@ -70,6 +70,9 @@ class StaleTaskRecovery:
         event_repository=None,
         on_task_permanently_failed: "Callable[[str, str, str | None], None] | None" = None,  # NEW: callback(instance_id, error, message_id)
         on_task_cancelled_and_retried: "Callable[[int, int, str], None] | None" = None,  # NEW: callback(cancelled_task_id, retry_task_id, origin)
+        instance_manager=None,  # Phase 2 Batch 2 — InstanceManager for terminal notif enqueue
+        work_resolver=None,  # Phase 2 Batch 2 — WorkResolverService for terminal notif routing
+        watcher_repo=None,  # Phase 2 Batch 2 — JobWatcherRepository for terminal notif claim
     ):
         """Initialize stale task recovery.
         
@@ -111,6 +114,14 @@ class StaleTaskRecovery:
         self._thread: threading.Thread | None = None
         self._on_task_permanently_failed = on_task_permanently_failed  # NEW
         self._on_task_cancelled_and_retried = on_task_cancelled_and_retried  # NEW
+        # Phase 2 Batch 2 — notification dependencies for the four
+        # force-fail terminal sites. ``None`` means "no notification
+        # attempted" — used by direct-construction tests / partial
+        # wiring. Production wires these in via api.py after the
+        # JobRepository is constructed.
+        self._instance_manager = instance_manager
+        self._work_resolver = work_resolver
+        self._watcher_repo = watcher_repo
     
     def start(self) -> None:
         """Start the background recovery thread."""
@@ -248,7 +259,7 @@ class StaleTaskRecovery:
                     else:
                         # Max retries exceeded or retry already scheduled — permanent fail
                         if current.retry_count >= self._max_retries:
-                            self._task_repo.fail_task(
+                            failed_task = self._task_repo.fail_task(
                                 task.id,
                                 f"Stale task permanently failed after "
                                 f"{self._max_retries} retries"
@@ -272,6 +283,17 @@ class StaleTaskRecovery:
                                         f"Failed to notify parent of permanent task failure "
                                         f"(instance={task.instance_id[:8]}..., error={cb_err})"
                                     )
+                            # Phase 2 Batch 2 — fire watcher
+                            # notification only if the atomic fail_task
+                            # returned non-None (i.e. we won the
+                            # status=running guard race).
+                            if failed_task is not None:
+                                self._schedule_work_notification(
+                                    failed_task,
+                                    "failed",
+                                    error=f"Stale task permanently failed "
+                                    f"after {self._max_retries} retries",
+                                )
                 
                 elif current.status == TaskStatus.CANCELLED.value:
                     # Worker already cancelled it — check if retry was scheduled
@@ -304,7 +326,7 @@ class StaleTaskRecovery:
                                 task.id, retry_task.id, origin="worker_cancelled"
                             )
                         else:
-                            self._task_repo.fail_task(
+                            failed_task = self._task_repo.fail_task(
                                 task.id,
                                 f"Stale task permanently failed after "
                                 f"{self._max_retries} retries"
@@ -324,7 +346,20 @@ class StaleTaskRecovery:
                                         f"Failed to notify parent of permanent task failure "
                                         f"(instance={task.instance_id[:8]}..., error={cb_err})"
                                     )
-                
+                            # Phase 2 Batch 2 — fire watcher
+                            # notification only if the atomic fail_task
+                            # returned non-None (i.e. we won the
+                            # status=running guard race). Pass the
+                            # returned row so the notifier sees the
+                            # up-to-date ``error`` and ``completed_at``.
+                            if failed_task is not None:
+                                self._schedule_work_notification(
+                                    failed_task,
+                                    "failed",
+                                    error=f"Stale task permanently failed "
+                                    f"after {self._max_retries} retries",
+                                )
+
                 # FIX: W6 — Only fail the associated message if we actually acted upon the task
                 if task_acted_upon and task.message_id:
                     try:
@@ -393,7 +428,7 @@ class StaleTaskRecovery:
                             task.id, retry_task.id, origin="startup_stale_running"
                         )
                     else:
-                        self._task_repo.fail_task(
+                        failed_task = self._task_repo.fail_task(
                             task.id,
                             f"Startup recovery: max retries ({self._max_retries}) exceeded"
                         )
@@ -401,7 +436,16 @@ class StaleTaskRecovery:
                             f"Startup recovery: task {task.id} permanently failed"
                         )
                         self._log_recovery_event(task, "startup_permanently_failed")
-                    
+                        # Phase 2 Batch 2 — fire watcher notification
+                        # only if the atomic fail_task returned non-None.
+                        if failed_task is not None:
+                            self._schedule_work_notification(
+                                failed_task,
+                                "failed",
+                                error=f"Startup recovery: max retries "
+                                f"({self._max_retries}) exceeded",
+                            )
+
                     recovered += 1
                     # NEW: Notify parent
                     if self._on_task_permanently_failed:
@@ -453,7 +497,7 @@ class StaleTaskRecovery:
                         recovered += 1
                     else:
                         # Max retries exceeded — mark permanent fail
-                        self._task_repo.fail_task(
+                        failed_task = self._task_repo.fail_task(
                             task.id,
                             f"Startup recovery (orphan): max retries ({self._max_retries}) exceeded"
                         )
@@ -472,6 +516,15 @@ class StaleTaskRecovery:
                                     f"Failed to notify parent of permanent task failure "
                                     f"(instance={task.instance_id[:8]}..., error={cb_err})"
                                 )
+                        # Phase 2 Batch 2 — fire watcher notification
+                        # only if the atomic fail_task returned non-None.
+                        if failed_task is not None:
+                            self._schedule_work_notification(
+                                failed_task,
+                                "failed",
+                                error=f"Startup recovery (orphan): max "
+                                f"retries ({self._max_retries}) exceeded",
+                            )
                     
                 except Exception as e:
                     logger.error(
@@ -509,6 +562,76 @@ class StaleTaskRecovery:
     def is_running(self) -> bool:
         """Check if the recovery thread is running."""
         return self._thread is not None and self._thread.is_alive()
+
+    def set_notification_deps(
+        self,
+        instance_manager,
+        work_resolver,
+        watcher_repo,
+    ) -> None:
+        """Late-wire the Phase 2 Batch 2 notification dependencies.
+
+        Wired by ``daemon/api.py`` AFTER ``setup_worker_pool`` returns
+        because the ``WorkResolverService`` depends on the
+        ``JobRepository``, which is created in api.py after the worker
+        pool.
+
+        All three are required for the four force-fail terminal sites
+        (``recover_stale_tasks`` x2 and ``recover_on_startup`` x2) to
+        fire a watcher notification. If any of them is ``None``, the
+        terminal sites silently skip the notification — the terminal
+        write itself still succeeds.
+        """
+        self._instance_manager = instance_manager
+        self._work_resolver = work_resolver
+        self._watcher_repo = watcher_repo
+
+    def _schedule_work_notification(
+        self,
+        task: Any,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """Bridge the recovery thread's sync terminal write to the async notifier.
+
+        Phase 2 Batch 2 — mirrors
+        :meth:`Worker._schedule_work_notification` in
+        ``worker_pool.py``. The recovery thread is a plain
+        ``threading.Thread`` (not async); the notifier awaits
+        ``enqueue_message``, so we use
+        ``MainLoopBridge.run_async_no_wait`` to fire-and-forget on the
+        main event loop.
+
+        Best-effort: the next ``reconcile_terminal_watches`` sweep on
+        daemon restart will catch any watcher that missed an event
+        during this window. Failures are swallowed at DEBUG level so
+        the recovery loop never raises out of a notification error.
+        """
+        if (
+            self._instance_manager is None
+            or self._work_resolver is None
+            or self._watcher_repo is None
+        ):
+            return
+        try:
+            from .main_loop_bridge import MainLoopBridge
+            from .work_notifier import notify_work_watchers
+            MainLoopBridge.run_async_no_wait(
+                notify_work_watchers(
+                    work_id=task.work_id,
+                    status=status,
+                    error=error,
+                    instance_manager=self._instance_manager,
+                    work_resolver=self._work_resolver,
+                    watcher_repo=self._watcher_repo,
+                )
+            )
+        except Exception as e:  # noqa: BLE001 — never raise from a fire-and-forget
+            logger.debug(
+                f"StaleTaskRecovery: failed to schedule work "
+                f"notification for task {task.id} work_id="
+                f"{task.work_id[:8]}... status={status}: {e}"
+            )
 
     def _notify_bus_of_cancel_and_retry(
         self,

@@ -1684,6 +1684,18 @@ class InstanceManager:
           counterpart lives in
           ``daemon/migrations/versions/20260627_000001_virtual_job_work_id.sql``.
           See feature/virtual-job-management-surface.
+        - job_watchers.job_id FK drop (Phase 2 Batch 1, 2026-06-27):
+          the FOREIGN KEY constraint from ``job_watchers.job_id`` to
+          ``job_queue_items.job_id`` is dropped so the column can
+          hold a virtual ``work_id`` (a UUID4 string that may not
+          have a matching ``job_queue_items`` row — tasks-only work).
+          SQLite uses a table-rebuild pattern; here on PostgreSQL we
+          issue a single DROP CONSTRAINT. **This is the ONE DROP
+          statement in an otherwise ADD-only method.** The IF
+          EXISTS guard makes it idempotent (a no-op once the
+          constraint is already gone). The SQLite counterpart lives
+          in
+          ``daemon/migrations/versions/20260627_000002_drop_job_watchers_fk.sql``.
         - idx_infra_assets_attributes_gin /
           idx_infra_assets_relationships_gin: GIN indexes on the
           JSONB ``attributes`` and ``relationships`` columns of
@@ -1956,6 +1968,18 @@ class InstanceManager:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_work_id ON task(work_id)",
             # Promote to NOT NULL now that backfill is complete.
             "ALTER TABLE task ALTER COLUMN work_id SET NOT NULL",
+            # ── Drop job_watchers.job_id FK (Phase 2 Batch 1, 2026-06-27) ──
+            # The ONE DROP statement in this otherwise ADD-only method.
+            # The default PostgreSQL auto-generated FK constraint name is
+            # ``<table>_<column>_fkey`` (i.e. ``job_watchers_job_id_fkey``).
+            # IF EXISTS keeps it idempotent: a no-op once the constraint
+            # is already gone (re-run after first apply). Fresh Postgres
+            # databases that get here after the model change has landed
+            # will also no-op because ``SQLModel.metadata.create_all()``
+            # creates the table without the FK in the first place.
+            # SQLite path: ``daemon/migrations/versions/20260627_000002_drop_job_watchers_fk.sql``
+            # (table-rebuild, since SQLite cannot DROP CONSTRAINT).
+            "ALTER TABLE job_watchers DROP CONSTRAINT IF EXISTS job_watchers_job_id_fkey",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
@@ -3331,12 +3355,13 @@ class InstanceManager:
                 # guard releases — otherwise the next ``job_continue``
                 # call is blocked by ``has_inflight_task`` (which counts
                 # PENDING + RUNNING tasks for the instance).
+                failed_task = None
                 try:
                     task = await asyncio.to_thread(
                         self._task_repo.get_by_work_id, old_job_id
                     )
                     if task is not None:
-                        await asyncio.to_thread(
+                        failed_task = await asyncio.to_thread(
                             self._task_repo.fail_task,
                             task.id,
                             f"Resume failed: {e}",
@@ -3348,6 +3373,35 @@ class InstanceManager:
                         )
                 except Exception:
                     pass
+
+                # Phase 2 Batch 2 — fire watcher notification only if
+                # the atomic fail_task returned non-None (i.e. we won
+                # the status=running guard race). The resume path runs
+                # on the async lifespan, so we await the notifier
+                # directly instead of bridging through MainLoopBridge.
+                if failed_task is not None:
+                    try:
+                        from daemon.services.work_notifier import (
+                            notify_work_watchers,
+                        )
+                        await notify_work_watchers(
+                            work_id=failed_task.work_id,
+                            status="failed",
+                            error=f"Resume failed: {e}",
+                            instance_manager=self,
+                            work_resolver=getattr(
+                                self, "_work_resolver", None
+                            ),
+                            watcher_repo=getattr(
+                                self, "_watcher_repo", None
+                            ),
+                        )
+                    except Exception as notify_err:
+                        logger.debug(
+                            f"[RESUME] notify_work_watchers failed for "
+                            f"work_id={old_job_id[:8]}...: "
+                            f"{type(notify_err).__name__}: {notify_err}"
+                        )
 
                 # Update instance status to ERROR
                 try:

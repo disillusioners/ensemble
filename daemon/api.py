@@ -245,6 +245,51 @@ async def lifespan(app: FastAPI):
     watcher_repo = JobWatcherRepository(engine=manager.engine)
     manager._watcher_repo = watcher_repo  # Store on manager for tools access
 
+    # Phase 2 (Batch 2) of feature/virtual-job-management-surface:
+    # construct the WorkResolverService now that the JobRepository is
+    # available. The resolver is the single point that looks up a
+    # work_id across the ``task`` and ``job_queue_items`` tables, and
+    # is the data source for the kind-agnostic
+    # ``daemon.services.work_notifier.notify_work_watchers`` helper.
+    #
+    # The resolver needs three repos that already exist on the manager:
+    # the TaskRepository (``manager._task_repo``, set up in
+    # ``setup_worker_pool``), the JobRepository (created above as
+    # ``job_repository``), and the InstanceRepository (created during
+    # ``manager.initialize()`` at ``manager._instance_repository``).
+    from daemon.services.work_resolver import WorkResolverService
+    work_resolver = WorkResolverService(
+        task_repo=manager._task_repo,
+        job_repo=job_repository,
+        instance_repo=manager._instance_repository,
+    )
+    manager._work_resolver = work_resolver  # Stored on manager for tools access
+    logger.info("WorkResolverService constructed and wired to InstanceManager")
+
+    # Phase 2 (Batch 2) — late-wire the watcher_repo + work_resolver
+    # into the worker pool / task processor / stale-task recovery
+    # components that were constructed in ``manager.setup_worker_pool``
+    # (line 198) BEFORE the resolver and JobRepository were available.
+    # All three accept None at construction (deferred-wiring pattern)
+    # and expose a setter that fans out to live workers, so this call
+    # is safe whether the pool was started in between or not.
+    if manager._worker_pool is not None:
+        manager._worker_pool.set_work_resolver(work_resolver)
+        manager._worker_pool.set_watcher_repo(watcher_repo)
+    if manager._task_processor is not None:
+        manager._task_processor.set_work_resolver(work_resolver)
+        manager._task_processor.set_watcher_repo(watcher_repo)
+    if manager._stale_recovery is not None:
+        manager._stale_recovery.set_notification_deps(
+            instance_manager=manager,
+            work_resolver=work_resolver,
+            watcher_repo=watcher_repo,
+        )
+    logger.info(
+        "Phase 2 Batch 2: watcher_repo + work_resolver wired to "
+        "TaskProcessor / WorkerPool / StaleTaskRecovery"
+    )
+
     # Create job queue management service for auto-provisioning
     job_queue_mgmt_service = JobQueueMgmtService(
         queue_repo=queue_repo,
@@ -269,6 +314,12 @@ async def lifespan(app: FastAPI):
     job_queue_service.set_config(config.job_system)
     job_queue_service.set_watcher_repo(watcher_repo)
     job_queue_service.set_dispatch_bus(dispatch_event_bus)
+    # Phase 2 (Batch 2) — wire the WorkResolverService so
+    # ``JobQueueService.notify_watchers`` delegates to
+    # ``notify_work_watchers`` (kind-agnostic) instead of the legacy
+    # JobItem-only fallback path. The resolver is constructed above
+    # in this lifespan.
+    job_queue_service.set_work_resolver(work_resolver)
     
     # Wire retry engine into JobQueueService
     from daemon.services.job_retry_engine import JobRetryEngine

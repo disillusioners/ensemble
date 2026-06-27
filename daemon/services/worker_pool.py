@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from daemon.cancellation import CancellationReason, OperationCancelledError
 from daemon.constants import MAX_ERROR_LEN
 from .main_loop_bridge import MainLoopBridge
+from .work_notifier import notify_work_watchers
 
 if TYPE_CHECKING:
     from daemon.services.task_processor import Task
@@ -181,6 +182,8 @@ class Worker(threading.Thread):
         retry_backoff_max: int = 3600,
         heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
         timeout_grace_seconds: float = 30.0,
+        work_resolver=None,  # WorkResolverService — Phase 2 Batch 2 notification
+        watcher_repo=None,  # JobWatcherRepository — Phase 2 Batch 2 notification
     ):
         """Initialize a worker thread.
 
@@ -205,6 +208,12 @@ class Worker(threading.Thread):
                 few seconds after the safety timeout fires. Default 30s
                 (production observed 4s gap between timeout and natural
                 completion).
+            work_resolver: Optional WorkResolverService — Phase 2
+                Batch 2 terminal-notification routing. When ``None``,
+                the four worker-side terminal sites short-circuit
+                the notify call.
+            watcher_repo: Optional JobWatcherRepository — Phase 2
+                Batch 2 terminal-notification claim.
         """
         super().__init__(daemon=True)
         self.worker_id = worker_id
@@ -219,6 +228,12 @@ class Worker(threading.Thread):
         self._tasks_claimed = 0
         self._tasks_completed = 0
         self._tasks_failed = 0
+        # Phase 2 Batch 2 — notification dependencies for terminal sites.
+        # Updated via WorkerPool.set_work_resolver / set_watcher_repo
+        # after the worker thread has started (api.py wires them up
+        # once the resolver / repo are constructed).
+        self._work_resolver = work_resolver
+        self._watcher_repo = watcher_repo
 
         # Per-worker heartbeat. Lazily started in run() so the task
         # repository is fully wired before the thread begins.
@@ -561,8 +576,9 @@ class Worker(threading.Thread):
                         f"creation (underlying coroutine finished after "
                         f"the thread-side timeout)."
                     )
+                    completed_task = None
                     try:
-                        self._task_processor._task_repo.complete_task(
+                        completed_task = self._task_processor._task_repo.complete_task(
                             task.id,
                             {
                                 "success": True,
@@ -577,6 +593,13 @@ class Worker(threading.Thread):
                             f"{e}"
                         )
                     self._tasks_completed += 1
+                    # Phase 2 Batch 2 — fire watcher notification only
+                    # if the atomic complete_task returned non-None.
+                    # ``try/except`` already swallows DB races; we now
+                    # also need the return-value guard so a concurrent
+                    # recovery cannot double-notify via this path.
+                    if completed_task is not None:
+                        self._schedule_work_notification(completed_task, "completed")
                     return
 
             # Try to schedule a retry
@@ -610,7 +633,7 @@ class Worker(threading.Thread):
                 self._cancel_bus_watchers_for_task(task.id, retry_task.id)
             else:
                 # Max retries exceeded
-                self._task_processor._task_repo.fail_task(
+                failed_task = self._task_processor._task_repo.fail_task(
                     task.id,
                     f"Task cancelled after {self._max_retries} retries"
                 )
@@ -626,9 +649,17 @@ class Worker(threading.Thread):
                     error_type="max_retries_exceeded",
                     message_id=task.message_id,
                 )
+                # Phase 2 Batch 2 — fire watcher notification only if
+                # the atomic fail_task returned non-None.
+                if failed_task is not None:
+                    self._schedule_work_notification(
+                        failed_task,
+                        "failed",
+                        error=f"Task cancelled after {self._max_retries} retries",
+                    )
         else:
             # Non-timeout cancellation (shutdown, user request, etc.)
-            self._task_processor._task_repo.cancel_task(
+            cancelled_task = self._task_processor._task_repo.cancel_task(
                 task.id, reason=f"Cancelled: {reason.value}"
             )
             self._tasks_failed += 1
@@ -639,13 +670,74 @@ class Worker(threading.Thread):
                 error_type="cancelled",
                 message_id=task.message_id,
             )
+            # Phase 2 Batch 2 — fire watcher notification only if the
+            # atomic cancel_task returned non-None.
+            if cancelled_task is not None:
+                self._schedule_work_notification(
+                    cancelled_task,
+                    "cancelled",
+                    error=f"Task cancelled: {reason.value}",
+                )
     
     def _handle_task_failure(self, task: "Task", error: str) -> None:
         """Handle task failure — schedule retry or permanent fail."""
         # For now: fail permanently. Retry-on-error is a separate feature.
         # Timeout cancellation already handles retry.
-        self._task_processor._task_repo.fail_task(task.id, error)
+        failed_task = self._task_processor._task_repo.fail_task(task.id, error)
         self._tasks_failed += 1
+        # Phase 2 Batch 2 — fire watcher notification only if the
+        # atomic fail_task returned non-None (i.e. we won the
+        # status=running guard race). Without this guard, a concurrent
+        # recovery call could double-notify the same watcher.
+        if failed_task is not None:
+            self._schedule_work_notification(failed_task, "failed", error=error)
+
+    def _schedule_work_notification(
+        self,
+        task: "Task",
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """Bridge the worker thread's sync terminal write to the async notifier.
+
+        Phase 2 Batch 2 — called only when the atomic repo terminal
+        method (``complete_task``/``fail_task``/``cancel_task``)
+        returned a non-None ``Task``, proving we won the status-guard
+        race. The notifier itself is async (it awaits
+        ``instance_manager.enqueue_message``), so we use
+        ``MainLoopBridge.run_async_no_wait`` to fire-and-forget on the
+        main event loop — the same pattern already used by
+        ``_notify_parent_of_failure`` and
+        ``_cancel_bus_watchers_for_task``.
+
+        Silently no-ops when ``work_resolver`` / ``watcher_repo`` are
+        not yet wired (late-wiring path that runs before api.py sets
+        them via ``WorkerPool.set_work_resolver``). The notification
+        is best-effort — the next reconcile-on-startup sweep will
+        catch any watcher that missed an event during this window.
+        """
+        if self._work_resolver is None or self._watcher_repo is None:
+            return
+        instance_manager = getattr(self._task_processor, "_manager", None)
+        if instance_manager is None:
+            return
+        try:
+            MainLoopBridge.run_async_no_wait(
+                notify_work_watchers(
+                    work_id=task.work_id,
+                    status=status,
+                    error=error,
+                    instance_manager=instance_manager,
+                    work_resolver=self._work_resolver,
+                    watcher_repo=self._watcher_repo,
+                )
+            )
+        except Exception as e:  # noqa: BLE001 — never raise from a fire-and-forget
+            logger.debug(
+                f"Worker {self.worker_id}: failed to schedule work "
+                f"notification for task {task.id} work_id="
+                f"{task.work_id[:8]}... status={status}: {e}"
+            )
 
     def _await_message_completion(
         self, message_id: str, grace_seconds: float
@@ -749,6 +841,8 @@ class WorkerPool:
         retry_backoff_max: int = 3600,
         heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
         timeout_grace_seconds: float = 30.0,
+        work_resolver=None,  # WorkResolverService — Phase 2 Batch 2 notification
+        watcher_repo=None,  # JobWatcherRepository — Phase 2 Batch 2 notification
     ):
         """Initialize the worker pool.
 
@@ -764,6 +858,17 @@ class WorkerPool:
                 to each Worker.
             timeout_grace_seconds: Grace window for the timeout-orphan
                 race fix (see ``Worker.__init__`` for full context).
+            work_resolver: Optional WorkResolverService — Phase 2 Batch 2
+                terminal-notification routing. When ``None``, the four
+                worker-side terminal sites short-circuit the notify call
+                so direct-construction tests do not crash. Wired in via
+                :meth:`set_work_resolver` from ``daemon/api.py`` after
+                the resolver is constructed (it depends on the
+                JobRepository, which is built AFTER ``setup_worker_pool``
+                returns).
+            watcher_repo: Optional JobWatcherRepository — Phase 2 Batch 2
+                terminal-notification claim. Same nullability contract
+                as ``work_resolver``.
         """
         self._task_processor = task_processor
         self._num_workers = num_workers
@@ -773,6 +878,18 @@ class WorkerPool:
         self._retry_backoff_max = retry_backoff_max
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self._timeout_grace_seconds = timeout_grace_seconds
+        # Phase 2 Batch 2 — notification dependencies for the four
+        # worker-side terminal sites (``complete_task`` /
+        # ``fail_task`` / ``cancel_task`` at ``_handle_cancellation``
+        # and ``_handle_task_failure``). Stored on the pool AND copied
+        # to each Worker at start() time so workers that begin before
+        # late-wiring still see the right values (the worker thread
+        # snapshots ``self.work_resolver`` / ``self.watcher_repo`` at
+        # construction; late setters must update BOTH the pool and the
+        # already-started workers, see :meth:`set_work_resolver` /
+        # :meth:`set_watcher_repo`).
+        self._work_resolver = work_resolver
+        self._watcher_repo = watcher_repo
         self._workers: list[Worker] = []
         self._started = False
         self._stopped = False
@@ -877,6 +994,8 @@ class WorkerPool:
                 retry_backoff_max=self._retry_backoff_max,
                 heartbeat_interval_seconds=self._heartbeat_interval_seconds,
                 timeout_grace_seconds=self._timeout_grace_seconds,
+                work_resolver=self._work_resolver,
+                watcher_repo=self._watcher_repo,
             )
             worker.start()
             self._workers.append(worker)
@@ -949,3 +1068,39 @@ class WorkerPool:
             "workers": [w.get_stats() for w in self._workers],
             "pool_pending_tasks": self._task_processor.get_pending_count(),
         }
+
+    def set_work_resolver(self, work_resolver) -> None:
+        """Late-wire the WorkResolverService for Phase 2 Batch 2 notification.
+
+        Wired by ``daemon/api.py`` AFTER the worker pool is started
+        because the resolver is constructed in api.py after the worker
+        pool (it depends on the JobRepository). Updates BOTH the pool
+        and every already-started worker so a worker that races the
+        late-wire still sees the right value at its next terminal
+        call.
+
+        Atomicity note: this method writes ``worker._work_resolver``
+        directly without a lock. The Worker reads its own copy on each
+        terminal call (the four sync sites at ``_handle_cancellation``
+        and ``_handle_task_failure``), so a single-threaded writer
+        (api.py lifespan startup) cannot lose updates — but a worker
+        that interleaves a read between the pool write and the worker
+        write would still see the OLD value until the next
+        ``set_work_resolver``. In practice this is benign because the
+        api.py lifespan completes before workers begin processing
+        production tasks; the test surface that exercises terminal
+        notifications wires ``work_resolver`` via the constructor or
+        before any worker claims a task.
+        """
+        self._work_resolver = work_resolver
+        for worker in self._workers:
+            worker._work_resolver = work_resolver
+
+    def set_watcher_repo(self, watcher_repo) -> None:
+        """Late-wire the JobWatcherRepository for Phase 2 Batch 2 notification.
+
+        Same rationale and atomicity contract as :meth:`set_work_resolver`.
+        """
+        self._watcher_repo = watcher_repo
+        for worker in self._workers:
+            worker._watcher_repo = watcher_repo

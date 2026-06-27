@@ -93,7 +93,16 @@ class TestJoberWatchIntegration:
 
     @pytest.fixture
     def job_queue_service(self, repository, lock_manager, queue_repository, instance_manager, watcher_repo):
-        """Create JobQueueService with watcher repo configured."""
+        """Create JobQueueService with watcher repo configured.
+
+        Phase 2 (Batch 4a, 2026-06-27,
+        ``feature/virtual-job-management-surface``): explicitly disable
+        ``use_virtual_job_resolver`` so the existing tests exercise the
+        legacy JobItem-only ``get_job`` path. The new resolver path is
+        covered by ``tests/unit/services/test_work_resolver.py`` and
+        ``tests/job_queue/test_job_queue_tools.py`` (which set the flag
+        on/off independently per test class).
+        """
         service = JobQueueService(
             repository=repository,
             lock_manager=lock_manager,
@@ -101,6 +110,11 @@ class TestJoberWatchIntegration:
             instance_manager=instance_manager,
         )
         service.set_watcher_repo(watcher_repo)
+        # Phase 2 (Batch 4a) — kill switch OFF for these legacy tests.
+        # ``set_config`` would normally wire this from
+        # ``JobSystemConfig.use_virtual_job_resolver``; tests bypass
+        # that by setting the attribute directly.
+        service._use_virtual_job_resolver = False
         # Use a new event loop for testing (pytest-asyncio creates one for async tests)
         try:
             loop = asyncio.get_running_loop()
@@ -316,6 +330,8 @@ class TestJoberWatchIntegration:
         mock_job_service.get_job = AsyncMock(return_value=mock_job)
         mock_job_service.notify_watchers = AsyncMock(return_value=0)
         mock_job_service.enqueue = AsyncMock()
+        # Phase 2 (Batch 4a) — kill switch OFF for the legacy-path test.
+        mock_job_service.use_virtual_job_resolver = False
 
         tools = create_job_tools(
             job_service=mock_job_service,
@@ -558,6 +574,7 @@ class TestJoberWatchIntegration:
     def test_tool_registration(self):
         """Task 4 & 5: Verify all 17 tools are registered correctly (16 original + job_continue)."""
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         watcher_repo = MagicMock()
@@ -594,6 +611,7 @@ class TestJoberWatchIntegration:
     async def test_job_create_with_watch_param(self):
         """Task 4: job_create with watch=True should work (regression check)."""
         job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = False
         queue_mgmt_service = AsyncMock()
         dead_letter_service = MagicMock()
         watcher_repo = MagicMock()
