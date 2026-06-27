@@ -17,6 +17,22 @@
         </mat-select>
       </mat-form-field>
 
+      <!-- Phase 4 — view-mode toggle (Queues vs All Work) -->
+      <mat-button-toggle-group
+        class="view-mode-toggle"
+        [value]="viewMode()"
+        (change)="onViewModeChange($event.value)"
+        aria-label="Select jobs view mode">
+        <mat-button-toggle value="queues">
+          <mat-icon>view_list</mat-icon>
+          Queues
+        </mat-button-toggle>
+        <mat-button-toggle value="all-work">
+          <mat-icon>workspaces</mat-icon>
+          All Work
+        </mat-button-toggle>
+      </mat-button-toggle-group>
+
       <!-- Hint when no project selected -->
       @if (!filters().project_id) {
         <span class="project-hint-inline">
@@ -53,16 +69,17 @@
       <button
         mat-stroked-button
         (click)="onRefresh()"
-        [disabled]="loading()"
+        [disabled]="loading() || workLoading()"
         class="refresh-btn">
-        <mat-icon [class.spinning]="loading()">refresh</mat-icon>
+        <mat-icon [class.spinning]="loading() || workLoading()">refresh</mat-icon>
         Refresh
       </button>
       <button
         mat-flat-button
         color="primary"
         (click)="onOpenCreateDialog()"
-        [disabled]="!filters().project_id"
+        [disabled]="!filters().project_id || isAllWorkView()"
+        [matTooltip]="isAllWorkView() ? 'Switch to Queues view to create jobs' : ''"
         class="create-btn">
         <mat-icon>add</mat-icon>
         New Job
@@ -147,15 +164,17 @@
 
   <!-- Main Content with Queue Sidebar and Drawer -->
   <div class="jobs-main-layout">
-    <!-- Queue Sidebar -->
-    <app-queue-list
-      [projectId]="selectedProjectId()"
-      [selectedQueueId]="selectedQueueId()"
-      [projectPaused]="isCurrentProjectPaused()"
-      (queueSelected)="onQueueSelected($event)"
-      (queueChanged)="onQueueChanged()"
-      (projectPauseChanged)="onProjectPauseChanged($event)">
-    </app-queue-list>
+    <!-- Queue Sidebar — only active in the 'queues' view. -->
+    @if (!isAllWorkView()) {
+      <app-queue-list
+        [projectId]="selectedProjectId()"
+        [selectedQueueId]="selectedQueueId()"
+        [projectPaused]="isCurrentProjectPaused()"
+        (queueSelected)="onQueueSelected($event)"
+        (queueChanged)="onQueueChanged()"
+        (projectPauseChanged)="onProjectPauseChanged($event)">
+      </app-queue-list>
+    }
 
     <!-- Main Content -->
     <mat-drawer-container class="jobs-drawer-container" [hasBackdrop]="true">
@@ -163,7 +182,7 @@
       <mat-drawer-content class="jobs-content">
 
         <!-- Loading State -->
-        @if (loading() && jobs().length === 0) {
+        @if ((loading() || workLoading()) && jobs().length === 0 && works().length === 0) {
           <div class="loading-container">
             @for (i of [1, 2, 3]; track i) {
               <div class="skeleton-card">
@@ -181,8 +200,10 @@
           </div>
         }
 
-        <!-- Error State -->
-        @if (error()) {
+        <!-- Error State — only surface the legacy JobService error in
+             the queues view; in the all-work view we show the
+             WorkService error specifically. -->
+        @if (error() && !isAllWorkView()) {
           <div class="error-container">
             <mat-icon class="error-icon">error_outline</mat-icon>
             <h3>Failed to load jobs</h3>
@@ -194,8 +215,20 @@
           </div>
         }
 
-        <!-- Empty State -->
-        @if (isEmptyState()) {
+        @if (workError() && isAllWorkView()) {
+          <div class="error-container">
+            <mat-icon class="error-icon">error_outline</mat-icon>
+            <h3>Failed to load work</h3>
+            <p>{{ workError() }}</p>
+            <button mat-stroked-button color="primary" (click)="onRefresh()">
+              <mat-icon>refresh</mat-icon>
+              Try Again
+            </button>
+          </div>
+        }
+
+        <!-- Empty State — queues view (legacy) -->
+        @if (isEmptyState() && !isAllWorkView()) {
           <div class="empty-container">
             <mat-icon class="empty-icon">inbox</mat-icon>
             <h3>No jobs found</h3>
@@ -213,10 +246,21 @@
           </div>
         }
 
-        <!-- Job List -->
-        @if (!loading() || jobs().length > 0) {
+        <!-- Empty State — All Work view (Phase 4) -->
+        @if (isEmptyWorkState()) {
+          <div class="empty-container">
+            <mat-icon class="empty-icon">workspaces</mat-icon>
+            <h3>No work records yet</h3>
+            <p>No jobs, turns, or reports have been recorded for this project.</p>
+          </div>
+        }
+
+        <!-- Job List — feeds both views through ``displayedJobs``.
+             In the All Work view the same cards render but each
+             carries its ``kind`` chip. -->
+        @if (!loading() || jobs().length > 0 || works().length > 0) {
           <div class="job-list">
-            @for (job of filteredJobs(); track job.job_id) {
+            @for (job of displayedJobs(); track job.job_id) {
               <app-job-card
                 [job]="job"
                 [projectPaused]="getProjectPaused(job.project_id || '')"

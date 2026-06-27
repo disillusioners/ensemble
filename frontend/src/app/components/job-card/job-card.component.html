@@ -1,12 +1,14 @@
 <mat-card class="job-card" [class.job-deleted]="isDeleted()">
   <div class="job-card-header">
     <div class="job-card-badges">
-      <span 
-        class="priority-badge" 
-        [style.backgroundColor]="priorityColor()"
-        [style.color]="priorityTextColor()">
-        {{ priorityLabel() }}
-      </span>
+      @if (showPriorityBadge()) {
+        <span
+          class="priority-badge"
+          [style.backgroundColor]="priorityColor()"
+          [style.color]="priorityTextColor()">
+          {{ priorityLabel() }}
+        </span>
+      }
       <span 
         class="status-chip"
         [style.backgroundColor]="statusColor() + '20'"
@@ -14,6 +16,16 @@
         <mat-icon class="status-icon" [class.spinning]="isProcessing()">{{ statusIcon() }}</mat-icon>
         {{ statusLabel() }}
       </span>
+      @if (showKindChip()) {
+        <span
+          class="kind-chip"
+          [style.backgroundColor]="kindColor() + '20'"
+          [style.color]="kindColor()"
+          [matTooltip]="'Work kind: ' + kindLabel() + ' — task-backed, not queued'">
+          <mat-icon class="kind-icon">{{ kindIcon() }}</mat-icon>
+          {{ kindLabel() }}
+        </span>
+      }
       @if (showPausedBadge()) {
         <span 
           class="paused-badge"

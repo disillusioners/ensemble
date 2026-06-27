@@ -339,7 +339,12 @@ class TestResolveWork:
         record = resolver.resolve_work(wid)
 
         assert record is not None
-        assert record.kind == "task"
+        # Phase 4 (2026-06-27): ``process_message`` tasks now surface
+        # as ``kind="turn"`` (split off the previous ``"task"``
+        # vocabulary). ``kind="task"`` is kept as a backward-compat
+        # filter alias for the union of turn + report, but individual
+        # records expose the specific subtype.
+        assert record.kind == "turn"
         assert record.work_id == wid
         # Task "running" canonicalises to "processing".
         assert record.status == "processing"
@@ -470,9 +475,10 @@ class TestResolveWork:
 
         record = resolver.resolve_work(shared_id)
 
-        # The task-first branch wins.
+        # The task-first branch wins. ``process_message`` task →
+        # ``kind="turn"`` under Phase 4 (2026-06-27).
         assert record is not None
-        assert record.kind == "task"
+        assert record.kind == "turn"
 
     def test_resolve_work_task_without_instance_returns_none_agent_id(
         self, engine, resolver
@@ -493,7 +499,8 @@ class TestResolveWork:
         record = resolver.resolve_work(wid)
 
         assert record is not None
-        assert record.kind == "task"
+        # Phase 4 (2026-06-27): ``process_message`` → ``kind="turn"``.
+        assert record.kind == "turn"
         assert record.instance_id == "ghost-instance"
         assert record.agent_id is None
 
@@ -525,7 +532,10 @@ class TestListWork:
         assert len(records) == 2
         work_ids = {r.work_id for r in records}
         assert work_ids == {task_id, job_id}
-        assert {r.kind for r in records} == {"task", "job"}
+        # Phase 4 (2026-06-27): the seeded ``process_message`` task
+        # surfaces as ``kind="turn"`` (split off the previous
+        # ``"task"`` vocabulary). The JobItem stays ``kind="job"``.
+        assert {r.kind for r in records} == {"turn", "job"}
 
     def test_list_work_filter_by_project_id(self, engine, resolver):
         """``project_id`` filter narrows results to one project."""
@@ -565,8 +575,10 @@ class TestListWork:
         assert len(records) == 2
         assert {r.status for r in records} == {"processing"}
         # One Task (status="running") and one JobItem (status="processing")
-        # both canonicalise to "processing".
-        assert {r.kind for r in records} == {"task", "job"}
+        # both canonicalise to "processing". Phase 4 (2026-06-27):
+        # the Task row surfaces as ``kind="turn"`` (process_message →
+        # turn), not the legacy ``kind="task"``.
+        assert {r.kind for r in records} == {"turn", "job"}
 
     def test_list_work_filter_by_status_dead_letter_only_matches_jobs(
         self, engine, resolver
@@ -583,14 +595,23 @@ class TestListWork:
         assert records[0].status == "dead_letter"
 
     def test_list_work_filter_by_kind_task(self, engine, resolver):
-        """``kind="task"`` excludes JobItem rows."""
+        """``kind="task"`` excludes JobItem rows.
+
+        Phase 4 (2026-06-27): ``kind="task"`` is now a backward-
+        compatible *filter* alias meaning "all task rows" (turn +
+        report). The returned records still expose the specific
+        subtype — ``kind="turn"`` for ``process_message``, ``kind=
+        "report"`` for ``process_report``/``send_report`` — so the
+        seeded ``process_message`` row surfaces as ``kind="turn"``
+        here, not ``kind="task"``.
+        """
         _seed_task(engine, instance_id="i1")
         _seed_job(engine, instance_id="i2")
 
         records = resolver.list_work(kind="task")
 
         assert len(records) == 1
-        assert records[0].kind == "task"
+        assert records[0].kind == "turn"
 
     def test_list_work_filter_by_kind_job(self, engine, resolver):
         """``kind="job"`` excludes Task rows."""
@@ -669,7 +690,9 @@ class TestListWork:
 
         # 1 task + 1 job, both matching all three filters.
         assert len(records) == 2
-        assert {r.kind for r in records} == {"task", "job"}
+        # Phase 4 (2026-06-27): Task ``process_message`` →
+        # ``kind="turn"``.
+        assert {r.kind for r in records} == {"turn", "job"}
         for r in records:
             assert r.project_id == "proj-match"
             assert r.instance_id == "i-match"
@@ -808,7 +831,12 @@ class TestGetWork:
         record = await job_queue_service_with_resolver.get_work(wid)
 
         assert record is not None
-        assert record.kind == "task"
+        # Phase 4 (2026-06-27): ``process_message`` Task surfaces as
+        # ``kind="turn"`` (split off the previous ``"task"``
+        # vocabulary). The docstring above was written pre-Phase-4 and
+        # still says ``kind='task'`` — that's the filter alias, not
+        # the resolved record's ``kind`` value.
+        assert record.kind == "turn"
         assert record.work_id == wid
         # Task ``running`` canonicalises to ``processing``.
         assert record.status == "processing"
@@ -1360,12 +1388,15 @@ class TestCancelTaskViaJobCancel:
         )
         task_id = _lookup_task_id(engine, wid)
 
-        # Step 1: resolver routes to kind="task" — this is the branch
-        # the job_cancel tool uses to decide between cooperative (task)
-        # and atomic (job) cancellation.
+        # Step 1: resolver routes to kind="turn" (Phase 4 split:
+        # ``process_message`` → ``"turn"``; was the legacy
+        # ``"task"`` pre-2026-06-27). The job_cancel tool branches on
+        # whether ``record.kind`` is in the task side (turn/report)
+        # vs ``"job"`` — the cooperative-vs-atomic decision is
+        # unchanged by the split.
         record = resolver.resolve_work(wid)
         assert record is not None
-        assert record.kind == "task"
+        assert record.kind == "turn"
         assert record.status == "processing"  # RUNNING canonicalises
 
         # Step 2 + 3: cooperative cancel — this is the production
@@ -1510,10 +1541,13 @@ class TestJobListUnion:
 
         records = resolver.list_work()
 
-        # Both rows surface.
+        # Both rows surface. Phase 4 (2026-06-27): the seeded
+        # ``process_message`` Task is now exposed as ``kind="turn"``
+        # (the legacy single ``"task"`` kind was split into
+        # ``turn`` + ``report`` based on ``Task.task_type``).
         assert len(records) == 2
         by_kind: dict[str, Any] = {r.kind: r for r in records}
-        assert set(by_kind.keys()) == {"task", "job"}
+        assert set(by_kind.keys()) == {"turn", "job"}
 
         # The JobItem shows up with kind="job" and the canonical
         # ``pending`` status (JobItem PENDING maps to PENDING).
@@ -1521,16 +1555,17 @@ class TestJobListUnion:
         assert by_kind["job"].kind == "job"
         assert by_kind["job"].status == "pending"
 
-        # The Task shows up with kind="task" and the canonical
+        # The Task shows up with kind="turn" (Phase 4 split:
+        # ``process_message`` → ``"turn"``) and the canonical
         # ``processing`` status (Task RUNNING canonicalises to
         # ``processing``).
-        assert by_kind["task"].work_id == task_id
-        assert by_kind["task"].kind == "task"
-        assert by_kind["task"].status == "processing"
+        assert by_kind["turn"].work_id == task_id
+        assert by_kind["turn"].kind == "turn"
+        assert by_kind["turn"].status == "processing"
         # ``agent_id`` is looked up from the matching Instance row on
         # the Task branch — proves the Task-side instance lookup works
         # inside ``list_work``.
-        assert by_kind["task"].agent_id == "developer"
+        assert by_kind["turn"].agent_id == "developer"
 
 
 # ─── 6. work_id returned by enqueue flow is resolvable via resolve_work ──
@@ -1601,7 +1636,12 @@ class TestJobContinueReturnsRealWorkId:
             f"{job_id!r} — the resolver cannot see Task-created work"
         )
         assert record.work_id == job_id
-        assert record.kind == "task"
+        # Phase 4 (2026-06-27): ``process_message`` Task surfaces as
+        # ``kind="turn"`` (split off the previous ``"task"``
+        # vocabulary). ``kind="task"`` is kept as a backward-compat
+        # *filter* alias but the resolved record exposes the specific
+        # ``task_type``-derived subtype.
+        assert record.kind == "turn"
         # ``agent_id`` is looked up from the matching Instance row,
         # proving the resolver sees the full Task-side context.
         assert record.agent_id == "developer"
@@ -2818,7 +2858,11 @@ class TestDeferredWorkIdWatchable:
             "virtual job surface treats deferred work as invisible. "
             "Phase 3 Part B3 regression."
         )
-        assert record.kind == "task"
+        # Phase 4 (2026-06-27): deferred ``process_message`` tasks
+        # surface as ``kind="turn"``. ``is_deferred=True`` is a
+        # separate orthogonal flag (defer-queue idle gate) — it does
+        # NOT change the ``task_type``-derived ``kind`` value.
+        assert record.kind == "turn"
         assert record.work_id == deferred_wid
         # The canonical status mirrors the source PENDING ("pending"
         # is unchanged by canonicalize_status — see work_status.py).

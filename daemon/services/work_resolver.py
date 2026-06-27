@@ -68,6 +68,50 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── Kind discrimination within the Task side ─────────────────────────────
+# The Task table carries a ``task_type`` column that distinguishes
+# message turns (user→agent) from report tasks (child→parent completion
+# report). The WorkRecord exposes this as ``kind="turn"`` vs
+# ``kind="report"``. ``kind="task"`` is kept as a backward-compatible
+# alias for clients that haven't migrated to the split vocabulary and
+# matches BOTH process_message AND process_report rows.
+#
+# Phase 4 (2026-06-27): split kind into turn/report based on
+# ``Task.task_type``. See ``daemon/repositories/task/models.py``
+# (TaskType enum, lines 19-34).
+
+TURN_TASK_TYPES: frozenset[str] = frozenset({"process_message"})
+
+REPORT_TASK_TYPES: frozenset[str] = frozenset({
+    "process_report",
+    "send_report",
+})
+
+
+def _kind_from_task_type(task_type: str | None) -> str:
+    """Map a ``Task.task_type`` to a WorkRecord ``kind`` value.
+
+    Phase 4 (2026-06-27): the resolver splits what was previously a
+    single ``kind="task"`` into ``"turn"`` (message turn) and
+    ``"report"`` (child completion report) so the frontend can render
+    queue badges only on jobs.
+
+    * ``"process_message"`` → ``"turn"``
+    * ``"process_report"``, ``"send_report"`` → ``"report"``
+    * Unknown / ``None`` → ``"turn"`` (safe default; ``process_message``
+      is the dominant TaskType in production today).
+
+    Args:
+        task_type: The Task.task_type string value.
+
+    Returns:
+        The corresponding WorkRecord ``kind`` value.
+    """
+    if task_type in REPORT_TASK_TYPES:
+        return "report"
+    return "turn"
+
+
 # ── WorkRecord ─────────────────────────────────────────────────────────────
 # The unified view-model. Mirrors the fields the virtual job UI surface
 # wants to display (work_id, kind, status, instance/project/agent
@@ -83,8 +127,13 @@ class WorkRecord:
 
     * ``work_id`` — stable cross-system UUID4 handle (the same value
       callers use to look the row up).
-    * ``kind`` — ``"task"`` (worker pool) or ``"job"`` (job queue). The
-      resolver normalises away which table backs the row.
+    * ``kind`` — ``"turn"`` (user message turn on an instance),
+      ``"report"`` (child completion report riding the same delivery
+      pipeline), or ``"job"`` (job queue). The resolver normalises
+      away which table backs the row. Phase 4 (2026-06-27) split the
+      previous ``"task"`` value into ``"turn"`` vs ``"report"`` based
+      on ``Task.task_type`` so the frontend can distinguish message
+      turns from report-only records (queue badges show only on jobs).
     * ``status`` — canonical status string (see ``work_status``). Task
       ``"running"`` becomes ``"processing"``; JobItem ``"processing"``
       stays ``"processing"``; both ``"paused"`` map onto ``"paused"``;
@@ -106,7 +155,7 @@ class WorkRecord:
     """
 
     work_id: str
-    kind: str          # "task" or "job"
+    kind: str          # "turn" | "report" | "job"
     status: str        # canonical status (via work_status.canonicalize_status)
     instance_id: str | None
     project_id: str | None
@@ -342,9 +391,28 @@ class WorkResolverService:
           status — the Task SELECT simply returns the empty set
           for that filter (handled automatically by the IN-clause
           containing only ``"dead_letter"`` finding no matches).
-        * ``kind`` — ``"task"`` queries only the Task table;
-          ``"job"`` queries only JobItem; ``None`` (default)
-          queries both.
+          The value may also be a comma-separated list of canonical
+          statuses (e.g. ``"pending,processing"``) — matches the
+          legacy ``GET /api/jobs`` behaviour. Each token is mapped
+          through the reverse canonical map independently and the
+          resulting source-status sets are unioned into one ``IN``
+          clause. Tokens are stripped of surrounding whitespace and
+          lowercased; duplicates are collapsed.
+        * ``kind`` — Phase 4 (2026-06-27): the filter is now
+          five-valued:
+
+          * ``"job"`` — query only the JobItem table.
+          * ``"turn"`` — query only the Task table, restricted to
+            ``task_type IN ("process_message")``.
+          * ``"report"`` — query only the Task table, restricted to
+            ``task_type IN ("process_report", "send_report")``.
+          * ``"task"`` — query only the Task table, no ``task_type``
+            filter. Backward-compatible alias for the union of
+            ``"turn"`` + ``"report"`` (the previous single-kind
+            behaviour). New clients should prefer the split
+            vocabulary.
+          * ``None`` (default) — query both tables, no
+            ``task_type`` filter.
 
         Sort order is ``created_at DESC`` across the merged result.
         JobItem ``created_at`` is a string and Task ``created_at``
@@ -359,8 +427,14 @@ class WorkResolverService:
             status: Optional canonical-status filter
                 (``"pending"``, ``"processing"``, ``"paused"``,
                 ``"completed"``, ``"failed"``, ``"cancelled"``,
-                ``"dead_letter"``).
-            kind: Optional kind filter (``"task"``, ``"job"``).
+                ``"dead_letter"``). May also be a comma-separated
+                list of canonical statuses (e.g.
+                ``"pending,processing"``) to match the legacy
+                ``GET /api/jobs`` behaviour — each token is
+                independently translated to source statuses and
+                unioned.
+            kind: Optional kind filter (``"job"``, ``"turn"``,
+                ``"report"``, ``"task"``).
 
         Returns:
             A list of :class:`WorkRecord` ordered by ``created_at``
@@ -368,31 +442,65 @@ class WorkResolverService:
         """
         source_statuses: set[str] | None = None
         if status is not None:
-            # Unknown canonical values (forward map returned the input
-            # unchanged) collapse to ``{status}`` — the SQL IN-clause
-            # then matches zero rows because the per-table status
-            # strings never equal the canonical string for statuses
-            # the resolver knows about. This is intentional: an
-            # unknown status filter is a programmer error, not user
-            # input, and silently returning [] is the safe default.
-            source_statuses = _CANONICAL_TO_SOURCES.get(status, {status})
+            # Split comma-separated canonical statuses (matches the
+            # legacy ``GET /api/jobs`` behaviour in
+            # ``daemon/routers/jobs_crud.py``). Whitespace is
+            # stripped, tokens are lowercased, empties are dropped,
+            # and order-preserving dedupe collapses duplicates so
+            # ``"pending,pending"`` and ``" pending , PENDING "``
+            # behave identically.
+            canonical_statuses = list(dict.fromkeys(
+                token.strip().lower()
+                for token in status.split(",")
+                if token.strip()
+            ))
+            # Map each canonical status back to its source-status
+            # set (e.g. ``"processing"`` → ``{"running",
+            # "processing"}``) and union across all tokens. Unknown
+            # canonical values fall back to ``{status}`` per-token
+            # — same defensive rule the single-status path used
+            # pre-change, just applied per element. The legacy
+            # ``/api/jobs`` router validates the list and 400s on
+            # unknowns, so in practice every token here is known.
+            unioned: set[str] = set()
+            for canonical in canonical_statuses:
+                unioned.update(_CANONICAL_TO_SOURCES.get(canonical, {canonical}))
+            source_statuses = unioned
 
         records: list[WorkRecord] = []
 
-        if kind != "job":
+        # Translate kind filter into per-table predicates.
+        # ``"job"`` excludes the Task side, ``"task"``/``"turn"``/
+        # ``"report"`` exclude the JobItem side, ``None`` includes
+        # both. ``"task"`` is the backward-compat alias meaning
+        # "all task rows" (turn + report).
+        query_tasks_table = kind != "job"
+        query_jobs_table = kind != "task" and kind != "turn" and kind != "report"
+
+        # Map kind filter to a task_type set for the Task SELECT.
+        # ``None`` means no task_type filter (query all task rows).
+        task_type_filter: set[str] | None = None
+        if kind == "turn":
+            task_type_filter = set(TURN_TASK_TYPES)
+        elif kind == "report":
+            task_type_filter = set(REPORT_TASK_TYPES)
+        elif kind == "task":
+            task_type_filter = None  # backward-compat: all task rows
+
+        if query_tasks_table:
             # Task table has no ``project_id`` column — the filter is
             # applied here against the WorkRecord (which already pulled
             # project_id from the matching instance row in
             # ``_task_to_record``). JobItem keeps its SQL-level filter
             # in ``_query_jobs`` because it does carry the column.
-            tasks = self._query_tasks(instance_id, source_statuses)
+            tasks = self._query_tasks(instance_id, source_statuses, task_type_filter)
             records.extend(
                 record
                 for record in (self._task_to_record(t) for t in tasks)
                 if project_id is None or record.project_id == project_id
             )
 
-        if kind != "task":
+        if query_jobs_table:
             jobs = self._query_jobs(project_id, instance_id, source_statuses)
             records.extend(self._job_to_record(j) for j in jobs)
 
@@ -423,7 +531,7 @@ class WorkResolverService:
         instance = self._lookup_instance(task.instance_id)
         return WorkRecord(
             work_id=task.work_id,
-            kind="task",
+            kind=_kind_from_task_type(task.task_type),
             status=canonicalize_status(task.status),
             instance_id=task.instance_id,
             project_id=instance.project_id if instance is not None else None,
@@ -499,6 +607,7 @@ class WorkResolverService:
         self,
         instance_id: str | None,
         source_statuses: set[str] | None,
+        task_types: set[str] | None = None,
     ) -> list[Task]:
         """Run the Task SELECT for ``list_work`` and return the rows.
 
@@ -508,6 +617,15 @@ class WorkResolverService:
         ``project_id`` filter is therefore applied post-fetch inside
         :meth:`list_work`, not at SQL level — see the comment there
         for why.
+
+        The optional ``task_types`` parameter carries the Phase 4
+        ``kind`` filter translated into Task-side values (e.g.
+        ``"turn"`` → ``{"process_message"}``). ``None`` (or empty
+        set) means no task_type filter — the SELECT returns all task
+        rows. Phase 4 split ``kind="task"`` into ``turn`` /
+        ``report`` so the SQL-level IN-clause is now the primary
+        mechanism for separating message turns from child-completion
+        reports at the WorkRecord boundary.
 
         Uses a single ``SQLModelSession`` so the read is consistent
         within the request (no torn reads across the task / job union
@@ -531,8 +649,10 @@ class WorkResolverService:
                 stmt = stmt.where(Task.instance_id == instance_id)
             if source_statuses is not None:
                 stmt = stmt.where(Task.status.in_(source_statuses))
+            if task_types is not None:
+                stmt = stmt.where(Task.task_type.in_(task_types))
             stmt = stmt.order_by(col(Task.created_at).desc())
-            return list(session.exec(stmt))
+        return list(session.exec(stmt))
 
     def _query_jobs(
         self,

@@ -4,6 +4,17 @@ export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'can
 
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 
+/**
+ * WorkKind subset that may appear on a Job record.
+ *
+ * Only ``'job'`` is meaningful for jobs surfaced through
+ * ``JobService``; ``'turn'`` / ``'report'`` are reserved for the
+ * unified Work surface so a Job-shaped object synthesised from a
+ * ``Work`` record can carry the kind forward without re-typing the
+ * ``work.model`` namespace everywhere.
+ */
+export type JobWorkKind = 'job' | 'turn' | 'report';
+
 export interface Job {
   job_id: string;
   agent_id: string;
@@ -27,6 +38,11 @@ export interface Job {
   dlq_reason?: string | null; // reason for moving to DLQ
   retry_count?: number; // number of retries before going to DLQ
   moved_to_dlq_at?: string | null; // timestamp when moved to DLQ
+  // Virtual Job Management Surface (Phase 4): work kind discriminator.
+  // Optional for backward compatibility — existing JobService responses
+  // omit it, in which case the card treats the record as a real
+  // queued job (kind === 'job') and shows the queue badge as before.
+  kind?: JobWorkKind;
 }
 
 export interface JobCreate {

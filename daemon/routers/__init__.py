@@ -9,6 +9,7 @@ from .mappings import router as mappings_router
 from .schedules import router as schedules_router
 from .sources import router as sources_router
 from .webhooks import router as webhooks_router
+from .work import router as work_router
 from .projects import router as projects_router
 from .queues import router as queues_router
 from .dlq import router as dlq_router
@@ -26,6 +27,7 @@ __all__ = [
     "schedules_router",
     "sources_router",
     "webhooks_router",
+    "work_router",
     "projects_router",
     "queues_router",
     "dlq_router",

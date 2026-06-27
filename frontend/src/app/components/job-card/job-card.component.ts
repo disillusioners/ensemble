@@ -6,7 +6,13 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { Job, JobStatus, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted } from '../../models/job.model';
+import { Job, JobStatus, JobWorkKind, getPriorityColor, getStatusColor, isTerminalStatus, isJobDeleted } from '../../models/job.model';
+import {
+  getKindColor,
+  getKindIcon,
+  getKindLabel,
+  isTaskBackedKind,
+} from '../../models/work.model';
 
 @Component({
   selector: 'app-job-card',
@@ -50,6 +56,14 @@ export class JobCardComponent {
     return color === '#F59E0B' ? '#000000' : '#FFFFFF';
   });
 
+  /**
+   * Hide the priority badge for task-backed work (turn / report) —
+   * those rows do not have a meaningful priority in the backend and
+   * showing ``P0`` would be misleading. Mirrors the kind-chip
+   * guardrail: only real queued ``job`` rows carry a priority.
+   */
+  showPriorityBadge = computed(() => this.isJobKind());
+
   statusIcon = computed(() => {
     const status = this.job().status;
     switch (status) {
@@ -73,14 +87,54 @@ export class JobCardComponent {
   isProcessing = computed(() => this.job().status === 'processing');
 
   messagePreview = computed(() => {
-    const msg = this.job().message ?? '';
-    return msg.length > 100 ? msg.substring(0, 100) + '...' : msg;
+    // Prefer the original message when present (real Job surface).
+    // Fall back to result_summary for task-backed work records that
+    // do not carry a human-typed message — the user still needs to
+    // see SOMETHING in the preview slot rather than a blank card.
+    const job = this.job();
+    const raw = job.message ?? job.result_summary ?? '';
+    return raw.length > 100 ? raw.substring(0, 100) + '...' : raw;
   });
 
   relativeTime = computed(() => {
     const date = new Date(this.job().created_at);
     return this.getRelativeTime(date);
   });
+
+  // ── Kind chip (Phase 4 — Virtual Job Management Surface) ────────────
+  //
+  // Effective kind defaults to ``'job'`` for the legacy Job surface
+  // (where ``kind`` is unset) and surfaces ``'turn'`` / ``'report'``
+  // for task-backed work records synthesised by the Jobs page.
+  //
+  // The chip is ALWAYS shown when the record has an explicit non-job
+  // kind — that is the user-visible guardrail that tells them this
+  // row is task-backed and not part of any real queue. For pure Job
+  // rows the chip stays hidden so the existing UI does not change.
+
+  effectiveKind = computed<JobWorkKind>(() => this.job().kind ?? 'job');
+
+  kindColor = computed(() => getKindColor(this.effectiveKind()));
+  kindLabel = computed(() => getKindLabel(this.effectiveKind()));
+  kindIcon = computed(() => getKindIcon(this.effectiveKind()));
+
+  /**
+   * Show the kind chip only for task-backed work kinds (turn / report).
+   *
+   * For the default ``'job'`` kind the chip is suppressed so existing
+   * cards look identical to the pre-Phase-4 surface — keeping the
+   * change additive and the diff visually minimal.
+   */
+  showKindChip = computed(() => isTaskBackedKind(this.effectiveKind()));
+
+  /**
+   * True if the card represents a real queued job (kind === 'job' OR
+   * kind unset). Queue badge is hidden when this is false.
+   *
+   * This is the Phase 4 guardrail: turn/report rows must NEVER show a
+   * queue badge even if a stale ``queue_id`` happens to be attached.
+   */
+  isJobKind = computed(() => this.effectiveKind() === 'job');
 
   canCancel = computed(() => {
     const status = this.job().status;
@@ -111,7 +165,21 @@ export class JobCardComponent {
     return queueName || queueId.substring(0, 8);
   });
 
-  hasQueue = computed(() => !!this.job().queue_id);
+  /**
+   * Whether the queue badge should be rendered.
+   *
+   * Two-part gate:
+   *
+   * 1. ``queue_id`` must be present on the record.
+   * 2. The record must be a real queued ``job`` (``isJobKind``).
+   *    Task-backed work (turn / report) is NEVER shown with a queue
+   *    badge — it is not part of any queue, regardless of whether a
+   *    stale ``queue_id`` happened to leak through.
+   *
+   * Phase 4 guardrail: a user scanning the unified work list must
+   * never confuse a task row for a queued job.
+   */
+  hasQueue = computed(() => !!this.job().queue_id && this.isJobKind());
 
   protected onCancel(): void {
     this.cancel.emit();

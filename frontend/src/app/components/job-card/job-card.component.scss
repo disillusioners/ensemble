@@ -47,6 +47,30 @@
   }
 }
 
+// Kind chip — Phase 4 Virtual Job Management Surface.
+//
+// Mirrors the visual weight of ``.status-chip`` so a user scanning a
+// row of cards sees the kind chip and the status chip as peers rather
+// than one being a "subordinate" of the other. The chip is only
+// rendered for task-backed kinds (turn / report); real queued jobs
+// keep the legacy look.
+.kind-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid currentColor;
+
+  .kind-icon {
+    font-size: 14px;
+    width: 14px;
+    height: 14px;
+  }
+}
+
 .paused-badge {
   display: flex;
   align-items: center;

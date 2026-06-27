@@ -1,0 +1,525 @@
+"""Unit tests for the GET /api/work endpoint.
+
+Phase 4 (2026-06-27) of ``feature/virtual-job-management-surface``.
+Validates:
+
+* ``kind`` filter splits into ``job`` / ``turn`` / ``report`` (and
+  the backward-compat ``task`` alias matches turn+report).
+* All other filters (status, project_id, instance_id) compose with
+  the kind filter.
+* 503 returned when WorkResolverService has not been wired in.
+* 400 returned for unknown ``kind`` values.
+* JSON serialization shape (ISO-8601 created_at, null fields).
+
+The tests build a real in-memory SQLite database (StaticPool + FK
+on) and run the actual ``WorkResolverService`` SQL, mirroring
+``tests/unit/routers/test_jobs_streaming_resolver.py``. This pins
+the kind-discrimination contract that the frontend consumes — if
+``Task.task_type`` is misread or the ``kind="task"`` alias is lost,
+the ``/api/work?kind=job`` tests fail.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, SQLModel
+
+from daemon.repositories.instance.models import Instance
+from daemon.repositories.instance.repository import SQLModelInstanceRepository
+from daemon.repositories.job_queue.models import JobItem, JobQueue, JobStatus
+from daemon.repositories.job_queue.repository import JobRepository
+from daemon.repositories.task.models import Task, TaskStatus
+from daemon.repositories.task.repository import TaskRepository
+from daemon.routers.work import (
+    get_work_resolver,
+    router as work_router,
+    set_work_resolver,
+)
+from daemon.services.work_resolver import WorkResolverService
+
+
+# ─── Fixtures ────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def engine() -> Engine:
+    """In-memory SQLite engine (StaticPool + FK on)."""
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(eng, "connect")
+    def _enable_fk(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
+    SQLModel.metadata.create_all(eng)
+    try:
+        yield eng
+    finally:
+        eng.dispose()
+
+
+@pytest.fixture
+def job_repo(engine: Engine) -> JobRepository:
+    return JobRepository(engine)
+
+
+@pytest.fixture
+def task_repo(engine: Engine) -> TaskRepository:
+    return TaskRepository(engine)
+
+
+@pytest.fixture
+def instance_repo(engine: Engine) -> SQLModelInstanceRepository:
+    return SQLModelInstanceRepository(engine)
+
+
+@pytest.fixture
+def resolver(
+    task_repo: TaskRepository,
+    job_repo: JobRepository,
+    instance_repo: SQLModelInstanceRepository,
+) -> WorkResolverService:
+    return WorkResolverService(task_repo, job_repo, instance_repo)
+
+
+@pytest.fixture
+def client(resolver: WorkResolverService) -> TestClient:
+    """TestClient with the work_resolver wired in via dependency_overrides.
+
+    Uses ``app.dependency_overrides`` (the FastAPI-recommended way)
+    so the real ``get_work_resolver`` factory is bypassed in favour
+    of the test's resolver. This is what ``daemon/api.py`` does at
+    runtime via ``set_work_resolver``.
+    """
+    app = FastAPI()
+    app.include_router(work_router, prefix="/api")
+    app.dependency_overrides[get_work_resolver] = lambda: resolver
+    return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_work_resolver_global():
+    """Reset the module-level ``_work_resolver`` around each test.
+
+    The work router holds a module-level singleton that
+    ``daemon/api.py`` wires in at startup. Each test needs a clean
+    slate so ``test_uninitialized_resolver_returns_503`` can observe
+    the 503 path (the default state in CI without a real lifespan
+    run).
+    """
+    import daemon.routers.work as work_module
+    original = work_module._work_resolver
+    work_module._work_resolver = None
+    yield
+    work_module._work_resolver = original
+
+
+# ─── Seed helpers ────────────────────────────────────────────────────────────
+
+
+def _seed_instance(
+    engine: Engine,
+    *,
+    instance_id: str | None = None,
+    agent_id: str = "developer",
+    project_id: str | None = "test-project",
+) -> str:
+    """Insert an Instance row and return its ID."""
+    iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with Session(engine) as s:
+        inst = Instance(
+            instance_id=iid,
+            agent_id=agent_id,
+            agent_dir=f"/tmp/agents/{agent_id}",
+            agent_name=agent_id,
+            project_id=project_id,
+            status="running",
+            created_at=now_iso,
+            updated_at=now_iso,
+            paused_at=None,
+        )
+        s.add(inst)
+        s.commit()
+    return iid
+
+
+def _seed_job(
+    engine: Engine,
+    *,
+    job_id: str | None = None,
+    instance_id: str | None = None,
+    project_id: str | None = "test-project",
+    status: str = JobStatus.PENDING.value,
+    queue_id: str | None = None,
+) -> str:
+    """Insert a JobItem row and return its job_id."""
+    jid = job_id or str(uuid.uuid4())
+    with Session(engine) as s:
+        if queue_id is not None:
+            queue = JobQueue(
+                queue_id=queue_id,
+                project_id="test-project",
+                queue_name=queue_id,
+                queue_name_lower=queue_id,
+                queue_type="fifo",
+                concurrency_limit=1,
+                is_system=False,
+                is_paused=False,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+            s.add(queue)
+            s.commit()
+        job = JobItem(
+            job_id=jid,
+            agent_id="developer",
+            agent_dir="/tmp/agents/developer",
+            message="m",
+            source="api",
+            project_id=project_id,
+            priority=5,
+            status=status,
+            result_summary=None,
+            error_message=None,
+            instance_id=instance_id,
+            queue_id=queue_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            job_metadata={},
+        )
+        s.add(job)
+        s.commit()
+    return jid
+
+
+def _seed_task(
+    engine: Engine,
+    *,
+    work_id: str | None = None,
+    instance_id: str | None = None,
+    task_type: str = "process_message",
+    status: str = TaskStatus.PENDING.value,
+    result: str | None = None,
+    error: str | None = None,
+) -> str:
+    """Insert a Task row and return its work_id."""
+    wid = work_id or str(uuid.uuid4())
+    if instance_id is None:
+        instance_id = _seed_instance(engine)
+    with Session(engine) as s:
+        task = Task(
+            work_id=wid,
+            task_type=task_type,
+            instance_id=instance_id,
+            message_id=None,
+            status=status,
+            result=result,
+            error=error,
+            created_at=datetime.now(timezone.utc),
+        )
+        s.add(task)
+        s.commit()
+    return wid
+
+
+# ─── Tests ──────────────────────────────────────────────────────────────────
+
+
+class TestListWorkBasic:
+    """Top-level coverage: GET /work with no filters and no data."""
+
+    def test_list_work_returns_jobs_and_tasks(self, client: TestClient, engine: Engine):
+        """Seed one of each kind — GET /work returns all three."""
+        job_id = _seed_job(engine)
+        turn_id = _seed_task(engine, task_type="process_message")
+        report_id = _seed_task(engine, task_type="process_report")
+
+        resp = client.get("/api/work")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body) == 3
+        kinds = {item["work_id"]: item["kind"] for item in body}
+        assert kinds[job_id] == "job"
+        assert kinds[turn_id] == "turn"
+        assert kinds[report_id] == "report"
+
+    def test_empty_result_returns_empty_array(self, client: TestClient):
+        """No seeded data → empty list (not 404, not null)."""
+        resp = client.get("/api/work")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+class TestKindFilter:
+    """Phase 4 contract: kind split into job / turn / report / task."""
+
+    def test_kind_filter_job_returns_only_jobs(self, client: TestClient, engine: Engine):
+        job_id = _seed_job(engine)
+        _seed_task(engine, task_type="process_message")
+        _seed_task(engine, task_type="process_report")
+
+        resp = client.get("/api/work?kind=job")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == job_id
+        assert body[0]["kind"] == "job"
+
+    def test_kind_filter_turn_returns_only_turns(self, client: TestClient, engine: Engine):
+        _seed_job(engine)
+        turn_id = _seed_task(engine, task_type="process_message")
+        _seed_task(engine, task_type="process_report")
+
+        resp = client.get("/api/work?kind=turn")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == turn_id
+        assert body[0]["kind"] == "turn"
+
+    def test_kind_filter_report_returns_only_reports(self, client: TestClient, engine: Engine):
+        _seed_job(engine)
+        _seed_task(engine, task_type="process_message")
+        report_id = _seed_task(engine, task_type="process_report")
+
+        resp = client.get("/api/work?kind=report")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == report_id
+        assert body[0]["kind"] == "report"
+
+    def test_kind_filter_task_returns_all_task_kinds(self, client: TestClient, engine: Engine):
+        """``kind=task`` is the backward-compat alias for turn+report."""
+        _seed_job(engine)
+        _seed_task(engine, task_type="process_message")
+        _seed_task(engine, task_type="process_report")
+
+        resp = client.get("/api/work?kind=task")
+        assert resp.status_code == 200
+        body = resp.json()
+        # Job filtered out; both process_message and process_report present
+        assert len(body) == 2
+        kinds = {item["kind"] for item in body}
+        assert kinds == {"turn", "report"}
+
+    def test_kind_filter_report_includes_send_report_type(self, client: TestClient, engine: Engine):
+        """``send_report`` TaskType should also map to kind='report'."""
+        _seed_task(engine, task_type="send_report")
+        resp = client.get("/api/work?kind=report")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["kind"] == "report"
+
+    def test_kind_filter_no_match_returns_empty(self, client: TestClient, engine: Engine):
+        """``?kind=turn`` with no turns seeded → empty list."""
+        _seed_job(engine)
+        _seed_task(engine, task_type="process_report")
+
+        resp = client.get("/api/work?kind=turn")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+class TestStatusFilter:
+    """Canonical status filter — Task ``running`` maps to ``processing``."""
+
+    def test_status_filter_processing_returns_running_task(self, client: TestClient, engine: Engine):
+        _seed_task(engine, status=TaskStatus.PENDING.value)
+        running_id = _seed_task(engine, status=TaskStatus.RUNNING.value)
+        _seed_task(engine, status=TaskStatus.COMPLETED.value)
+
+        resp = client.get("/api/work?status=processing")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == running_id
+        assert body[0]["status"] == "processing"
+
+    def test_status_filter_comma_separated_returns_union(
+        self, client: TestClient, engine: Engine
+    ):
+        """Comma-separated status filter returns the union (Phase 4 fix).
+
+        Regression test: pre-fix, ``?status=pending,processing`` looked up
+        the literal string ``"pending,processing"`` in the reverse
+        canonical map, found nothing, and silently returned ``[]``. After
+        the fix, the resolver splits on ``,`` and unions the per-token
+        source-status sets, so a pending task AND a running task (which
+        canonicalises to ``processing``) both come back.
+        """
+        pending_id = _seed_task(engine, status=TaskStatus.PENDING.value)
+        running_id = _seed_task(engine, status=TaskStatus.RUNNING.value)
+        _seed_task(engine, status=TaskStatus.COMPLETED.value)
+
+        resp = client.get("/api/work?status=pending,processing")
+        assert resp.status_code == 200
+        body = resp.json()
+        returned_ids = {item["work_id"] for item in body}
+        assert returned_ids == {pending_id, running_id}
+        # Both canonical statuses are visible on the wire.
+        statuses = {item["status"] for item in body}
+        assert statuses == {"pending", "processing"}
+
+    def test_status_filter_comma_separated_handles_whitespace_and_dupes(
+        self, client: TestClient, engine: Engine
+    ):
+        """Whitespace stripping and deduplication on the comma list."""
+        running_id = _seed_task(engine, status=TaskStatus.RUNNING.value)
+
+        # Note the spaces, the mixed case, and the duplicate token.
+        resp = client.get("/api/work?status=%20processing%20,PROCESSING,running")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == running_id
+
+
+class TestInstanceFilter:
+    """instance_id filter narrows the result to one instance."""
+
+    def test_instance_id_filter(self, client: TestClient, engine: Engine):
+        inst_a = _seed_instance(engine, instance_id="inst-a")
+        inst_b = _seed_instance(engine, instance_id="inst-b")
+        task_a_id = _seed_task(engine, instance_id=inst_a)
+        _seed_task(engine, instance_id=inst_b)
+
+        resp = client.get(f"/api/work?instance_id={inst_a}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == task_a_id
+
+
+class TestProjectFilter:
+    """project_id filter narrows the result to one project."""
+
+    def test_project_id_filter_on_jobs(self, client: TestClient, engine: Engine):
+        job_p1 = _seed_job(engine, project_id="proj-1")
+        _seed_job(engine, project_id="proj-2")
+
+        resp = client.get("/api/work?project_id=proj-1&kind=job")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == job_p1
+
+
+class TestCombinedFilters:
+    """kind and status compose with AND."""
+
+    def test_kind_and_status_compose(self, client: TestClient, engine: Engine):
+        running_turn = _seed_task(
+            engine,
+            task_type="process_message",
+            status=TaskStatus.RUNNING.value,
+        )
+        _seed_task(
+            engine,
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+        )
+        _seed_task(
+            engine,
+            task_type="process_report",
+            status=TaskStatus.RUNNING.value,
+        )
+
+        resp = client.get("/api/work?kind=turn&status=processing")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["work_id"] == running_turn
+
+
+class TestErrorResponses:
+    """HTTP error paths: 400 for bad kind, 503 for uninitialized resolver."""
+
+    def test_invalid_kind_returns_400(self, client: TestClient):
+        resp = client.get("/api/work?kind=invalid")
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert "invalid" in detail["error"].lower()
+        assert set(detail["accepted"]) == {"job", "task", "report", "turn"}
+
+    def test_uninitialized_resolver_returns_503(self):
+        """Without ``set_work_resolver``, GET /work should 503."""
+        app = FastAPI()
+        app.include_router(work_router, prefix="/api")
+        # NO dependency_overrides — exercises the None branch in get_work_resolver.
+        # The autouse ``_reset_work_resolver_global`` fixture has already
+        # cleared the module-level global for us.
+        test_client = TestClient(app)
+        resp = test_client.get("/api/work")
+        assert resp.status_code == 503
+        assert "not initialized" in str(resp.json()).lower()
+
+
+class TestSerialization:
+    """JSON serialization shape — the frontend contract."""
+
+    def test_created_at_serialized_as_iso8601(self, client: TestClient, engine: Engine):
+        wid = _seed_task(engine)
+        resp = client.get("/api/work")
+        assert resp.status_code == 200
+        body = resp.json()
+        item = next(i for i in body if i["work_id"] == wid)
+        # Should be a string in ISO 8601 format
+        assert isinstance(item["created_at"], str)
+        # Round-trip parse should succeed
+        parsed = datetime.fromisoformat(item["created_at"])
+        assert isinstance(parsed, datetime)
+
+    def test_response_field_shape(self, client: TestClient, engine: Engine):
+        """All advertised fields present, none extra, none missing."""
+        # Result is a JSON object — WorkResolverService's
+        # ``_parse_task_result_summary`` re-serialises non-string JSON
+        # values via ``json.dumps``, so the result_summary is the JSON
+        # string ``'{"output": "hello"}'`` rather than the decoded
+        # dict (the API contract is JSON-safe strings).
+        wid = _seed_task(
+            engine,
+            task_type="process_message",
+            result='{"output": "hello"}',
+        )
+        resp = client.get("/api/work")
+        body = resp.json()
+        item = next(i for i in body if i["work_id"] == wid)
+        assert set(item.keys()) == {
+            "work_id", "kind", "status", "instance_id",
+            "project_id", "agent_id", "result_summary", "error",
+            "created_at",
+        }
+        assert item["kind"] == "turn"
+        assert item["result_summary"] == '{"output": "hello"}'
+
+    def test_none_fields_serialized_as_null(self, client: TestClient, engine: Engine):
+        """None values round-trip as JSON null (not omitted)."""
+        wid = _seed_task(engine)
+        resp = client.get("/api/work")
+        body = resp.json()
+        item = next(i for i in body if i["work_id"] == wid)
+        # JSON null is ``None`` in Python after deserialisation.
+        # We explicitly check the raw JSON to assert the wire shape.
+        raw = resp.text
+        assert '"result_summary":null' in raw or '"result_summary": null' in raw
+        assert '"error":null' in raw or '"error": null' in raw
+        # Belt-and-suspenders: decoded nulls are Python None.
+        assert item["result_summary"] is None
+        assert item["error"] is None

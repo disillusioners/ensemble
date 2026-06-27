@@ -53,12 +53,13 @@ from daemon.routers import (
     agents_router,
     database_router,
     instances_router,
+    jobs_router,
     messages_router,
     mappings_router,
     schedules_router,
     sources_router,
     webhooks_router,
-    jobs_router,
+    work_router,
     projects_router,
     queues_router,
     dlq_router,
@@ -515,6 +516,16 @@ async def lifespan(app: FastAPI):
     set_proj_mgmt_service(job_queue_mgmt_service)
     from daemon.routers.queues import set_job_queue_mgmt_service as set_queue_mgmt_service
     set_queue_mgmt_service(job_queue_mgmt_service)
+
+    # Set WorkResolverService for work router injection.
+    # Phase 4 (2026-06-27) of feature/virtual-job-management-surface:
+    # GET /api/work relies on the same WorkResolverService that the
+    # watcher repo + worker pool + task processor + stale-task
+    # recovery already consume (constructed earlier in this lifespan
+    # block). The router follows the queues.py DI pattern (module-
+    # level global + setter + Depends factory).
+    from daemon.routers.work import set_work_resolver
+    set_work_resolver(work_resolver)
 
     # Start StreamableHTTP session manager within lifespan
     session_mgr = get_kb_mcp_session_manager()
@@ -1096,6 +1107,7 @@ def create_app() -> FastAPI:
     api_router.include_router(schedules_router)     # /api/schedules
     api_router.include_router(webhooks_router)      # /api/webhooks
     api_router.include_router(jobs_router)          # /api/jobs
+    api_router.include_router(work_router)          # /api/work  (Phase 4: virtual job mgmt)
     api_router.include_router(projects_router)      # /api/projects
     api_router.include_router(queues_router)        # /api/queues
     api_router.include_router(dlq_router)           # /api/dlq

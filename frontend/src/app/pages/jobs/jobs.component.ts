@@ -2,6 +2,7 @@ import { Component, signal, computed, inject, OnInit, OnDestroy, effect } from '
 import { Router } from '@angular/router';
 import { CommonModule } from '@angular/common';
 import { MatButtonModule } from '@angular/material/button';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
@@ -19,6 +20,7 @@ import { ProjectService } from '../../services/project.service';
 import { TabStateService } from '../../services/tab-state.service';
 import { QueueService } from '../../services/queue.service';
 import { ApiService } from '../../services/api.service';
+import { WorkService } from '../../services/work.service';
 import { JobCardComponent } from '../../components/job-card/job-card.component';
 import { JobDetailDrawerComponent } from '../../components/job-detail-drawer/job-detail-drawer.component';
 import { JobCreateDialogComponent, JobCreateDialogResult } from '../../components/job-create-dialog/job-create-dialog.component';
@@ -27,6 +29,21 @@ import { Job, JobFilters, JobStatus, JobSource, JobEventPayload, isTerminalStatu
 import { JobQueue } from '../../models/job-queue.model';
 import { Project } from '../../models/project.model';
 import { Agent } from '../../models';
+import { Work } from '../../models/work.model';
+
+/**
+ * Top-level view mode for the Jobs page (Phase 4 — Virtual Job
+ * Management Surface).
+ *
+ * * ``'queues'``   — the legacy "Queues" view: queue sidebar on the
+ *   left, jobs filtered by selected queue on the right. Backed by
+ *   ``JobService``.
+ * * ``'all-work'`` — the unified work list: queue sidebar still
+ *   visible but inactive, main pane shows ALL work records (jobs +
+ *   turns + reports) backed by ``WorkService``. The kind chip on
+ *   each card tells the user which backing table the row came from.
+ */
+export type JobsViewMode = 'queues' | 'all-work';
 
 @Component({
   selector: 'app-jobs',
@@ -34,6 +51,7 @@ import { Agent } from '../../models';
   imports: [
     CommonModule,
     MatButtonModule,
+    MatButtonToggleModule,
     MatIconModule,
     MatProgressSpinnerModule,
     MatChipsModule,
@@ -59,10 +77,12 @@ export class JobsComponent implements OnInit, OnDestroy {
   private readonly tabStateService = inject(TabStateService);
   private readonly queueService = inject(QueueService);
   private readonly api = inject(ApiService);
+  private readonly workService = inject(WorkService);
   private readonly dialog = inject(MatDialog);
   private readonly snackBar = inject(MatSnackBar);
-  
+
   private readonly STORAGE_KEY = 'job-page-selected-project';
+  private readonly VIEW_MODE_KEY = 'job-page-view-mode';
   private refreshInterval: ReturnType<typeof setInterval> | null = null;
   private sseSubscription: Subscription | null = null;
   private projectRestored = false;
@@ -75,20 +95,31 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly selectedJob = signal<Job | null>(null);
   readonly drawerOpen = signal(false);
   readonly projects = this.projectService.projects;
-  
+
   // Queue sidebar signals
   readonly selectedQueueId = signal<string | null>(null);
   readonly selectedProjectId = computed(() => this.filters().project_id ?? null);
-  
+
   // Filter signals
   readonly filters = signal<JobFilters>({});
-  
+
   // DLQ signals
   readonly retryingAll = signal(false);
   readonly isDeadLetterFilterActive = computed(() => this.filters().status?.includes('dead_letter') ?? false);
-  
+
   // Deleted jobs filter
   readonly showDeleted = signal(false);
+
+  // View mode signal (Phase 4) — 'queues' (legacy) or 'all-work'
+  // (unified list backed by /api/work). Persisted in localStorage so
+  // the user's preferred view survives a page reload.
+  readonly viewMode = signal<JobsViewMode>('queues');
+  private viewModeRestored = false;
+
+  // Unified work list (Phase 4) — only populated when viewMode is
+  // 'all-work'. The mapping to Job[] lives in ``displayedJobs`` so
+  // the rest of the template can stay type-agnostic.
+  readonly works = signal<Work[]>([]);
   
   // SSE connection status
   readonly isConnected = this.jobSseService.isConnected;
@@ -152,6 +183,89 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly hasJobs = computed(() => this.filteredJobs().length > 0);
   readonly isEmptyState = computed(() => !this.loading() && this.filteredJobs().length === 0 && !this.error());
 
+  // Phase 4 — unified work view computeds.
+
+  /**
+   * Source for the displayed list — either the legacy filteredJobs
+   * (queues view) or jobs synthesised from the WorkService response
+   * (all-work view). The card template stays type-stable on ``Job``
+   * so it does not need to branch on view mode.
+   */
+  readonly displayedJobs = computed<Job[]>(() => {
+    if (this.viewMode() === 'all-work') {
+      return this.worksAsJobs();
+    }
+    return this.filteredJobs();
+  });
+
+  /**
+   * Map ``Work`` records onto the ``Job`` shape that ``JobCardComponent``
+   * already knows how to render.
+   *
+   * The mapping is deliberately one-way and lossy — turn / report rows
+   * do not have a ``message`` or ``priority`` in the backend, so the
+   * JobCardComponent's ``messagePreview`` falls back to ``result_summary``
+   * and the priority badge reads as ``P0``. The ``kind`` field is what
+   * carries the semantic difference; that is the whole point of the
+   * kind chip.
+   *
+   * The map also pins ``queue_id`` to ``null`` for non-job kinds so a
+   * stale value cannot accidentally re-enable the queue badge after
+   * the kind guardrail runs in JobCardComponent.
+   */
+  private worksAsJobs(): Job[] {
+    return this.works().map((work) => this.workToJob(work));
+  }
+
+  /**
+   * Single-row Work → Job mapper. Kept private and pure so it can be
+   * reused by the SSE update path when a work_id event arrives.
+   */
+  private workToJob(work: Work): Job {
+    return {
+      job_id: work.work_id,
+      agent_id: work.agent_id ?? '',
+      message: undefined,
+      source: undefined,
+      project_id: work.project_id,
+      priority: 0,
+      status: (work.status as Job['status']) ?? 'pending',
+      created_at: work.created_at,
+      started_at: null,
+      completed_at: null,
+      instance_id: work.instance_id,
+      error_message: work.error,
+      result_summary: work.result_summary,
+      queue_id: null,
+      cancelled_at: null,
+      kind: work.kind,
+    };
+  }
+
+  /**
+   * Empty-state flag for the unified work view (Phase 4).
+   */
+  readonly isEmptyWorkState = computed(() => {
+    return this.viewMode() === 'all-work'
+      && !this.workLoading()
+      && this.works().length === 0
+      && !this.workError();
+  });
+
+  /**
+   * Convenience boolean — true while the page is in the all-work view.
+   */
+  readonly isAllWorkView = computed(() => this.viewMode() === 'all-work');
+
+  /**
+   * Convenience accessors for the WorkService signals so the template
+   * does not need to reach into a private field. Wrapping in computed
+   * is intentional — it lets Angular track the dependency cleanly
+   * through the template change-detection cycle.
+   */
+  readonly workLoading = computed(() => this.workService.loading());
+  readonly workError = computed(() => this.workService.error());
+
   // Status filter options
   readonly statusOptions: { value: JobStatus; label: string }[] = [
     { value: 'pending', label: 'Pending' },
@@ -214,6 +328,17 @@ export class JobsComponent implements OnInit, OnDestroy {
         this.tryRestoreProject();
       }
     });
+
+    // Effect to restore the persisted view mode ('queues' vs.
+    // 'all-work') once on first read. Uses a guard flag so it does
+    // not race with subsequent user-driven view-mode changes.
+    effect(() => {
+      if (this.viewModeRestored) {
+        return;
+      }
+      this.viewModeRestored = true;
+      this.tryRestoreViewMode();
+    });
   }
 
   ngOnInit(): void {
@@ -221,6 +346,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     this.loadAgents();
     this.loadProjects();
     this.startAutoRefresh();
+    // Phase 4 — kick off an initial WorkService fetch in parallel so
+    // switching to the All Work view later is instantaneous. The fetch
+    // is harmless if the user never toggles the view mode.
+    this.loadWorks();
   }
 
   private tryRestoreProject(): void {
@@ -250,6 +379,28 @@ export class JobsComponent implements OnInit, OnDestroy {
         localStorage.removeItem(this.STORAGE_KEY);
       } catch {
         // silently ignore
+      }
+    }
+  }
+
+  /**
+   * Restore the persisted view mode ('queues' vs 'all-work') from
+   * localStorage. Wrapped in try/catch for private-browsing safety
+   * — matches the pattern used by ``tryRestoreProject``.
+   */
+  private tryRestoreViewMode(): void {
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem(this.VIEW_MODE_KEY);
+    } catch {
+      return;
+    }
+    if (saved === 'queues' || saved === 'all-work') {
+      this.viewMode.set(saved);
+      // If the user previously left the page in all-work view, kick
+      // off an initial fetch so the list is not blank on reload.
+      if (saved === 'all-work') {
+        this.loadWorks();
       }
     }
   }
@@ -289,6 +440,45 @@ export class JobsComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Phase 4 — fetch the unified work list from ``WorkService``.
+   *
+   * Filters mirror what the page already exposes for the legacy
+   * Jobs view (status / project_id); the queue sidebar stays inactive
+   * in this view so we deliberately do NOT push ``queue_id`` into the
+   * filter payload — that filter would force the backend to return
+   * ONLY queued work, defeating the unified surface.
+   *
+   * Errors are non-fatal — the legacy Jobs list still renders and the
+   * snackbar gives the operator a hint about why the work list is
+   * empty.
+   */
+  private loadWorks(): void {
+    const projectId = this.filters().project_id;
+    const statusFilter = this.filters().status;
+    this.workService.getWork({
+      project_id: projectId || undefined,
+      status: statusFilter && statusFilter.length > 0 ? statusFilter.join(',') : undefined,
+    }).subscribe({
+      next: (works) => {
+        this.works.set(works);
+      },
+      error: (err) => {
+        console.error('[Jobs] Failed to load works:', err);
+        // Surface the error to the user; do NOT clear the legacy
+        // Jobs signal — operators may still want to use that view.
+        this.snackBar.open(
+          err?.message || 'Failed to load unified work list',
+          'Dismiss',
+          {
+            duration: 5000,
+            panelClass: 'error-snackbar'
+          }
+        );
+      }
+    });
+  }
+
   private loadAgents(): void {
     this.api.listAgents().subscribe({
       next: (response) => {
@@ -302,6 +492,15 @@ export class JobsComponent implements OnInit, OnDestroy {
 
   private startAutoRefresh(): void {
     this.refreshInterval = setInterval(() => {
+      if (this.viewMode() === 'all-work') {
+        // Refresh whichever view is currently active. The legacy
+        // refresh path stays untouched so other call sites are not
+        // disturbed.
+        if (!this.workService.loading()) {
+          this.loadWorks();
+        }
+        return;
+      }
       if (!this.loading()) {
         this.jobService.refreshJobs(this.filters());
       }
@@ -336,10 +535,58 @@ export class JobsComponent implements OnInit, OnDestroy {
           : job
       )
     );
+
+    // Phase 4 — also patch the unified Work list so SSE updates
+    // land on the right record in the All Work view too. The SSE
+    // payload uses ``job_id`` as the work_id key — the backend SSE
+    // endpoint already resolves work_id through WorkResolverService,
+    // so the same status update is valid for both Job and Work rows.
+    this.works.update(works =>
+      works.map(work =>
+        work.work_id === status.job_id
+          ? {
+              ...work,
+              status: status.status || work.status,
+              instance_id: status.instance_id ?? work.instance_id,
+              result_summary: status.result_summary ?? work.result_summary,
+              error: status.error_message ?? work.error,
+            }
+          : work
+      )
+    );
   }
 
   protected onRefresh(): void {
-    this.loadJobs();
+    if (this.viewMode() === 'all-work') {
+      this.loadWorks();
+    } else {
+      this.loadJobs();
+    }
+  }
+
+  /**
+   * Phase 4 — switch between 'queues' (legacy) and 'all-work'
+   * (unified list backed by /api/work). Persists the choice so it
+   * survives a reload.
+   *
+   * Switching INTO 'all-work' triggers an immediate fetch if the
+   * work list is empty — the initial ngOnInit fetch may have raced
+   * with the first paint and we do not want the user to see a
+   * stale blank list.
+   */
+  protected onViewModeChange(mode: JobsViewMode): void {
+    if (this.viewMode() === mode) {
+      return;
+    }
+    this.viewMode.set(mode);
+    try {
+      localStorage.setItem(this.VIEW_MODE_KEY, mode);
+    } catch {
+      // Private-browsing — silently ignore.
+    }
+    if (mode === 'all-work' && this.works().length === 0) {
+      this.loadWorks();
+    }
   }
 
   protected onStatusFilterChange(statuses: JobStatus[]): void {
