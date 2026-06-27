@@ -28,6 +28,8 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from daemon.graph import ThinkingChatOpenAI
 
+pytestmark = pytest.mark.integration
+
 
 # =============================================================================
 # Mock LLM Server (Real HTTP Server)

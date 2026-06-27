@@ -35,7 +35,7 @@ from sqlmodel import Session, SQLModel
 
 # Model imports — required so SQLModel.metadata sees the tables when
 # create_all() runs on the test engine.
-from daemon.repositories.dependency_bus.models import DependencyWatcher  # noqa: F401  (for SQLModel.metadata.create_all)
+from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState  # noqa: F401  (for SQLModel.metadata.create_all)
 from daemon.repositories.dependency_bus.repository import DependencyWatcherRepository
 from daemon.repositories.event.models import Event, EventKind  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
@@ -201,6 +201,59 @@ def _seed_message(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _seed_dependency_watcher(
+    engine: Engine,
+    *,
+    target_instance_id: str,
+    source_task_id: str | None = None,
+    state: str = DependencyWatcherState.PENDING.value,
+) -> str:
+    """Insert a DependencyWatcher row targeting the given instance."""
+    sid = source_task_id or f"task-{uuid.uuid4().hex[:8]}"
+    with Session(engine) as session:
+        watcher = DependencyWatcher(
+            source_task_id=sid,
+            target_instance_id=target_instance_id,
+            follow_up_payload={"kind": "follow_up"},
+            watcher_metadata={"child_id": sid},
+            state=state,
+        )
+        session.add(watcher)
+        session.commit()
+    return sid
+
+
+def _seed_message_job_item(
+    engine: Engine,
+    *,
+    instance_id: str,
+    job_id: str | None = None,
+    status: str = JobStatus.PROCESSING.value,
+) -> str:
+    """Insert a JobItem row of ``job_type='message'`` for the given instance.
+
+    Used by the post-Phase-5 regression tests to verify that residual
+    MESSAGE JobItem rows (no longer created by the post-D13 dispatch
+    path) do NOT block the WAITING_CHILDREN write — the legacy
+    ``_has_no_active_message_job`` carve-out guard was removed.
+    """
+    jid = job_id or f"job-{uuid.uuid4().hex[:8]}"
+    with Session(engine) as session:
+        job = JobItem(
+            job_id=jid,
+            agent_id="leader",
+            agent_dir="/tmp/leader",
+            message="stale message job",
+            source="api",
+            instance_id=instance_id,
+            job_type="message",
+            status=status,
+        )
+        session.add(job)
+        session.commit()
+    return jid
+
+
 class TestRootPendingMessagesNormalPath:
     """When the root instance has pending messages in its own queue, the
     WAITING_CHILDREN status write proceeds (was previously gated by
@@ -219,6 +272,208 @@ class TestRootPendingMessagesNormalPath:
         service = _build_child_reports_service(engine)
         root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
         _seed_message(engine, instance_id=root_id, status=MessageStatus.READY.value)
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+
+        assert result.outcome == "root_waiting_children"
+        assert result.instance_id == root_id
+
+        with Session(engine) as session:
+            inst = session.get(Instance, root_id)
+            assert inst.status == InstanceStatus.WAITING_CHILDREN.value
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests for deferred_waiting_children (newly-unconditional path)
+#
+# After Phase 5 removed the ``_has_no_active_message_job`` guard, the
+# ``deferred_waiting_children`` outcome (around line ~1149 / ~1195 / ~1300
+# in ``daemon/services/child_reports.py``) is reachable whenever the bus
+# has PENDING watchers for the instance — no carve-out gating.
+#
+# Test A documents the newly-unconditional path:
+#   - A parent instance with PENDING bus watchers correctly gets the
+#     ``deferred_waiting_children`` outcome.
+#
+# Test B documents the post-removal invariant:
+#   - A stale MESSAGE ``JobItem`` row (if any residual exists) does NOT
+#     block the WAITING_CHILDREN write — the guard is gone, so the
+#     pending own-queue message alone drives the outcome.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestDeferredWaitingChildrenNewlyUnconditionalPath:
+    """Tests for the ``deferred_waiting_children`` outcome — newly
+    unconditionally reachable after the Phase 5 removal of the
+    ``_has_no_active_message_job`` guard.
+
+    The bus (``DependencyBus``) is the post-D13 authoritative completion
+    signal; when the bus has PENDING watchers for an instance, the
+    completion gate defers with ``deferred_waiting_children`` and the
+    instance stays in its current status (no WAITING_CHILDREN transition
+    on the early-return path at line ~1149)."""
+
+    def test_root_with_pending_bus_watcher_returns_deferred_waiting_children(
+        self, engine: Engine
+    ):
+        """A root instance with a PENDING ``DependencyWatcher`` row
+        correctly yields the ``deferred_waiting_children`` outcome.
+
+        This documents that the newly-unconditional path (no longer
+        gated by ``_has_no_active_message_job``) works as expected:
+        the bus pending-children count is the authoritative signal and
+        the completion gate defers without transitioning status.
+        """
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_dependency_watcher(
+            engine, target_instance_id=root_id, state=DependencyWatcherState.PENDING.value
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+
+        assert result.outcome == "deferred_waiting_children"
+        assert result.instance_id == root_id
+        assert result.parent_id is None
+
+        # The early-return deferred path does NOT transition status
+        # (Phase 4: instances stay in their current status while
+        # children run; the bus is authoritative).
+        with Session(engine) as session:
+            inst = session.get(Instance, root_id)
+            assert inst.status == InstanceStatus.RUNNING.value
+
+    def test_root_with_fired_bus_watcher_proceeds_to_completion_path(
+        self, engine: Engine
+    ):
+        """A root instance whose bus watcher has already FIRED is no
+        longer blocked by a residual PENDING watcher — the gate
+        consults the live bus state, not the historical record.
+
+        This documents that the deferred path is conditional on the
+        CURRENT bus state (PENDING watchers), not on whether watchers
+        EVER existed for the instance.
+        """
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
+        # All watchers FIRED — the bus sees zero pending children.
+        _seed_dependency_watcher(
+            engine,
+            target_instance_id=root_id,
+            state=DependencyWatcherState.FIRED.value,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+
+        # No pending bus watchers + no pending own-queue messages →
+        # root_completed. (This is the control case that demonstrates
+        # the deferred path is conditional, not unconditional.)
+        assert result.outcome == "root_completed"
+        assert result.instance_id == root_id
+
+        with Session(engine) as session:
+            inst = session.get(Instance, root_id)
+            assert inst.status == InstanceStatus.COMPLETED.value
+
+
+class TestStaleMessageJobDoesNotBlockWaitingChildren:
+    """Post-removal invariant: a residual MESSAGE ``JobItem`` row must
+    NOT block the WAITING_CHILDREN write.
+
+    Before Phase 5, ``_has_no_active_message_job`` queried
+    ``job_queue_items`` for active MESSAGE jobs (``job_type='message'``
+    with status IN (PENDING, PROCESSING) and ``deleted_at IS NULL``)
+    and could gate the WAITING_CHILDREN write. After Phase 5 removed
+    the guard, the WAITING_CHILDREN write proceeds purely on the
+    own-queue ``pending_count`` signal — residual MESSAGE JobItem rows
+    are ignored.
+
+    These tests insert a MESSAGE JobItem row alongside a pending
+    own-queue message and assert that the write proceeds with
+    ``root_waiting_children``. If someone re-introduces a MESSAGE-
+    job-active guard in the future, these tests will fail loudly.
+    """
+
+    def test_stale_processing_message_job_does_not_block_waiting_children(
+        self, engine: Engine
+    ):
+        """A residual PROCESSING MESSAGE ``JobItem`` row does NOT block
+        the WAITING_CHILDREN write. Outcome must be
+        ``root_waiting_children`` (driven by the pending own-queue
+        message alone — the MESSAGE-job guard is gone).
+        """
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
+        # Pending own-queue message — drives the own-queue pending_count > 0 path.
+        _seed_message(engine, instance_id=root_id, status=MessageStatus.READY.value)
+        # Residual MESSAGE JobItem — would have been an active MESSAGE worker
+        # before D13. After Phase 5 guard removal, this row is invisible to
+        # the completion gate.
+        _seed_message_job_item(
+            engine,
+            instance_id=root_id,
+            status=JobStatus.PROCESSING.value,
+        )
+
+        result = service._process_child_completion_db_sync(
+            instance_id=root_id,
+            completed_message_id="msg-different-id",
+            last_content="assistant text",
+        )
+
+        # Stale MESSAGE JobItem must NOT have blocked the write.
+        assert result.outcome == "root_waiting_children"
+        assert result.instance_id == root_id
+
+        # WAITING_CHILDREN write committed — the post-removal invariant.
+        with Session(engine) as session:
+            inst = session.get(Instance, root_id)
+            assert inst.status == InstanceStatus.WAITING_CHILDREN.value
+
+            # The residual MESSAGE JobItem is still in the table —
+            # untouched by the completion gate.
+            from sqlmodel import select as _sa_select
+            jobs = session.exec(
+                _sa_select(JobItem).where(
+                    JobItem.instance_id == root_id,
+                    JobItem.job_type == "message",
+                )
+            ).all()
+            assert len(jobs) == 1
+            assert jobs[0].status == JobStatus.PROCESSING.value
+
+    def test_stale_pending_message_job_does_not_block_waiting_children(
+        self, engine: Engine
+    ):
+        """A residual PENDING MESSAGE ``JobItem`` row (the other
+        non-terminal state the legacy guard checked) also does NOT
+        block the WAITING_CHILDREN write.
+
+        Mirrors the PROCESSING case above — covers both
+        ``JobStatus.PENDING`` and ``JobStatus.PROCESSING`` (the two
+        non-terminal states the legacy ``_has_no_active_message_job``
+        guard scanned for).
+        """
+        service = _build_child_reports_service(engine)
+        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
+        _seed_message(engine, instance_id=root_id, status=MessageStatus.READY.value)
+        _seed_message_job_item(
+            engine,
+            instance_id=root_id,
+            status=JobStatus.PENDING.value,
+        )
 
         result = service._process_child_completion_db_sync(
             instance_id=root_id,

@@ -101,10 +101,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from sqlalchemy import text
-from sqlmodel import Session, select
+from sqlmodel import Session, SQLModel, select
 
 # Import the JobItem model so its ``Table`` is registered on
 # ``SQLModel.metadata`` before the session-scoped ``pg_engine`` fixture
@@ -116,6 +117,7 @@ from daemon.repositories.dependency_bus import (  # noqa: F401
     DependencyWatcherState,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus  # noqa: F401
+from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus  # noqa: F401
 from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageQueue,
@@ -123,12 +125,15 @@ from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageType,
 )
 from daemon.repositories.task.models import Task, TaskStatus, TaskType  # noqa: F401
+from daemon.services.cancellation import CancellationService
+from daemon.services.instance_messaging import InstanceMessagingService
 from daemon.services.dependency_bus import (
     DependencyBus,
     FollowUp,
     Outcome,
     set_dependency_bus,
 )
+from daemon.write_pause_guard import WritePauseGuard
 
 
 # Auto-apply the postgres marker so ``pytest -m postgres`` selects these
@@ -226,6 +231,94 @@ def instance_id() -> str:
     return f"06f500af-{uuid.uuid4().hex[:8]}"
 
 
+@pytest.fixture
+def cancellation_service():
+    """Real ``CancellationService`` shim with ``is_shutting_down=False``.
+
+    The messaging service only reads ``is_shutting_down`` to reject
+    enqueues during shutdown — we don't need a fully-wired service.
+    A ``MagicMock(spec=CancellationService)`` with the one attribute set
+    is the minimum surface that satisfies ``_prepare_enqueued_message``.
+    """
+    service = MagicMock(spec=CancellationService)
+    service.is_shutting_down = False
+    return service
+
+
+@pytest.fixture
+def write_guard() -> WritePauseGuard:
+    """Real ``WritePauseGuard`` (no active pause)."""
+    return WritePauseGuard()
+
+
+@pytest.fixture
+def instance_repository(pg_repository_factory) -> SQLModelInstanceRepository:
+    """Real ``SQLModelInstanceRepository`` bound to the PG engine.
+
+    The repository reads the instance row inside ``_prepare_enqueued_message``
+    so the dispatch path can transition IDLE → RUNNING. A real repo (not a
+    mock) keeps the test honest about the actual on-disk shape of the
+    instance row PostgreSQL will see in production.
+    """
+    return pg_repository_factory(SQLModelInstanceRepository)
+
+
+@pytest.fixture
+def messaging_manager(pg_engine, instance_repository, write_guard):
+    """Mock ``InstanceManager`` exposing only the attributes ``enqueue_message``
+    actually touches.
+
+    Pattern mirrors the helper in ``tests/test_enqueue_shared.py`` so the
+    fixture lives next to its usage and a future maintainer doesn't have to
+    chase the test-file-to-fixture map across two directories.
+    """
+    manager = MagicMock()
+    manager.engine = pg_engine
+    manager.write_guard = write_guard
+    manager._instance_repository = instance_repository
+
+    # ``enqueue_message`` awaits ``stream_status_change`` after a successful
+    # IDLE → RUNNING transition. Capture the call so the test can assert on
+    # it if needed; otherwise just no-op.
+    manager._live_hub = MagicMock()
+    manager._live_hub.stream_status_change = AsyncMock()
+
+    # ``enqueue_message`` calls ``_worker_pool.notify_work()`` after the
+    # prelude writes the Task row. The code guards with ``if
+    # self._manager._worker_pool is not None`` so a MagicMock is fine.
+    manager._worker_pool = MagicMock()
+    manager._worker_pool.notify_work = MagicMock()
+
+    # JobQueueService.enqueue is NEVER called for messages (D13 invariant).
+    # The mock is wired to a sentinel value so any unexpected call would
+    # surface as ``"job-test-123"`` in assertions and be obviously wrong.
+    manager._job_queue_service = MagicMock()
+    manager._job_queue_service.enqueue = AsyncMock(
+        return_value=MagicMock(job_id="job-test-123")
+    )
+
+    # ``_maybe_trigger_title_generation`` calls
+    # ``_generate_and_broadcast_title`` via ``MainLoopBridge.run_async_no_wait``
+    # — patched out at the call site so we don't need a real LLM in PG tests.
+    manager._generate_and_broadcast_title = AsyncMock()
+
+    return manager
+
+
+@pytest.fixture
+def messaging_service(messaging_manager, cancellation_service):
+    """``InstanceMessagingService`` wired to real PG engine + mock manager.
+
+    Returns the service directly (not via ``InstanceMessagingService(manager)``)
+    so individual tests can exercise different code paths without rebuilding
+    the wiring.
+    """
+    return InstanceMessagingService(
+        manager=messaging_manager,
+        cancellation_service=cancellation_service,
+    )
+
+
 # =============================================================================
 # Raw-SQL insert helpers
 # =============================================================================
@@ -271,11 +364,13 @@ def _insert_task(
 ) -> int:
     """Insert a ``task`` row with the given status; return its integer id.
 
+    Used by Scenarios 1 and 2 to seed CANCELLED / PAUSED task rows
+    whose orphan watcher should (or should not) be swept on bus.start().
     Uses a raw INSERT (not ``session.add``) so we don't fight with the
     Task model's ``version_id_col`` machinery in a test that's just
     setting up fixture state. The integer primary key is generated by
-    SQLite/PostgreSQL via the autoincrement / serial column; we use
-    ``RETURNING id`` to capture it.
+    PostgreSQL via the serial column; we use ``RETURNING id`` to capture
+    it.
 
     NOTE: ``retry_count``, ``cancel_requested``, and ``retry_scheduled``
     are NOT NULL on the schema (SQLModel ``Field(default=...)`` only
@@ -492,123 +587,87 @@ async def test_paused_task_watcher_not_cancelled_by_sweep(
 
 
 @pytest.mark.asyncio
-async def test_d13_single_record_invariant(pg_engine, instance_id):
-    """Scenario 3 placeholder simulation — D13 single-record invariant.
+async def test_d13_single_record_invariant(
+    pg_engine,
+    instance_id,
+    messaging_service,
+):
+    """Scenario 3: D13 single-record invariant.
 
-    NOTE: This test is a *placeholder simulation*, not a faithful
-    reproduction of any single code path. It inserts BOTH a Task row
-    AND a JobItem(job_type='message') row for the same message to
-    represent the dual-record coupling problem state — no current
-    dispatch path produces both records together.
+    Drives the D13 invariant through the real
+    ``InstanceMessagingService.enqueue_message`` dispatch path against
+    PostgreSQL — the canonical code path where the invariant is enforced.
+    This replaces the earlier placeholder simulation, which inserted both
+    a ``task`` row AND a ``job_queue_items`` row with ``job_type='message'``
+    to represent the dual-record coupling problem state.
 
-    When Phase 2 lands and ``enqueue_message`` always writes only Task
-    + MessageQueue (no JobItem ever) and ``enqueue_job`` rejects
-    ``job_type='message'``, this simulation can be replaced with a real
-    ``enqueue_message`` invocation (e.g. via a focused
-    ``InstanceManager`` test fixture) without changing the assertion
-    contract — the invariant is what matters, not how the rows got
-    there.
+    After the D11-D13 architecture migration:
 
-    Today's actual dispatch paths
-    (``daemon/services/instance_messaging.py``):
-      * ``workerpool`` path — writes ``message_queue`` + ``task`` rows
-        (NO ``job_queue_items`` row).
-      * ``jobqueue`` path  — writes ``message_queue`` +
-        ``job_queue_items`` (job_type='message') + a DispatchEventBus
-        event (NO ``task`` row).
+      * ``enqueue_message`` routes ALL messages through the unified
+        ``_prepare_enqueued_message`` prelude, which writes ``message_queue``
+        + ``task`` rows in a single transaction. The WorkerPool is the
+        only dispatch primitive for messages — no ``JobItem`` is ever
+        created.
+      * ``enqueue_job`` rejects ``job_type='message'`` as defense-in-depth.
 
-    The dual-record coupling problem: both paths can coexist for the
-    same logical work, and a JobItem created via the jobqueue path can
-    diverge from the Task lifecycle under retry/cancel, leaving orphan
-    watchers in the DependencyBus — the structural root cause of the
-    06f500af bug class. Phase 2 (D13) eliminates this by making
-    ``enqueue_message`` route ALL messages through the WorkerPool path
-    (write only ``task`` + ``message_queue`` rows) and making
-    ``enqueue_job`` reject ``job_type='message'``. The net result: one
-    user message → exactly one Task row, zero JobItems with
-    ``job_type='message'``.
+    The net result: one user message → exactly one ``message_queue`` row,
+    exactly one ``task`` row, and zero ``job_queue_items`` rows with
+    ``job_type='message'``. This structural guarantee is what makes the
+    06f500af-class bug (parent stranded in ``waiting_children`` because a
+    PENDING watcher on a JobItem diverged from the Task lifecycle)
+    impossible by construction.
 
-    Test approach
-    -------------
-    To keep this test independent of the full ``InstanceManager``
-    wiring (LLM, checkpointer, LangGraph, MCP), the simulation inserts:
-      * One ``Instance`` row (parent, IDLE).
-      * One ``message_queue`` row (the user's message).
-      * One ``task`` row (the WorkerPool dispatch unit).
-      * One ``job_queue_items`` row with ``job_type='message'`` (the
-        offending dual-record artifact — what Phase 2 removes).
+    Steps:
+      1. Insert an ``Instance`` row in IDLE status — the parent that
+         will receive the message.
+      2. Call ``messaging_service.enqueue_message(...)`` — the real
+         dispatch path (no mocks on the DB side).
+      3. Assert the invariant on the real PostgreSQL tables:
+           * Exactly 1 ``message_queue`` row for ``instance_id``.
+           * Exactly 1 ``task`` row for ``instance_id``.
+           * Exactly 0 ``job_queue_items`` rows with ``job_type='message'``
+             for ``instance_id``.
 
-    The assertion verifies the D13 invariant fails today (red phase)
-    and will pass once Phase 2 lands.
+    Pre-Phase-2: ``enqueue_message`` could create both records (or a
+    JobItem via the legacy ``jobqueue`` dispatch path), so this test
+    would fail. Post-Phase-2 + D13: green.
     """
-    message_id = str(uuid.uuid4())
     _insert_instance(pg_engine, instance_id)
 
-    # Insert the message_queue row (the user's message landed in the queue).
-    with pg_engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO message_queue "
-                "(message_id, instance_id, content, type, source, status, "
-                " priority, retry_count, max_retries, enqueued_at) "
-                "VALUES (:mid, :iid, :content, :type, :source, :status, "
-                " :priority, :retry_count, :max_retries, :enqueued_at)"
-            ),
-            {
-                "mid": message_id,
-                "iid": instance_id,
-                "content": "acceptance test message",
-                "type": MessageType.HUMAN.value,
-                "source": "api",
-                "status": MessageStatus.READY.value,
-                "priority": 1,
-                "retry_count": 0,
-                "max_retries": 5,
-                "enqueued_at": _now_dt(),
-            },
+    # Drive the canonical enqueue path. ``MainLoopBridge.run_async_no_wait``
+    # is patched out because it would otherwise schedule title-generation
+    # work via the daemon's main event loop — irrelevant to the invariant
+    # under test and unsafe to invoke from a pytest worker.
+    with patch("daemon.services.instance_messaging.MainLoopBridge.run_async_no_wait"):
+        result = await messaging_service.enqueue_message(
+            instance_id=instance_id,
+            message="acceptance test message",
+            source="api",
+            priority=1,
         )
 
-    # Insert one Task row — the WorkerPool dispatch unit. Phase 2 keeps
-    # this; it's the single record that drives the dispatch.
-    _insert_task(pg_engine, instance_id, TaskStatus.PENDING.value)
+    # Sanity check: enqueue_message returned an AsyncMessageResult with
+    # the minted message_id. ``job_id`` is the adapter for the removed
+    # ``JobItem.job_id`` — it's the Task PK cast to string (see
+    # AsyncMessageResult.job_id docstring for the D13 contract).
+    assert result.message_id, (
+        "enqueue_message must return a non-empty message_id from the "
+        "real dispatch path"
+    )
 
-    # Insert the OFFENDING job_queue_items row with job_type='message'.
-    # This is the pre-Phase-2 dual-record artifact — Phase 2 removes
-    # this INSERT from enqueue_message entirely (and enqueue_job
-    # rejects job_type='message' as defense-in-depth).
-    with pg_engine.begin() as conn:
-        conn.execute(
-            text(
-                "INSERT INTO job_queue_items "
-                "(job_id, agent_id, agent_dir, message, source, priority, "
-                " status, created_at, job_type, retry_count, version, "
-                " instance_id) "
-                "VALUES (:job_id, :agent_id, :agent_dir, :message, "
-                " :source, :priority, :status, :created_at, :job_type, "
-                " :retry_count, :version, :instance_id)"
-            ),
-            {
-                "job_id": str(uuid.uuid4()),
-                "agent_id": "acceptance-test",
-                "agent_dir": "/tmp/acceptance",
-                "message": "acceptance test message",
-                "source": "api",
-                "priority": 1,
-                "status": JobStatus.PENDING.value,
-                "created_at": _now_iso(),
-                "job_type": "message",  # the offending dual-record artifact
-                "retry_count": 0,
-                "version": 0,
-                "instance_id": instance_id,
-            },
-        )
-
-    # Verify the D13 invariant.
+    # Verify the D13 invariant directly against the PostgreSQL tables.
+    # Using raw SQL (not the ORM) keeps the assertion independent of
+    # any specific repository's read-side semantics — what matters is
+    # what the DB actually contains.
     with pg_engine.connect() as conn:
-        task_count = conn.execute(
+        message_queue_count = conn.execute(
             text(
-                "SELECT COUNT(*) FROM task WHERE instance_id = :iid"
+                "SELECT COUNT(*) FROM message_queue WHERE instance_id = :iid"
             ),
+            {"iid": instance_id},
+        ).scalar()
+        task_count = conn.execute(
+            text("SELECT COUNT(*) FROM task WHERE instance_id = :iid"),
             {"iid": instance_id},
         ).scalar()
         job_item_count = conn.execute(
@@ -619,10 +678,16 @@ async def test_d13_single_record_invariant(pg_engine, instance_id):
             {"iid": instance_id},
         ).scalar()
 
+    assert message_queue_count == 1, (
+        f"D13 invariant: expected exactly 1 message_queue row for instance "
+        f"{instance_id}, got {message_queue_count}. Each user message must "
+        f"produce exactly one MessageQueue row."
+    )
     assert task_count == 1, (
         f"D13 invariant: expected exactly 1 task row for instance "
-        f"{instance_id}, got {task_count}. A user message must produce "
-        f"exactly one dispatchable record."
+        f"{instance_id}, got {task_count}. Each user message must produce "
+        f"exactly one dispatchable Task row — the Task row IS the dispatch "
+        f"primitive post-D13 (no JobItem is created)."
     )
     assert job_item_count == 0, (
         f"D13 invariant violated: expected 0 job_queue_items rows with "
