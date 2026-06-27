@@ -749,11 +749,15 @@ class InstanceLifecycleService:
             and self._manager._instance_repository is not None
         ):
             with Session(self._manager.engine) as session:
+                # Use .scalars() to unwrap single-column Row objects — on
+                # PostgreSQL the driver returns tuples like ('uuid',) when
+                # selecting a single column, which breaks downstream queries
+                # that expect a plain string (psycopg Row adapt error).
                 rows = session.exec(
                     select(InstanceHierarchy.child_id).where(
                         InstanceHierarchy.parent_id == instance_id
                     )
-                ).all()
+                ).scalars().all()
                 child_ids = list(rows)
         if child_ids:
             results = await asyncio.gather(
@@ -2455,8 +2459,8 @@ status=InstanceStatus.IDLE.value,
                     "UPDATE task "
                     "SET status = :cancelled_status, "
                     "    cancel_requested = :cancel_requested_true, "
-                    "    cancel_requested_at = :now_varchar, "
-                    "    completed_at = CAST(:now_ts AS TIMESTAMP), "
+                    "    cancel_requested_at = :now_iso, "
+                    "    completed_at = :now_iso, "
                     "    retry_scheduled = :retry_scheduled_true, "
                     "    error = :error_msg "
                     "WHERE instance_id IN :tree_ids "
@@ -2469,8 +2473,7 @@ status=InstanceStatus.IDLE.value,
                     "cancel_requested_true": True,
                     "retry_scheduled_true": True,
                     "paused_status": TaskStatus.PAUSED.value,
-                    "now_varchar": now_iso,
-                    "now_ts": now_iso,
+                    "now_iso": now_iso,
                     "error_msg": "Superseded by resume cascade — resume_processing_job owns graph driving",
                     "tree_ids": tree_ids,
                 },
