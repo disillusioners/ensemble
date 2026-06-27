@@ -183,13 +183,18 @@ Exit criterion: every execution-state read of a job resolves through the instanc
 ### Phase 2 — Introduce `admission_state` (additive, dual-write)
 
 - Migration: `ALTER TABLE job_queue_items ADD COLUMN admission_state TEXT NOT NULL DEFAULT 'queued'`; backfill from `status` (`pending→queued`, `processing→active`, `completed/failed/cancelled→done`, `dead_letter→dead`).
-- **Dual-path, Postgres-primary** (per the repo convention):
+- **Dual-path, Postgres-primary** (per the repo convention — the migration runner is a NO-OP on non-SQLite, `runner.py:455-482`; schema evolution for existing Postgres DBs happens in `_ensure_postgres_columns()`, `manager.py:1653`):
   - **SQLite**: migration SQL file `daemon/migrations/versions/<date>_job_admission_state.sql` (auto-applied by the runner).
-  - **PostgreSQL**: the runner is a NO-OP (`runner.py:464-480`); the `ADD COLUMN` + backfill + index run idempotently at startup in `daemon/manager.py::_ensure_postgres_columns()`. **Add the `admission_state` index with `CREATE INDEX IF NOT EXISTS … CONCURRENTLY`** (Postgres) to avoid an `ACCESS EXCLUSIVE` lock on a large `job_queue_items` table — note `CONCURRENTLY` cannot run inside a transaction, so it must be issued on a raw connection outside the `engine.begin()` block, not via SQLAlchemy ORM.
-- Every existing status write site (§6.1) adds a *paired* `admission_state` write in the same UPDATE. No behavior change — both columns move together.
+  - **PostgreSQL**: `ADD COLUMN IF NOT EXISTS` + backfill + `CREATE INDEX IF NOT EXISTS` on `admission_state`, run idempotently at startup in `_ensure_postgres_columns()`. **Use the established plain `CREATE INDEX IF NOT EXISTS` pattern** (every one of the 100+ existing indexes in this codebase uses it; introducing `CONCURRENTLY` would be a new operational pattern). The single-column enum index builds in well under a second even on a large `job_queue_items`, so the brief `ACCESS EXCLUSIVE` lock is acceptable. *(Only if an operator has a multi-million-row table and cannot tolerate the lock: `CREATE INDEX CONCURRENTLY` is the escape hatch — it cannot run inside `engine.begin()`, so it needs `engine.connect().execution_options(isolation_level='AUTOCOMMIT')`, and a prior failed `CONCURRENTLY` build leaves an invalid index (`indisvalid=false`) that `IF NOT EXISTS` will NOT replace, so `DROP INDEX IF EXISTS` it first. This is intentionally NOT the default.)*
+- **Install the §8.7 deferred CONSTRAINT TRIGGERs in this phase** (PostgreSQL), not Phase 5 — the trigger is the safety net that catches a missing `job_locks` release path in the *new* Phase 4 write paths; it must exist before the risk it mitigates activates. Two triggers:
+  - on `job_queue_items` (the `active` ⇒ lock-exists direction),
+  - on `job_locks` (the lock-exists ⇒ `active` direction — the silent-failure mode a single-direction check misses).
+  Both are `CREATE CONSTRAINT TRIGGER … DEFERRABLE INITIALLY DEFERRED` so they run at COMMIT (after the `start_job` insert-lock-then-set-active ordering, avoiding false-fires).
+  - **Novelty note:** this is the **first** `CONSTRAINT TRIGGER` / `DEFERRABLE` usage in the codebase (verified — no precedent). Idempotent install on every startup via `DROP TRIGGER IF EXISTS` + `CREATE CONSTRAINT TRIGGER`. *(The reviewer cited `manager.py:1693-1696` as a precedent — that is incorrect: that line is a `DROP CONSTRAINT` on an FK, not a trigger. There is no trigger precedent; this introduces one.)* SQLite does not support deferred cross-table triggers; it gets the §8.7 CI sweep instead.
+- Every existing status write site (§6.1) adds a *paired* `admission_state` write in the same UPDATE. No behavior change — both columns move together. (The Phase 2 trigger is safe during dual-write: `admission_state` mirrors `status`, and the lock invariant already holds for `status='processing'` today.)
 - Add `AdmissionState` enum in `models.py`; add `admission_state` index replacing the status indexes (keep old indexes for now).
 
-Exit criterion: `admission_state` is correct and dual-written on both dialects; nothing reads it yet.
+Exit criterion: `admission_state` is correct and dual-written on both dialects; the Postgres commit-time invariant trigger is installed; nothing reads `admission_state` yet.
 
 ### Phase 3 — Cut over gating/count queries
 
@@ -321,6 +326,12 @@ A job retried N times points to N terminal instances over its life; only the *cu
 
 Net: Postgres gets commit-time DB enforcement (strongest), SQLite gets the sweep, both get the hot-path check. The bidirectional sweep stays as defense-in-depth on Postgres too. This resolves the review's §2.1/§3.2 tension: the rejection of the *application* helper stands, but the Postgres trigger is adopted as the superior replacement that only became viable with Postgres-primary.
 
+**Installation timing:** the triggers are installed in **Phase 2** (with the `admission_state` column), not Phase 5 — see Phase 2. The safety net must precede the Phase 4 write-path changes it guards.
+
+**SQLite degraded guarantee (disclosed):** SQLite lacks deferred cross-table triggers, so on SQLite the `active ⇔ lock` invariant has **no runtime enforcement** — it is only caught by the periodic bidirectional CI sweep, which has detection lag (a missing-release bug is discovered on the next sweep, not at commit). On the Postgres-primary path the trigger fails the offending commit immediately. This is an accepted asymmetry of supporting SQLite as a secondary dialect; the sweep is the mitigation. If SQLite were ever promoted back to primary, the sweep cadence would need to tighten.
+
+**Novelty cost:** this introduces `CONSTRAINT TRIGGER` / `DEFERRABLE` to the codebase for the first time (no precedent). The trade is justified because §8.7 calls this "the concurrency-correctness invariant of the entire system" — the strongest available enforcement is warranted.
+
 ---
 
 ## 9. Test impact
@@ -346,7 +357,7 @@ Large but mechanical. Major files:
 5. The status-drift warning, `_job_item_to_work_record_shim`, and the dead `stream_status_change(job_status=...)` parameter are deleted.
 6. Every job execution-state read resolves through `Instance`/`WorkRecord`; `use_virtual_job_resolver` flag is removed (always-on). `JobResponse` is built by `WorkResolver`, not a hand-rolled join.
 7. `count_active_jobs*`, `list_pending*`, defer-gate, recovery, and stale-lock-sweep queries filter on `admission_state` (and lock presence).
-8. The `active ⇔ lock-held` invariant is enforced: on **PostgreSQL** via a deferred CONSTRAINT TRIGGER at commit, on **SQLite** via a bidirectional CI sweep, plus a hot-path assertion in `start_job_atomic` on both (§8.7).
+8. The `active ⇔ lock-held` invariant is enforced: on **PostgreSQL** via deferred CONSTRAINT TRIGGERs at commit (**both directions** — `job_queue_items` and `job_locks`), installed in Phase 2; on **SQLite** via a bidirectional CI sweep; plus a hot-path assertion in `start_job_atomic` on both (§8.7).
 9. Frontend Jobs page renders from `Work` exclusively; `JobStatus` derives from canonical status.
 10. All existing tests green after reseed; new admission-state tests green.
 11. Every terminal write routes through `_finalize_terminal(instance_id, decision)` with a required `Decision`; no finalize path bypasses it (grep-verifiable).
@@ -379,3 +390,16 @@ A strategic review (`job-as-queue-proxy.review.md`) approved the destination and
 | R3.1 written invariants doc | **Adopted** | Phase 0, DoD 12 |
 | R3.2 bidirectional CI sweep | **Adopted** (folded into §8.7) | §8.7 |
 | R3.3 MCP schema-equivalence verification in Phase 7 | **Adopted** | Phase 7, DoD 13 |
+
+### 12.1 Database-review disposition (2026-06-28, Postgres-primary follow-up)
+
+A second review assessed the Postgres/SQLite treatment. Disposition:
+
+| Item | Disposition | Where |
+|---|---|---|
+| D-A trigger must be installed in Phase 2, not Phase 5 | **Adopted** — the safety net precedes the Phase 4 risk it mitigates | Phase 2, §8.7 |
+| D-B idempotent trigger install via `DROP TRIGGER IF EXISTS` + `CREATE` | **Adopted (substance); precedent corrected** — the review cited `manager.py:1693-1696` as a trigger precedent, but that line is a `DROP CONSTRAINT` on an FK, not a trigger. There is **no** trigger precedent in the codebase; this is the first. The idempotent-install substance is correct. | Phase 2 |
+| D-C install BOTH triggers (job_queue_items + job_locks directions) | **Adopted** — single-direction misses the silent lock-without-active mode | Phase 2, DoD 8 |
+| D-D disclose SQLite's no-runtime-enforcement gap | **Adopted** — SQLite has no deferred cross-table triggers; invariant is sweep-only with detection lag | §8.7 |
+| D-E `CONCURRENTLY` autocommit + invalid-index recovery detail | **Rejected as default** — introducing `CONCURRENTLY` is itself a new operational pattern (no precedent in 100+ existing indexes); the single-column enum index builds in <1s, so plain `CREATE INDEX IF NOT EXISTS` (the established pattern) is the default. `CONCURRENTLY` retained only as a documented operator escape hatch with the autocommit/`indisvalid` recovery notes folded into that note | Phase 2 |
+| D-F tighten `runner.py` line reference | **Adopted** — corrected to `runner.py:455-482` (the comment block + NO-OP check) | Phase 2 |
