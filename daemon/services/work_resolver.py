@@ -164,6 +164,61 @@ class WorkRecord:
     error: str | None
     created_at: datetime | None
 
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize this :class:`WorkRecord` to a JSON-friendly dict.
+
+        Canonical shape for the virtual job surface — used by both
+        :mod:`daemon.routers.work` (GET /api/work) and the
+        :mod:`daemon.tools.job_queue` MCP tools. Field naming follows
+        the JobItem.to_dict() convention (``work_id`` instead of
+        ``job_id``; ``error`` for JobItem's ``error_message``) so the
+        same dict shape works regardless of which table backs the row;
+        ``kind`` distinguishes the two.
+
+        ``created_at`` is normalised to an ISO-8601 string. Naive
+        datetimes are coerced to UTC first so the output always
+        carries the ``+00:00`` offset — frontend code can rely on
+        tz-awareness without parsing the string.
+
+        Returns:
+            A plain ``dict`` mirroring the WorkRecord fields, with
+            ``created_at`` coerced to ISO-8601 (or ``None``).
+        """
+        return {
+            "work_id": self.work_id,
+            "kind": self.kind,
+            "status": self.status,
+            "instance_id": self.instance_id,
+            "project_id": self.project_id,
+            "agent_id": self.agent_id,
+            "result_summary": self.result_summary,
+            "error": self.error,
+            "created_at": _serialize_created_at(self.created_at),
+        }
+
+
+def _serialize_created_at(value: datetime | None) -> str | None:
+    """Return an ISO-8601 string for ``value``, or ``None``.
+
+    Task rows give us a tz-aware or naive ``datetime``; JobItem rows
+    give us a tz-aware parsed string already. JSON serialisation
+    needs a string. Naive datetimes are coerced to UTC before
+    formatting so the output always carries the ``+00:00`` offset —
+    frontend code can rely on tz-awareness without parsing the string
+    for missing-offset edge cases.
+
+    Args:
+        value: A ``datetime`` (tz-aware or naive) or ``None``.
+
+    Returns:
+        An ISO-8601 string, or ``None`` if ``value`` is ``None``.
+    """
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
 
 # ── Reverse canonical → source status map ─────────────────────────────────
 # The DB stores the *original* per-table status strings (Task
@@ -652,7 +707,7 @@ class WorkResolverService:
             if task_types is not None:
                 stmt = stmt.where(Task.task_type.in_(task_types))
             stmt = stmt.order_by(col(Task.created_at).desc())
-        return list(session.exec(stmt))
+            return list(session.exec(stmt))
 
     def _query_jobs(
         self,

@@ -561,87 +561,13 @@ class TestReviewerFixes:
             f"Full call order: {call_order}"
         )
 
-    @pytest.mark.asyncio
-    async def test_rebuild_reconstructs_pending_jobs_from_watcher_repo(self):
-        """B-W3: ``rebuild_from_db`` Step 5 must reconstruct
-        ``pending_jobs`` from the watcher repository. Without this,
-        watched-job parents get empty ``pending_jobs`` after restart ->
-        Variant B orphan survives a crash (the parent would fire its
-        completion callback prematurely once message children resolve).
 
-        This test seeds the watcher_repo with two watched jobs in
-        PROCESSING, calls ``rebuild_from_db``, and verifies the CM
-        reconstructed both into ``_pending[parent_id].pending_jobs``.
-        """
-        # ─── Build the CM with a mock watcher_repo ───
-        watcher_repo = MagicMock(name="JobWatcherRepository")
-
-        # ``rebuild_from_db`` calls ``get_watched_processing_job_ids(parent_id)``
-        # synchronously via ``asyncio.to_thread`` (see line 1225 of
-        # correlation_manager.py). We seed it to return two watched job
-        # IDs for the parent under test.
-        parent_id = "parent-rebuild"
-        watched_job_ids = ["watched-job-1", "watched-job-2"]
-
-        def _get_watched_processing_job_ids(pid: str) -> list[str]:
-            # Only return watched jobs for the parent under test —
-            # simulates a query keyed on parent_id.
-            return watched_job_ids if pid == parent_id else []
-
-        watcher_repo.get_watched_processing_job_ids = MagicMock(
-            side_effect=_get_watched_processing_job_ids
-        )
-
-        # Instance repo must return a single parent (the one we care
-        # about) with waiting_for=0 — meaning the DB has no pending
-        # message children, only watched jobs. This is the exact
-        # watched-job-only scenario the B-W3 fix protects.
-
-        # Phase 5: CM-era import removed; test body below is dead code.
-
-        instance_repo = make_instance_repo()
-        parent = MagicMock(name="DBParent")
-        parent.instance_id = parent_id
-        parent.waiting_for = 0
-        instance_repo.get_all_with_waiting_for = MagicMock(return_value=[parent])
-        instance_repo.get_children = MagicMock(return_value=[])
-
-        cm = CorrelationManager(
-            instance_repository=instance_repo,
-            message_queue_repository=make_msg_repo(),
-            completion_callback=None,
-            watcher_repository=watcher_repo,
-        )
-
-        # ─── Run rebuild_from_db ───
-        await cm.rebuild_from_db()
-
-        # ─── Assert Step 5 reconstructed the watched jobs ───
-        assert parent_id in cm._pending, (
-            f"rebuild_from_db must create a _pending[{parent_id}] entry "
-            f"when the watcher_repo reports watched PROCESSING jobs for "
-            f"this parent. Got _pending keys: {list(cm._pending.keys())}"
-        )
-        reconstructed = cm._pending[parent_id].pending_jobs
-        assert watched_job_ids[0] in reconstructed, (
-            f"Step 5 must add '{watched_job_ids[0]}' to pending_jobs. "
-            f"Got: {reconstructed}"
-        )
-        assert watched_job_ids[1] in reconstructed, (
-            f"Step 5 must add '{watched_job_ids[1]}' to pending_jobs. "
-            f"Got: {reconstructed}"
-        )
-        # Sanity: pending_jobs is a set — order-independent equality.
-        assert reconstructed == set(watched_job_ids)
-
-        # And the CM must report the parent as INCOMPLETE — the
-        # crash-recovery contract: pending_jobs must NOT be empty
-        # after rebuild, otherwise the parent would fire its completion
-        # callback immediately once any message children resolve.
-        assert cm.is_complete(parent_id) is False, (
-            "is_complete must return False after rebuild when watched "
-            "jobs are pending — otherwise Variant B orphan survives "
-            "a crash."
-        )
-        assert cm.get_pending_count(parent_id) == 2
+# Note: ``test_rebuild_reconstructs_pending_jobs_from_watcher_repo`` was
+# removed in Phase 5 — it tested ``CorrelationManager.rebuild_from_db``
+# which no longer exists (CorrelationManager was replaced by
+# DependencyBus + ``JobQueueService.reconcile_terminal_watches``).
+# Restart-reconciliation coverage now lives in
+# ``tests/unit/services/test_work_resolver.py::TestReconcileTerminalWatchesResolver``.
+# The mocks for the removed ``watcher_repo.get_watched_processing_job_ids``
+# method are gone with it — that method was deleted in P2 Batch 1.
 

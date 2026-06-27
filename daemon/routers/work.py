@@ -24,7 +24,6 @@ parameter against the allowed vocabulary.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -86,61 +85,12 @@ def set_work_resolver(resolver: "WorkResolverService") -> None:
 
 
 # ── Serialization ──────────────────────────────────────────────────────────
-
-
-def _serialize_created_at(value: datetime | None) -> str | None:
-    """Return an ISO-8601 string for ``value``, or ``None``.
-
-    Task rows give us a tz-aware or naive ``datetime``; JobItem rows
-    give us a tz-aware parsed string already. JSON serialisation
-    needs a string. Naive datetimes are coerced to UTC before
-    formatting so the output always carries the ``+00:00`` offset
-    — frontend code can rely on tz-awareness without parsing the
-    string for missing offset edge cases.
-
-    Args:
-        value: A ``datetime`` (tz-aware or naive) or ``None``.
-
-    Returns:
-        An ISO-8601 string, or ``None`` if ``value`` is ``None``.
-    """
-    if value is None:
-        return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.isoformat()
-
-
-def _work_record_to_dict(record: WorkRecord) -> dict[str, Any]:
-    """Serialize a :class:`WorkRecord` to a JSON-safe dict.
-
-    Field shape matches the contract the virtual job UI surface
-    expects (see frontend ``work.model.ts``). None values are kept
-    as JSON ``null`` — the frontend checks explicit nullability.
-
-    The ``kind`` field is one of ``"job"`` / ``"turn"`` /
-    ``"report"`` after Phase 4 — see ``WorkResolverService`` for
-    how this is derived from ``Task.task_type`` vs. JobItem.
-
-    Args:
-        record: A WorkRecord produced by
-            ``WorkResolverService.list_work`` or
-            ``WorkResolverService.resolve_work``.
-
-    Returns:
-        A dict matching the GET /api/work response item shape.
-    """
-    return {
-        "work_id": record.work_id,
-        "kind": record.kind,
-        "status": record.status,
-        "instance_id": record.instance_id,
-        "project_id": record.project_id,
-        "agent_id": record.agent_id,
-        "result_summary": record.result_summary,
-        "error": record.error,
-        "created_at": _serialize_created_at(record.created_at),
-    }
+# `WorkRecord.to_dict()` (defined in `daemon.services.work_resolver`) is the
+# canonical serializer for the virtual job surface. The router calls it
+# directly — the previous local `_work_record_to_dict` and
+# `_serialize_created_at` helpers were removed so MCP tools
+# (`daemon.tools.job_queue`) and the HTTP route emit byte-identical
+# shapes for the same WorkRecord.
 
 
 # ── Routes ────────────────────────────────────────────────────────────────
@@ -215,7 +165,7 @@ async def list_work(
         status=status,
         kind=kind,
     )
-    return [_work_record_to_dict(r) for r in records]
+    return [r.to_dict() for r in records]
 
 
 __all__ = ["router", "set_work_resolver", "get_work_resolver"]

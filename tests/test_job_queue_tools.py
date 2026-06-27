@@ -1133,3 +1133,300 @@ class TestJobContinueTool:
         assert "inst-1" in result["error"]
         # Critical: enqueue should NOT have been called
         mock_manager.enqueue_message.assert_not_awaited()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2 (Batch 4a) — resolver-routed tool tests
+#
+# The flag ``job_service.use_virtual_job_resolver`` switches
+# ``job_get`` / ``job_list`` / ``job_cancel`` / ``watch_job`` / ``watch_jobs``
+# onto the ``WorkResolverService``-driven path that unifies Task rows
+# (worker-pool side) and JobItem rows (dispatch-queue side) under the
+# virtual-job surface.
+#
+# HIGH 2 was a wrong-kind check in ``job_cancel`` that was unreachable
+# under the previous all-``use_virtual_job_resolver=False`` test pack.
+# These tests exercise the resolver branch for every routed tool so a
+# regression of HIGH 2 (or any sibling routing bug) fails loudly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _make_work_record(work_id, kind, status, *, instance_id=None, project_id=None,
+                       agent_id=None, result_summary=None, error=None):
+    """Build a WorkRecord-shaped mock with a real ``to_dict()``.
+
+    The tool code calls ``record.to_dict()`` to serialise — using a real
+    ``to_dict()`` (rather than a MagicMock return_value) keeps the test
+    assertions meaningful and matches the contract documented in
+    ``daemon.services.work_resolver.WorkRecord.to_dict``.
+    """
+    record = MagicMock(name=f"WorkRecord[{work_id[:8]}]")
+    record.work_id = work_id
+    record.kind = kind
+    record.status = status
+    record.instance_id = instance_id
+    record.project_id = project_id
+    record.agent_id = agent_id
+    record.result_summary = result_summary
+    record.error = error
+    record.created_at = None
+    record.to_dict = lambda: {
+        "work_id": record.work_id,
+        "kind": record.kind,
+        "status": record.status,
+        "instance_id": record.instance_id,
+        "project_id": record.project_id,
+        "agent_id": record.agent_id,
+        "result_summary": record.result_summary,
+        "error": record.error,
+        "created_at": None,
+    }
+    return record
+
+
+class TestResolverRoutedTools:
+    """Tests for the ``use_virtual_job_resolver=True`` branch in
+    ``job_get`` / ``job_list`` / ``job_cancel`` / ``watch_job``.
+
+    These tests run with the resolver flag **ON**, exercising the
+    ``WorkResolverService``-driven paths. The complementary
+    ``use_virtual_job_resolver=False`` tests live in the per-tool
+    classes above; together they cover the full kill-switch surface.
+    """
+
+    # ── job_get — resolver path ────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_job_get_resolver_path_job(self):
+        """``job_get`` with flag ON returns the WorkRecord dict for a
+        JobItem (``kind="job"``). ``job_service.get_work`` is the
+        resolver-aware lookup; ``to_dict()`` is the canonical
+        serialiser both routers and MCP tools share.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_get = tools[1]
+
+        work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="job", status="pending",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        result = await job_get.ainvoke({"job_id": work_id})
+
+        assert result == record.to_dict()
+        assert result["kind"] == "job"
+        job_service.get_work.assert_awaited_once_with(work_id)
+        # Legacy path must NOT have been called
+        job_service.get_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_get_resolver_path_task(self):
+        """``job_get`` with flag ON returns the WorkRecord dict for a
+        Task (``kind="turn"``). Verifies the resolver path resolves
+        worker-pool rows, not just JobItems.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_get = tools[1]
+
+        work_id = "task-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="turn", status="running",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+            error=None,
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        result = await job_get.ainvoke({"job_id": work_id})
+
+        assert result == record.to_dict()
+        assert result["kind"] == "turn"
+        assert result["status"] == "running"
+        job_service.get_work.assert_awaited_once_with(work_id)
+        job_service.get_job.assert_not_called()
+
+    # ── job_list — resolver path ───────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_job_list_resolver_path(self):
+        """``job_list`` with flag ON calls ``work_resolver.list_work``
+        and returns the union of jobs + tasks as ``{"jobs": [...],
+        "count": N}``.
+
+        ``list_work`` is invoked synchronously via
+        ``asyncio.to_thread`` — so the resolver's ``list_work`` must be
+        a sync callable. Use a plain ``MagicMock`` (NOT ``AsyncMock``)
+        and assert via ``assert_called_once_with`` rather than
+        ``assert_awaited_*``.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        # The resolver is fetched via ``getattr(job_service,
+        # "_work_resolver", None)`` so plain attribute assignment works.
+        work_resolver = MagicMock(name="WorkResolverService")
+        job_service._work_resolver = work_resolver
+
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_list = tools[2]
+
+        rec_job = _make_work_record(
+            "job-aaaa1111", kind="job", status="pending",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        rec_task = _make_work_record(
+            "task-bbbb2222", kind="turn", status="running",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        work_resolver.list_work = MagicMock(return_value=[rec_job, rec_task])
+
+        result = await job_list.ainvoke({})
+
+        assert result["count"] == 2
+        assert result["jobs"] == [rec_job.to_dict(), rec_task.to_dict()]
+        work_resolver.list_work.assert_called_once()
+        # Legacy list_jobs must NOT have been called
+        job_service.list_jobs.assert_not_called()
+
+    # ── job_cancel — resolver path (HIGH 2 regression guard) ──────────
+
+    @pytest.mark.asyncio
+    async def test_job_cancel_resolver_path_task(self):
+        """``job_cancel`` with flag ON on a Task (``kind="turn"``)
+        goes through the **cooperative** ``task_repo.request_cancel``
+        path — NOT ``cancel_job``. Returns the cooperative-cancel
+        message that documents the asynchronous semantics.
+
+        THIS IS THE HIGH 2 REGRESSION GUARD: pre-fix the tool used
+        ``record.kind != "task"`` but the resolver emits
+        ``kind="turn"`` / ``kind="report"``, so every Task cancel was
+        routed into ``cancel_job`` (instant atomic cancel that does
+        nothing for worker-pool rows). The corrected check is
+        ``record.kind != "job"``.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        manager = MagicMock(name="Manager")
+        task_repo = MagicMock(name="TaskRepo")
+        manager._task_repo = task_repo
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_cancel = tools[3]
+
+        work_id = "task-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="turn", status="running",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        # ``get_by_work_id`` and ``request_cancel`` are both invoked
+        # synchronously via ``asyncio.to_thread``, so plain MagicMocks
+        # (NOT AsyncMock) — see ``daemon/tools/job_queue.py:512-522``.
+        task_row = MagicMock(name="TaskRow")
+        task_row.id = 42
+        task_repo.get_by_work_id = MagicMock(return_value=task_row)
+        task_repo.request_cancel = MagicMock(return_value=True)
+
+        result = await job_cancel.ainvoke({"job_id": work_id})
+
+        assert "Cancel requested" in result
+        assert "cooperative" in result
+        # CRITICAL: instant atomic cancel path must NOT have been taken
+        job_service.cancel_job.assert_not_called()
+        task_repo.get_by_work_id.assert_called_once_with(work_id)
+        task_repo.request_cancel.assert_called_once_with(42)
+
+    @pytest.mark.asyncio
+    async def test_job_cancel_resolver_path_job(self):
+        """``job_cancel`` with flag ON on a JobItem (``kind="job"``)
+        goes through the instant atomic ``cancel_job`` path and
+        returns the success message.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        # ``manager`` is passed so the cooperative-path guard succeeds;
+        # it must NOT be exercised on the JobItem branch.
+        manager = MagicMock(name="Manager")
+        manager._task_repo = MagicMock(name="TaskRepo")
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_cancel = tools[3]
+
+        work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="job", status="pending",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.cancel_job = AsyncMock(return_value=True)
+
+        result = await job_cancel.ainvoke({"job_id": work_id})
+
+        assert result == f"Job {work_id} cancelled successfully."
+        job_service.cancel_job.assert_awaited_once_with(work_id)
+        # Cooperative task path must NOT have been taken
+        manager._task_repo.get_by_work_id.assert_not_called()
+        manager._task_repo.request_cancel.assert_not_called()
+
+    # ── watch_job — resolver path ──────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_watch_job_resolver_path(self):
+        """``watch_job`` with flag ON registers a watch via
+        ``service.get_work`` + ``watcher_repo.add_watch`` on a
+        non-terminal WorkRecord. The watch should be registered
+        exactly once for the supplied work_id.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        watcher_repo = MagicMock(name="JobWatcherRepository")
+        watcher_repo.count_watches_for_instance = MagicMock(return_value=0)
+        watcher_repo.add_watch = MagicMock(return_value=MagicMock(name="JobWatcher"))
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            current_instance_id="watcher-inst-1",
+            watcher_repo=watcher_repo,
+        )
+        watch_job = tools[13]
+
+        work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            work_id, kind="job", status="processing",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        result = await watch_job.ainvoke({"job_id": work_id})
+
+        assert "Watch registered" in result
+        # Resolver path was used (not the legacy get_job path)
+        job_service.get_work.assert_awaited_once_with(work_id)
+        job_service.get_job.assert_not_called()
+        # Watch was registered against the supplied work_id
+        watcher_repo.add_watch.assert_called_once()
+        call_args = watcher_repo.add_watch.call_args
+        assert call_args.args[0] == work_id
+        assert call_args.args[1] == "watcher-inst-1"
+        # notify_watchers should NOT fire on a non-terminal record
+        job_service.notify_watchers.assert_not_called()

@@ -1,7 +1,6 @@
 """Job queue management tools for LangGraph agents."""
 
 import asyncio
-from dataclasses import asdict as _asdict
 from datetime import datetime
 from typing import Annotated, Any, TYPE_CHECKING
 
@@ -30,37 +29,10 @@ Create, list, and manage jobs and job queues.
 TERMINAL_STATES = set(ALL_TERMINAL_STATES)
 
 
-def _work_record_to_dict(record: "WorkRecord") -> dict[str, Any]:
-    """Serialize a :class:`WorkRecord` to a JSON-friendly dict.
-
-    Phase 2 (Batch 4a, 2026-06-27) of
-    ``feature/virtual-job-management-surface``. Tools that route through
-    the resolver return WorkRecords instead of JobItems; agents parse
-    the dict form so we need a consistent shape.
-
-    Field naming follows the JobItem.to_dict() convention where
-    possible (``work_id`` instead of ``job_id``, ``error`` for
-    JobItem's ``error_message``); the unified surface uses
-    ``work_id`` so the same dict works whether the underlying row was a
-    Task or a JobItem. ``kind`` distinguishes the two so the agent can
-    decide which fields to render.
-
-    The ``created_at`` field is normalised to an ISO-8601 string when
-    the underlying value is a ``datetime`` (Task rows) so the output
-    shape matches what JobItem.to_dict() emits (string, not datetime).
-
-    Args:
-        record: The :class:`WorkRecord` to serialise.
-
-    Returns:
-        A plain ``dict`` mirroring the WorkRecord fields, with
-        ``created_at`` coerced to ISO string when possible.
-    """
-    data = _asdict(record)
-    created = data.get("created_at")
-    if isinstance(created, datetime):
-        data["created_at"] = created.isoformat()
-    return data
+# `WorkRecord.to_dict()` (defined in `daemon.services.work_resolver`) is
+# the canonical serializer for the virtual job surface. It handles
+# tz-aware / tz-naive `created_at` normalisation so both routers and
+# MCP tools get a byte-identical JSON shape for the same WorkRecord.
 
 # Full documentation strings for each tool
 _FULL_DOCS = {
@@ -372,7 +344,7 @@ def create_job_tools(
                 record = await job_service.get_work(job_id)
                 if record is None:
                     return {"error": "Job not found"}
-                return _work_record_to_dict(record)
+                return record.to_dict()
 
             job_item = await job_service.get_job(job_id)
             if job_item is None:
@@ -475,7 +447,7 @@ def create_job_tools(
                 # never have a deleted state), apply offset, then limit.
                 page = records[offset : offset + limit]
                 result = {
-                    "jobs": [_work_record_to_dict(r) for r in page],
+                    "jobs": [r.to_dict() for r in page],
                     "count": len(page),
                 }
                 return truncate_dict_result(result, list_key="jobs", limit=limit)
@@ -518,7 +490,13 @@ def create_job_tools(
                 if record is None:
                     return f"ERROR: Could not cancel job {job_id}. Job not found."
 
-                if record.kind == "task":
+                # Phase 4: the resolver never emits ``kind="task"`` — Task
+                # rows are split into ``kind="turn"`` (process_message)
+                # or ``kind="report"`` (process_report / send_report).
+                # Both Task kinds need the cooperative ``request_cancel``
+                # path; only ``kind="job"`` (JobItem rows) goes through
+                # the instant ``cancel_job`` path.
+                if record.kind != "job":
                     # Cooperative task cancel: look up the Task by
                     # ``work_id`` and call ``task_repo.request_cancel``
                     # which sets ``cancel_requested=True``. The worker

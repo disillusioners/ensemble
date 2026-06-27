@@ -24,7 +24,7 @@ from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 from daemon.services.project_normalizer import normalize_project_id
-from daemon.services.work_notifier import notify_work_watchers
+from daemon.services.work_notifier import _format_status_display, notify_work_watchers
 from daemon.services.work_status import is_terminal as _work_status_is_terminal
 from daemon.registry import get_registry
 
@@ -341,15 +341,12 @@ class JobQueueService:
                 if status not in watcher.watch_events:
                     continue
 
-                status_display = status
-                if status == "completed":
-                    status_display = "completed ✓"
-                elif status == "failed":
-                    status_display = "failed ✗"
-                elif status == "in_progress":
-                    status_display = "in progress ⟳"
-                elif status == "paused":
-                    status_display = "paused ⏸"
+                # Status display mapping lives in
+                # ``work_notifier._format_status_display`` so the
+                # orchestrator's [JOB_EVENT] parser contract is
+                # defined exactly once (see ``work_notifier.py``
+                # module docstring — DO NOT CHANGE the byte output).
+                status_display = _format_status_display(status)
 
                 notification_parts = [f"[JOB_EVENT] Job {job_id[:8]}... {status_display}"]
                 notification_parts.append(f"  Agent: {job.agent_id}")
