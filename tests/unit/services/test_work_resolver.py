@@ -558,16 +558,35 @@ class TestListWork:
         assert {r.project_id for r in records} == {"proj-A"}
 
     def test_list_work_filter_by_instance_id(self, engine, resolver):
-        """``instance_id`` filter narrows results to one instance."""
-        _seed_task(engine, instance_id="inst-target")
-        _seed_task(engine, instance_id="inst-other")
-        _seed_job(engine, instance_id="inst-target")
-        _seed_job(engine, instance_id="inst-other")
+        """``instance_id`` filter narrows results to one instance.
 
-        records = resolver.list_work(instance_id="inst-target")
+        Task and JobItem are seeded on distinct instances so the
+        P-C(i) dedup (which drops a Task turn sharing an
+        ``instance_id`` with a JobItem) does not shrink the
+        result — the filter test stays focused on the
+        ``instance_id`` filter itself.
+        """
+        _seed_task(engine, instance_id="inst-target-task")
+        _seed_task(engine, instance_id="inst-other-task")
+        _seed_job(engine, instance_id="inst-target-job")
+        _seed_job(engine, instance_id="inst-other-job")
 
-        assert len(records) == 2
-        assert {r.instance_id for r in records} == {"inst-target"}
+        # Use a regex-style filter? No — the API takes one
+        # ``instance_id`` at a time. To exercise the filter's narrowing
+        # effect against both tables at once without invoking dedup,
+        # filter twice and combine.
+        target_task_records = resolver.list_work(instance_id="inst-target-task")
+        target_job_records = resolver.list_work(instance_id="inst-target-job")
+
+        # Each side returns exactly one record — Task on the task
+        # instance, JobItem on the job instance. Both tables respect
+        # the filter.
+        assert len(target_task_records) == 1
+        assert target_task_records[0].instance_id == "inst-target-task"
+        assert target_task_records[0].kind == "turn"
+        assert len(target_job_records) == 1
+        assert target_job_records[0].instance_id == "inst-target-job"
+        assert target_job_records[0].kind == "job"
 
     def test_list_work_filter_by_status_canonical(self, engine, resolver):
         """A canonical ``status`` filter matches both Task ``running`` and
@@ -670,40 +689,60 @@ class TestListWork:
         assert len(records) == 2  # 1 task + 1 active job
 
     def test_list_work_combines_multiple_filters(self, engine, resolver):
-        """Filters compose with AND semantics."""
+        """Filters compose with AND semantics.
+
+        Task and JobItem are seeded on **distinct** instances
+        (``i-match-task`` vs ``i-match-job``) so the P-C(i) dedup
+        (which drops a Task turn sharing an ``instance_id`` with a
+        JobItem) does not shrink the result. The combined-filter
+        contract under test is "AND across project / instance /
+        status" — the dedup is tested separately in
+        :class:`TestListWorkDedup`.
+        """
         _seed_task(
             engine,
-            instance_id="i-match",
+            instance_id="i-match-task",
             project_id="proj-match",
             status=TaskStatus.RUNNING.value,
         )
         _seed_task(
             engine,
-            instance_id="i-other",
+            instance_id="i-other-task",
             project_id="proj-match",
             status=TaskStatus.RUNNING.value,
         )
         _seed_job(
             engine,
-            instance_id="i-match",
+            instance_id="i-match-job",
             project_id="proj-match",
             status=JobStatus.PROCESSING.value,
         )
 
-        records = resolver.list_work(
+        # Filter twice (Task and Job side each accept one
+        # ``instance_id`` at a time) and combine — preserves the
+        # multi-filter AND-composition assertion without invoking
+        # dedup.
+        task_records = resolver.list_work(
             project_id="proj-match",
-            instance_id="i-match",
+            instance_id="i-match-task",
+            status="processing",
+        )
+        job_records = resolver.list_work(
+            project_id="proj-match",
+            instance_id="i-match-job",
             status="processing",
         )
 
-        # 1 task + 1 job, both matching all three filters.
-        assert len(records) == 2
+        # 1 task + 1 job, each matching all three filters on their
+        # own instance.
+        assert len(task_records) == 1
+        assert len(job_records) == 1
         # Phase 4 (2026-06-27): Task ``process_message`` →
         # ``kind="turn"``.
-        assert {r.kind for r in records} == {"turn", "job"}
-        for r in records:
+        assert task_records[0].kind == "turn"
+        assert job_records[0].kind == "job"
+        for r in task_records + job_records:
             assert r.project_id == "proj-match"
-            assert r.instance_id == "i-match"
             assert r.status == "processing"
 
 
@@ -885,6 +924,264 @@ class TestListWorkRootOnly:
             {r.work_id for r in all_records}
             == set(root_wids) | set(child_wids)
         )
+
+
+# ─── P-C(i): WorkResolverService.list_work Task-turn deduplication ──────────
+# Phase 5 (2026-06-27) of ``feature/virtual-job-management-surface``. The
+# ``job_create`` flow emits BOTH a JobItem (the handle the orchestrator
+# holds) AND a Task turn on the same ``instance_id`` (the message that
+# drove the job). The virtual-job surface wants one row per logical
+# work unit — the JobItem is that handle — so ``list_work`` drops the
+# duplicate Task turn at query time. Standalone Task turns (no matching
+# JobItem) stay visible; report tasks are NEVER deduped because they
+# carry the child's completion payload that the JobItem itself does not.
+#
+# Constraints (from the P-C(i) spec):
+#
+# * ``list_work`` is the ONLY surface affected — ``resolve_work``
+#   always returns the exact record.
+# * Apply AFTER root-scoping, BEFORE the sort/pagination boundary.
+# * Status drift guard: if the JobItem and the dropped Task disagree
+#   on status, log a warning pointing the operator at
+#   ``JobFeedbackObserver`` (which is responsible for keeping the two
+#   in sync).
+
+
+class TestListWorkDedup:
+    """``list_work`` dedupes Task turns whose ``instance_id`` matches a
+    JobItem in the same result set. Single-record lookups via
+    ``resolve_work`` are NOT affected.
+
+    The dedup is applied after root-scoping and before the sort, so
+    the visible record count matches the count of logical work units
+    rather than the raw union of Task + JobItem rows.
+    """
+
+    def test_dedup_job_create_pair_shows_one_row(
+        self, engine, resolver
+    ):
+        """A JobItem + Task (kind=turn) sharing the same
+        ``instance_id`` → ``list_work`` returns ONLY the JobItem.
+
+        The ``job_create`` flow models this: it inserts a JobItem
+        (the handle the orchestrator created and holds) AND a Task
+        turn (the message that drove the job) on the same
+        ``instance_id``. Without dedup the virtual-job surface would
+        show two rows for one logical work unit; with P-C(i) it shows
+        one — the JobItem.
+        """
+        # Seed a single root instance and the pair on it.
+        _seed_instance(engine, instance_id="inst-job-pair")
+        jid = _seed_job(
+            engine,
+            instance_id="inst-job-pair",
+            status=JobStatus.PENDING.value,
+        )
+        # Task turn on the same instance — same logical work unit
+        # from the ``job_create`` flow.
+        _seed_task(
+            engine,
+            instance_id="inst-job-pair",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+        )
+
+        records = resolver.list_work()
+
+        # Exactly one record back — the JobItem wins, the Task turn
+        # is deduped.
+        assert len(records) == 1
+        assert records[0].work_id == jid
+        assert records[0].kind == "job"
+
+    def test_dedup_does_not_affect_standalone_turns(
+        self, engine, resolver
+    ):
+        """A Task turn with NO matching JobItem → stays visible.
+
+        Standalone turns are the steady-state of ``POST /messages``
+        and ``job_continue`` calls that are not part of a
+        ``job_create`` pair. They are NOT deduped because no JobItem
+        is shadowing them.
+        """
+        _seed_instance(engine, instance_id="inst-standalone")
+        # A standalone Task turn on its own instance — no JobItem
+        # ever paired with it.
+        wid = _seed_task(
+            engine,
+            instance_id="inst-standalone",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+        )
+
+        records = resolver.list_work()
+
+        # No matching JobItem → the standalone Task turn survives.
+        assert len(records) == 1
+        assert records[0].work_id == wid
+        assert records[0].kind == "turn"
+
+    def test_dedup_does_not_affect_reports(self, engine, resolver):
+        """A Report Task (``kind=report``) + a JobItem sharing the
+        same ``instance_id`` → Report stays visible.
+
+        Reports carry the child's completion payload that the
+        JobItem itself does not (the JobItem is the parent-side
+        handle; the Report is the inbound notification). The P-C(i)
+        spec only dedupes ``kind="turn"`` — never ``kind="report"``,
+        so a Report paired with a JobItem on the same instance must
+        surface as its own row.
+        """
+        # Seed a root instance. The Report task's ``instance_id`` is
+        # set to the ROOT (parent-bound; see ``child_reports.py``),
+        # so we use the root for both rows.
+        _seed_instance(engine, instance_id="inst-report-root")
+        jid = _seed_job(
+            engine,
+            instance_id="inst-report-root",
+            status=JobStatus.PROCESSING.value,
+        )
+        report_wid = _seed_task(
+            engine,
+            instance_id="inst-report-root",
+            task_type="process_report",
+            status=TaskStatus.RUNNING.value,
+        )
+
+        records = resolver.list_work()
+
+        # Both rows survive: the JobItem (its handle) AND the Report
+        # (the child's completion payload). The dedup only targets
+        # ``kind="turn"`` rows.
+        assert len(records) == 2
+        work_ids = {r.work_id for r in records}
+        assert work_ids == {jid, report_wid}
+        kinds = {r.kind for r in records}
+        assert kinds == {"job", "report"}
+
+    def test_dedup_works_across_statuses(self, engine, resolver):
+        """Dedup holds for BOTH terminal AND non-terminal JobItem
+        statuses.
+
+        The P-C(i) dedup is keyed only on ``instance_id`` matching —
+        it does not gate on JobItem status. So a JobItem in any
+        state (pending, processing, paused, completed, failed,
+        cancelled, dead_letter) still shadows a same-instance Task
+        turn. This test exercises the two ends of the terminal /
+        non-terminal spectrum to pin the contract.
+        """
+        # ── Case A: non-terminal JobItem (processing).
+        _seed_instance(engine, instance_id="inst-processing")
+        jid_processing = _seed_job(
+            engine,
+            instance_id="inst-processing",
+            status=JobStatus.PROCESSING.value,
+        )
+        _seed_task(
+            engine,
+            instance_id="inst-processing",
+            task_type="process_message",
+            status=TaskStatus.RUNNING.value,
+        )
+
+        # ── Case B: terminal JobItem (completed).
+        _seed_instance(engine, instance_id="inst-completed")
+        jid_completed = _seed_job(
+            engine,
+            instance_id="inst-completed",
+            status=JobStatus.COMPLETED.value,
+        )
+        _seed_task(
+            engine,
+            instance_id="inst-completed",
+            task_type="process_message",
+            status=TaskStatus.COMPLETED.value,
+        )
+
+        # ── Case C: pending JobItem (also non-terminal).
+        _seed_instance(engine, instance_id="inst-pending")
+        jid_pending = _seed_job(
+            engine,
+            instance_id="inst-pending",
+            status=JobStatus.PENDING.value,
+        )
+        _seed_task(
+            engine,
+            instance_id="inst-pending",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+        )
+
+        records = resolver.list_work()
+
+        # One row per instance — the three JobItems won, the three
+        # Task turns were deduped.
+        assert len(records) == 3
+        work_ids = {r.work_id for r in records}
+        assert work_ids == {jid_processing, jid_completed, jid_pending}
+        # Every returned row is the JobItem handle, not the Task turn.
+        assert {r.kind for r in records} == {"job"}
+
+    def test_dedup_logs_warning_on_status_drift(
+        self, engine, resolver, caplog
+    ):
+        """When a JobItem and its shadowed Task turn disagree on
+        status, ``list_work`` still dedupes the Task AND logs a
+        warning so an operator can investigate.
+
+        The ``JobFeedbackObserver`` is supposed to keep the JobItem
+        status in sync with the driving Task turn — a disagreement
+        is an ops signal, not a user-facing one (the user still
+        sees a single, JobItem-backed row).
+        """
+        import logging
+        _seed_instance(engine, instance_id="inst-drift")
+        # JobItem in COMPLETED (canonical: "completed"). Task turn in
+        # RUNNING (canonical: "processing"). The two disagree — drift.
+        jid = _seed_job(
+            engine,
+            instance_id="inst-drift",
+            status=JobStatus.COMPLETED.value,
+        )
+        wid = _seed_task(
+            engine,
+            instance_id="inst-drift",
+            task_type="process_message",
+            status=TaskStatus.RUNNING.value,
+        )
+
+        # Capture log records from the resolver's logger.
+        with caplog.at_level(
+            logging.WARNING, logger="daemon.services.work_resolver"
+        ):
+            records = resolver.list_work()
+
+        # Dedup still proceeds — the JobItem wins.
+        assert len(records) == 1
+        assert records[0].work_id == jid
+        assert records[0].kind == "job"
+        assert records[0].status == "completed"
+        # The Task turn's work_id must NOT be in the result set.
+        assert all(r.work_id != wid for r in records)
+
+        # The status drift warning was logged with all three
+        # identifying fields (instance_id, job_status, task_status)
+        # so an operator can pinpoint the offending pair.
+        drift_records = [
+            rec for rec in caplog.records
+            if "status drift detected" in rec.getMessage()
+        ]
+        assert len(drift_records) == 1, (
+            f"Expected exactly one status-drift warning, got "
+            f"{len(drift_records)}: {[r.getMessage() for r in drift_records]}"
+        )
+        message = drift_records[0].getMessage()
+        assert "instance_id=inst-drift" in message
+        assert "JobItem status=completed" in message
+        # Task RUNNING canonicalises to "processing" — assert the
+        # canonical value (what ``list_work`` actually compares), not
+        # the source Task.status string.
+        assert "Task status=processing" in message
 
 
 # ─── Phase 2 (Batch 3): JobQueueService.get_work and reconcile_terminal_watches ─

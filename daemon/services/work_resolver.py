@@ -13,6 +13,11 @@ behind one vocabulary (``work_status.canonicalize_status``) and one
 identifier (``work_id``) so callers (HTTP routes, MCP tools, future UI
 surfaces) don't need to branch on which table backs a given handle.
 
+P-C(i) (2026-06-27): ``list_work`` additionally dedupes Task turns
+whose ``instance_id`` matches a JobItem (the ``job_create`` flow emits
+both rows for the same logical work unit). Single-record lookups via
+``resolve_work`` are not affected.
+
 Why a separate service
 ----------------------
 
@@ -503,6 +508,25 @@ class WorkResolverService:
           parent relationship and are part of the jober's
           management view.
 
+        * **P-C(i) (2026-06-27) Task-turn deduplication** — the
+          ``job_create`` flow emits BOTH a JobItem (the handle the
+          orchestrator created and holds) AND a Task turn on the
+          same ``instance_id`` (the message that drove the job).
+          The virtual-job surface wants one row per logical work
+          unit, so ``list_work`` drops Task turns whose
+          ``instance_id`` matches a JobItem's. Standalone Task
+          turns (``POST /messages`` / ``job_continue`` with no
+          matching JobItem) stay visible; report tasks
+          (``kind="report"``) are NEVER deduped because they carry
+          the child's completion payload and are not paired with a
+          JobItem. Applied after root-scoping and before the
+          sort/pagination boundary (matches the
+          filter-before-pagination contract from reviewer W1).
+
+          Single-record lookups via :meth:`resolve_work` are
+          **not** affected — ``list_work`` is the only surface that
+          dedupes.
+
         Sort order is ``created_at DESC`` across the merged result.
         JobItem ``created_at`` is a string and Task ``created_at``
         is a ``datetime``; we normalise both to ``datetime`` via
@@ -629,6 +653,63 @@ class WorkResolverService:
                 )
             else:
                 records.extend(self._job_to_record(j) for j in jobs)
+
+        # P-C(i) (2026-06-27): Task-turn deduplication. When the
+        # ``job_create`` flow runs, it emits BOTH a JobItem (the
+        # handle the orchestrator holds) AND a Task turn on the
+        # same ``instance_id`` (the message that drives the job).
+        # The virtual-job surface wants one row per logical work
+        # unit — the JobItem is that handle — so we drop the
+        # duplicate Task turn here. Standalone turns (no matching
+        # JobItem) stay visible; report tasks (parent-bound, never
+        # paired with a JobItem) are NEVER deduped because they
+        # carry the child's completion payload that the JobItem
+        # itself does not.
+        #
+        # Applied AFTER root-scoping (so we don't waste effort
+        # deduping child rows that the ``root_only`` guard already
+        # filtered) and BEFORE the sort/pagination boundary (so a
+        # future ``limit=20`` cannot drop a JobItem and surface its
+        # ghost Task turn instead — matching the
+        # filter-before-pagination contract reviewer W1 nailed down
+        # for P-A).
+        if records:
+            job_status_by_instance_id: dict[str, str] = {
+                r.instance_id: r.status
+                for r in records
+                if r.kind == "job" and r.instance_id is not None
+            }
+            if job_status_by_instance_id:
+                kept: list[WorkRecord] = []
+                for r in records:
+                    # Only Task turns are eligible for dedup. Jobs
+                    # and report tasks are kept unconditionally.
+                    if (
+                        r.kind == "turn"
+                        and r.instance_id is not None
+                        and r.instance_id in job_status_by_instance_id
+                    ):
+                        # Status drift guard: the JobFeedbackObserver
+                        # is supposed to keep the JobItem status in
+                        # sync with the driving Task turn. If they
+                        # disagree, log a warning so an operator can
+                        # investigate — the dedup itself still
+                        # proceeds (JobItem wins) so the user-facing
+                        # surface stays consistent.
+                        job_status = job_status_by_instance_id[r.instance_id]
+                        if r.status != job_status:
+                            logger.warning(
+                                "work_resolver: status drift detected for "
+                                "instance_id=%s: JobItem status=%s, "
+                                "Task status=%s. "
+                                "JobFeedbackObserver should have synced these.",
+                                r.instance_id,
+                                job_status,
+                                r.status,
+                            )
+                        continue
+                    kept.append(r)
+                records = kept
 
         # Sort newest-first. Use ``_normalize_sort_key`` to coerce
         # every key to tz-aware UTC — Task rows come back from SQLite
