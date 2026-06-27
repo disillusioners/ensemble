@@ -212,6 +212,12 @@
 | **migration_postgres_test** | **tests/postgres/ (-m postgres)** | **Architecture migration PostgreSQL: dependency_bus, concurrent, smoke, legacy_column_drop, premature completion (skipped CM-removed), 06f500af bug class, report_lane_phase2** | **5 min** | **2026-06-26** | **✅ PASS (66 passed, 2 pre-existing fail, 33 skipped CM-removed, 0 NEW, commit 19cca0b2, branch feature/finish-architecture-migration)** |
 | **phase6_regression_test** | **tests/ (-m 'not integration and not postgres')** | **Phase 6 broad SQLite regression: full suite, 0 NEW failures beyond pre-existing baseline** | **5 min** | **2026-06-23** | **✅ PASS (7688 passed, 29 pre-existing failures, 0 NEW, feature/cleanup-old-architecture, commit d45cc0ed)** |
 
+### E2E Test Packs
+
+| Pack | Location | Scope | Timeout | Last Run | Status |
+|------|----------|-------|---------|----------|--------|
+| e2e_workflows_test | tests/e2e/test_e2e_workflows.py (-m integration) | 4 critical E2E workflows against live daemon: (1) parent-child happy path, (2) pause/resume, (3) terminate/revive, (4) wave spawn + defer queue. Real HTTP API + real LLM calls. | 5 min | 2026-06-27 | ✅ PASS (4/4, pause/resume regression fixed via commit 677599d2, feature/migration-followups) |
+
 ---
 
 ## Updating PACKS.md
