@@ -15,8 +15,10 @@ batched UPDATEs in a single ``WriteGuardSession`` transaction:
   1. ``instances`` (PAUSED → RUNNING) — clears ``paused_at``.
   2. ``job_queue_items`` (PAUSED → PROCESSING) — re-arms the job
      so JobProcessor's queue sweep can re-claim it.
-  3. ``task`` (PAUSED → PENDING) — re-arms the task so the
-     WorkerPool's ``claim_pending_task`` picks it up.
+  3. ``task`` (PAUSED → CANCELLED) — the cascade cancels paused tasks
+     (``cancel_requested=true``, ``retry_scheduled=true``) so the
+     ``resume_processing_job`` driver owns the graph turn. Re-arming
+     to PENDING would let ``claim_pending_task`` race the driver.
 
 Because the sync helper is pure DB I/O (no in-memory graph
 dependency), it is the cold-resume contract under test: resume
@@ -175,7 +177,7 @@ def _make_lifecycle_service(engine: Engine) -> InstanceLifecycleService:
 class TestColdResumeAfterTTLEviction:
     """S2 — Cold-resume contract: DB-only resume succeeds without an
     in-memory graph. The three atomic UPDATEs (instance, job, task)
-    must transition PAUSED → RUNNING/PROCESSING/PENDING in one
+    must transition PAUSED → RUNNING/PROCESSING/CANCELLED in one
     transaction, even when the instance graph was evicted from cache.
     """
 
@@ -183,7 +185,7 @@ class TestColdResumeAfterTTLEviction:
         """The full resume-cascade DB path:
           instance: PAUSED → RUNNING (paused_at cleared)
           job:      PAUSED → PROCESSING
-          task:     PAUSED → PENDING
+          task:     PAUSED → CANCELLED
 
         All three must commit in a single transaction (atomicity is
         the W2 contract for Phase 3).
@@ -221,9 +223,10 @@ class TestColdResumeAfterTTLEviction:
             )
 
             task = s.get(Task, task_id)
-            assert task.status == TaskStatus.PENDING.value, (
-                "Task must transition PAUSED → PENDING (re-armed for "
-                "WorkerPool claim_pending_task)"
+            assert task.status == TaskStatus.CANCELLED.value, (
+                "Task must transition PAUSED → CANCELLED (resume "
+                "cascade cancels paused tasks so resume_processing_job "
+                "owns graph driving without racing claim_pending_task)"
             )
 
     def test_resume_db_sync_is_idempotent(self, engine):
@@ -282,7 +285,7 @@ class TestColdResumeAfterTTLEviction:
         # State after second pass equals state after first pass.
         assert inst_status_1 == InstanceStatus.RUNNING.value
         assert job_status_1 == JobStatus.PROCESSING.value
-        assert task_status_1 == TaskStatus.PENDING.value
+        assert task_status_1 == TaskStatus.CANCELLED.value
 
     def test_resume_db_sync_handles_empty_tree(self, engine):
         """Edge case: an empty tree (e.g., no PAUSED nodes found) is
@@ -340,11 +343,11 @@ class TestColdResumeAfterTTLEviction:
 
     def test_resume_db_sync_atomicity_on_task_failure(self, engine):
         """If one UPDATE in the cascade fails (e.g., task row in a
-        terminal status where PAUSED→PENDING isn't valid), the whole
+        terminal status where PAUSED→CANCELLED isn't valid), the whole
         transaction must roll back — no half-resumed state.
 
         We simulate the failure by pre-setting the task to a state
-        that conflicts with PAUSED→PENDING (COMPLETED). SQLAlchemy's
+        that conflicts with PAUSED→CANCELLED (COMPLETED). SQLAlchemy's
         UPDATE will still succeed rowcount-wise (it's a status-
         guarded UPDATE), but the row stays COMPLETED. To force a
         real rollback, we use a task row in a different status:

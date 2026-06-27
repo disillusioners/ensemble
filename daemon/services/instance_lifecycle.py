@@ -2335,13 +2335,25 @@ status=InstanceStatus.IDLE.value,
              job so ``JobProcessor``'s queue sweep (``start_job``) sees
              it on the next tick. The ``WHERE status = 'paused'``
              guard makes the UPDATE idempotent.
-          3. ``task`` (PAUSED → PENDING) — re-arms the task so
-             ``claim_pending_task`` can pick it up. We transition to
-             ``PENDING`` (NOT ``RUNNING``) so the unified re-claim
-             path (WorkerPool → ``claim_pending_task``) takes over —
-             the worker that picks it up flips PENDING → RUNNING →
-             terminal. Bypassing the claim mechanism would race with
-             the per-instance guard and the Worker's lifecycle.
+          3. ``task`` (PAUSED → CANCELLED) — the cascade cancels paused
+             tasks (``cancel_requested=true``, ``retry_scheduled=true``)
+             rather than re-arming them to ``PENDING``. On resume,
+             ``resume_processing_job`` owns the graph turn for the root
+             instance (driving ``graph.astream`` from the checkpoint);
+             the previously paused task was the WORKER's
+             ``process_message`` task for that same turn. Re-arming it
+             to ``PENDING`` would let ``WorkerPool → claim_pending_task``
+             re-claim and re-process the message as a FRESH turn
+             (``is_retry=False``), racing ``resume_processing_job``
+             under the ExecutionGate and corrupting the checkpoint.
+             Cancelling makes the task non-claimable
+             (``claim_pending_task`` filters ``status='pending'``) and
+             lets the worker that may have already entered the pipeline
+             short-circuit on the load-time idempotency guard in
+             ``ProcessMessageProcessor``. ``retry_scheduled=true``
+             prevents the retry engine from scheduling a retry child;
+             the resume driver owns the outcome, so no retry is
+             desired.
 
         The three UPDATEs share ONE ``WriteGuardSession`` so the
         commit is atomic (all-or-nothing).

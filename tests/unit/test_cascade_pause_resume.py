@@ -11,9 +11,9 @@ Test surface:
   1. 3-level hierarchy cascade pause: grandparent → parent → child.
      Verifies ALL instances, jobs (PROCESSING→PAUSED), and tasks
      (RUNNING→PAUSED) transition atomically.
-  2. 3-level hierarchy cascade resume: grandparent → parent → child.
-     Verifies ALL instances (PAUSED→RUNNING), jobs (PAUSED→PROCESSING),
-     and tasks (PAUSED→PENDING) transition atomically.
+2. 3-level hierarchy cascade resume: grandparent → parent → child.
+      Verifies ALL instances (PAUSED→RUNNING), jobs (PAUSED→PROCESSING),
+      and tasks (PAUSED→CANCELLED) transition atomically.
   3. Partial-tree pause: parent + child1 + child2. Pause child1 only.
      Verifies ONLY child1's subtree pauses; parent and child2 stay RUNNING.
   4. Partial-tree resume: from partial pause above, resume child1.
@@ -399,7 +399,7 @@ def test_cascade_resume_3level_hierarchy(lifecycle_service, engine, write_guard)
     """3-level hierarchy: grandparent → parent → child (all PAUSED).
 
     Resume grandparent → ALL instances (PAUSED→RUNNING), jobs (PAUSED→PROCESSING),
-    tasks (PAUSED→PENDING).
+    tasks (PAUSED→CANCELLED).
     """
     # Build hierarchy: all PAUSED
     gp_id = _seed_instance(
@@ -459,12 +459,13 @@ def test_cascade_resume_3level_hierarchy(lifecycle_service, engine, write_guard)
             f"job for {iid[:8]} expected PROCESSING, got {jobs[0].status}"
         )
 
-    # All three tasks PENDING (not RUNNING — the claim path owns that)
+    # All three tasks CANCELLED (resume cascade cancels paused tasks —
+    # resume_processing_job owns graph driving, not the worker re-claim path)
     for iid in [gp_id, p_id, c_id]:
         tasks = _read_tasks(engine, iid)
         assert len(tasks) == 1
-        assert tasks[0].status == TaskStatus.PENDING.value, (
-            f"task for {iid[:8]} expected PENDING, got {tasks[0].status}"
+        assert tasks[0].status == TaskStatus.CANCELLED.value, (
+            f"task for {iid[:8]} expected CANCELLED, got {tasks[0].status}"
         )
 
 
@@ -579,7 +580,7 @@ def test_partial_tree_resume_only_subtree(lifecycle_service, engine, write_guard
 
     assert result.updated_ids == [child1_id]
 
-    # child1 RUNNING, job PROCESSING, task PENDING
+    # child1 RUNNING, job PROCESSING, task CANCELLED
     inst = _read_instance(engine, child1_id)
     assert inst.status == InstanceStatus.RUNNING.value
     jobs = _read_jobs(engine, child1_id)
@@ -587,7 +588,7 @@ def test_partial_tree_resume_only_subtree(lifecycle_service, engine, write_guard
     assert jobs[0].status == JobStatus.PROCESSING.value
     tasks = _read_tasks(engine, child1_id)
     assert len(tasks) == 1
-    assert tasks[0].status == TaskStatus.PENDING.value
+    assert tasks[0].status == TaskStatus.CANCELLED.value
 
     # parent STILL RUNNING
     inst = _read_instance(engine, parent_id)
