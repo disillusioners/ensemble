@@ -2359,6 +2359,7 @@ status=InstanceStatus.IDLE.value,
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
+        now_dt = datetime.now(timezone.utc)
         with WriteGuardSession(Session(engine), write_guard) as session:
             # ─── UPDATE 1: instances → RUNNING (existing L14 behaviour) ───
             # Single batched UPDATE: status + paused_at for all nodes
@@ -2460,7 +2461,7 @@ status=InstanceStatus.IDLE.value,
                     "SET status = :cancelled_status, "
                     "    cancel_requested = :cancel_requested_true, "
                     "    cancel_requested_at = :now_iso, "
-                    "    completed_at = :now_iso, "
+                    "    completed_at = :now_dt, "
                     "    retry_scheduled = :retry_scheduled_true, "
                     "    error = :error_msg "
                     "WHERE instance_id IN :tree_ids "
@@ -2474,6 +2475,7 @@ status=InstanceStatus.IDLE.value,
                     "retry_scheduled_true": True,
                     "paused_status": TaskStatus.PAUSED.value,
                     "now_iso": now_iso,
+                    "now_dt": now_dt,
                     "error_msg": "Superseded by resume cascade — resume_processing_job owns graph driving",
                     "tree_ids": tree_ids,
                 },
