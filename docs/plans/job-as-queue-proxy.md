@@ -8,7 +8,7 @@
 | **Unblocks** | Removal of `JobStatus`, `JobFeedbackObserver` status-write half, the status-drift warning, the `_job_item_to_work_record_shim`, and ~half of `_finalize_job_db_sync` |
 | **Primary scope** | `daemon/repositories/job_queue/models.py`, `daemon/repositories/job_queue/repository.py`, `daemon/services/job_queue_service.py`, `daemon/services/job_feedback_observer.py`, `daemon/services/job_processor.py`, `daemon/services/job_state_machine.py`, `daemon/services/instance_lifecycle.py`, `daemon/services/job_retry_engine.py`, `daemon/services/dead_letter_service.py`, `daemon/services/work_resolver.py`, `daemon/services/work_status.py`, `daemon/tools/job_queue.py`, `daemon/routers/{jobs_crud,jobs_management,jobs_streaming,work,messages}.py`, `daemon/routers/schemas.py` |
 | **Frontend scope** | `frontend/src/app/models/{job,work}.model.ts`, `frontend/src/app/pages/jobs/`, `frontend/src/app/services/{job,job-sse,work}.service.ts` |
-| **Schema** | New migration `2026MMDD_job_admission_state.sql` + `_ensure_postgres_columns()` parity |
+| **Schema** | **PostgreSQL is the primary database; SQLite remains supported.** Dual-path migrations per the established convention (`daemon/migrations/versions/*.sql` for SQLite + runtime `ALTER … IF EXISTS` in `daemon/manager.py::_ensure_postgres_columns()` for adds / a new `_ensure_postgres_drop_*()` helper for drops; the migration runner is a NO-OP on Postgres, `runner.py:464-480`). See Phase 2 / Phase 5. |
 | **Agent contract** | No tool rename, no notification format change. The `work_id` handle and canonical status vocabulary from D14 stay verbatim; only their *source* changes (Instance instead of JobItem). |
 | **Definition of done** | §10 |
 
@@ -165,6 +165,7 @@ Strategy: **the read landing zone (`WorkRecord`) already exists from D14.** We e
   - `admission_state IN ('queued','active')` ⇔ `deleted_at IS NULL`.
   - `admission_state='done'` ⇒ `instance_id` references a terminal instance.
   - `admission_state='dead'` ⇒ a `DeadLetterItem` row exists for this `job_id`.
+  - **Isolation assumption (unchanged by this plan):** the in-session `bus pending-children COUNT` + terminal UPDATE gate in `_finalize_job_db_sync` relies on transaction atomicity. On **PostgreSQL (primary)** the baseline is READ COMMITTED; the gate's correctness is preserved because the COUNT and UPDATE share one transaction and the bus watcher state lives in a separate table updated under the same write. On SQLite the whole-DB write lock serializes it. Record this so the Postgres trigger design (§8.7) does not assume a stronger isolation level than READ COMMITTED.
 
 ### Phase 1 — Read authority: route all job reads through Instance/WorkRecord
 
@@ -182,11 +183,13 @@ Exit criterion: every execution-state read of a job resolves through the instanc
 ### Phase 2 — Introduce `admission_state` (additive, dual-write)
 
 - Migration: `ALTER TABLE job_queue_items ADD COLUMN admission_state TEXT NOT NULL DEFAULT 'queued'`; backfill from `status` (`pending→queued`, `processing→active`, `completed/failed/cancelled→done`, `dead_letter→dead`).
-- `_ensure_postgres_columns()` parity entry.
+- **Dual-path, Postgres-primary** (per the repo convention):
+  - **SQLite**: migration SQL file `daemon/migrations/versions/<date>_job_admission_state.sql` (auto-applied by the runner).
+  - **PostgreSQL**: the runner is a NO-OP (`runner.py:464-480`); the `ADD COLUMN` + backfill + index run idempotently at startup in `daemon/manager.py::_ensure_postgres_columns()`. **Add the `admission_state` index with `CREATE INDEX IF NOT EXISTS … CONCURRENTLY`** (Postgres) to avoid an `ACCESS EXCLUSIVE` lock on a large `job_queue_items` table — note `CONCURRENTLY` cannot run inside a transaction, so it must be issued on a raw connection outside the `engine.begin()` block, not via SQLAlchemy ORM.
 - Every existing status write site (§6.1) adds a *paired* `admission_state` write in the same UPDATE. No behavior change — both columns move together.
 - Add `AdmissionState` enum in `models.py`; add `admission_state` index replacing the status indexes (keep old indexes for now).
 
-Exit criterion: `admission_state` is correct and dual-written; nothing reads it yet.
+Exit criterion: `admission_state` is correct and dual-written on both dialects; nothing reads it yet.
 
 ### Phase 3 — Cut over gating/count queries
 
@@ -218,6 +221,10 @@ Exit criterion: `status` column is no longer written by any production path (onl
 ### Phase 5 — Drop the redundant columns
 
 - Migration: drop `status`, `started_at`, `completed_at`, `result_summary`, `error_message`, `cancelled_at`, `failed_at` from `job_queue_items`; drop the status indexes.
+- **Dual-path, Postgres-primary, irreversible** — follow the established `20260621_000002_drop_legacy_completion_columns.sql` pattern exactly:
+  - **SQLite**: migration SQL file marked `MANUAL: TRUE`, with the same irreversibility/observation-window warnings (apply only after Phase 4 has run clean in production for ≥2 weeks, post-backup, operator on-call). The `DOWN` section recreates empty columns — data is permanently lost.
+  - **PostgreSQL**: a new `daemon/manager.py::_ensure_postgres_drop_admission_legacy()` helper (mirroring `_ensure_postgres_drop_legacy_columns()` at `manager.py:2022`) runs `ALTER TABLE job_queue_items DROP COLUMN IF EXISTS …` idempotently at startup. Drop the now-unused indexes first (`DROP INDEX IF EXISTS`) to avoid dependency errors; note `DROP COLUMN` takes a brief `ACCESS EXCLUSIVE` lock on Postgres.
+  - **Dialect note**: `move_to_dlq` already snapshots `error_message`/`retry_count`/`failed_at` into `DeadLetterItem` (Phase 4 must complete first — §8.6), so no data is lost on the drop; the columns are write-only-dead by Phase 4.
 - Delete `JobStatus` enum, `job_state_machine.py` (or reduce to a 4-transition admission machine), the drift warning, the shim, the dead `stream_status_change(job_status=...)` parameter.
 - `WorkRecord` / `work_status.py`: confirm `_STATUS_CANONICAL_MAP` is fully consistent post-drop (Phase 4 already deleted the `JobStatus.*` entries; this phase verifies no residual references).
 
@@ -304,14 +311,15 @@ A job retried N times points to N terminal instances over its life; only the *cu
 
 `admission_state='active'` ⇔ a `JobLock` row exists for the job. This is the concurrency-correctness invariant of the whole system: if `active` without a lock, the worker pool can double-dispatch; if a lock without `active`, the defer-gate and `count_active_jobs*` miscount.
 
-**Enforcement — bidirectional, CI-first, not a per-write helper.** A separate review (§12 R2.1) asked for a `_assert_active_invariant` helper called from every write path. That is over-specified and partly self-defeating: such a helper runs *inside the same code path that already does the acquire/release*, so it cannot catch the actual failure mode — a *missing* release path. The robust mechanisms are:
+**Postgres-primary changes the enforcement menu.** A separate review (§12 R2.1) asked for a per-write `_assert_active_invariant` helper. That is self-defeating: it runs *inside the same code path that already does the acquire/release*, so it cannot catch the actual failure mode — a *missing* release path. But because Postgres is now the primary database, a **DB-enforced** mechanism is available that the helper never was:
 
-- **Bidirectional CI sweep** (both directions, since single-direction misses the silent "lock exists but job isn't active" case):
+- **PostgreSQL (primary) — deferred CONSTRAINT TRIGGER.** A `CREATE CONSTRAINT TRIGGER … DEFERRABLE INITIALLY DEFERRED` on `job_queue_items` that, at commit, raises if `admission_state='active'` has no matching `job_locks` row (and a symmetric trigger on `job_locks` for the other direction). This is **DB-enforced at commit**, independent of which application code path ran — so it *does* catch a missing release path the application helper cannot. Deferred (not immediate) so the `start_job` acquire-then-set-active ordering inside one transaction doesn't false-fire. This is the recommended primary enforcement on Postgres.
+- **SQLite (secondary) — bidirectional CI sweep.** SQLite lacks deferred cross-table triggers; fall back to the bidirectional sweep (both directions, since single-direction misses the silent "lock exists but job isn't active" case):
   - daily: sample random `active` jobs → assert each has a `JobLock` row;
   - nightly: sample random `JobLock` rows → assert each has an `active` job.
-- **Cheap assertion on the one hot path only:** in `start_job_atomic`, after lock acquisition and before commit, assert the row is (or is being set to) `active`. This is the single point where the invariant is *established*; asserting there is cheap and catches acquire/active skew. Finalize's release path is covered by the sweep, not a helper.
+- **Cheap hot-path assertion (both dialects):** in `start_job_atomic`, after lock acquisition and before commit, assert the row is (or is being set to) `active`. This is the single point where the invariant is *established*.
 
-This resolves the review's §2.1/§3.2 tension in favour of observability + a minimal hot-path check.
+Net: Postgres gets commit-time DB enforcement (strongest), SQLite gets the sweep, both get the hot-path check. The bidirectional sweep stays as defense-in-depth on Postgres too. This resolves the review's §2.1/§3.2 tension: the rejection of the *application* helper stands, but the Postgres trigger is adopted as the superior replacement that only became viable with Postgres-primary.
 
 ---
 
@@ -338,7 +346,7 @@ Large but mechanical. Major files:
 5. The status-drift warning, `_job_item_to_work_record_shim`, and the dead `stream_status_change(job_status=...)` parameter are deleted.
 6. Every job execution-state read resolves through `Instance`/`WorkRecord`; `use_virtual_job_resolver` flag is removed (always-on). `JobResponse` is built by `WorkResolver`, not a hand-rolled join.
 7. `count_active_jobs*`, `list_pending*`, defer-gate, recovery, and stale-lock-sweep queries filter on `admission_state` (and lock presence).
-8. The `active ⇔ lock-held` invariant is enforced: hot-path assertion in `start_job_atomic` + a **bidirectional** CI sweep (§8.7).
+8. The `active ⇔ lock-held` invariant is enforced: on **PostgreSQL** via a deferred CONSTRAINT TRIGGER at commit, on **SQLite** via a bidirectional CI sweep, plus a hot-path assertion in `start_job_atomic` on both (§8.7).
 9. Frontend Jobs page renders from `Work` exclusively; `JobStatus` derives from canonical status.
 10. All existing tests green after reseed; new admission-state tests green.
 11. Every terminal write routes through `_finalize_terminal(instance_id, decision)` with a required `Decision`; no finalize path bypasses it (grep-verifiable).
@@ -363,7 +371,7 @@ A strategic review (`job-as-queue-proxy.review.md`) approved the destination and
 
 | Review item | Disposition | Where |
 |---|---|---|
-| R2.1 enforce `active ⇔ lock-held` at write boundary | **Redirected** — per-write helper is self-defeating (shares the release code path); bidirectional CI sweep + hot-path assertion only | §8.7, DoD 8 |
+| R2.1 enforce `active ⇔ lock-held` at write boundary | **Redirected + upgraded** — the application per-write helper is rejected as self-defeating; instead **PostgreSQL commit-time deferred CONSTRAINT TRIGGER** (newly viable under Postgres-primary) is the primary enforcement, with the SQLite bidirectional CI sweep as the secondary-dialect fallback and a hot-path assertion on both | §8.7, DoD 8 |
 | R2.2 single `_finalize_terminal` with required `Decision` | **Adopted fully** — structural guarantee over an audit | §3.2, Phase 4, DoD 11 |
 | R2.3 `JobResponseV2` / frontend in Phase 2 | **Rejected** — over-engineering; D14 already guarantees byte-identical output. Adopted only the kernel: reuse `WorkResolver`, don't hand-roll a join | Phase 1, DoD 6, §11 |
 | R2.4 assign `_STATUS_CANONICAL_MAP` cleanup to a phase | **Adopted** — explicit Phase 4 bullet | Phase 4 |
