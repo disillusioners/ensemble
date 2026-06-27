@@ -1767,6 +1767,23 @@ class JobFeedbackObserver:
                 status_to_finalize,
                 error=error_for_finalize,
             )
+            # Hardening 1 (2026-06-27): mirror the ``_process_event``
+            # happy path — clear the sticky parent-error flag AFTER
+            # finalize so a future revive / re-spawn of the same
+            # instance id does not inherit the error state from its
+            # previous incarnation. ``bus`` is guaranteed non-None
+            # here (the early-return at the top of this try-block
+            # already filtered the None-bus case), so the inline
+            # ``had_parent_error`` guard avoids an unconditional
+            # method call. The clear is idempotent and safe — the
+            # flag's only purpose was the ``_resolve_finalize_status``
+            # override above, which has been applied. Any exception
+            # raised here propagates to the outer ``except Exception``
+            # branch and is logged at WARNING; we do NOT want a
+            # ``clear_parent_error`` failure to wedge the deferred
+            # safety net (the terminal transition has already fired).
+            if bus.had_parent_error(instance_id):
+                bus.clear_parent_error(instance_id)
         except asyncio.CancelledError:
             raise
         except Exception as e:
