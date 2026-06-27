@@ -310,24 +310,33 @@ class TestResumeGateWrapping:
         FAILED, instance ERROR). The race-fix should not break the
         existing error path.
 
-        Phase 2.5 (D13 / Phase 2 migration): post-D13 there is no
-        ``JobItem`` to ``complete_job``. The error handler now calls
-        ``TaskRepository.fail_task(task_id, ...)`` instead, where
-        ``task_id`` is parsed from ``old_job_id`` (the WorkerPool Task
-        ID). For non-integer ``old_job_id`` values (a legacy UUID or a
-        non-task identifier), the ``fail_task`` call is skipped
-        silently and only the instance ERROR transition runs — the
-        per-instance guard release that ``fail_task`` would normally
-        provide is lost in that legacy fallback path. The test uses
-        an integer ``old_job_id`` so both transitions fire.
+        Phase 1 (Virtual Job Management Surface, post-D13): there is
+        no ``JobItem`` to ``complete_job``. The error handler now
+        resolves the Task via ``_task_repo.get_by_work_id(old_job_id)``
+        (where ``old_job_id`` is the Task's UUID4 ``work_id`` set by
+        the producer) and calls ``TaskRepository.fail_task(task.id, ...)``
+        with the resolved integer primary key. When ``get_by_work_id``
+        returns ``None`` (orphaned work_id), ``fail_task`` is skipped
+        and only the instance ERROR transition runs — the per-instance
+        guard release that ``fail_task`` would normally provide is
+        lost in that orphan fallback path.
         """
         gate = _make_fake_gate(
             raise_after=(RuntimeError, "boom")
         )
         manager = _make_manager(gate)
-        # Phase 2.5: wire ``_task_repo.fail_task`` so the new
-        # error-handler path is observable.
+
+        # Phase 1: wire ``_task_repo`` so the new work_id → Task.id
+        # resolution path is observable. The producer now sets
+        # ``old_job_id`` to the Task's UUID4 ``work_id`` (NOT the int
+        # PK), so ``get_by_work_id`` must return a fake Task whose
+        # ``id`` is the integer the resolver passes to ``fail_task``.
+        task_pk = 42
+        fake_work_id = "12345678-1234-4abc-8def-123456789abc"
+        fake_task = MagicMock()
+        fake_task.id = task_pk
         manager._task_repo = MagicMock()
+        manager._task_repo.get_by_work_id = MagicMock(return_value=fake_task)
         manager._task_repo.fail_task = MagicMock(return_value=None)
 
         # Should not raise — the existing except Exception block
@@ -336,23 +345,25 @@ class TestResumeGateWrapping:
             instance_id="inst-other-err",
             message="resume",
             message_id=str(uuid.uuid4()),
-            old_job_id="42",  # integer — parsed as Task ID
+            old_job_id=fake_work_id,  # UUID4 — resolved via get_by_work_id
             silent=False,
             images=None,
         )
 
-        # Phase 2.5: ``_task_repo.fail_task(42, ...)`` replaces the
-        # legacy ``_job_queue_service.complete_job(_, DemandState.FAILED)``
-        # call. The Task ID comes from parsing ``old_job_id`` as int.
+        # Phase 1: ``get_by_work_id`` is called with the work_id
+        # (UUID4) to resolve the integer primary key, then
+        # ``fail_task`` is called with that resolved PK.
+        manager._task_repo.get_by_work_id.assert_called_once_with(fake_work_id)
         manager._task_repo.fail_task.assert_called_once()
         ft_args = manager._task_repo.fail_task.call_args.args
-        assert ft_args[0] == 42
+        assert ft_args[0] == task_pk
         assert "Resume failed" in ft_args[1]
 
         # ``complete_job`` is no longer called by the resume path —
-        # there is no ``JobItem`` for the message post-D13. The legacy
-        # fallback (non-int ``old_job_id``) would also skip
-        # ``fail_task`` and only update the instance status.
+        # there is no ``JobItem`` for the message post-D13. The
+        # orphan-fallback path (get_by_work_id returns None) would
+        # also skip ``fail_task`` and only update the instance status
+        # — covered by ``test_get_by_work_id_returns_none_...`` below.
         manager._job_queue_service.complete_job.assert_not_called()
 
         # Instance is still marked ERROR (unconditional).
@@ -500,3 +511,150 @@ class TestResumeCleanupAndCancellation:
         )
 
         manager._request_registry.unregister.assert_called_once_with(message_id)
+
+
+class TestResumeFailureWorkIdResolution:
+    """Direct tests for the resume failure path's work_id → Task.id
+    resolution (Phase 1 / Virtual Job Management Surface).
+
+    The resume path's error handler in
+    ``_resume_processing_background`` resolves the work_id (UUID4)
+    passed as ``old_job_id`` into a Task via
+    ``_task_repo.get_by_work_id`` and then calls ``fail_task(task.id,
+    ...)`` with the resolved integer primary key. When
+    ``get_by_work_id`` returns ``None`` (orphan / unknown work_id),
+    ``fail_task`` is skipped and only the instance ERROR transition
+    runs — the per-instance guard release that ``fail_task`` would
+    normally provide is lost in that orphan fallback path.
+
+    These tests exercise the resolution path in isolation so the
+    work_id → Task.id round-trip is pinned independent of the
+    gate-wrapping / cleanup tests above (which exercise the happy
+    path and rely on a different ``_task_repo`` shape).
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_by_work_id_returns_task_fail_task_called_with_resolved_id(self, _make_manager):
+        """Test A: when ``get_by_work_id`` returns a Task, the error
+        handler calls ``fail_task`` with the resolved ``task.id`` (int
+        PK), NOT with the work_id (UUID4). The error message and
+        status are passed through to ``fail_task``.
+        """
+        gate = _make_fake_gate(raise_after=(RuntimeError, "boom"))
+        manager = _make_manager(gate)
+
+        # Phase 1: producer sets ``old_job_id`` to the Task's UUID4
+        # ``work_id``. The consumer resolves it back via
+        # ``get_by_work_id`` and fails by ``task.id`` (the int PK).
+        work_id = "12345678-1234-4def-8abc-123456789012"
+        resolved_task_id = 99
+
+        fake_task = MagicMock()
+        fake_task.id = resolved_task_id
+        manager._task_repo = MagicMock()
+        manager._task_repo.get_by_work_id = MagicMock(return_value=fake_task)
+        manager._task_repo.fail_task = MagicMock(return_value=None)
+
+        # Should not raise — the error handler catches and routes to
+        # fail_task + instance ERROR.
+        await manager._resume_processing_background(
+            instance_id="inst-resolve",
+            message="resume",
+            message_id=str(uuid.uuid4()),
+            old_job_id=work_id,
+            silent=False,
+            images=None,
+        )
+
+        # get_by_work_id is called with the work_id (UUID4) to
+        # resolve the integer primary key.
+        manager._task_repo.get_by_work_id.assert_called_once_with(work_id)
+
+        # fail_task is called with the resolved task.id (int PK), NOT
+        # the work_id — this is the round-trip contract the producer
+        # fix at ``daemon/manager.py:2922`` exists to satisfy.
+        manager._task_repo.fail_task.assert_called_once()
+        ft_args = manager._task_repo.fail_task.call_args.args
+        ft_kwargs = manager._task_repo.fail_task.call_args.kwargs
+        assert ft_args[0] == resolved_task_id, (
+            f"fail_task must be called with the resolved task.id "
+            f"(int PK {resolved_task_id}), not the work_id "
+            f"({work_id!r}) — got {ft_args[0]!r}"
+        )
+        # Error message includes "Resume failed" + the original
+        # exception detail (the consumer wraps ``f"Resume failed:
+        # {e}"``).
+        assert ft_args[1].startswith("Resume failed")
+        assert "boom" in ft_args[1]
+
+        # Instance is still marked ERROR (unconditional on the
+        # resume path's failure branch).
+        manager._instance_repository.update_instance.assert_called_once()
+        ui_kwargs = manager._instance_repository.update_instance.call_args.kwargs
+        assert ui_kwargs["status"] == InstanceStatus.ERROR.value
+
+        # No JobItem completion on the post-D13 resume path.
+        manager._job_queue_service.complete_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_by_work_id_returns_none_skips_fail_task_gracefully(self, _make_manager, caplog):
+        """Test B: when ``get_by_work_id`` returns ``None`` (orphan
+        work_id), the resume path does NOT call ``fail_task`` and does
+        NOT raise. The instance ERROR transition still runs (it's
+        unconditional on the failure branch). The per-instance guard
+        release that ``fail_task`` would normally provide is lost in
+        this orphan fallback path — that's a known limitation,
+        documented inline at ``daemon/manager.py:~3331``.
+        """
+        import logging
+
+        gate = _make_fake_gate(raise_after=(RuntimeError, "boom"))
+        manager = _make_manager(gate)
+
+        # Orphan work_id — no Task exists for it.
+        orphan_work_id = "00000000-0000-4000-8000-000000000000"
+        manager._task_repo = MagicMock()
+        manager._task_repo.get_by_work_id = MagicMock(return_value=None)
+        manager._task_repo.fail_task = MagicMock(return_value=None)
+
+        # Should not raise — the inner ``except Exception: pass`` in
+        # the work_id resolution branch swallows the orphan case.
+        with caplog.at_level(logging.DEBUG, logger="daemon.manager"):
+            await manager._resume_processing_background(
+                instance_id="inst-orphan",
+                message="resume",
+                message_id=str(uuid.uuid4()),
+                old_job_id=orphan_work_id,
+                silent=False,
+                images=None,
+            )
+
+        # get_by_work_id is called once with the orphan work_id.
+        manager._task_repo.get_by_work_id.assert_called_once_with(orphan_work_id)
+
+        # fail_task is NOT called because there is no Task to fail —
+        # this is the orphan fallback path that loses the per-instance
+        # guard release.
+        manager._task_repo.fail_task.assert_not_called()
+
+        # Debug log records the skip so operators can correlate.
+        debug_messages = [
+            record.message for record in caplog.records
+            if record.levelno == logging.DEBUG
+        ]
+        assert any(
+            "no task found for work_id" in msg
+            and orphan_work_id in msg
+            for msg in debug_messages
+        ), (
+            f"Expected a DEBUG log with 'no task found for work_id "
+            f"{orphan_work_id!r}' in caplog; got: {debug_messages}"
+        )
+
+        # Instance ERROR transition still runs (unconditional).
+        manager._instance_repository.update_instance.assert_called_once()
+        ui_kwargs = manager._instance_repository.update_instance.call_args.kwargs
+        assert ui_kwargs["status"] == InstanceStatus.ERROR.value
+
+        # No JobItem completion on the post-D13 resume path.
+        manager._job_queue_service.complete_job.assert_not_called()

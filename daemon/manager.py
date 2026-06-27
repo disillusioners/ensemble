@@ -1947,8 +1947,9 @@ class InstanceManager:
             "ALTER TABLE task ADD COLUMN IF NOT EXISTS work_id TEXT",
             # Backfill historical rows with a real UUID4 so future
             # writes (which all go through uuid.uuid4()) don't collide.
-            # gen_random_uuid() is provided by pgcrypto; the daemon
-            # enables it via ``CREATE EXTENSION`` in init scripts.
+            # ``gen_random_uuid()`` is built-in to PostgreSQL 13+ and
+            # does NOT require the pgcrypto extension; this statement
+            # works on every supported PostgreSQL deployment.
             "UPDATE task SET work_id = gen_random_uuid()::text WHERE work_id IS NULL",
             # Unique index matches the name used by the SQLite
             # migration so both paths converge on the same index.
@@ -2834,11 +2835,16 @@ class InstanceManager:
         The ``old_job_id`` parameter threaded downstream into
         ``_resume_processing_background`` and ultimately
         ``_process_resume_finalize`` (Task 2.5.5) is now derived from
-        ``task.id`` (the WorkerPool task identifier) rather than a
-        ``JobItem.job_id``. Post-D13, ``job_id`` is a logical alias
-        for the Task row's ``id``; ``_finalize_job_db_sync`` accepts
-        ``job_id=None`` and skips Step 1 (no JobItem UPDATE) while
-        still running Steps 2+3 (instance status + lock release).
+        ``task.work_id`` (the Task's stable UUID4 cross-system
+        identifier) rather than a ``JobItem.job_id`` or the int ``id``
+        primary key. The consumer in ``_resume_processing_background``
+        resolves it back to a Task row via
+        ``_task_repo.get_by_work_id(old_job_id)`` — the int PK would
+        break that round-trip and silently skip the per-instance guard
+        release on resume failure. Post-D13, ``job_id`` is a logical
+        alias for the Task row's ``work_id``; ``_finalize_job_db_sync``
+        accepts ``job_id=None`` and skips Step 1 (no JobItem UPDATE)
+        while still running Steps 2+3 (instance status + lock release).
 
         Args:
             instance_id: The instance ID.
@@ -2873,7 +2879,7 @@ class InstanceManager:
             logger.warning(f"Resume already in progress for {instance_id[:8]}")
             return {
                 "instance_id": instance_id,
-                "job_id": str(existing_task.id) if existing_task else None,
+                "job_id": existing_task.work_id if existing_task else None,
                 "message_id": None,
                 "status": "already_resuming",
             }
@@ -2919,7 +2925,14 @@ class InstanceManager:
                 return None
 
         # Root instance path: has a PAUSED/RUNNING PROCESS_MESSAGE Task
-        old_job_id = str(existing_task.id)
+        # Phase 1 (Virtual Job Management Surface): ``old_job_id`` is the
+        # Task's stable ``work_id`` (UUID4 string), NOT the integer PK.
+        # The consumer in ``_resume_processing_background`` (line ~3322)
+        # resolves it via ``_task_repo.get_by_work_id(old_job_id)`` and
+        # calls ``fail_task(task.id, ...)`` — using the int PK would break
+        # the resolver round-trip and silently skip the per-instance
+        # guard release.
+        old_job_id = existing_task.work_id
         logger.info(
             f"Found PAUSED/RUNNING PROCESS_MESSAGE task id="
             f"{existing_task.id} (status={existing_task.status}) for root "
