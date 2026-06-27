@@ -134,6 +134,7 @@ When a job reaches a terminal status, I must decide how to react:
 |--------|---------|--------|
 | **COMPLETED** | Job succeeded | Record result, proceed to next step or report success |
 | **FAILED** | Job failed | Check error type: transient → retry; persistent → report failure |
+| **PAUSED** ⏸ | Work temporarily suspended | Can be resumed; check why and decide whether to resume, terminate, or cancel |
 | **CANCELLED** | Job was cancelled | Report cancellation, stop any dependent jobs |
 | **TERMINATED** | Job forcefully stopped | Report termination, do NOT retry |
 | **DEAD_LETTER** | Moved to dead letter queue | Report as critical failure immediately |
@@ -208,6 +209,14 @@ If a job has been running longer than expected:
 - Use `job_get(job_id)` to check current status
 - If running but making progress, continue waiting
 - If running and stuck (per agent feedback), consider `job_cancel()` and retry
+
+---
+
+## Notes
+
+### Handle Semantics: Jobs and Continued-Instance Work
+
+The `job_id` returned by `job_create` (and surfaced as `new_job_id` by `job_continue`) is a `work_id` handle — a stable UUID4 minted on Task/JobItem creation. The same handle is accepted by `watch_job` and `job_get` for **both** traditional job queue items and continued-instance work (subsequent message turns on an instance). In practice this means: if you call `job_continue` against a completed instance to send a follow-up message, the returned `new_job_id` can be passed directly to `watch_job` to receive a `[JOB_EVENT]` when the new turn finishes — no separate "instance watch" tool is needed.
 
 ---
 

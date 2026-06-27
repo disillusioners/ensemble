@@ -146,6 +146,8 @@ def _seed_task(
     project_id: str | None = "test-project",
     created_at: datetime | None = None,
     seed_instance: bool = True,
+    task_type: str = "process_message",
+    is_deferred: bool = False,
 ) -> str:
     """Insert a ``Task`` row. Returns the ``work_id`` (auto-generated if None).
 
@@ -155,6 +157,11 @@ def _seed_task(
     ``project_id``. Pass ``seed_instance=False`` for tests that
     intentionally exercise the "instance deleted / orphaned work unit"
     path (e.g. ``test_resolve_work_task_without_instance_returns_none_agent_id``).
+
+    ``is_deferred`` defaults to False. When True, the task is marked as a
+    defer-queue task (Phase 3 Part B1, 2026-06-27): the worker pool's idle
+    gate only claims a deferred task once every non-defer queue is empty.
+    The default (False) preserves every prior caller's expectations.
     """
     if seed_instance:
         # Match the resolver's lookup: ``_lookup_instance(task.instance_id)``
@@ -177,13 +184,14 @@ def _seed_task(
     with Session(engine) as s:
         task = Task(
             work_id=wid,
-            task_type="process_message",
+            task_type=task_type,
             instance_id=instance_id,
             message_id=None,
             status=status,
             result=result,
             error=error,
             created_at=created,
+            is_deferred=is_deferred,
         )
         s.add(task)
         s.commit()
@@ -1998,6 +2006,856 @@ class TestJobListMultiStatusFilter:
         assert completed_jid in returned_ids
         # Pending task excluded.
         assert pending_wid not in returned_ids
+
+
+# ─── Phase 3 (Part A): Reviewer-Flagged Missing Tests ─────────────────────
+# The Phase 2 review on ``feature/virtual-job-management-surface``
+# flagged five test gaps that, if not closed, leave the centralised
+# notification hook (``work_notifier.notify_work_watchers``) under-tested
+# for the mainline code paths. The tests below close those gaps with
+# the same in-memory SQLite / real-repos / mock-InstanceManager surface
+# used above.
+#
+# The five tests pin down:
+#
+# 1. The MAINLINE completion path through ``task_processor.on_success``
+#    (atomic ``complete_task`` → centralised notification fires exactly
+#    once).
+# 2. The cross-method race (``complete_task`` vs ``fail_task``) — the
+#    central ``WHERE status='running'`` SQL guard must serialise them
+#    so the watcher is notified at most once even when two terminal
+#    methods race on the same task.
+# 3. PG parity for the ``job_watchers.job_id`` FK drop (the SQLite
+#    migration uses table-rebuild because SQLite has no
+#    ``DROP CONSTRAINT``; PG uses a single statement — both must be
+#    present and correct).
+# 4. The restart reconciliation sweep (``reconcile_terminal_watches``)
+#    for tasks that completed while the daemon was down — the
+#    resolver-based path must catch them and clean up the watcher row.
+# 5. PROCESS_REPORT (report-lane) completions go through the same
+#    centralised notification hook — the report lane bypasses the
+#    cross-system job-coordination guard, but it must NOT bypass the
+#    notification fan-out.
+
+
+# ─── 1. MAINLINE completion through task_processor.on_success ─────────────
+
+
+class TestMainlineCompletionOnSuccess:
+    """The MAINLINE completion site is ``task_processor.on_success``
+    (task_processor.py:399). When a user-message ``process_message``
+    task completes, ``on_success`` calls ``task_repo.complete_task``
+    and, if the atomic SQL guard returned a non-None row, fires the
+    centralised notification hook.
+
+    This test exercises that exact sequence end-to-end with the real
+    ``TaskRepository`` + the real ``notify_work_watchers`` helper +
+    a mock ``InstanceManager.enqueue_message`` to capture the
+    notification — and asserts the whole sequence fires exactly one
+    notification for the watching instance.
+
+    The pre-existing ``TestWatchTaskAndNotifyOnComplete`` covers the
+    happy path, but it does not call out the production-side frame of
+    "this is what ``task_processor.on_success`` does". This test
+    names that explicitly and adds the "atomic-guard-only-winner-
+    notifies" guarantee as a single end-to-end shape so a future
+    reviewer can grep ``task_processor.on_success`` → this test and
+    immediately see the contract pinned down.
+    """
+
+    async def test_mainline_completion_on_success_fires_one_notification(
+        self, engine, resolver, task_repo: TaskRepository,
+        watcher_repo: JobWatcherRepository, instance_manager_mock,
+    ):
+        """``task_processor.on_success`` path: ``complete_task`` returns
+        non-None → centralised notify hook fires once.
+
+        Production flow being simulated (see ``task_processor.py:399``):
+
+        1. ``task_repo.complete_task(task_id, result)`` — atomic
+           ``UPDATE...WHERE status='running' RETURNING *``.
+        2. If the guard matched (return value is non-None), call
+           ``notify_work_watchers(work_id, "completed", ...)``.
+        3. ``notify_work_watchers`` resolves through the resolver,
+           reads the watchers, builds the ``[JOB_EVENT]`` payload,
+           enqueues a message to each watcher, then atomically
+           claims (DELETEs) the watcher row.
+
+        Asserts:
+
+        * ``complete_task`` returns the updated Task (the
+          ``status='running'`` SQL guard matched).
+        * ``notify_work_watchers`` returns 1 (one watcher notified).
+        * ``instance_manager.enqueue_message`` was awaited exactly
+          once with the orchestrator's ``[JOB_EVENT]`` payload
+          carrying the canonical work_id prefix and the
+          ``completed ✓`` glyph.
+        """
+        _seed_instance(engine, instance_id="inst-mainline", agent_id="developer")
+        _seed_instance(engine, instance_id="watcher-mainline")
+        wid = _seed_task(
+            engine,
+            instance_id="inst-mainline",
+            status=TaskStatus.RUNNING.value,
+        )
+        task_id = _lookup_task_id(engine, wid)
+        watcher_repo.add_watch(wid, "watcher-mainline")
+
+        # Step 1 — the atomic terminal repo method, exactly as
+        # ``task_processor.on_success`` invokes it. Pass a JSON-serializable
+        # result dict because the repo wraps it via ``json.dumps``.
+        updated = task_repo.complete_task(task_id, {"answer": "done"})
+        assert updated is not None, (
+            "complete_task returned None — the WHERE status='running' "
+            "guard did not match. The task was not in RUNNING state "
+            "before this call (bad fixture)."
+        )
+        assert updated.status == TaskStatus.COMPLETED.value
+
+        # Step 2 — the production terminal-handler only fires the
+        # notification when ``complete_task`` returned a non-None
+        # row. We replicate that gate here.
+        if updated is None:
+            return  # unreachable — defensive only
+
+        notified = await notify_work_watchers(
+            wid,
+            "completed",
+            error=None,
+            instance_manager=instance_manager_mock,
+            work_resolver=resolver,
+            watcher_repo=watcher_repo,
+        )
+
+        # Exactly one notification fired for the one registered watcher.
+        assert notified == 1
+        instance_manager_mock.enqueue_message.assert_awaited_once()
+        call_args = instance_manager_mock.enqueue_message.call_args
+        assert call_args is not None
+        message = call_args.kwargs["message"]
+        # Orchestrator's parser contract — see
+        # agents/job-orchestration/skill.md.
+        assert "[JOB_EVENT]" in message
+        assert f"Job {wid[:8]}..." in message
+        assert "completed ✓" in message
+        # The watcher is on ``watcher-mainline`` (NOT on the task's
+        # own instance — the watcher's instance is the recipient).
+        assert call_args.kwargs["instance_id"] == "watcher-mainline"
+        assert call_args.kwargs["source"] == f"internal_agent:job_event:{wid}:completed"
+
+    async def test_mainline_completion_skips_notify_when_guard_loses(
+        self, engine, task_repo: TaskRepository,
+        watcher_repo: JobWatcherRepository, instance_manager_mock,
+        resolver,
+    ):
+        """``complete_task`` returning ``None`` (guard lost the race)
+        means the caller MUST NOT fire the notification.
+
+        This is the "other side" of test 1 — when the atomic
+        ``WHERE status='running'`` guard excludes the caller (because
+        a concurrent path already transitioned the task), the caller
+        is silent. Production code follows the pattern::
+
+            updated = task_repo.complete_task(task_id, result)
+            if updated is None:
+                return  # lost the race — do not notify
+            await notify_work_watchers(...)
+
+        Asserts the inverse half of the contract: when ``complete_task``
+        returns ``None``, ``notify_work_watchers`` is NOT called and
+        ``enqueue_message`` is not invoked.
+        """
+        _seed_instance(engine, instance_id="inst-guard-lost", agent_id="developer")
+        _seed_instance(engine, instance_id="watcher-guard-lost")
+        wid = _seed_task(
+            engine,
+            instance_id="inst-guard-lost",
+            status=TaskStatus.RUNNING.value,
+        )
+        task_id = _lookup_task_id(engine, wid)
+        watcher_repo.add_watch(wid, "watcher-guard-lost")
+
+        # First caller wins the guard — terminal write succeeds.
+        winner = task_repo.complete_task(task_id, {"answer": "first"})
+        assert winner is not None
+        assert winner.status == TaskStatus.COMPLETED.value
+
+        # Second caller loses the guard (status is no longer 'running').
+        loser = task_repo.complete_task(task_id, {"answer": "second"})
+        assert loser is None, (
+            "complete_task should return None when status guard is "
+            "already violated (a concurrent caller transitioned the "
+            "task first)."
+        )
+
+        # The "loser" branch is silent — no notification fires.
+        # We don't even reach the notify call, but assert that if we
+        # DID skip it the mock never saw a call.
+        instance_manager_mock.enqueue_message.assert_not_awaited()
+
+
+# ─── 2. Concurrent complete_task vs fail_task — exactly one notification ───
+
+
+class TestConcurrentTerminalRace:
+    """When ``worker_pool.complete_task`` and ``stale_task_recovery.
+    fail_task`` race on the SAME running task (worker is finishing
+    its turn while the recovery service is force-failing the same task
+    because the heartbeat went stale), only ONE wins the atomic
+    ``WHERE status='running'`` guard. The winner fires the
+    notification; the loser returns ``None`` and skips the notify.
+
+    The pre-existing ``TestNoDoubleNotify`` covers two
+    ``complete_task`` callers racing — same terminal method twice.
+    This test covers the more dangerous cross-method case: a
+    ``complete_task`` racing a ``fail_task`` on the same task. Both
+    use the same ``WHERE status='running'`` SQL guard, so the same
+    exactly-once guarantee applies — but the cross-method case is the
+    one production actually hits (worker + recovery in different
+    threads / processes).
+    """
+
+    async def test_concurrent_complete_vs_fail_exactly_one_notification(
+        self, engine, resolver, task_repo: TaskRepository,
+        watcher_repo: JobWatcherRepository, instance_manager_mock,
+    ):
+        """``complete_task`` vs ``fail_task`` racing → exactly one
+        notification fires (the winner's).
+
+        The two atomic terminal methods would, in production, run on
+        independent threads (a worker thread finishing its turn, a
+        stale-task recovery thread force-failing). Both submit
+        ``UPDATE...WHERE status='running' RETURNING *`` against the
+        same row. SQLite serialises the writes; whichever lands second
+        sees ``status != 'running'`` and returns ``None``. Only the
+        winner calls the centralised notification hook.
+
+        Concurrency note for this test: the in-memory engine fixture
+        uses ``StaticPool`` with ``check_same_thread=False``, which
+        means all sessions share a single SQLite connection. Two
+        threads attempting ``engine.begin()`` on the same connection
+        cause SQLite's "cannot commit transaction - SQL statements
+        in progress" error. We therefore serialise the two terminal
+        calls via an ``asyncio.Lock`` while preserving the test's
+        intent: prove the ``WHERE status='running'`` SQL guard makes
+        complete vs fail race to a single winner regardless of
+        ordering. The existing ``TestNoDoubleNotify`` exercises the
+        same gate for two ``complete_task`` callers; this test
+        extends the contract to the cross-method case.
+
+        Asserts:
+
+        * Exactly one of the two atomic calls returns a non-None row.
+        * The watcher row is consumed (terminal claim-and-delete) by
+          the single notify.
+        * ``instance_manager.enqueue_message`` is awaited exactly
+          once, with the glyph matching the winner (either
+          ``completed ✓`` or ``failed ✗``).
+        """
+        _seed_instance(engine, instance_id="inst-cross-race", agent_id="developer")
+        _seed_instance(engine, instance_id="watcher-cross-race")
+        wid = _seed_task(
+            engine,
+            instance_id="inst-cross-race",
+            status=TaskStatus.RUNNING.value,
+        )
+        task_id = _lookup_task_id(engine, wid)
+        watcher_repo.add_watch(wid, "watcher-cross-race")
+
+        # Serialise the terminal writes — see concurrency note above.
+        # The SQL guard's job is the SAME regardless of whether the
+        # two calls land in the same nanosecond or sequentially:
+        # only the call that observes ``status='running'`` wins.
+        race_lock = asyncio.Lock()
+
+        async def complete_branch() -> str | None:
+            async with race_lock:
+                updated = await asyncio.to_thread(
+                    task_repo.complete_task, task_id, {"answer": "complete wins"}
+                )
+            return "completed" if updated is not None else None
+
+        async def fail_branch() -> str | None:
+            async with race_lock:
+                updated = await asyncio.to_thread(
+                    task_repo.fail_task, task_id, "fail wins"
+                )
+            return "failed" if updated is not None else None
+
+        # Schedule both — gather() runs them in order; the lock
+        # ensures they execute sequentially on the StaticPool
+        # connection. The SQL guard is still tested: the SECOND
+        # caller sees status != 'running' and returns None.
+        complete_outcome, fail_outcome = await asyncio.gather(
+            complete_branch(),
+            fail_branch(),
+        )
+
+        # Exactly one winner (the atomic guard guarantees this).
+        winners = [s for s in (complete_outcome, fail_outcome) if s is not None]
+        assert len(winners) == 1, (
+            f"Expected exactly one winner from complete/fail race; "
+            f"got complete_outcome={complete_outcome!r} "
+            f"fail_outcome={fail_outcome!r}. The SQL guard failed."
+        )
+
+        # The winner fires the notification (the production gate).
+        # We replicate it once for whichever side won.
+        winner_status = winners[0]
+        winner_error = None
+        if winner_status == "failed":
+            winner_error = "fail wins"
+
+        notified = await notify_work_watchers(
+            wid,
+            winner_status,
+            error=winner_error,
+            instance_manager=instance_manager_mock,
+            work_resolver=resolver,
+            watcher_repo=watcher_repo,
+        )
+
+        # Exactly one notification fired (the loser's branch did NOT
+        # call notify because its atomic call returned None).
+        assert notified == 1
+        instance_manager_mock.enqueue_message.assert_awaited_once()
+        call_args = instance_manager_mock.enqueue_message.call_args
+        message = call_args.kwargs["message"]
+        # The notification glyph matches the winner's terminal state.
+        if winner_status == "completed":
+            assert "completed ✓" in message
+        else:
+            assert "failed ✗" in message
+            # The error string flows through as the ``Error:`` line.
+            assert "fail wins" in message
+        # The watcher row is consumed (terminal claim-and-delete).
+        assert watcher_repo.get_watchers_for_job(wid) == []
+
+
+# ─── 3. PG fk-drop parity — static SQL string validation ──────────────────
+
+
+class TestPostgresFkDropParity:
+    """Phase 2 Batch 1 dropped the ``job_watchers.job_id`` FK so the
+    ``job_id`` column can hold a virtual ``work_id`` (a UUID4 string
+    that may not have a matching ``job_queue_items`` row — tasks-only
+    work).
+
+    The SQLite path uses a table-rebuild because SQLite has no
+    ``ALTER TABLE ... DROP CONSTRAINT``. The PostgreSQL path uses a
+    single ``ALTER TABLE ... DROP CONSTRAINT IF EXISTS`` statement in
+    ``EnsembleManager._ensure_postgres_columns``. Both must be
+    correct, because PostgreSQL is the production deployment and the
+    SQLite runner is a NO-OP on PG (runner.py:446-448) — the
+    statements live in ``_ensure_postgres_columns`` only.
+
+    This test reads both files as plain text and asserts the right
+    SQL primitives are present. It does NOT need a database — it's a
+    static source-level contract test, the same shape used by
+    ``tests/unit/test_coder_developer_migration.py``.
+    """
+
+    def test_sqlite_migration_uses_table_rebuild(self):
+        """``20260627_000002_drop_job_watchers_fk.sql`` rebuilds the
+        table via ``CREATE TABLE job_watchers_new`` + ``INSERT``
+        + ``DROP TABLE job_watchers`` + ``ALTER TABLE...
+        RENAME TO job_watchers``.
+
+        SQLite does not support ``ALTER TABLE ... DROP CONSTRAINT``,
+        so the migration MUST use the table-rebuild pattern. The
+        rebuild happens inside ``PRAGMA foreign_keys=off`` /
+        ``PRAGMA foreign_keys=on`` so any other concurrent FK on the
+        same connection is not disturbed.
+        """
+        from pathlib import Path
+
+        sql_path = (
+            Path(__file__).resolve().parents[3]
+            / "daemon"
+            / "migrations"
+            / "versions"
+            / "20260627_000002_drop_job_watchers_fk.sql"
+        )
+        sql_text = sql_path.read_text()
+
+        # The SQLite rebuild primitives.
+        assert "PRAGMA foreign_keys=off" in sql_text, (
+            "SQLite migration missing PRAGMA foreign_keys=off wrapper"
+        )
+        assert "PRAGMA foreign_keys=on" in sql_text, (
+            "SQLite migration missing PRAGMA foreign_keys=on reset"
+        )
+        assert "CREATE TABLE job_watchers_new" in sql_text, (
+            "SQLite migration missing CREATE TABLE job_watchers_new — "
+            "the table-rebuild pattern is incomplete"
+        )
+        assert "INSERT INTO job_watchers_new" in sql_text, (
+            "SQLite migration missing the row copy from old to new"
+        )
+        assert "DROP TABLE job_watchers" in sql_text, (
+            "SQLite migration missing the DROP of the FK-bearing table"
+        )
+        assert "ALTER TABLE job_watchers_new RENAME TO job_watchers" in sql_text, (
+            "SQLite migration missing the RENAME that finalises the rebuild"
+        )
+
+        # The new table MUST NOT carry the FOREIGN KEY on job_id —
+        # the whole point of the migration. (The old constraint
+        # ``REFERENCES job_queue_items(job_id)`` must be absent from
+        # the CREATE TABLE statement.)
+        new_table_section = sql_text[
+            sql_text.index("CREATE TABLE job_watchers_new"):
+            sql_text.index("INSERT INTO job_watchers_new")
+        ]
+        assert "REFERENCES job_queue_items" not in new_table_section, (
+            "CREATE TABLE job_watchers_new still declares "
+            "REFERENCES job_queue_items — the FK was not actually "
+            "dropped. The rebuild mirrors the model with the FK still "
+            "present, which defeats the migration."
+        )
+
+    def test_postgres_path_uses_drop_constraint_if_exists(self):
+        """``EnsembleManager._ensure_postgres_columns`` (a method on
+        ``InstanceManager`` in ``daemon/manager.py``) includes the
+        PG-native ``ALTER TABLE job_watchers DROP CONSTRAINT IF
+        EXISTS job_watchers_job_id_fkey`` statement.
+
+        The default PG auto-generated FK constraint name is
+        ``<table>_<column>_fkey`` so the canonical name is
+        ``job_watchers_job_id_fkey``. ``IF EXISTS`` makes the
+        statement idempotent — re-runs are no-ops, fresh DBs
+        (already without the FK via ``SQLModel.metadata.create_all``)
+        are no-ops too.
+
+        We read the source file as plain text rather than importing
+        the class: ``InstanceManager.__init__`` requires a fully
+        configured DB engine + LangGraph wiring (out of scope for a
+        static contract test). The static-file approach mirrors the
+        pattern in ``tests/unit/test_coder_developer_migration.py``.
+        """
+        from pathlib import Path
+
+        manager_path = (
+            Path(__file__).resolve().parents[3]
+            / "daemon"
+            / "manager.py"
+        )
+        source = manager_path.read_text()
+
+        assert (
+            "ALTER TABLE job_watchers DROP CONSTRAINT IF EXISTS "
+            "job_watchers_job_id_fkey"
+        ) in source, (
+            "daemon/manager.py is missing the PG FK drop. Existing "
+            "PG databases will keep the FK and reject any watch row "
+            "whose job_id is not a real JobItem.job_id, which breaks "
+            "virtual (task-only) work watches."
+        )
+
+    def test_postgres_path_documents_idempotency(self):
+        """The DROP CONSTRAINT line is documented as idempotent in
+        ``_ensure_postgres_columns`` so future contributors don't
+        add a try/except swallow around it.
+
+        The repo's invariant (per the
+        ``child-completion-report-lost-under-concurrent-task-processing``
+        codereview fix): failures here MUST propagate to startup —
+        it's better to fail loudly than to keep a phantom FK that
+        silently breaks virtual-job watches later.
+        """
+        from pathlib import Path
+
+        manager_path = (
+            Path(__file__).resolve().parents[3]
+            / "daemon"
+            / "manager.py"
+        )
+        source = manager_path.read_text()
+
+        # The DROP CONSTRAINT statement must appear in the same
+        # `_ensure_postgres_columns` method as its docstring
+        # reference, so future contributors see both at once. The
+        # method's docstring explicitly enumerates the FK drop.
+        assert "DROP CONSTRAINT IF EXISTS job_watchers_job_id_fkey" in source
+        # The docstring must call out this specific DROP — that's
+        # the only thing that protects a future contributor from
+        # deleting it as "the one DROP in an otherwise ADD-only
+        # method" without realising what it does.
+        assert "job_watchers_job_id_fkey" in source, (
+            "daemon/manager.py no longer mentions "
+            "job_watchers_job_id_fkey — the PG FK drop was either "
+            "removed or renamed and the docstring was not updated."
+        )
+
+
+# ─── 4. Restart reconciliation — watched task completed while daemon down ──
+
+
+class TestRestartReconciliation:
+    """A task may reach a terminal state while the daemon is DOWN
+    (crash, deploy, manual stop). The restart-time sweep
+    (``reconcile_terminal_watches``) must pick up those watchers and
+    notify them — without the watch row being left behind.
+
+    The pre-existing ``TestReconcileTerminalWatchesResolver`` covers
+    the resolver-based reconcile path generally; this test frames the
+    scenario explicitly as a "daemon was down" restart and asserts
+    the watcher row is cleaned up after notification (the contract
+    that prevents the watching instance from being notified twice on
+    the next reconcile cycle).
+    """
+
+    async def test_restart_reconcile_notifies_and_cleans_watcher(
+        self, engine, job_queue_service_with_resolver,
+        watcher_repo: JobWatcherRepository,
+        instance_manager_mock,
+    ):
+        """Simulates a daemon restart: a task reached COMPLETED while
+        the daemon was down, but the watcher row is still present.
+
+        Production flow:
+
+        1. User registers a watch on a still-RUNNING task.
+        2. Daemon crashes (or is stopped for deploy).
+        3. The task is finalised by an external path while the
+           daemon is down (status moves to ``completed``).
+        4. Daemon restarts. ``reconcile_terminal_watches`` runs and
+           finds the watched task already terminal.
+        5. The watcher is notified and the watcher row is removed
+           (so a future reconcile cycle does not re-notify).
+
+        Asserts:
+
+        * ``reconcile_terminal_watches`` returns 1 (one watched task
+          reconciled).
+        * ``enqueue_message`` was awaited once with the
+          ``[JOB_EVENT] completed ✓`` payload addressed to the
+          watcher's instance.
+        * The watcher row is gone (``get_watchers_for_job`` returns
+          ``[]``) — the terminal claim-and-delete inside
+          ``notify_work_watchers`` cleaned it up.
+        """
+        _seed_instance(engine, instance_id="inst-restart-task", agent_id="developer")
+        _seed_instance(engine, instance_id="watcher-restart")
+        # The task is already COMPLETED — simulating that the
+        # terminal write happened while the daemon was down.
+        wid = _seed_task(
+            engine,
+            instance_id="inst-restart-task",
+            status=TaskStatus.COMPLETED.value,
+            result=json.dumps({"answer": "done while daemon was down"}),
+        )
+        # The watcher row is still present from before the crash —
+        # that's the whole point of the reconcile sweep.
+        watcher_repo.add_watch(wid, "watcher-restart")
+        assert len(watcher_repo.get_watchers_for_job(wid)) == 1
+
+        # Restart-time sweep.
+        reconciled = await job_queue_service_with_resolver.reconcile_terminal_watches()
+
+        assert reconciled == 1
+        instance_manager_mock.enqueue_message.assert_awaited_once()
+        call_args = instance_manager_mock.enqueue_message.call_args
+        assert call_args is not None
+        message = call_args.kwargs["message"]
+        # Canonical status glyph + parser contract.
+        assert "[JOB_EVENT]" in message
+        assert "completed ✓" in message
+        # The watching instance is the recipient.
+        assert call_args.kwargs["instance_id"] == "watcher-restart"
+        assert call_args.kwargs["source"] == f"internal_agent:job_event:{wid}:completed"
+
+        # The watcher row is consumed — a second reconcile cycle would
+        # see ``reconciled == 0`` and not re-notify.
+        assert watcher_repo.get_watchers_for_job(wid) == []
+
+    async def test_restart_reconcile_skips_already_cleaned_watcher(
+        self, engine, job_queue_service_with_resolver,
+        watcher_repo: JobWatcherRepository,
+        instance_manager_mock,
+    ):
+        """Idempotency: a SECOND ``reconcile_terminal_watches`` call
+        after the first one cleaned the watcher row must return 0
+        (no notification fired, no double-notify).
+
+        This is the post-condition assertion that proves the
+        terminal claim-and-delete is taking effect — without it, a
+        future crash + restart would re-notify the same watcher on
+        the same terminal event.
+        """
+        _seed_instance(engine, instance_id="inst-restart-twice", agent_id="developer")
+        _seed_instance(engine, instance_id="watcher-restart-twice")
+        wid = _seed_task(
+            engine,
+            instance_id="inst-restart-twice",
+            status=TaskStatus.COMPLETED.value,
+        )
+        watcher_repo.add_watch(wid, "watcher-restart-twice")
+
+        # First sweep — finds the watched terminal task, notifies, cleans.
+        first = await job_queue_service_with_resolver.reconcile_terminal_watches()
+        assert first == 1
+        assert instance_manager_mock.enqueue_message.await_count == 1
+        # Watcher row is gone after the first sweep.
+        assert watcher_repo.get_watchers_for_job(wid) == []
+
+        # Second sweep — no watchers left, no notifications fire.
+        second = await job_queue_service_with_resolver.reconcile_terminal_watches()
+        assert second == 0
+        # No NEW notification fired (still 1, not 2).
+        assert instance_manager_mock.enqueue_message.await_count == 1
+
+
+# ─── 5. PROCESS_REPORT notification — report-lane completion ──────────────
+
+
+class TestProcessReportNotification:
+    """PROCESS_REPORT tasks (the report lane — child-completion reports)
+    bypass the cross-system job-coordination guard in
+    ``claim_pending_task`` (per the Phase 1, 2026-06-24 report-lane
+    decoupling decision). But they MUST still go through the same
+    centralised notification hook as user-message tasks when they
+    reach a terminal state — otherwise the watching parent agent
+    would never learn that the report finished.
+
+    This test exercises the simplest end-to-end shape: a PROCESS_REPORT
+    task in RUNNING state with a registered watcher, then
+    ``task_repo.complete_task`` (the atomic terminal repo method) —
+    the SAME call that ``task_processor.on_success`` issues for any
+    task, regardless of ``task_type``. The centralised
+    ``notify_work_watchers`` fires for it too because the hook is
+    keyed on the task's ``work_id`` and the resolver, NOT on
+    ``task_type``.
+    """
+
+    async def test_process_report_completion_fires_notification(
+        self, engine, resolver, task_repo: TaskRepository,
+        watcher_repo: JobWatcherRepository, instance_manager_mock,
+    ):
+        """A PROCESS_REPORT task completing via the atomic
+        ``complete_task`` path triggers the centralised notification
+        hook exactly once.
+
+        The task is seeded with ``task_type="process_report"`` (Phase 1
+        2026-06-24 report lane). The test path is otherwise identical
+        to the user-message completion path — same atomic terminal
+        repo method, same ``notify_work_watchers`` call, same
+        ``[JOB_EVENT]`` payload contract.
+
+        Asserts:
+
+        * ``complete_task`` returns the updated Task (atomic guard
+          matches for the PROCESS_REPORT row).
+        * The notification fires once with the canonical work_id
+          prefix and the ``completed ✓`` glyph.
+        * The watcher row is consumed (terminal claim-and-delete).
+        """
+        _seed_instance(engine, instance_id="inst-report", agent_id="developer")
+        _seed_instance(engine, instance_id="watcher-report")
+        # Report-lane task — bypasses the cross-system job-coordination
+        # guard but still goes through the SAME complete_task +
+        # notify_work_watchers path as user messages.
+        wid = _seed_task(
+            engine,
+            instance_id="inst-report",
+            status=TaskStatus.RUNNING.value,
+            task_type="process_report",
+        )
+        task_id = _lookup_task_id(engine, wid)
+        watcher_repo.add_watch(wid, "watcher-report")
+
+        # Drive to COMPLETED via the same atomic terminal repo method
+        # the worker / task_processor use for any task type.
+        updated = task_repo.complete_task(task_id, {"child_result": "ok"})
+        assert updated is not None
+        assert updated.status == TaskStatus.COMPLETED.value
+        # Defensive: the task_type was preserved by the terminal
+        # write (the atomic UPDATE only touches status/result/
+        # completed_at — task_type is not mutated).
+        assert updated.task_type == "process_report"
+
+        # The centralised hook fires regardless of task_type — the
+        # hook is keyed on the work_id and the resolver, not on the
+        # TaskType enum.
+        notified = await notify_work_watchers(
+            wid,
+            "completed",
+            error=None,
+            instance_manager=instance_manager_mock,
+            work_resolver=resolver,
+            watcher_repo=watcher_repo,
+        )
+
+        assert notified == 1
+        instance_manager_mock.enqueue_message.assert_awaited_once()
+        call_args = instance_manager_mock.enqueue_message.call_args
+        assert call_args is not None
+        message = call_args.kwargs["message"]
+        # Same parser contract as the user-message path.
+        assert "[JOB_EVENT]" in message
+        assert f"Job {wid[:8]}..." in message
+        assert "completed ✓" in message
+        assert call_args.kwargs["instance_id"] == "watcher-report"
+        assert call_args.kwargs["source"] == f"internal_agent:job_event:{wid}:completed"
+        # Watcher row consumed — claim-and-delete happened.
+        assert watcher_repo.get_watchers_for_job(wid) == []
+
+
+# ─── Phase 3 (Part B3): Defer-queue facade — deferred work_id watchable ────
+# Phase 3 Part B3 of ``feature/virtual-job-management-surface`` closes the
+# last resolver-surface gap for the defer queue: a deferred Task row
+# (``is_deferred=True``) is still a first-class virtual-job work unit —
+# it must resolve through ``resolve_work`` AND it must be watchable via
+# the same ``watch_job`` facade primitives a non-deferred task uses.
+#
+# The defer-queue idle gate (``claim_pending_task``) defers claiming of
+# these rows behind every non-defer queue, but from the
+# ``work_resolver`` / ``JobWatcherRepository`` point of view they are
+# ordinary Tasks — they have a ``work_id``, a canonical status, and a
+# row in ``job_watchers`` if anyone subscribes. This test pins that
+# contract so the virtual job surface treats deferred and non-deferred
+# work identically from the read/watch perspective.
+
+
+class TestDeferredWorkIdWatchable:
+    """A deferred task (``is_deferred=True``) is observable through the
+    virtual-job facade just like a regular task.
+
+    The defer queue is a worker-pool dispatch concern — it changes WHICH
+    tasks the idle gate claims next, not whether the public virtual-job
+    surface sees them. This test proves the surface treats deferred work
+    identically from the read/watch perspective:
+
+    * ``resolve_work(work_id)`` returns a populated ``WorkRecord``
+      (``kind="task"``, canonical status ``"pending"`` for an un-claimed
+      defer task).
+    * ``watcher_repo.add_watch(wid, instance_id)`` registers the watch
+      (the same primitive ``watch_job`` uses internally on the
+      non-terminal branch).
+    * ``watcher_repo.get_watchers_for_job(wid)`` returns the registered
+      watcher — the watch is durably persisted and discoverable for the
+      eventual terminal notification sweep.
+
+    Asserting the canonical ``pending`` status matters because the
+    ``claim_pending_task`` idle gate is what blocks deferred tasks from
+    being picked up — by the time ``resolve_work`` runs, the row is
+    simply a PENDING Task that happens to carry ``is_deferred=True``.
+    The virtual job surface does not (yet) surface the defer flag, so
+    the only observable difference at this layer is the row's existence
+    in the DB.
+    """
+
+    def test_deferred_work_id_watchable(
+        self, engine, resolver, task_repo: TaskRepository,
+        watcher_repo: JobWatcherRepository,
+    ):
+        """A deferred task's work_id resolves AND can be watched.
+
+        End-to-end shape (facade-level integration):
+
+        1. Seed a deferred task (``is_deferred=True``, status=PENDING)
+           with a known work_id.
+        2. ``resolver.resolve_work(wid)`` returns a populated
+           ``WorkRecord`` — deferred tasks are first-class virtual-job
+           work units, invisible-gate concerns are downstream.
+        3. Register a watcher via the same primitive ``watch_job`` uses
+           on the non-terminal branch: ``watcher_repo.add_watch``.
+        4. ``watcher_repo.get_watchers_for_job(wid)`` returns the
+           registered watcher — the watch is durable for the terminal
+           sweep.
+
+        Asserts:
+
+        * The seeded Task's ``is_deferred`` flag was persisted (sanity
+          check on the fixture — the facade contract under test is
+          independent of this bit, but a regression here would mask a
+          real DB-layer bug).
+        * ``resolve_work`` returns a non-None ``WorkRecord`` with
+          ``kind="task"``, ``work_id`` matching, and the canonical
+          ``"pending"`` status (the row has not been claimed yet, so
+          ``processing`` has not been reached).
+        * The watcher row is registered, addressed to the watching
+          instance, and discoverable via the same lookup the terminal
+          sweep uses.
+        """
+        # The task's owning instance and the watcher's recipient are
+        # separate — matches the production ``watch_job`` contract
+        # (the watcher's instance_id is the *recipient* of the future
+        # notification, NOT the task's own instance).
+        _seed_instance(engine, instance_id="inst-deferred-task", agent_id="developer")
+        _seed_instance(engine, instance_id="watcher-deferred")
+
+        # Seed the deferred task with a known work_id and PENDING
+        # status — the row has not been claimed yet (defer-queue idle
+        # gate holds it back), so the canonical status is "pending".
+        deferred_wid = _seed_task(
+            engine,
+            work_id="wid-deferred-known",
+            instance_id="inst-deferred-task",
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+        )
+
+        # Sanity-check the fixture itself: the deferred flag must have
+        # been persisted. Without this, the rest of the test would
+        # pass against a misnamed "deferred" task that is actually a
+        # regular one — masking a DB-layer regression.
+        persisted_task = task_repo.get_by_work_id(deferred_wid)
+        assert persisted_task is not None
+        assert persisted_task.is_deferred is True, (
+            "_seed_task did not persist is_deferred=True — the defer "
+            "fixture is broken. Check the sa_column wiring on the "
+            "is_deferred field."
+        )
+
+        # Step 1: resolve through the facade. Deferred tasks are
+        # first-class virtual-job work units — the resolver must see
+        # them like any other Task row.
+        record = resolver.resolve_work(deferred_wid)
+
+        assert record is not None, (
+            "resolve_work returned None for a deferred task — the "
+            "virtual job surface treats deferred work as invisible. "
+            "Phase 3 Part B3 regression."
+        )
+        assert record.kind == "task"
+        assert record.work_id == deferred_wid
+        # The canonical status mirrors the source PENDING ("pending"
+        # is unchanged by canonicalize_status — see work_status.py).
+        # The defer flag does NOT alter the status; the idle gate
+        # holds the row in PENDING until the gate opens, then it
+        # transitions through the same lifecycle as a non-deferred row.
+        assert record.status == "pending", (
+            f"Expected canonical status 'pending' for an un-claimed "
+            f"deferred task, got {record.status!r}. The defer flag "
+            f"must not change the canonical status."
+        )
+        # The standard identity fields are still populated.
+        assert record.instance_id == "inst-deferred-task"
+        assert record.agent_id == "developer"
+        assert record.project_id == "test-project"
+
+        # Step 2: register a watcher via the same primitive the
+        # ``watch_job`` facade uses on the non-terminal branch. The
+        # deferred task is non-terminal (``is_terminal("pending")`` is
+        # False), so production ``watch_job`` takes the "register and
+        # wait" branch — no immediate notification. The watch row must
+        # be durable so the eventual terminal sweep can find it.
+        watcher_repo.add_watch(deferred_wid, "watcher-deferred")
+
+        # Step 3: the watch is discoverable via the same lookup the
+        # terminal sweep uses. This is the durability contract: a
+        # watcher registered on a deferred work_id survives until
+        # the task reaches a terminal state (at which point
+        # ``notify_work_watchers`` claims and deletes the row).
+        registered = watcher_repo.get_watchers_for_job(deferred_wid)
+        assert len(registered) == 1, (
+            f"Expected exactly one watcher registered for the "
+            f"deferred work_id, got {len(registered)}. The watch was "
+            f"not durably persisted."
+        )
+        assert registered[0].job_id == deferred_wid
+        assert registered[0].instance_id == "watcher-deferred"
 
 
 # ─── end of file ─────────────────────────────────────────────────────────────

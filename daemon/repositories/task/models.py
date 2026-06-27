@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Column, Index, Integer
+from sqlalchemy import Boolean, Column, Index, Integer, text
 from sqlmodel import SQLModel, Field
 
 
@@ -61,6 +61,24 @@ class TaskStatus(str, enum.Enum):
 # deduplicates it into the Table) and as the version_id_col target.
 _task_version_col = Column("version", Integer, nullable=False, server_default="0")
 
+# Defer-queue marker column (Phase 3 Part B1, 2026-06-27). The Pydantic
+# ``Field(default=False)`` on the Python side does NOT propagate to a
+# SQL DEFAULT clause — SQLModel emits ``is_deferred BOOLEAN NOT NULL``
+# with no default, which would break every existing raw-SQL ``INSERT
+# INTO task`` that omits the column (e.g. the retry path in
+# ``TaskRepository.schedule_retry`` and the test helper
+# ``_create_task_with_status``). We declare the column manually with
+# ``server_default=text("false")`` so fresh databases created by
+# ``SQLModel.metadata.create_all()`` emit the same schema as the
+# PostgreSQL migration in ``_ensure_postgres_columns()`` and the
+# SQLite migration in
+# ``daemon/migrations/versions/20260627_000003_task_is_deferred.sql``.
+# Indexes the column because the defer-queue idle gate filters on it
+# every claim cycle.
+_task_is_deferred_col = Column(
+    "is_deferred", Boolean, nullable=False, server_default=text("false"), index=True
+)
+
 
 class Task(SQLModel, table=True):
     """SQLModel Task table for worker pool tasks."""
@@ -100,6 +118,20 @@ class Task(SQLModel, table=True):
 
     # Retry guard (atomic flag to prevent double-retry)
     retry_scheduled: bool = Field(default=False)
+
+    # Defer queue marker (Phase 3 Part B1, 2026-06-27,
+    # feature/virtual-job-management-surface). When True the task
+    # belongs to the defer-queue lane: the worker pool's idle gate
+    # only claims a deferred task once every non-defer queue is
+    # empty, so orchestrators can stage work behind "real" traffic
+    # without competing for claim slots. Defaults to False so every
+    # existing task created before this column was added is treated
+    # as a regular (non-defer) task — backfill is a no-op. The
+    # ``sa_column=_task_is_deferred_col`` declaration provides the
+    # ``server_default=text("false")`` that Pydantic's
+    # ``Field(default=False)`` does NOT emit to SQL on its own — see
+    # the column definition above for the rationale.
+    is_deferred: bool = Field(default=False, sa_column=_task_is_deferred_col)
 
     # Result storage (TEXT column storing JSON)
     result: str | None = Field(default=None)
@@ -162,6 +194,7 @@ class Task(SQLModel, table=True):
             "cancel_requested": self.cancel_requested,
             "cancel_requested_at": self.cancel_requested_at,
             "retry_scheduled": self.retry_scheduled,
+            "is_deferred": self.is_deferred,
             "result": result_data,
             "error": self.error,
             "created_at": self.created_at.isoformat() if self.created_at else None,

@@ -379,6 +379,16 @@ class TaskRepository:
         while the task is in flight; the recovery predicate compares
         ``last_heartbeat_at`` to the threshold.
 
+        Defer queue idle gate (Phase 3 Part B2, 2026-06-27): deferred
+        tasks (``is_deferred=True``) are gated on the project having no
+        active non-deferred work, mirroring the job defer queue's
+        ``count_active_jobs_in_non_defer_queues == 0`` semantics. The
+        gate is a Python pre-check (TOCTOU-acceptable) — same trade-off
+        as the job defer queue (see project critical notes). Non-
+        deferred tasks bypass the gate entirely and fall through to
+        the normal atomic claim; only deferred tasks are held back
+        while non-deferred work is active.
+
         Args:
             worker_id: ID of the worker claiming the task.
 
@@ -413,6 +423,107 @@ class TaskRepository:
         # on both backends.
 
         with self.engine.begin() as conn:
+            # --------------------------------------------------------
+            # Defer queue idle gate (Phase 3 Part B2, 2026-06-27).
+            #
+            # Look at the oldest PENDING task that the atomic claim
+            # below would consider (matching the candidate-selection
+            # ``ORDER BY created_at ASC LIMIT 1`` semantics). If the
+            # candidate is a deferred task (``is_deferred=True``), check
+            # whether the candidate's project has any RUNNING non-
+            # deferred tasks. If yes, the defer task must wait —
+            # return None and skip the atomic claim.
+            #
+            # TOCTOU is acceptable (matches the job defer queue's
+            # count_active_jobs_in_non_defer_queues == 0 pattern —
+            # see project critical notes). The pre-check and the
+            # atomic UPDATE below are two separate SQL statements;
+            # a concurrent task lifecycle change between them may
+            # let a defer task claim one cycle early or late. This
+            # is harmless — the defer queue semantic is "defer work
+            # shouldn't compete with non-defer work", a politeness,
+            # not a correctness invariant.
+            #
+            # The pre-check uses a narrow candidate lookup that does
+            # NOT apply the full set of guards from the atomic claim
+            # below (per-instance guard, pause gate, cross-system
+            # guard). The candidate selected here may differ from
+            # what the full atomic claim would pick in pathological
+            # cases — but the pre-check is intentionally cheap and
+            # idempotent. If the candidate differs, the pre-check
+            # is moot (the atomic claim either picks a different
+            # task or returns None).
+            #
+            # Project scoping: the active-non-deferred count is
+            # filtered to the candidate's project_id. A non-deferred
+            # task in project A does NOT block a deferred task in
+            # project B — defer queues are project-local politeness.
+            # If the candidate's instance has no matching ``instances``
+            # row (LEFT JOIN NULL), project_id is NULL and the gate
+            # defaults to "no project context → allow the claim"
+            # (consistent with the cross-system guard's COALESCE
+            # semantics elsewhere in this method).
+            #
+            # The defer gate ONLY blocks deferred tasks. Non-deferred
+            # candidates skip the entire pre-check and fall through
+            # to the normal atomic claim unchanged.
+            # --------------------------------------------------------
+            candidate_row = conn.execute(
+                text("""
+                    SELECT t.id, t.instance_id, t.is_deferred, i.project_id
+                    FROM task t
+                    LEFT JOIN instances i ON t.instance_id = i.instance_id
+                    WHERE t.status = :status_pending
+                    AND (t.next_retry_at IS NULL OR t.next_retry_at <= :now_str)
+                    ORDER BY t.created_at ASC
+                    LIMIT 1
+                """),
+                {
+                    "status_pending": TaskStatus.PENDING.value,
+                    "now_str": now_str,
+                },
+            ).fetchone()
+
+            if (
+                candidate_row is not None
+                and bool(candidate_row.is_deferred)
+                and candidate_row.project_id is not None
+            ):
+                # Count RUNNING non-deferred tasks for the candidate's
+                # project. The defer gate fires (return None) when this
+                # count is > 0.
+                active_non_deferred = conn.execute(
+                    text("""
+                        SELECT COUNT(*) FROM task t
+                        JOIN instances i ON t.instance_id = i.instance_id
+                        WHERE t.status = :status_running
+                        AND t.is_deferred = :is_deferred_false
+                        AND i.project_id = :project_id
+                    """),
+                    {
+                        "status_running": TaskStatus.RUNNING.value,
+                        # Python bool so the comparison works on both
+                        # SQLite (INTEGER 0/1) and PostgreSQL (BOOLEAN
+                        # false/true) — matches the dual-driver pattern
+                        # used elsewhere in this repository.
+                        "is_deferred_false": False,
+                        "project_id": candidate_row.project_id,
+                    },
+                ).scalar() or 0
+
+                if active_non_deferred > 0:
+                    # Project is busy with non-deferred work — defer
+                    # task must wait. Return None without attempting
+                    # the atomic claim.
+                    logger.debug(
+                        "claim_pending_task: defer gate holds back deferred "
+                        "task %s for project %s (%d active non-deferred tasks)",
+                        candidate_row.id,
+                        candidate_row.project_id,
+                        active_non_deferred,
+                    )
+                    return None
+
             stmt = text(f"""
                 UPDATE task
                 SET status = :status_running,
@@ -710,7 +821,7 @@ class TaskRepository:
             task_type=row.task_type,
             instance_id=row.instance_id,
             message_id=row.message_id,
-            work_id=row.work_id,
+            work_id=row.work_id if hasattr(row, 'work_id') else str(uuid.uuid4()),
             status=row.status,
             worker_id=row.worker_id,
             retry_count=row.retry_count if hasattr(row, 'retry_count') else 0,
@@ -718,6 +829,7 @@ class TaskRepository:
             cancel_requested=bool(row.cancel_requested) if hasattr(row, 'cancel_requested') else False,
             cancel_requested_at=row.cancel_requested_at if hasattr(row, 'cancel_requested_at') else None,
             retry_scheduled=bool(row.retry_scheduled) if hasattr(row, 'retry_scheduled') else False,
+            is_deferred=bool(row.is_deferred) if hasattr(row, 'is_deferred') else False,
             result=row.result,
             error=row.error,
             created_at=row.created_at,
@@ -1193,15 +1305,19 @@ class TaskRepository:
             # ``work_id`` column is a NOT NULL UUID4 generated here so
             # the retry child has its own virtual-job identifier —
             # distinct from the parent's work_id, since the retry is
-            # logically a new work attempt.
+            # logically a new work attempt. ``is_deferred`` (Phase 3
+            # Part B1, 2026-06-27) is inherited from the parent — a
+            # retry stays in the same defer-queue lane.
             result = conn.execute(
                 text("""
                     INSERT INTO task (task_type, instance_id, message_id, status,
                                       retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled, work_id)
+                                      cancel_requested, retry_scheduled, work_id,
+                                      is_deferred)
                     VALUES (:task_type, :instance_id, :message_id, :status_pending,
                             :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled, :work_id)
+                            :cancel_requested, :retry_scheduled, :work_id,
+                            :is_deferred)
                     RETURNING *
                 """),
                 {
@@ -1215,6 +1331,7 @@ class TaskRepository:
                     "cancel_requested": False,
                     "retry_scheduled": False,
                     "work_id": str(uuid.uuid4()),
+                    "is_deferred": bool(parent_row.is_deferred) if hasattr(parent_row, 'is_deferred') else False,
                 }
             ).fetchone()
 
@@ -1461,14 +1578,18 @@ class TaskRepository:
             # New ``work_id`` is generated for the same reason as in
             # ``schedule_retry`` above: a retry is a fresh logical work
             # attempt and gets its own virtual-job identifier.
+            # ``is_deferred`` is inherited from the parent so the retry
+            # child stays in the same defer-queue lane.
             result = conn.execute(
                 text("""
                     INSERT INTO task (task_type, instance_id, message_id, status,
                                       retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled, work_id)
+                                      cancel_requested, retry_scheduled, work_id,
+                                      is_deferred)
                     VALUES (:task_type, :instance_id, :message_id, :status_pending,
                             :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled, :work_id)
+                            :cancel_requested, :retry_scheduled, :work_id,
+                            :is_deferred)
                     RETURNING *
                 """),
                 {
@@ -1482,6 +1603,7 @@ class TaskRepository:
                     "cancel_requested": False,
                     "retry_scheduled": False,
                     "work_id": str(uuid.uuid4()),
+                    "is_deferred": bool(parent_row.is_deferred) if hasattr(parent_row, 'is_deferred') else False,
                 },
             ).fetchone()
 

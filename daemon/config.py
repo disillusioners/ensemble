@@ -414,6 +414,8 @@ class JobSystemConfig(BaseSettings):
     # so we can roll back to the legacy per-table reads if the merged
     # resolver turns up a regression. Override via
     # ENSEMBLE_JOB_SYSTEM_USE_VIRTUAL_JOB_RESOLVER.
+    # Can be removed after P4 is stable and verified in production —
+    # serves as kill switch for the virtual job resolver.
     use_virtual_job_resolver: bool = Field(
         default=True,
         description=(

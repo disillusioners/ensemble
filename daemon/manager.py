@@ -1696,6 +1696,21 @@ class InstanceManager:
           constraint is already gone). The SQLite counterpart lives
           in
           ``daemon/migrations/versions/20260627_000002_drop_job_watchers_fk.sql``.
+        - task.is_deferred (Phase 3 Part B1, 2026-06-27): defer-queue
+          lane marker. When True the row belongs to the defer-queue
+          lane and the worker pool's idle gate holds it until every
+          non-defer queue is empty. Mirrors the
+          ``last_heartbeat_at`` / ``work_id`` pattern: ADD COLUMN
+          (idempotent via ``IF NOT EXISTS``) plus a CREATE INDEX for
+          the defer-gate predicate (also ``IF NOT EXISTS``). Fresh
+          PostgreSQL databases get the column + index automatically
+          from ``SQLModel.metadata.create_all()`` because the
+          ``is_deferred`` field is declared with ``index=True`` on
+          the Task SQLModel. Existing databases need the explicit
+          statements here because the .sql migration runner is a
+          NO-OP on PG. SQLite counterpart lives in
+          ``daemon/migrations/versions/20260627_000003_task_is_deferred.sql``.
+          See feature/virtual-job-management-surface.
         - idx_infra_assets_attributes_gin /
           idx_infra_assets_relationships_gin: GIN indexes on the
           JSONB ``attributes`` and ``relationships`` columns of
@@ -1980,6 +1995,25 @@ class InstanceManager:
             # SQLite path: ``daemon/migrations/versions/20260627_000002_drop_job_watchers_fk.sql``
             # (table-rebuild, since SQLite cannot DROP CONSTRAINT).
             "ALTER TABLE job_watchers DROP CONSTRAINT IF EXISTS job_watchers_job_id_fkey",
+            # ── Defer Queue marker (Phase 3 Part B1, 2026-06-27) ──────
+            # ``task.is_deferred``: defer-queue lane marker. Boolean,
+            # NOT NULL DEFAULT false so existing rows backfill cleanly
+            # (every pre-migration task is non-deferred). Matches the
+            # SQLite ``ALTER TABLE task ADD COLUMN is_deferred BOOLEAN
+            # DEFAULT 0 NOT NULL`` in
+            # ``daemon/migrations/versions/20260627_000003_task_is_deferred.sql``.
+            # Both dialects use the same logical default (false ↔ 0)
+            # so a freshly-added column reads back as ``False`` from
+            # the ORM regardless of which backend created it.
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS is_deferred BOOLEAN NOT NULL DEFAULT false",
+            # Plain index on is_deferred matching the model's
+            # ``index=True``. The defer-queue idle-gate predicate
+            # filters on ``WHERE status='pending' AND is_deferred=...``
+            # every claim cycle, so an index keeps it O(log n) as the
+            # task table grows. IF NOT EXISTS makes this a no-op on
+            # re-run and on fresh databases where create_all already
+            # created it from the model.
+            "CREATE INDEX IF NOT EXISTS ix_task_is_deferred ON task(is_deferred)",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
@@ -2360,6 +2394,8 @@ class InstanceManager:
         priority: int = 1,
         images: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        *,
+        is_deferred: bool = False,
     ) -> AsyncMessageResult:
         """Enqueue a message via the unified dispatcher.
 
@@ -2372,6 +2408,14 @@ class InstanceManager:
         No ``JobItem`` row is ever created for a message — the Task row
         IS the dispatch primitive.
 
+        ``is_deferred`` (Phase 3 Part B1, 2026-06-27): keyword-only
+        marker forwarded to the underlying ``InstanceMessagingService.enqueue_message``.
+        When True, the created Task row is stamped ``is_deferred=True``
+        and the worker pool's idle gate holds the task until every
+        non-defer queue is empty. Default False preserves the prior
+        behaviour for every caller that does not opt in (HTTP route,
+        telegram, scheduler, internal reports).
+
         Args:
             instance_id: The ID of the target instance.
             message: The message content.
@@ -2379,6 +2423,7 @@ class InstanceManager:
             priority: Message priority (0=system, 1=user).
             images: Optional list of base64-encoded images for vision messages.
             metadata: Optional metadata dictionary (e.g., {"resume_mode": True}).
+            is_deferred: See above.
 
         Returns:
             AsyncMessageResult with message_id, instance_id, status, and
@@ -2392,6 +2437,7 @@ class InstanceManager:
             priority=priority,
             images=images,
             metadata=metadata,
+            is_deferred=is_deferred,
         )
 
     async def _process_message_with_tracking(

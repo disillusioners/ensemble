@@ -17,6 +17,7 @@ def _create_task_with_status(
     instance_id: str = "test-instance",
     message_id: str = "test-message",
     status: str = TaskStatus.PENDING.value,
+    is_deferred: bool = False,
 ) -> Task:
     """Insert a task with a specific status directly via raw SQL.
 
@@ -25,6 +26,12 @@ def _create_task_with_status(
     the repository's claim/complete/cancel lifecycle. Mirrors the
     helper in ``test_task_retry_repository.py``; kept local to avoid
     cross-file test coupling.
+
+    The ``is_deferred`` parameter (Phase 3 Part B2, 2026-06-27) lets
+    defer-queue tests create deferred task rows directly — the
+    repository's public API does not yet expose a "create deferred
+    task" call path for tests to use, so we use this helper to insert
+    deferred rows for the defer-gate tests.
     """
     created_at = datetime.now(timezone.utc)
     with engine.begin() as conn:
@@ -33,10 +40,10 @@ def _create_task_with_status(
                 """
                 INSERT INTO task (task_type, instance_id, message_id, status,
                                   retry_count, created_at, cancel_requested,
-                                  retry_scheduled, work_id)
+                                  retry_scheduled, work_id, is_deferred)
                 VALUES (:task_type, :instance_id, :message_id, :status,
                         :retry_count, :created_at, :cancel_requested,
-                        :retry_scheduled, :work_id)
+                        :retry_scheduled, :work_id, :is_deferred)
                 """
             ),
             {
@@ -49,6 +56,9 @@ def _create_task_with_status(
                 "cancel_requested": False,
                 "retry_scheduled": False,
                 "work_id": str(uuid.uuid4()),
+                # Python bool so the bind works on both SQLite
+                # (INTEGER 0/1) and PostgreSQL (BOOLEAN false/true).
+                "is_deferred": is_deferred,
             },
         )
         task_id = result.lastrowid
@@ -832,6 +842,317 @@ class TestTaskClaiming:
             message_id="anything",
         )
         assert repository.claim_pending_task(worker_id="worker-1") is None
+
+
+class TestDeferQueueGate:
+    """Tests for the defer queue idle gate (Phase 3 Part B2, 2026-06-27).
+
+    The gate holds back deferred tasks (``is_deferred=True``) when the
+    candidate's project has at least one RUNNING non-deferred task.
+    Non-deferred tasks bypass the gate entirely. The gate is
+    project-scoped — non-deferred work in project A does NOT block
+    deferred tasks in project B.
+    """
+
+    def _insert_instance(
+        self,
+        engine,
+        instance_id: str,
+        project_id: str,
+        status: str = "running",
+    ) -> None:
+        """Insert a minimal Instance row directly via raw SQL.
+
+        The Task model has no ``project_id`` column — the defer gate
+        joins through ``instances`` to scope the active-non-deferred
+        count. Helper keeps the test self-contained.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO instances
+                        (instance_id, agent_id, agent_dir, status, project_id,
+                         created_at, updated_at, version)
+                    VALUES
+                        (:instance_id, :agent_id, :agent_dir, :status, :project_id,
+                         :created_at, :updated_at, 1)
+                    """
+                ),
+                {
+                    "instance_id": instance_id,
+                    "agent_id": "developer",
+                    "agent_dir": "agents/developer",
+                    "status": status,
+                    "project_id": project_id,
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            )
+
+    def _create_deferred_task(
+        self,
+        repository,
+        engine,
+        instance_id: str,
+        project_id: str,
+        message_id: str,
+    ) -> Task:
+        """Create a PENDING deferred task and ensure its instance has a
+        project_id (required for the defer gate's project-scoped count).
+        """
+        self._insert_instance(engine, instance_id, project_id)
+        return _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id=instance_id,
+            message_id=message_id,
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+        )
+
+    def test_deferred_task_blocked_when_project_has_active_non_deferred(
+        self, repository, engine
+    ):
+        """Gate fires: a deferred task is NOT claimable while the same
+        project has a RUNNING non-deferred task. The pre-check returns
+        None before the atomic claim runs."""
+        # Project A: one RUNNING non-deferred task (already claimed) +
+        # one PENDING deferred task. The deferred task must wait.
+        non_deferred = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-defer-A",
+            message_id="m-nondefer",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        # Move the non-deferred task to RUNNING via the atomic claim path.
+        # Important: we must use ``running`` instances so the pause gate
+        # in the claim SQL does not block the claim. Insert the instance
+        # row first with status=running.
+        self._insert_instance(engine, "inst-defer-A", "project-A")
+        # Force the task to RUNNING without re-running claim_pending_task
+        # (we want the pre-existing RUNNING task to be the gate's input).
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET status = :running, "
+                    "worker_id = :worker, started_at = :now, "
+                    "last_heartbeat_at = :now WHERE id = :id"
+                ),
+                {
+                    "running": TaskStatus.RUNNING.value,
+                    "worker": "pre-existing-worker",
+                    "now": datetime.now(timezone.utc),
+                    "id": non_deferred.id,
+                },
+            )
+
+        # Now insert a PENDING deferred task for the same project.
+        deferred = self._create_deferred_task(
+            repository, engine, "inst-defer-B", "project-A", "m-defer"
+        )
+
+        # The deferred task must NOT be claimable — the gate holds it back.
+        assert repository.claim_pending_task(worker_id="worker-1") is None
+
+        # Verify the deferred task is still PENDING (untouched by the gate).
+        db_task = repository.get(deferred.id)
+        assert db_task is not None
+        assert db_task.status == TaskStatus.PENDING.value
+
+    def test_deferred_task_claimable_when_project_is_idle(
+        self, repository, engine
+    ):
+        """Gate does NOT fire: a deferred task IS claimable when the
+        project has no RUNNING non-deferred tasks."""
+        deferred = self._create_deferred_task(
+            repository, engine, "inst-defer-C", "project-C", "m-defer-2"
+        )
+
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+
+        assert claimed is not None
+        assert claimed.id == deferred.id
+        assert claimed.status == TaskStatus.RUNNING.value
+
+    def test_non_deferred_task_unaffected_by_defer_gate(
+        self, repository, engine
+    ):
+        """Gate does NOT apply to non-deferred tasks: a non-deferred
+        candidate is always claimable, even when another non-deferred
+        task is RUNNING in the same project."""
+        # Two non-deferred tasks for the same project. t1 is RUNNING
+        # (forces the per-instance guard for inst-X so claim_pending_task
+        # skips t1 — but t2 is for a different instance, so the
+        # per-instance guard does not block it).
+        t1 = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-nondef-1",
+            message_id="m-nd1",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        t2 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-nondef-2",
+            message_id="m-nd2",
+        )
+        # Make t1 RUNNING with a healthy instance so the per-instance
+        # guard has nothing to do for inst-nondef-2.
+        self._insert_instance(engine, "inst-nondef-1", "project-D")
+        self._insert_instance(engine, "inst-nondef-2", "project-D")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET status = :running, "
+                    "worker_id = :worker, started_at = :now, "
+                    "last_heartbeat_at = :now WHERE id = :id"
+                ),
+                {
+                    "running": TaskStatus.RUNNING.value,
+                    "worker": "pre-existing-worker",
+                    "now": datetime.now(timezone.utc),
+                    "id": t1.id,
+                },
+            )
+
+        # t2 (non-deferred, inst-nondef-2) must be claimable despite t1
+        # being RUNNING in the same project — the defer gate is
+        # NON-defer-invisible.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == t2.id
+
+    def test_defer_gate_is_project_scoped(self, repository, engine):
+        """Gate is project-scoped: a non-deferred task in project A
+        does NOT block a deferred task in project B."""
+        # Project A: one RUNNING non-deferred task.
+        non_deferred_A = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-A-1",
+            message_id="m-A-nd",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        self._insert_instance(engine, "inst-A-1", "project-A")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET status = :running, "
+                    "worker_id = :worker, started_at = :now, "
+                    "last_heartbeat_at = :now WHERE id = :id"
+                ),
+                {
+                    "running": TaskStatus.RUNNING.value,
+                    "worker": "pre-existing-worker",
+                    "now": datetime.now(timezone.utc),
+                    "id": non_deferred_A.id,
+                },
+            )
+
+        # Project B: one PENDING deferred task (different project).
+        deferred_B = self._create_deferred_task(
+            repository, engine, "inst-B-1", "project-B", "m-B-defer"
+        )
+
+        # Deferred task in project B must be claimable — non-defer work
+        # in project A does not cross the project boundary.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == deferred_B.id
+        assert claimed.status == TaskStatus.RUNNING.value
+
+    def test_defer_gate_releases_when_non_deferred_completes(
+        self, repository, engine
+    ):
+        """Gate releases: once the RUNNING non-deferred task completes,
+        the deferred task becomes claimable."""
+        non_deferred = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-E-1",
+            message_id="m-E-nd",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        self._insert_instance(engine, "inst-E-1", "project-E")
+        # Claim the non-deferred task via the normal claim path so it
+        # is RUNNING with a valid worker + heartbeat.
+        claimed_nd = repository.claim_pending_task(worker_id="worker-nd")
+        assert claimed_nd is not None
+        assert claimed_nd.id == non_deferred.id
+
+        # Insert a deferred task for the same project.
+        deferred = self._create_deferred_task(
+            repository, engine, "inst-E-2", "project-E", "m-E-defer"
+        )
+
+        # Gate holds the deferred task.
+        assert repository.claim_pending_task(worker_id="worker-1") is None
+
+        # Complete the non-deferred task.
+        repository.complete_task(claimed_nd.id, {"ok": True})
+
+        # Gate releases — the deferred task is now claimable.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == deferred.id
+
+    def test_defer_gate_allows_when_candidate_instance_has_no_project(
+        self, repository, engine
+    ):
+        """No-project-context fallback: when the candidate's instance
+        has no matching ``instances`` row (e.g. legacy), the LEFT JOIN
+        yields ``project_id = NULL`` and the gate defaults to "allow".
+        This mirrors the COALESCE fallback pattern used by the
+        cross-system guard elsewhere in the method."""
+        # Insert a RUNNING non-deferred task WITHOUT an instance row
+        # (project context unknown). This deliberately puts the
+        # non-deferred task in a project-unknown state.
+        non_deferred = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-no-row",
+            message_id="m-no-row",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET status = :running, "
+                    "worker_id = :worker, started_at = :now, "
+                    "last_heartbeat_at = :now WHERE id = :id"
+                ),
+                {
+                    "running": TaskStatus.RUNNING.value,
+                    "worker": "pre-existing-worker",
+                    "now": datetime.now(timezone.utc),
+                    "id": non_deferred.id,
+                },
+            )
+
+        # Insert a deferred task whose instance also has no row →
+        # project_id NULL on the LEFT JOIN.
+        deferred = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-no-project",
+            message_id="m-no-proj",
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+        )
+
+        # Gate defaults to "allow" because the candidate's project_id
+        # is NULL — the deferred task is claimable.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None
+        assert claimed.id == deferred.id
 
 
 class TestTaskCompletion:

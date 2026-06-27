@@ -133,10 +133,11 @@ class _PreparedEnqueueContext(NamedTuple):
     # D13: The Task row is always created in the same transaction as the
     # MessageQueue row. ``task_id`` is its primary key (int | None) — None
     # only if the task insert failed for an unrecoverable reason (callers
-    # treat None as "no job_id adapter available"). The HTTP route discards
-    # ``job_id``; the ``job_continue`` tool uses it as ``new_job_id`` (the
-    # semantic shift from JobItem UUID → Task int is intentional and
-    # documented on AsyncMessageResult.job_id).
+    # treat None as "no resolvable work_id available"). The HTTP route
+    # discards ``job_id``; the ``job_continue`` tool uses it as
+    # ``new_job_id`` (the resolution path goes through
+    # ``work_resolver.resolve_work`` against ``task`` and
+    # ``job_queue_items`` — see ``enqueue_message``).
     task_id: int | None
     # Virtual Job Management Surface (Phase 1, Batch 3,
     # 2026-06-27). The stable cross-system ``work_id`` (UUID4 string)
@@ -150,6 +151,16 @@ class _PreparedEnqueueContext(NamedTuple):
     # NamedTuple for the existing test surface). ``None`` only when
     # the Task insert itself failed (mirrors ``task_id``).
     work_id: str | None
+    # Defer Queue marker (Phase 3 Part B1, 2026-06-27,
+    # feature/virtual-job-management-surface). Mirrors
+    # ``Task.is_deferred`` at row-creation time. The orchestrator
+    # passes ``is_deferred`` into ``enqueue_message`` /
+    # ``_prepare_enqueued_message``; the value is stamped onto the new
+    # Task row and surfaced here so callers (and the eventual defer
+    # queue gate) can read it without re-querying the DB. Always False
+    # for the default (non-defer) path — every existing caller that
+    # does not pass ``is_deferred`` is unaffected.
+    is_deferred: bool
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -754,6 +765,7 @@ class InstanceMessagingService:
         metadata: dict[str, Any] | None,
         *,
         path_label: str = "",
+        is_deferred: bool = False,
     ) -> _PreparedEnqueueContext:
         """Shared prelude for ``enqueue_message``.
 
@@ -775,6 +787,12 @@ class InstanceMessagingService:
             path_label: Optional identifier appended to the "Reactivating
                 completed instance" log message. Empty string omits the
                 suffix.
+            is_deferred: Phase 3 Part B1 (2026-06-27) defer-queue marker.
+                When True, the created Task row is stamped
+                ``is_deferred=True`` and the worker pool's idle gate
+                will hold the task until every non-defer queue is
+                empty. Default False preserves the prior behaviour for
+                every caller that does not explicitly opt in.
 
         Returns:
             ``_PreparedEnqueueContext`` carrying the values callers need to
@@ -814,10 +832,11 @@ class InstanceMessagingService:
         # Task row is always created in the same transaction as the
         # MessageQueue row. ``task_id`` is its primary key (int | None) —
         # None only if the task insert failed for an unrecoverable reason
-        # (callers treat None as "no job_id adapter available"). The HTTP
-        # route discards ``job_id``; the ``job_continue`` tool uses it as
-        # ``new_job_id`` (the semantic shift from JobItem UUID → Task int
-        # is intentional and documented on AsyncMessageResult.job_id).
+        # (callers treat None as "no resolvable work_id available"). The
+        # HTTP route discards ``job_id``; the ``job_continue`` tool uses it
+        # as ``new_job_id`` (resolution goes through
+        # ``work_resolver.resolve_work`` against ``task`` and
+        # ``job_queue_items`` — see ``enqueue_message``).
         task_id: int | None = None
         # Virtual Job Management Surface (Phase 1, Batch 3,
         # 2026-06-27): capture ``Task.work_id`` alongside ``task.id``.
@@ -849,12 +868,19 @@ class InstanceMessagingService:
             #    MessageQueue row. The structural D13 fix that eliminates
             #    the dual-record coupling — messages no longer create a
             #    JobItem at all; the Task row IS the dispatch primitive.
+            #
+            #    ``is_deferred`` (Phase 3 Part B1, 2026-06-27) is
+            #    stamped at creation time so the defer-queue idle gate
+            #    can recognise the row without a follow-up UPDATE.
+            #    Default False matches every pre-existing caller; the
+            #    orchestrator opts in via ``enqueue_message``.
             task = Task(
                 task_type=TaskType.PROCESS_MESSAGE.value,
                 instance_id=instance_id,
                 message_id=message_id,
                 status=TaskStatus.PENDING.value,
                 created_at=datetime.now(timezone.utc),
+                is_deferred=is_deferred,
             )
             session.add(task)
             # ``task.work_id`` is populated by the model's
@@ -939,6 +965,7 @@ class InstanceMessagingService:
             previous_status=previous_status,
             task_id=task_id,
             work_id=work_id,
+            is_deferred=is_deferred,
         )
 
     async def enqueue_message(
@@ -949,6 +976,8 @@ class InstanceMessagingService:
         priority: int = 1,
         images: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        *,
+        is_deferred: bool = False,
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
@@ -970,6 +999,16 @@ class InstanceMessagingService:
         adapter — the int PK was a stop-gap until ``work_id`` was
         added; the resolver now resolves ``work_id`` uniformly across
         ``task`` and ``job_queue_items``.
+
+        ``is_deferred`` (Phase 3 Part B1, 2026-06-27): keyword-only
+        marker that stamps the created Task row with
+        ``Task.is_deferred=True``. The worker pool's idle gate holds
+        the task until every non-defer queue is empty. Default False
+        preserves the prior behaviour for every caller that does not
+        opt in (HTTP route, telegram, scheduler, internal reports).
+        Keyword-only on purpose — it is a forward-looking orchestrator
+        affordance and threading it positionally would silently
+        re-route existing traffic if a caller miscounted args.
 
         New-message-during-pause behaviour:
 
@@ -995,6 +1034,7 @@ class InstanceMessagingService:
             priority=priority,
             images=images,
             metadata=metadata,
+            is_deferred=is_deferred,
         )
 
         # Emit status_change event if status was changed to running
@@ -1016,7 +1056,7 @@ class InstanceMessagingService:
         if self._manager._worker_pool is not None:
             self._manager._worker_pool.notify_work()
 
-        # ``job_id`` adapter: ``task.work_id`` (UUID4) is the stable
+        # ``job_id`` payload: ``task.work_id`` (UUID4) is the stable
         # cross-system handle minted by the Task model's
         # ``default_factory``. The HTTP ``send_message`` route discards
         # ``job_id`` entirely; the ``job_continue`` tool surfaces it as
