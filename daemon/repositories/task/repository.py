@@ -379,15 +379,19 @@ class TaskRepository:
         while the task is in flight; the recovery predicate compares
         ``last_heartbeat_at`` to the threshold.
 
-        Defer queue idle gate (Phase 3 Part B2, 2026-06-27): deferred
-        tasks (``is_deferred=True``) are gated on the project having no
-        active non-deferred work, mirroring the job defer queue's
-        ``count_active_jobs_in_non_defer_queues == 0`` semantics. The
-        gate is a Python pre-check (TOCTOU-acceptable) — same trade-off
-        as the job defer queue (see project critical notes). Non-
-        deferred tasks bypass the gate entirely and fall through to
-        the normal atomic claim; only deferred tasks are held back
-        while non-deferred work is active.
+        Defer queue idle gate (Phase 3 Part B2, 2026-06-27):
+        deferred tasks (``is_deferred=True``) are gated on the
+        project having no active non-deferred work, mirroring the job
+        defer queue's ``count_active_jobs_in_non_defer_queues == 0``
+        semantics. The gate is folded INTO the atomic claim's inner
+        SELECT (NOT a separate Python pre-check) so it shares the
+        same WHERE-clause evaluation as the pause gate, per-instance
+        guard, and cross-system guard — closing the deterministic
+        starvation window that the prior pre-check had when the
+        oldest PENDING task was deferred AND its instance was paused
+        or terminated. Non-deferred tasks bypass the gate entirely;
+        only deferred candidates are held back while non-deferred
+        work is active in the same project.
 
         Args:
             worker_id: ID of the worker claiming the task.
@@ -423,107 +427,34 @@ class TaskRepository:
         # on both backends.
 
         with self.engine.begin() as conn:
-            # --------------------------------------------------------
-            # Defer queue idle gate (Phase 3 Part B2, 2026-06-27).
+            # The defer queue idle gate is folded INTO the atomic
+            # claim's inner SELECT (not a separate Python pre-check).
+            # Folding the gate into the same SQL statement closes the
+            # deterministic starvation window that the prior
+            # pre-check had: when the oldest PENDING task was deferred
+            # AND its instance was paused/terminated, the pre-check
+            # (which did NOT apply the pause gate) would still pick the
+            # deferred task as the candidate, see ``is_deferred=True``,
+            # find the project's active non-deferred count > 0, and
+            # return None for the entire method — starving a younger,
+            # non-deferred, eligible task. With the gate in the same
+            # SQL, the pause gate and the defer gate evaluate together
+            # for every candidate: a paused deferred task is filtered
+            # out by the pause gate, and the next eligible non-deferred
+            # task is selected.
             #
-            # Look at the oldest PENDING task that the atomic claim
-            # below would consider (matching the candidate-selection
-            # ``ORDER BY created_at ASC LIMIT 1`` semantics). If the
-            # candidate is a deferred task (``is_deferred=True``), check
-            # whether the candidate's project has any RUNNING non-
-            # deferred tasks. If yes, the defer task must wait —
-            # return None and skip the atomic claim.
-            #
-            # TOCTOU is acceptable (matches the job defer queue's
-            # count_active_jobs_in_non_defer_queues == 0 pattern —
-            # see project critical notes). The pre-check and the
-            # atomic UPDATE below are two separate SQL statements;
-            # a concurrent task lifecycle change between them may
-            # let a defer task claim one cycle early or late. This
-            # is harmless — the defer queue semantic is "defer work
-            # shouldn't compete with non-defer work", a politeness,
-            # not a correctness invariant.
-            #
-            # The pre-check uses a narrow candidate lookup that does
-            # NOT apply the full set of guards from the atomic claim
-            # below (per-instance guard, pause gate, cross-system
-            # guard). The candidate selected here may differ from
-            # what the full atomic claim would pick in pathological
-            # cases — but the pre-check is intentionally cheap and
-            # idempotent. If the candidate differs, the pre-check
-            # is moot (the atomic claim either picks a different
-            # task or returns None).
-            #
-            # Project scoping: the active-non-deferred count is
-            # filtered to the candidate's project_id. A non-deferred
-            # task in project A does NOT block a deferred task in
-            # project B — defer queues are project-local politeness.
-            # If the candidate's instance has no matching ``instances``
-            # row (LEFT JOIN NULL), project_id is NULL and the gate
-            # defaults to "no project context → allow the claim"
-            # (consistent with the cross-system guard's COALESCE
-            # semantics elsewhere in this method).
-            #
-            # The defer gate ONLY blocks deferred tasks. Non-deferred
-            # candidates skip the entire pre-check and fall through
-            # to the normal atomic claim unchanged.
-            # --------------------------------------------------------
-            candidate_row = conn.execute(
-                text("""
-                    SELECT t.id, t.instance_id, t.is_deferred, i.project_id
-                    FROM task t
-                    LEFT JOIN instances i ON t.instance_id = i.instance_id
-                    WHERE t.status = :status_pending
-                    AND (t.next_retry_at IS NULL OR t.next_retry_at <= :now_str)
-                    ORDER BY t.created_at ASC
-                    LIMIT 1
-                """),
-                {
-                    "status_pending": TaskStatus.PENDING.value,
-                    "now_str": now_str,
-                },
-            ).fetchone()
-
-            if (
-                candidate_row is not None
-                and bool(candidate_row.is_deferred)
-                and candidate_row.project_id is not None
-            ):
-                # Count RUNNING non-deferred tasks for the candidate's
-                # project. The defer gate fires (return None) when this
-                # count is > 0.
-                active_non_deferred = conn.execute(
-                    text("""
-                        SELECT COUNT(*) FROM task t
-                        JOIN instances i ON t.instance_id = i.instance_id
-                        WHERE t.status = :status_running
-                        AND t.is_deferred = :is_deferred_false
-                        AND i.project_id = :project_id
-                    """),
-                    {
-                        "status_running": TaskStatus.RUNNING.value,
-                        # Python bool so the comparison works on both
-                        # SQLite (INTEGER 0/1) and PostgreSQL (BOOLEAN
-                        # false/true) — matches the dual-driver pattern
-                        # used elsewhere in this repository.
-                        "is_deferred_false": False,
-                        "project_id": candidate_row.project_id,
-                    },
-                ).scalar() or 0
-
-                if active_non_deferred > 0:
-                    # Project is busy with non-deferred work — defer
-                    # task must wait. Return None without attempting
-                    # the atomic claim.
-                    logger.debug(
-                        "claim_pending_task: defer gate holds back deferred "
-                        "task %s for project %s (%d active non-deferred tasks)",
-                        candidate_row.id,
-                        candidate_row.project_id,
-                        active_non_deferred,
-                    )
-                    return None
-
+            # The defer predicate uses a correlated subquery on
+            # ``task.instance_id`` (the candidate row's instance) to
+            # resolve the candidate's project_id via ``instances``.
+            # This preserves the original gate's project-scoping and
+            # NULL-fallback semantics:
+            #   * A non-deferred candidate (``is_deferred = false``)
+            #     bypasses the gate entirely.
+            #   * A deferred candidate whose instance has no
+            #     ``instances`` row resolves to project_id = NULL;
+            #     ``i2.project_id = NULL`` is UNKNOWN in SQL, so
+            #     EXISTS returns FALSE and the candidate is allowed —
+            #     the original "no project context → allow" fallback.
             stmt = text(f"""
                 UPDATE task
                 SET status = :status_running,
@@ -534,6 +465,29 @@ class TaskRepository:
                     SELECT id FROM task
                     WHERE status = :status_pending
                     AND (next_retry_at IS NULL OR next_retry_at <= :now_str)
+                    -- Defer queue idle gate (Phase 3 Part B2
+                    -- starvation-fix revision, 2026-06-27). Held back
+                    -- when this candidate is deferred AND there is
+                    -- active non-deferred work in the same project.
+                    -- Evaluated in the same SQL as the pause gate,
+                    -- per-instance guard, and cross-system guard so a
+                    -- paused deferred task can never starve a younger
+                    -- non-deferred task.
+                    AND NOT (
+                        task.is_deferred = :is_deferred_true
+                        AND EXISTS (
+                            SELECT 1 FROM task t2
+                            JOIN instances i2
+                                ON t2.instance_id = i2.instance_id
+                            WHERE t2.status = :status_running
+                              AND t2.is_deferred = :is_deferred_false
+                              AND i2.project_id = (
+                                  SELECT i_cand.project_id
+                                  FROM instances i_cand
+                                  WHERE i_cand.instance_id = task.instance_id
+                              )
+                        )
+                    )
                     AND instance_id NOT IN (
                         SELECT instance_id FROM task
                         WHERE status = :status_running_guard
@@ -623,6 +577,13 @@ class TaskRepository:
                 "status_terminated": InstanceStatus.TERMINATED.value,
                 "process_message_type": TaskType.PROCESS_MESSAGE.value,
                 "now_str": now_str,
+                # Defer queue idle gate (Phase 3 Part B2). Python
+                # booleans so the comparison works on both SQLite
+                # (INTEGER 0/1) and PostgreSQL (BOOLEAN false/true) —
+                # matches the dual-driver pattern used elsewhere in
+                # this repository (e.g. schedule_retry).
+                "is_deferred_true": True,
+                "is_deferred_false": False,
             }).fetchone()
 
             if row is None:
@@ -802,26 +763,31 @@ class TaskRepository:
     def _row_to_task(self, row) -> Task:
         """Convert a database row to a Task object.
 
+        Direct attribute access: every column referenced here MUST be
+        present on ``row``. The prior ``hasattr`` fallbacks for
+        ``work_id`` (random UUID) and ``is_deferred`` (False) silently
+        masked migration gaps — a row from a missing-column DDL would
+        yield a Task with a random work_id, breaking the
+        unique-indexed virtual-job correlation. Letting ``AttributeError``
+        surface makes migration gaps immediately debuggable. The
+        ``bool()`` coercion on ``cancel_requested`` / ``retry_scheduled``
+        is kept because INTEGER 0/1 (SQLite) and BOOLEAN false/true
+        (PostgreSQL) both coerce to proper Python bools inside
+        ``Task()``'s Pydantic validator; tests rely on ``is True`` /
+        ``is False`` for those flags.
+
         Args:
             row: Raw database row from UPDATE-RETURNING query.
 
         Returns:
             Task object.
         """
-        # Coerce boolean columns to Python bool explicitly. Raw SQL via
-        # RETURNING returns INTEGER 0/1 on SQLite (and the value can be
-        # a Python int even on PostgreSQL depending on the driver's
-        # type adapter). The Task model declares these fields as
-        # ``bool``, and downstream assertions like ``is True`` /
-        # ``is False`` rely on actual bool singletons, not ints. The
-        # Pydantic coercion path inside Task() is not always invoked
-        # here because we construct Task with keyword args directly.
         return Task(
             id=row.id,
             task_type=row.task_type,
             instance_id=row.instance_id,
             message_id=row.message_id,
-            work_id=row.work_id if hasattr(row, 'work_id') else str(uuid.uuid4()),
+            work_id=row.work_id,
             status=row.status,
             worker_id=row.worker_id,
             retry_count=row.retry_count if hasattr(row, 'retry_count') else 0,
@@ -829,7 +795,7 @@ class TaskRepository:
             cancel_requested=bool(row.cancel_requested) if hasattr(row, 'cancel_requested') else False,
             cancel_requested_at=row.cancel_requested_at if hasattr(row, 'cancel_requested_at') else None,
             retry_scheduled=bool(row.retry_scheduled) if hasattr(row, 'retry_scheduled') else False,
-            is_deferred=bool(row.is_deferred) if hasattr(row, 'is_deferred') else False,
+            is_deferred=row.is_deferred,
             result=row.result,
             error=row.error,
             created_at=row.created_at,

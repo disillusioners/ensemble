@@ -356,18 +356,42 @@ class TestRowToTaskMapping:
 
 
 class TestRowToTaskBackwardCompat:
-    """Tests for _row_to_task() backward compatibility with old rows."""
+    """Tests for _row_to_task() backward compatibility with old rows.
+
+    Phase 3 Part C2 (2026-06-27): ``work_id`` and ``is_deferred`` are
+    REQUIRED columns on every Task row after the work_id foundation
+    (P1) and the defer-queue marker (Phase 3 B1) landed. Mocks that
+    omit these columns exercise the AttributeError path — they are
+    included here so the test fixture mirrors a real schema.
+    Other fields (``retry_count``, ``next_retry_at``, ``cancel_requested``,
+    ``cancel_requested_at``, ``retry_scheduled``, ``last_heartbeat_at``)
+    still tolerate a missing column via the legacy ``hasattr`` fallback
+    so older code paths and partial-SELECT mocks don't blow up.
+    """
 
     def test_row_to_task_defaults_for_missing_fields(self, engine):
-        """_row_to_task should provide defaults when new fields are missing."""
+        """_row_to_task provides defaults for legacy fields (retry_count, etc.)
+        when missing from the row; work_id/is_deferred are required."""
 
         class MockRowOld:
-            """Mock row without new fields (old schema)."""
+            """Mock row WITHOUT the new P1/Phase 3 columns to exercise
+            the legacy ``hasattr`` fallback for retry_count and friends.
+
+            ``work_id`` and ``is_deferred`` ARE present here — they are
+            NOT under the legacy fallback (C2 removed their fallbacks).
+            A mock that omitted them would raise AttributeError on
+            ``row.work_id`` / ``row.is_deferred``, which is the
+            intended new behaviour (migration gaps must be debuggable,
+            not silently masked by random UUIDs).
+            """
             def __init__(self):
                 self.id = 1
                 self.task_type = "process_message"
                 self.instance_id = "test-instance"
                 self.message_id = "msg-123"
+                # work_id / is_deferred are required (no fallback).
+                self.work_id = "work-id-test-1"
+                self.is_deferred = False
                 self.status = "pending"
                 self.worker_id = None
                 self.result = None
@@ -375,12 +399,18 @@ class TestRowToTaskBackwardCompat:
                 self.created_at = datetime.now(timezone.utc)
                 self.started_at = None
                 self.completed_at = None
+                # No retry_count, next_retry_at, cancel_requested,
+                # cancel_requested_at, retry_scheduled, last_heartbeat_at
+                # — exercises the legacy ``hasattr`` fallback for those.
 
         mock_row = MockRowOld()
         repo = TaskRepository(engine)
         task = repo._row_to_task(mock_row)
 
-        # All new fields should get default values
+        # work_id / is_deferred pass through directly (no fallback).
+        assert task.work_id == "work-id-test-1"
+        assert task.is_deferred is False
+        # Legacy fields still get their defaults via ``hasattr``.
         assert task.retry_count == 0
         assert task.next_retry_at is None
         assert task.cancel_requested is False
@@ -388,15 +418,22 @@ class TestRowToTaskBackwardCompat:
         assert task.retry_scheduled is False
 
     def test_row_to_task_partial_new_fields(self, engine):
-        """_row_to_task should handle partial new fields (hasattr returns True for 0/False)."""
+        """_row_to_task reads legacy ``hasattr`` fields when present (no
+        default masking) and still passes through required fields
+        (work_id, is_deferred)."""
 
         class MockRowPartial:
-            """Mock row with some new fields."""
+            """Mock row with SOME legacy fields populated; work_id and
+            is_deferred are required and present.
+            """
             def __init__(self):
                 self.id = 1
                 self.task_type = "process_message"
                 self.instance_id = "test-instance"
                 self.message_id = "msg-123"
+                # work_id / is_deferred are required.
+                self.work_id = "work-id-test-2"
+                self.is_deferred = True
                 self.status = "pending"
                 self.worker_id = None
                 self.result = None
@@ -404,7 +441,7 @@ class TestRowToTaskBackwardCompat:
                 self.created_at = datetime.now(timezone.utc)
                 self.started_at = None
                 self.completed_at = None
-                # Only some new fields
+                # Some legacy fields populated.
                 self.retry_count = 2
                 self.next_retry_at = "2026-04-15T12:00:00Z"
                 # Missing: cancel_requested, cancel_requested_at, retry_scheduled
@@ -413,8 +450,13 @@ class TestRowToTaskBackwardCompat:
         repo = TaskRepository(engine)
         task = repo._row_to_task(mock_row)
 
+        # work_id / is_deferred pass through directly.
+        assert task.work_id == "work-id-test-2"
+        assert task.is_deferred is True
+        # Populated legacy fields pass through.
         assert task.retry_count == 2
         assert task.next_retry_at == "2026-04-15T12:00:00Z"
+        # Missing legacy fields still get their defaults via ``hasattr``.
         assert task.cancel_requested is False  # Default
         assert task.cancel_requested_at is None  # Default
         assert task.retry_scheduled is False  # Default

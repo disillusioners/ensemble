@@ -3,7 +3,7 @@
 import pytest
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
@@ -1102,6 +1102,141 @@ class TestDeferQueueGate:
         claimed = repository.claim_pending_task(worker_id="worker-1")
         assert claimed is not None
         assert claimed.id == deferred.id
+
+    def test_claim_skips_deferred_paused_instance_to_younger_non_deferred(
+        self, repository, engine
+    ):
+        """Phase 3 Part B2 starvation regression (2026-06-27).
+
+        The deterministic starvation bug: when the OLDEST PENDING task
+        is ``is_deferred=True`` AND its instance is PAUSED, the
+        Python pre-check (which did NOT apply the pause gate) would
+        still pick the deferred task as the candidate. The defer gate
+        then counted the project's active non-deferred work, found
+        count > 0, and returned ``None`` for the entire method —
+        starving a YOUNGER non-deferred eligible task that the
+        atomic claim would otherwise have picked.
+
+        With the defer gate folded INTO the atomic SQL's inner SELECT,
+        the pause gate and the defer gate evaluate together: the
+        deferred paused task is filtered out by the pause gate (its
+        instance is PAUSED), and the next eligible non-deferred task
+        is selected by the inner SELECT.
+
+        Setup:
+            * project-starve:
+              - inst-A (RUNNING): one RUNNING non-deferred task
+                (this makes the project's active non-deferred count
+                > 0 — the gate's blocker condition).
+              - inst-B (PAUSED):  one PENDING deferred task (OLDER
+                — created first). Ineligible due to pause gate AND
+                defer gate. THIS is the starved candidate.
+              - inst-C (RUNNING): one PENDING non-deferred task
+                (YOUNGER — created last). The eligible candidate
+                the prior pre-check would have starved.
+        """
+        # 1. Project's already-running non-deferred task (inst-A).
+        self._insert_instance(engine, "inst-A", "project-starve")
+        running_nd = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-A",
+            message_id="m-running-nd",
+            status=TaskStatus.RUNNING.value,
+            is_deferred=False,
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET worker_id = :worker, "
+                    "started_at = :now, last_heartbeat_at = :now "
+                    "WHERE id = :id"
+                ),
+                {
+                    "worker": "pre-existing-worker",
+                    "now": datetime.now(timezone.utc),
+                    "id": running_nd.id,
+                },
+            )
+
+        # 2. Older deferred task on a PAUSED instance (inst-B).
+        self._insert_instance(
+            engine, "inst-B", "project-starve", status="paused"
+        )
+        deferred_paused = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-B",
+            message_id="m-defer-paused",
+            status=TaskStatus.PENDING.value,
+            is_deferred=True,
+        )
+        # Capture created_at so we can pin ordering — this row must
+        # be OLDER than the eligible row below for the pre-check
+        # bug to manifest. SQLite returns the column as a string;
+        # parse it so we can do timedelta arithmetic.
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("SELECT created_at FROM task WHERE id = :id"),
+                {"id": deferred_paused.id},
+            ).fetchone()
+            paused_created_at_raw = row.created_at
+            paused_created_at = (
+                datetime.fromisoformat(paused_created_at_raw)
+                if isinstance(paused_created_at_raw, str)
+                else paused_created_at_raw
+            )
+
+        # 3. Younger non-deferred task on a RUNNING instance (inst-C).
+        self._insert_instance(engine, "inst-C", "project-starve")
+        eligible_nd = _create_task_with_status(
+            engine,
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-C",
+            message_id="m-eligible-nd",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :created_at "
+                    "WHERE id = :id"
+                ),
+                {
+                    "created_at": paused_created_at + timedelta(seconds=10),
+                    "id": eligible_nd.id,
+                },
+            )
+
+        # Pre-fix: claim_pending_task returns None (defer gate holds
+        # back the deferred paused task, starving the eligible one).
+        # Post-fix: claim_pending_task picks the eligible non-deferred
+        # task — the pause gate excludes the deferred paused task from
+        # the inner SELECT, and the defer gate evaluates together with
+        # the pause gate for any remaining deferred candidates.
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+
+        assert claimed is not None, (
+            "claim_pending_task returned None — younger non-deferred "
+            "eligible task was starved by the older deferred paused "
+            "task's defer gate."
+        )
+        assert claimed.id == eligible_nd.id
+        assert claimed.status == TaskStatus.RUNNING.value
+        assert claimed.worker_id == "worker-1"
+
+        # The deferred paused task is still PENDING (untouched — it is
+        # ineligible due to the pause gate, not the defer gate).
+        db_deferred = repository.get(deferred_paused.id)
+        assert db_deferred is not None
+        assert db_deferred.status == TaskStatus.PENDING.value
+
+        # The original RUNNING non-deferred task is still RUNNING
+        # (gate-counted but not disturbed).
+        db_running = repository.get(running_nd.id)
+        assert db_running is not None
+        assert db_running.status == TaskStatus.RUNNING.value
 
     def test_defer_gate_allows_when_candidate_instance_has_no_project(
         self, repository, engine
