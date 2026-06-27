@@ -7,6 +7,7 @@
 | **Depends on** | D11 + D13 complete (confirmed done in `LESSONS/architecture-migration-status-2026-06-26.md`). This plan is the missing management half of that migration. |
 | **Unblocks** | Defer queue on the message/task layer (separate follow-up plan). |
 | **Scope (primary)** | `daemon/repositories/job_queue/watcher_models.py`, `daemon/repositories/job_queue/watcher_repository.py`, `daemon/repositories/task/models.py`, `daemon/repositories/task/repository.py`, `daemon/services/job_queue_service.py`, `daemon/services/job_feedback_observer.py`, `daemon/services/worker_pool.py`, `daemon/services/stale_task_recovery.py`, `daemon/services/instance_messaging.py`, `daemon/tools/job_queue.py`, `daemon/routers/messages.py` |
+| **Scope (P4 — frontend)** | `frontend/src/app/pages/jobs/`, `frontend/src/app/components/job-card/`, `frontend/src/app/models/job.model.ts`, `frontend/src/app/services/job.service.ts` / new `work.service.ts` |
 | **Scope (schema)** | New migration `20260627_000001_virtual_job_work_id.sql` + `_ensure_postgres_columns()` parity entry |
 | **Agent contract** | No tool renames, no notification format change. `agents/_prompt_system/innate-skills/job-orchestration/skill.md` stays valid verbatim. |
 | **Definition of done** | §9 below |
@@ -143,9 +144,29 @@ To avoid double-notify: a task terminal that is *also* tracked by an observer fi
 - `agents/_prompt_system/innate-skills/job-orchestration/skill.md` — **no change required**. The notification format, parsing rules, and terminal-state table all hold for virtual jobs. Optional: add one line noting that `job_continue`/`watch_job` handles also work over continued-instance work.
 - No agent `soul.md`/`tools.md` edits (the whole point of the facade).
 
+### 3.10 Frontend — virtual queue UI (P4)
+
+The "virtual queue" is the human-visible layer of the same facade. The backend `list_work` UNION (§3.3) already emits normalized `WorkRecord`s; the frontend becomes a thin consumer. **Scoped deliverable: Option A (flat unified board). Options B and the defer-lane are follow-ups.**
+
+**Backend (small):**
+- Expose `GET /work` (or widen `GET /jobs` to return the UNION from `list_work`). One endpoint returning normalized `WorkRecord` rows with filters (`status`, `project_id`, `instance_id`, `kind`).
+- `WorkRecord` JSON shape maps 1:1 onto the existing frontend `Job` interface (`frontend/src/app/models/job.model.ts:7`) — add a `kind: 'job' | 'turn' | 'report'` field and reuse everything else.
+
+**Frontend (small):**
+- `JobCardComponent` (`components/job-card/job-card.component.html`) already renders `agent_id`, `status`, `message`, `instance_id`, `source`, timestamps, cancel/retry. `WorkRecord` populates it with zero structural change.
+- Add a `kind` chip next to the status chip: `job` (real queued job), `turn` (message turn on an instance), `report` (child-completion report).
+- Jobs page (`pages/jobs/jobs.component.ts`) gains a unified list mode backed by the `/work` endpoint; the queue sidebar (`QueueListComponent`) still filters real queues. Task-backed work shows no queue badge (it has no `queue_id`) — surfaced only via the `kind` chip.
+- SSE: reuse `job-sse.service` against `work_id` so task status flips (running→processing, paused, terminal) stream live into the board.
+
+**Why not fake task "queues":** tasks have no queue membership and no FIFO/concurrency semantics — `claim_pending_task` claims globally with only a "1 RUNNING task per instance" guard. Pretending they sit in a FIFO lane (synthetic `job_queues` rows) would advertise queueing behavior that doesn't exist. The defer lane (§7) is the one place a task-type virtual queue will earn real sidebar placement, because it actually gates admission.
+
+**Follow-ups (out of P4 scope):**
+- **Option B — per-instance grouping:** group task work under a synthetic lane per running instance ("Instance abc123 → 1 running turn"). The most honest visualization for conversation turns; medium effort (instance-aware grouping + new sidebar section).
+- **Defer-lane-as-real-queue:** when the defer queue (§7) lands, its tasks carry a lane with real idle-gating semantics → that lane is a genuine virtual queue that belongs in `QueueListComponent`.
+
 ---
 
-## 4. Phasing (one branch, 3 PRs)
+## 4. Phasing (one branch, 4 PRs)
 
 ```
 P1 — Schema + models + resolver (no behavior change yet)
@@ -155,15 +176,20 @@ P1 — Schema + models + resolver (no behavior change yet)
    │
 P2 — Watcher rewire + task-terminal notify (the observability half)
    job_watchers FK dropped; notify_watchers goes through the resolver;
-   task terminal sites fire notify_watchers(work_id, ...).
+   task terminal sites fire notify_work_watchers(work_id, ...).
    watch_job/job_get/job_cancel route through resolver (tasks now visible/manageable).
    │
 P3 — Cleanup + docs + test consolidation
    job_list UNION; remove the str(task.id) adapter comment; skill doc note;
    regression tests for the "one terminal notification" invariant.
+   │
+P4 — Virtual queue UI (the visible half for humans)
+   Backend GET /work (or widen GET /jobs to the list_work UNION);
+   frontend Work model + kind chip; jobs page unified list mode;
+   SSE live updates keyed on work_id.
 ```
 
-Engineering estimate: **~3–4 days** (P1 ~1.5, P2 ~1.5, P3 ~0.5). Lower risk than D11/D13 because it is additive (a facade), not a dispatch-path replacement.
+Engineering estimate: **~5–6 days** (P1 ~1.5, P2 ~1.5, P3 ~0.5, P4 ~1.5–2). Lower risk than D11/D13 because it is additive (a facade), not a dispatch-path replacement.
 
 ---
 
@@ -195,6 +221,12 @@ New pack `tests/unit/services/test_work_resolver.py` + extensions to existing pa
 10. **Migration/backfill tests** — existing `task` rows get a `work_id`; `job_watchers` FK dropped without losing rows (SQLite table-rebuild path covered by `tests/migrations/`).
 
 Existing job-orchestration E2E tests (patterns 1–6 in the skill doc) must pass unchanged — they are the contract-preservation proof.
+
+### P4 — UI tests (`frontend/src/app/pages/jobs/`)
+
+11. **`jobs-page unified list renders both kinds`** — a pending JobItem and a running Task both appear as cards with correct `kind` chip; task card shows no queue badge.
+12. **`task status flips stream via SSE`** — task terminal → card transitions to terminal status without a manual refresh (SSE keyed on `work_id`).
+13. **`work endpoint filters`** — `GET /work?kind=turn` and `?status=processing` return the normalized subset.
 
 ---
 
@@ -228,6 +260,7 @@ This is why D14 (this plan) is a prerequisite, not a competitor, to the defer qu
 - [ ] `job-orchestration/skill.md` notification contract still parses identically.
 - [ ] `_ensure_postgres_columns()` parity entry present; PG startup applies `work_id`.
 - [ ] No new dual-record coupling introduced (single source of truth per work_id; resolver is read-only).
+- [ ] (P4) `GET /work` returns the UNION; jobs page shows jobs + task turns with a `kind` chip; task status flips stream live via SSE.
 
 ---
 
@@ -236,3 +269,4 @@ This is why D14 (this plan) is a prerequisite, not a competitor, to the defer qu
 - **`get_watched_processing_job_ids` restart-rebuild** (`watcher_repository.py:217`) is the one place that JOINs `JobItem` for restart semantics. Mis-generalizing it can prematurely complete a parent on restart. Mitigated by test #8.
 - **Cooperative vs. immediate cancel** — orchestrators expecting `job_cancel` to be instantaneous will see task cancel as "requested." Documented; behavior is already correct, just newly observable.
 - **Notification dedup** relies on watch-row removal on terminal. If any task-terminal path forgets to call `notify_watchers`, the watch leaks (watcher waits forever). Mitigated by centralizing the call (single helper) + test #6.
+- **(P4) Misleading "queue" framing** — the unified board must NOT present task turns as if they sit in a FIFO queue (they don't). The `kind` chip is the guardrail: only real queues show a queue badge; task turns show `turn`/`report`. Avoiding synthetic `job_queues` rows for tasks keeps the queue metaphor honest. The defer lane (§7) is the sole future exception.
