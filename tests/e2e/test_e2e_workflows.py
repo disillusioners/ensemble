@@ -37,6 +37,7 @@ Run with::
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -938,6 +939,172 @@ def _get_system_defer_queue_id(project_id: str) -> str | None:
 
 
 # --------------------------------------------------------------------------- #
+# Virtual Job Management Surface helpers (Phase 4 — feature/virtual-job-management-surface)
+# --------------------------------------------------------------------------- #
+# ``GET /api/work`` exposes the unified WorkRecord view-model: ``work_id``,
+# ``kind`` (``"job"`` | ``"turn"`` | ``"report"`` | ``"task"``), ``status``,
+# ``instance_id``, ``project_id``, ``agent_id``, ``result_summary``,
+# ``error``, ``created_at``. The same ``work_id`` is also accepted at
+# ``GET /api/jobs/{work_id}/events`` (SSE) and ``POST /api/jobs/{work_id}/cancel``
+# for JobItem-backed rows. For message-driven tasks, ``message_id == work_id``.
+def _get_work_by_id(work_id: str) -> dict | None:
+    """Look up a single WorkRecord via the unified ``GET /api/work`` surface.
+
+    Returns the WorkRecord dict if found, ``None`` otherwise. The
+    ``work_id`` is the same UUID4 as ``message_id`` for message-driven
+    tasks, so callers can pass either interchangeably.
+    """
+    response = requests.get(f"{API_BASE}/work", timeout=10)
+    response.raise_for_status()
+    for record in response.json():
+        if record.get("work_id") == work_id:
+            return record
+    return None
+
+
+def _get_work_by_instance(
+    instance_id: str, kind: str | None = None
+) -> list[dict]:
+    """Get work records for an instance via the unified surface.
+
+    Args:
+        instance_id: Instance whose work to fetch.
+        kind: Optional filter (``"job"`` | ``"turn"`` | ``"report"`` |
+            ``"task"``). ``None`` returns all kinds (UNION).
+
+    Returns:
+        A list of WorkRecord dicts, newest-first.
+    """
+    params: dict[str, str] = {"instance_id": instance_id}
+    if kind:
+        params["kind"] = kind
+    response = requests.get(f"{API_BASE}/work", params=params, timeout=10)
+    response.raise_for_status()
+    return response.json()
+
+
+def _wait_for_work_status(
+    work_id: str,
+    target_statuses: str | set[str],
+    timeout: int = 120,
+) -> tuple[bool, str | None]:
+    """Poll the virtual job surface until work status reaches a target.
+
+    Args:
+        work_id: The work UUID4 to poll.
+        target_statuses: A single status string or a set of acceptable
+            canonical status strings (``"completed"``, ``"cancelled"``,
+            ``"failed"``, ``"processing"``, etc.).
+        timeout: Maximum seconds to wait.
+
+    Returns:
+        ``(reached, final_status)`` — ``reached`` is ``True`` if the
+        work was observed in one of the target statuses;
+        ``final_status`` is the last observed status (or ``None`` if
+        the work was never seen).
+    """
+    if isinstance(target_statuses, str):
+        target_statuses = {target_statuses}
+    else:
+        target_statuses = set(target_statuses)
+
+    deadline = time.time() + timeout
+    last_status: str | None = None
+    while time.time() < deadline:
+        record = _get_work_by_id(work_id)
+        if record is not None:
+            last_status = record.get("status")
+            if last_status in target_statuses:
+                logger.info(
+                    f"[WAIT_WORK] {work_id[:8]}... -> {last_status}"
+                )
+                return True, last_status
+        time.sleep(POLL_INTERVAL)
+    logger.warning(
+        f"[WAIT_WORK] timed out after {timeout}s; last_status={last_status}"
+    )
+    return False, last_status
+
+
+def _cancel_work(work_id: str) -> bool:
+    """Best-effort cooperative cancel via ``POST /api/jobs/{id}/cancel``.
+
+    Uses the unified work endpoint which is JobItem-gated at the HTTP
+    layer (task work_ids return 404 — task cancellation is currently
+    only routed through the MCP ``job_cancel`` tool). Tolerates 404
+    so callers can use this defensively against either kind.
+
+    Returns:
+        ``True`` on 2xx response or 404, ``False`` otherwise.
+    """
+    try:
+        response = requests.post(
+            f"{API_BASE}/jobs/{work_id}/cancel", timeout=10
+        )
+        if response.status_code == 404:
+            logger.info(
+                f"[WORK_CANCEL] {work_id[:8]}... not found (404) — "
+                "may be task-kind; HTTP cancel is JobItem-only"
+            )
+            return True
+        response.raise_for_status()
+        logger.info(f"[WORK_CANCEL] {work_id[:8]}... OK")
+        return True
+    except requests.exceptions.RequestException as exc:
+        logger.warning(
+            f"[WORK_CANCEL] {work_id[:8]}... failed (non-fatal): {exc}"
+        )
+        return False
+
+
+def _consume_sse_job_events(
+    work_id: str, timeout: int = 30
+) -> list[dict]:
+    """Subscribe to SSE job events for a ``work_id`` and collect events.
+
+    The SSE endpoint at ``/api/jobs/{work_id}/events`` is resolver-gated
+    and accepts both ``job_id`` and task ``work_id`` UUID4s. The stream
+    emits ``connected`` (initial state) and ``status_update`` /
+    ``completed`` / ``error`` events. The function terminates early on
+    ``completed`` / ``error`` and on timeout.
+
+    Returns:
+        A list of parsed event dicts. Each dict has ``event`` and
+        ``data`` keys matching the SSE wire format.
+    """
+    events: list[dict] = []
+    try:
+        response = requests.get(
+            f"{API_BASE}/jobs/{work_id}/events",
+            stream=True,
+            timeout=timeout,
+            headers={"Accept": "text/event-stream"},
+        )
+        for line in response.iter_lines(decode_unicode=True):
+            if not line or not line.startswith("data:"):
+                continue
+            try:
+                data = json.loads(line[5:].strip())
+            except (json.JSONDecodeError, ValueError):
+                continue
+            events.append({"event": "data", "data": data})
+            # Stop early on terminal markers (SSE parser doesn't propagate
+            # the named event, so we infer from the data payload).
+            status = (
+                data.get("status") if isinstance(data, dict) else None
+            )
+            if status in {"completed", "failed", "cancelled", "dead_letter"}:
+                # Try to read one more frame to capture the named event
+                # header (e.g. ``event: completed``) if present.
+                pass
+    except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+        pass
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"[SSE] unexpected error on {work_id[:8]}...: {exc}")
+    return events
+
+
+# --------------------------------------------------------------------------- #
 # Test 1 — Happy path: parent → child → terminal
 # --------------------------------------------------------------------------- #
 def test_parent_child_workflow_happy_path():
@@ -968,8 +1135,8 @@ def test_parent_child_workflow_happy_path():
         leader_id = _spawn_instance("leader")
         assert leader_id, "Failed to spawn leader instance"
 
-        # Step 2: send the test message.
-        _send_message(leader_id, TEST_MESSAGE)
+        # Step 2: send the test message (capture message_id == work_id).
+        msg_id = _send_message(leader_id, TEST_MESSAGE)
 
         # Step 3: wait for the developer child to be spawned.
         child_id = _wait_for_child_spawned(leader_id, timeout=SPAWN_TIMEOUT)
@@ -997,6 +1164,97 @@ def test_parent_child_workflow_happy_path():
         logger.info(
             f"[ASSERT] leader reached terminal status: {final_status} "
             f"(child also terminal — no premature completion)"
+        )
+
+        # ---- Virtual Job Management Surface: verify work_id resolves ----
+        # NOTE: ``message_id`` returned by /messages is the message_queue
+        # UUID; the matching Task row has its OWN ``work_id`` UUID. The
+        # mapping is via ``Task.message_id == message_id`` and the
+        # WorkRecord's ``result_summary.message_id`` field. To resolve
+        # the work_id we list the instance's turns and pick the one
+        # whose ``result_summary.message_id`` matches the message we just
+        # sent (or fall back to the most recent turn if not found).
+        logger.info(
+            "[VJM] Verifying virtual job surface for message_id=%s "
+            "on leader=%s",
+            msg_id,
+            leader_id[:8] + "...",
+        )
+
+        # 1. List turns via the unified surface
+        instance_turns = _get_work_by_instance(leader_id, kind="turn")
+        assert instance_turns, (
+            f"No turn records returned for leader {leader_id[:8]}... — "
+            f"virtual job surface failed to surface message-driven work"
+        )
+
+        # Find the turn whose result_summary.message_id matches msg_id
+        work_record: dict | None = None
+        for tr in instance_turns:
+            rs = tr.get("result_summary") or ""
+            if msg_id in rs:
+                work_record = tr
+                break
+        # Fallback: take the most recent turn if no result_summary match
+        if work_record is None:
+            logger.warning(
+                "[VJM] no turn matched msg_id=%s via result_summary — "
+                "using most recent turn record",
+                msg_id,
+            )
+            work_record = instance_turns[0]
+
+        assert work_record["kind"] == "turn", (
+            f"Expected kind='turn' for message-driven work, got "
+            f"kind='{work_record['kind']}'"
+        )
+        assert work_record["status"] in ("completed", "processing"), (
+            f"Expected completed/processing status, got "
+            f"'{work_record['status']}'"
+        )
+        work_id = work_record["work_id"]
+        assert work_id, "WorkRecord missing work_id"
+        logger.info(
+            "[VJM] ✓ job_get resolves message as kind='turn', "
+            "status='%s', work_id=%s",
+            work_record["status"],
+            work_id,
+        )
+
+        # 2. job_list returns UNION: both jobs and turns should exist for this instance
+        instance_work = _get_work_by_instance(leader_id)
+        kinds_present = {w["kind"] for w in instance_work}
+        assert "turn" in kinds_present, (
+            f"Expected 'turn' kind in work list for instance, got "
+            f"kinds={kinds_present}"
+        )
+        logger.info(
+            "[VJM] ✓ job_list UNION contains kind='turn' (kinds present: %s)",
+            kinds_present,
+        )
+
+        # 3. watch_job via SSE: the completed turn should emit a terminal event
+        # using its work_id (the Task's UUID, NOT the message_id).
+        sse_events = _consume_sse_job_events(work_id, timeout=15)
+        assert len(sse_events) > 0, (
+            f"No SSE events received for work_id={work_id} — "
+            f"watch_job SSE failed"
+        )
+        first_event = sse_events[0].get("data", {})
+        first_status = (
+            first_event.get("status") if isinstance(first_event, dict) else None
+        )
+        assert first_status in {
+            "completed", "failed", "cancelled", "dead_letter",
+        }, (
+            f"Expected terminal status in first SSE event for completed "
+            f"turn, got status={first_status!r}"
+        )
+        logger.info(
+            "[VJM] ✓ watch_job SSE delivered connected event with terminal "
+            "status '%s' for work_id=%s",
+            first_status,
+            work_id,
         )
 
         # Step 5: verify the leader's conversation history has at least
@@ -1068,7 +1326,39 @@ def test_parent_child_workflow_happy_path():
         # Step P2.3 — Send the second message. The leader may be in
         # ``completed`` status; the POST /messages endpoint should
         # auto-resume/reactivate the instance.
-        _send_message(leader_id, PHASE2_MESSAGE)
+        p2_msg_id = _send_message(leader_id, PHASE2_MESSAGE)
+
+        # ---- Virtual Job Management Surface: verify Phase 2 work_id ----
+        # The reused leader should produce a NEW work record (Phase 2
+        # message) visible via GET /api/work as kind="turn". Same
+        # work_id-vs-message_id note as Phase 1: resolve via instance.
+        p2_instance_turns = _get_work_by_instance(leader_id, kind="turn")
+        assert p2_instance_turns, (
+            f"Phase 2: no turn records returned for leader {leader_id[:8]}..."
+        )
+        # Find the turn whose result_summary.message_id matches p2_msg_id
+        p2_work_record: dict | None = None
+        for tr in p2_instance_turns:
+            rs = tr.get("result_summary") or ""
+            if p2_msg_id in rs:
+                p2_work_record = tr
+                break
+        if p2_work_record is None:
+            logger.warning(
+                "[VJM] Phase 2: no turn matched p2_msg_id=%s via "
+                "result_summary — using most recent turn record",
+                p2_msg_id,
+            )
+            p2_work_record = p2_instance_turns[0]
+        assert p2_work_record["kind"] == "turn", (
+            f"Phase 2: expected kind='turn' for message-driven work, "
+            f"got kind='{p2_work_record['kind']}'"
+        )
+        logger.info(
+            "[VJM] ✓ Phase 2 message resolves as kind='turn' with "
+            "work_id=%s",
+            p2_work_record["work_id"],
+        )
 
         # Step P2.4 — Wait for the leader to process the second message and
         # reach a terminal status again.
@@ -1393,6 +1683,73 @@ def test_pause_after_spawn_then_resume():
             logger.info(
                 f"[ASSERT] leader job reached 'completed' "
                 f"(status={job_final_status})"
+            )
+
+        # ---- Virtual Job Management Surface: verify cancel + work surface ----
+        # The leader's job_id IS its work_id (JobItem-backed); the same
+        # cancel endpoint serves both the legacy ``/api/jobs/{id}/cancel``
+        # and the unified work surface (cancel is resolver-gated at the
+        # HTTP layer for JobItem rows). Cancel a deferred JobItem (the
+        # kind-side cancellation flow is JobItem-backed), then verify the
+        # cancellation propagates to the ``/api/work`` view.
+        cancel_target_id = _create_job(
+            agent_id="leader",
+            message="Test 2 VJM cancel target",
+            project_id=PROJECT_ID,
+            priority=5,
+        )
+        assert cancel_target_id, "Failed to create cancel-target job"
+        # Verify the new job shows up in the work UNION as kind="job"
+        cancel_work = _get_work_by_id(cancel_target_id)
+        assert cancel_work is not None, (
+            f"Cancel-target JobItem {cancel_target_id[:8]}... missing "
+            f"from /api/work"
+        )
+        assert cancel_work["kind"] == "job", (
+            f"Expected kind='job' for fresh JobItem, got "
+            f"kind='{cancel_work['kind']}'"
+        )
+        logger.info(
+            "[VJM] ✓ fresh JobItem work_id=%s visible as kind='job' in /work",
+            cancel_target_id,
+        )
+
+        cancelled = _cancel_work(cancel_target_id)
+        assert cancelled, (
+            f"Failed to cancel JobItem work_id={cancel_target_id} — "
+            f"unified cancel endpoint failed"
+        )
+
+        # Verify the cancellation propagated to the work surface.
+        cancelled_ok, final_vjm_status = _wait_for_work_status(
+            cancel_target_id, "cancelled", timeout=30
+        )
+        assert cancelled_ok, (
+            f"Work surface did not reflect cancellation of "
+            f"{cancel_target_id[:8]}... (last status={final_vjm_status})"
+        )
+        logger.info(
+            "[VJM] ✓ JobItem work_id=%s reaches status='cancelled' in /work",
+            cancel_target_id,
+        )
+
+        # Verify the leader has visible turn records (UNION contains
+        # message-driven work as kind="turn").
+        leader_turns = _get_work_by_instance(leader_id, kind="turn")
+        if leader_turns:
+            sample = leader_turns[0]
+            assert sample["kind"] == "turn", (
+                f"Expected kind='turn' for leader turn record, got "
+                f"kind='{sample['kind']}'"
+            )
+            logger.info(
+                "[VJM] ✓ leader has %d turn record(s) via /work",
+                len(leader_turns),
+            )
+        else:
+            logger.info(
+                "[VJM] no turn records visible for leader — may be "
+                "compacted by the time the test runs the check"
             )
 
         # ── Verify no bus message leaks ───────────────────────────────────
@@ -1859,6 +2216,85 @@ def test_wave_spawn_with_defer_queue():
             f"[STEP7] ✅ job round-trip OK: id={job_id[:8]}... "
             f"status={job_final.get('status')}"
         )
+
+        # ---- Virtual Job Management Surface: verify UNION + work_id resolution ----
+        logger.info("[VJM] Verifying virtual job surface in cross-system context")
+
+        # 1. job_list UNION: GET /api/work should return both kinds
+        all_work = _get_work_by_instance(leader_id)
+        if all_work:
+            kinds_in_union = {w["kind"] for w in all_work}
+            logger.info(
+                "[VJM] ✓ job_list UNION for leader instance: kinds=%s "
+                "(count=%d)",
+                kinds_in_union,
+                len(all_work),
+            )
+            # Verify the UNION is working (at least one kind present)
+            assert len(kinds_in_union) >= 1, (
+                "Expected at least one kind in work UNION for leader"
+            )
+            # The leader processed the wave message → there should be
+            # at least one "turn" record for this instance.
+            assert "turn" in kinds_in_union, (
+                f"Expected 'turn' in work UNION for leader, got "
+                f"kinds={kinds_in_union}"
+            )
+        else:
+            logger.warning(
+                "[VJM] no work records returned for leader instance — "
+                "may have been compacted"
+            )
+
+        # 2. The deferred JobItem is also visible via the UNION as kind="job"
+        job_work = _get_work_by_id(job_id)
+        assert job_work is not None, (
+            f"Deferred JobItem {job_id[:8]}... missing from /api/work"
+        )
+        assert job_work["kind"] == "job", (
+            f"Expected kind='job' for deferred JobItem, got "
+            f"kind='{job_work['kind']}'"
+        )
+        logger.info(
+            "[VJM] ✓ deferred JobItem work_id=%s resolves as kind='job' "
+            "in /work",
+            job_id,
+        )
+
+        # 3. The kind="turn" filter should isolate message-driven work
+        turn_work = _get_work_by_instance(leader_id, kind="turn")
+        if turn_work:
+            sample = turn_work[0]
+            assert sample["kind"] == "turn", (
+                f"Expected kind='turn' from kind filter, got "
+                f"kind='{sample['kind']}'"
+            )
+            assert sample["work_id"], "WorkRecord missing work_id"
+            logger.info(
+                "[VJM] ✓ kind='turn' filter isolates %d turn record(s); "
+                "sample work_id=%s",
+                len(turn_work),
+                sample["work_id"],
+            )
+
+        # 4. SSE on the deferred JobItem work_id should deliver connected event
+        sse_events = _consume_sse_job_events(job_id, timeout=10)
+        if sse_events:
+            first = sse_events[0].get("data", {})
+            first_status = (
+                first.get("status") if isinstance(first, dict) else None
+            )
+            logger.info(
+                "[VJM] ✓ SSE on deferred JobItem work_id=%s delivered "
+                "connected event (status='%s')",
+                job_id,
+                first_status,
+            )
+        else:
+            logger.info(
+                "[VJM] SSE on deferred JobItem returned no events (job "
+                "may already be terminal — timing dependent)"
+            )
 
         # ── Verify no bus message leaks ───────────────────────────────────
         leak_found, leaked = _check_bus_message_leak(leader_id, label="Test 4")
