@@ -227,6 +227,7 @@
 |------|----------|-------|---------|----------|--------|
 | e2e_workflows_test | tests/e2e/test_e2e_workflows.py (-m integration) | 4 critical E2E workflows against live daemon: (1) parent-child happy path, (2) pause/resume, (3) terminate/revive, (4) wave spawn + defer queue. Real HTTP API + real LLM calls. | 5 min | 2026-06-27 | ✅ PASS (4/4, pause/resume regression fixed via commit 677599d2, feature/migration-followups) |
 | vjm_smoke_e2e_test | Manual: browser automation against live daemon:8079 + frontend:4199 | VJM Surface Web UI smoke test: (1) jobs page loads with "All Work" toggle, (2) view-mode switch works, (3) kind chip CSS wired (Job=blue, Turn=green, Report=purple), (4) task-backed work no queue badge, (5) unified list via /api/work, (6) queues view regression | 5 min | 2026-06-27 | ✅ PASS (6/6 checks, feature/virtual-job-management-surface, commit 3d3613e4) |
+| vjm_e2e_workflows_test | tests/e2e/test_e2e_workflows.py (-m integration) | VJM Surface E2E: 4 workflow tests + 18 inline [VJM] assertions. ALL 4 PASS with VJM assertions (job_get kind=turn, job_list UNION, watch_job SSE, cooperative cancel, deferred JobItem resolves kind=job). Helpers: _get_work_by_id, _get_work_by_instance, _wait_for_work_status, _cancel_work, _consume_sse_job_events (wall-clock bounded). Commits e19c4b31 + 461bf5d1 | 5 min | 2026-06-27 | ✅ PASS (4/4, Test 4=203s with fresh daemon, SSE deadline fix in 461bf5d1) |
 
 ---
 
