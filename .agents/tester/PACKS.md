@@ -1,8 +1,8 @@
 # Test Packs
 
 ## Summary
-- Total: 146 packs
-- Unit: 125 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
+- Total: 147 packs
+- Unit: 126 | Integration: 3 | Mock: 6 | E2E: 9 | Postgres: 2 | Manual: 1
 
 ## Unit Test Packs
 
@@ -123,12 +123,13 @@
 | pause_flow_redesign_unit_test | tests/unit/test_pause_flow_redesign.py | Phase 2 Pause Flow Redesign: atomic 3-table pause transition (W1), B2 worker race (complete_task PAUSED guard), C3 bus watcher preservation + compaction hook, SSE job_status, empty-data short-circuit | 2 min | 2026-06-25 | ✅ PASS (14/14, commit ab8447eb, gaps: no rollback-injection test, no PG mirror) |
 | resume_flow_redesign_unit_test | tests/unit/test_resume_flow_redesign.py | Phase 3 Resume Flow Redesign: atomic 3-table resume transition (PAUSED→RUNNING/PROCESSING/PENDING), W2 orphan fix (complete_task removed), `_process_resume_finalize()` dispatch (C1 fix), A9 bus=None RuntimeError, premature-completion defer when bus pending > 0 | 2 min | 2026-06-25 | ✅ PASS (12/12, commit 9fa7e8ed, gaps: no rollback/atomicity-failure test, double-finalize SQL guard not exercised in this file, no PG mirror) |
 
-| vjm_resolver_unit_test | tests/unit/services/test_work_resolver.py | Virtual Job Management Surface: WorkResolverService (resolve_work, list_work, get_work), canonicalize_status, is_terminal, watch+notify on task, cancel task via job_cancel, no-double-notify concurrent terminal, job_list UNION, Postgres FK-drop parity, deferred work_id watchable, restart reconciliation, process_report notification | 2 min | 2026-06-27 | ✅ PASS (63/63, feature/virtual-job-management-surface, commit 3d3613e4, 0 failures) |
-| vjm_router_unit_test | tests/unit/routers/test_work_router.py | VJM Surface: GET /api/work endpoint — list work, kind filter (job/turn/report/task/send_report/no-match), status filter (single/comma/whitespace), instance/project/combined filters, error responses (invalid kind→400, uninitialized→503), serialization (ISO8601, field shape, null) | 2 min | 2026-06-27 | ✅ PASS (19/19, feature/virtual-job-management-surface, commit 3d3613e4, 0 failures) |
+| vjm_resolver_unit_test | tests/unit/services/test_work_resolver.py | VJM Surface: WorkResolverService (resolve_work, list_work, get_work), canonicalize_status, is_terminal, watch+notify on task, cancel task via job_cancel, no-double-notify concurrent terminal, job_list UNION, Postgres FK-drop parity, deferred work_id watchable, restart reconciliation, process_report notification + root_only filter (default true, excludes children, keeps reports, applied BEFORE pagination) | 2 min | 2026-06-27 | ✅ PASS (67/67, feature/virtual-job-tool-completeness, commit f2514738, 0 failures) |
+| vjm_router_unit_test | tests/unit/routers/test_work_router.py | VJM Surface: GET /api/work endpoint — list work, kind filter, status filter, instance/project/combined filters, error responses, serialization + root_only query param passthrough | 2 min | 2026-06-27 | ✅ PASS (20/20, feature/virtual-job-tool-completeness, commit f2514738, 0 failures) |
+| vjm_tools_unit_test | tests/test_job_queue_tools.py | VJM Tool Completeness: job_continue resolver-aware (task work_id resolves+enqueues, job work_id legacy, W3 race guard), job_retry/delete/restore task-type "not applicable" messages, kill switch legacy fallback, resolver-path tool routing (get/list/cancel/watch) | 2 min | 2026-06-27 | ✅ PASS (69/69, feature/virtual-job-tool-completeness, commit f2514738, 0 failures) |
 | vjm_resume_gate_unit_test | tests/test_resume_gate.py | VJM Surface: resume gate wrapping (happy path, MESSAGE_JOB kind, exception propagation), cleanup+cancellation (graph task pop, cancellation token, request registry), work_id resolution (get_by_work_id→fail_task, graceful None) | 2 min | 2026-06-27 | ✅ PASS (9/9, feature/virtual-job-management-surface, commit 3d3613e4, 0 failures) |
 | vjm_task_repository_unit_test | tests/message_queue_redesign/test_task_repository.py | VJM Surface: TaskRepository full suite incl. claim_pending_task defer gate (7 tests: deferred blocked by active non-deferred, claimable when idle, non-defer bypass, project-scoped, releases on complete, skips paused instance, no-project bypass) | 2 min | 2026-06-27 | ✅ PASS (59/59, feature/virtual-job-management-surface, commit 3d3613e4, 0 failures) |
 | vjm_migration_unit_test | tests/migration/ | VJM Surface: migration tests (data factory + jsonb migration) — SQLite paths verified, PG-specific tests skipped (env-gated) | 2 min | 2026-06-27 | ✅ PASS (3/3 SQLite, 5 PG-skipped, feature/virtual-job-management-surface, commit 3d3613e4) |
-| vjm_job_queue_contract_test | tests/job_queue/ | VJM Surface: job orchestration contract preservation — full job_queue suite unchanged. 1 pre-existing flaky test (SQLite+threading atomic_retry race), passes in isolation | 5 min | 2026-06-27 | ✅ PASS (1288/1289, 38 skipped, 1 pre-existing flaky, feature/virtual-job-management-surface, commit 3d3613e4) |
+| vjm_job_queue_contract_test | tests/job_queue/ | VJM Surface: job orchestration contract preservation — full job_queue suite unchanged. 3 pre-existing flakes (2× SQLite+threading atomic_transition races at :359,:525, 1× port-timing jober_watch:772), all pass in isolation | 5 min | 2026-06-27 | ✅ PASS (1286/1327, 38 skipped, 3 pre-existing flakes, feature/virtual-job-tool-completeness, commit f2514738) |
 
 ## Integration Test Packs
 
@@ -240,3 +241,4 @@ Update after each test run:
 - Mark deprecated packs as DEPRECATED
 | crash_recovery_paused_integration_test | tests/integration/test_crash_recovery_paused.py | Phase 6 crash recovery for PAUSED: C2 job reconciliation (PROCESSING→PAUSED), C4 bus watcher preservation (skip stamping for PAUSED), bus state across restart, terminal instance edge cases | 2 min | 2026-06-25 | ✅ PASS (10/10, commit f79ce558, real in-memory SQLite) |
 | cold_resume_ttl_integration_test | tests/integration/test_cold_resume_ttl.py | Phase 6 cold-resume after TTL eviction: 3-table resume atomicity, idempotent resume, empty tree, only-resumes-paused, task failure atomicity, simulated full cold-resume cycle | 2 min | 2026-06-25 | ✅ PASS (6/6, commit f79ce558, real in-memory SQLite) |
+ | 2 min | 2026-06-25 | ✅ PASS (6/6, commit f79ce558, real in-memory SQLite) |
