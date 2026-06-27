@@ -1073,6 +1073,7 @@ def _consume_sse_job_events(
         ``data`` keys matching the SSE wire format.
     """
     events: list[dict] = []
+    deadline = time.monotonic() + timeout
     try:
         response = requests.get(
             f"{API_BASE}/jobs/{work_id}/events",
@@ -1081,6 +1082,13 @@ def _consume_sse_job_events(
             headers={"Accept": "text/event-stream"},
         )
         for line in response.iter_lines(decode_unicode=True):
+            # Wall-clock deadline: ``requests`` timeout only governs connect/
+            # read timeouts, not the total stream lifetime. SSE endpoints
+            # often keep the connection open with heartbeats, so an idle
+            # stream (e.g. deferred job that never starts) would otherwise
+            # block ``iter_lines`` forever.
+            if time.monotonic() >= deadline:
+                break
             if not line or not line.startswith("data:"):
                 continue
             try:
