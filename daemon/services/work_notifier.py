@@ -77,7 +77,6 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
-from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.work_status import is_terminal as _is_terminal
 
 if TYPE_CHECKING:
@@ -121,22 +120,42 @@ async def notify_work_watchers(
     so the same function serves both Task-originated and
     JobItem-originated terminal events.
 
-    Atomicity (terminal statuses): uses
-    ``watcher_repo.claim_watchers_for_job`` (a single
-    ``DELETE ... RETURNING *``) so concurrent callers cannot both
-    receive the same watcher row. The caller that wins the
-    ``status=running`` SQL guard on ``complete_task``/``fail_task``/
-    ``cancel_task`` is the caller that calls this function — the repo
-    returning non-None is the only serialization token we need.
+    Delivery contract:
+        * **Exactly-once on success, at-least-once on failure.**
+          Watchers are deleted only AFTER all notifications are
+          successfully delivered. If ``resolve_work`` fails (work
+          gone) or any ``enqueue_message`` throws, watcher rows
+          remain in place for ``reconcile_terminal_watches`` cleanup
+          at next startup — the watching instance is never
+          permanently un-notified.
 
-    Watcher preservation (non-terminal statuses): for
-    ``in_progress`` and other non-terminal statuses, the read-only
-    ``get_watchers_for_job`` is used instead — the watcher row stays
-    in place so the eventual terminal notification can still reach
-    it. Previously the claim-and-delete ran unconditionally on every
-    status, which permanently removed the watch the moment the first
-    progress update fired and left the watching instance unable to
-    receive the final terminal event.
+    Ordering (resolve → notify → claim):
+        1. **Resolve FIRST.** ``work_resolver.resolve_work`` runs
+           before any watcher fetch. If the work is gone, return 0
+           early — watchers stay in place for reconcile cleanup.
+        2. **Read-only fetch watchers.** ``get_watchers_for_job``
+           (SELECT — no DELETE) returns the rows. No DELETE at this
+           point: a notification failure in step 3 must not silently
+           drop the watch.
+        3. **Notify each watcher.** ``enqueue_message`` delivers
+           the notification. Any exception propagates to the outer
+           ``except`` (returns 0) — watcher rows still exist because
+           step 4 has not run.
+        4. **CLAIM (delete) ONLY AFTER successful notify.** For
+           terminal statuses with ``notified > 0``,
+           ``claim_watchers_for_job`` atomically deletes the watcher
+           rows. For non-terminal statuses, watchers are NEVER
+           claimed — they stay in place so the eventual terminal
+           notification can still reach them.
+
+    Exactly-once on the happy path is preserved by the REPO-LEVEL
+    non-None gating: the atomic ``WHERE status=running`` guard on
+    ``complete_task`` / ``fail_task`` / ``cancel_task`` returns a
+    non-None row only for the caller that won the status transition
+    race. That caller is the only one that calls this function, so
+    claim-after-notify is still exactly-once under the normal path.
+    The reorder makes failure paths safe (watchers survive for
+    reconcile) without weakening the happy path.
 
     Args:
         work_id: The stable cross-system UUID4 (``Task.work_id`` or
@@ -152,10 +171,10 @@ async def notify_work_watchers(
             ``work_id`` to a ``WorkRecord`` (provides ``agent_id``,
             ``result_summary``, ``error``).
         watcher_repo: The ``JobWatcherRepository`` whose
-            ``claim_watchers_for_job`` performs the atomic claim-and-
-            delete (used only for terminal statuses) and whose
             ``get_watchers_for_job`` performs the read-only lookup
-            (used for non-terminal statuses).
+            (always used) and whose ``claim_watchers_for_job``
+            performs the post-notify atomic delete (terminal
+            statuses only — runs only when ``notified > 0``).
         progress: Optional progress payload for ``in_progress``
             notifications — rendered as the ``  Progress:\n{progress}``
             line that ``JobFeedbackObserver._emit_in_progress`` passes
@@ -184,52 +203,36 @@ async def notify_work_watchers(
         return 0
 
     try:
-        # Atomic claim-and-delete for terminal statuses (``completed``,
-        # ``failed``, ``cancelled``, ``dead_letter``). Two concurrent
-        # callers cannot both receive the same watcher row, so
-        # notifications fire exactly once per watcher per terminal
-        # event.
-        #
-        # For non-terminal statuses (e.g. ``in_progress``) we use the
-        # read-only ``get_watchers_for_job`` instead — the watcher must
-        # stay registered so the eventual terminal notification can
-        # still reach it. Without this branch, the
-        # ``job_feedback_observer._emit_in_progress`` path would
-        # permanently delete the watcher, and the subsequent terminal
-        # event would find no watcher rows to notify.
-        #
-        # Wrapped in ``asyncio.to_thread`` so SQLite WAL contention
-        # cannot block the event loop (matches the existing
-        # ``notify_watchers`` pattern).
-        if _is_terminal(status):
-            watchers = await asyncio.to_thread(
-                watcher_repo.claim_watchers_for_job, work_id
-            )
-        else:
-            watchers = await asyncio.to_thread(
-                watcher_repo.get_watchers_for_job, work_id
-            )
-        if not watchers:
-            return 0
-
-        # Resolve the work record for the notification payload. The
-        # resolver looks up Task first then JobItem — for terminal
-        # notifications fired from the task terminal sites the Task
-        # branch is hit; for the existing job-side notification callers
-        # the JobItem branch is hit. Either way, the WorkRecord gives
-        # us a uniform ``agent_id`` / ``result_summary`` / ``error``
-        # triple.
+        # Step 1: Resolve FIRST. If the work record is gone (deleted,
+        # purged, etc.) return 0 and leave the watcher rows in place
+        # — ``reconcile_terminal_watches`` will pick them up at next
+        # startup. Previously resolve_work ran AFTER the claim/delete
+        # which meant a missing work record returned 0 anyway but
+        # silently dropped the watch (no reconcile path because the
+        # row was already deleted).
         work_record = await asyncio.to_thread(
             work_resolver.resolve_work, work_id
         )
         if work_record is None:
-            # Work was deleted between the watcher fetch and the
-            # notification — nothing to say. For terminal statuses
-            # the watchers were already claimed (and deleted) above;
-            # for non-terminal statuses they were read-only and
-            # remain in place until a future event triggers cleanup.
-            # Either way there is nothing left to notify, so 0 is
-            # the correct return.
+            logger.debug(
+                "notify_work_watchers: work_id=%s no longer resolvable "
+                "— leaving watchers in place for reconcile cleanup",
+                work_id[:8] if work_id else "<none>",
+            )
+            return 0
+
+        # Step 2: Read-only fetch watchers. We deliberately use the
+        # SELECT path (``get_watchers_for_job``) and NOT the
+        # claim-and-delete path here — the atomic DELETE moves to
+        # step 4 below so a notification failure in step 3 cannot
+        # silently drop the watch (which would leave the watching
+        # instance permanently un-notified). Wrapped in
+        # ``asyncio.to_thread`` so SQLite WAL contention cannot block
+        # the event loop.
+        watchers = await asyncio.to_thread(
+            watcher_repo.get_watchers_for_job, work_id
+        )
+        if not watchers:
             return 0
 
         agent_id = work_record.agent_id or "unknown"
@@ -279,23 +282,33 @@ async def notify_work_watchers(
             )
             notified += 1
 
-        # NOTE: for terminal statuses, ``claim_watchers_for_job``
-        # already deleted the watcher rows in the same atomic
-        # statement, so no follow-up ``remove_all_watches_for_job`` is
-        # needed. This is the race-free cleanup — the previous
-        # ``notify_watchers`` used a separate
-        # ``remove_all_watches_for_job`` call AFTER the notify loop,
-        # which could leave rows visible to a concurrent caller in the
-        # window between the SELECT and the DELETE.
+        # Step 4: CLAIM (delete) watchers ONLY AFTER successful notify.
         #
-        # Non-terminal statuses (e.g. ``in_progress``) take the
-        # read-only ``get_watchers_for_job`` branch above — the
-        # watcher is NOT deleted so the watching instance will still
-        # receive the eventual terminal notification. The earlier
-        # implementation unconditionally claimed (deleted) all
-        # watchers on every status, which broke progress tracking by
-        # silently dropping the watch before the terminal event fired.
-        if status not in ALL_TERMINAL_STATES:
+        # Terminal statuses (``completed`` / ``failed`` /
+        # ``cancelled`` / ``dead_letter``): if at least one watcher
+        # was notified, atomically claim (DELETE ... RETURNING) all
+        # watcher rows for this work_id. This is the
+        # exactly-once-on-success invariant — the only caller that
+        # reaches this function is the one that won the atomic
+        # ``WHERE status=running`` guard on ``complete_task`` /
+        # ``fail_task`` / ``cancel_task`` (the repo-level non-None
+        # gating), so claim-after-notify does not weaken exactly-once.
+        # On failure (notified == 0 because every watcher filtered the
+        # event out, or because enqueue_message threw), the claim is
+        # skipped and the rows remain for reconcile cleanup.
+        #
+        # Non-terminal statuses (``in_progress`` etc.): NEVER claim —
+        # the watcher must stay registered so the eventual terminal
+        # notification can still reach it. The earlier implementation
+        # unconditionally claimed (deleted) all watchers on every
+        # status, which broke progress tracking by silently dropping
+        # the watch before the terminal event fired.
+        if _is_terminal(status):
+            if notified > 0:
+                await asyncio.to_thread(
+                    watcher_repo.claim_watchers_for_job, work_id
+                )
+        else:
             logger.debug(
                 "notify_work_watchers: non-terminal status=%s for "
                 "work_id=%s — watcher rows preserved (read-only), "

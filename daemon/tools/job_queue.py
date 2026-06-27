@@ -108,6 +108,16 @@ Args:
     limit: Maximum number of jobs to return. Default: 50.
     include_deleted: Include soft-deleted jobs. Default: False.
 
+Note:
+    When the virtual-job resolver is enabled
+    (``USE_VIRTUAL_JOB_RESOLVER=ON``), ``job_list`` routes through
+    ``work_resolver.list_work`` which only honours ``queue_id`` for
+    JobItem rows. Task rows have no queue affinity and will be
+    included in the result regardless of the supplied ``queue_id``.
+    To get strict queue-only filtering, pass ``statuses=["pending",
+    "processing"]`` so the result excludes terminal Task rows, or
+    post-filter the returned records client-side.
+
 Returns:
     Dictionary with jobs list and count.""",
 

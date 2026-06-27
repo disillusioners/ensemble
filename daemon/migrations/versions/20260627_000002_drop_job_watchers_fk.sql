@@ -151,6 +151,19 @@ PRAGMA foreign_keys=on;
 CREATE INDEX IF NOT EXISTS idx_job_watchers_job_id ON job_watchers(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_watchers_instance_id ON job_watchers(instance_id);
 
+-- Recreate the named unique index ``uq_job_watchers_job_instance``.
+-- The table-rebuild drops it and the inline ``UNIQUE (job_id,
+-- instance_id)`` in CREATE TABLE only creates an auto-named index
+-- (e.g. ``sqlite_autoindex_job_watchers_1``) — without an explicit
+-- CREATE UNIQUE INDEX here, the named index that ``JobWatcher.__table_args__``
+-- declares via ``UniqueConstraint("job_id", "instance_id", name=...)``
+-- is gone, and any tooling that introspects ``sqlite_master`` for the
+-- canonical index name (e.g. the migration runner's schema diff
+-- harness) reports a phantom drift. CREATE UNIQUE INDEX IF NOT EXISTS
+-- is idempotent against the auto-named inline index, so the file is
+-- safe to re-run.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_job_watchers_job_instance ON job_watchers(job_id, instance_id);
+
 -- DOWN
 -- Reverses the table-rebuild by re-attaching the FK on job_id via
 -- another rebuild. Mirrors the UP structure but declares the FK.
@@ -179,3 +192,8 @@ PRAGMA foreign_keys=on;
 
 CREATE INDEX IF NOT EXISTS idx_job_watchers_job_id ON job_watchers(job_id);
 CREATE INDEX IF NOT EXISTS idx_job_watchers_instance_id ON job_watchers(instance_id);
+
+-- Recreate the named unique index ``uq_job_watchers_job_instance``
+-- (mirror of the UP section — the DOWN rebuild drops the named
+-- index too, so the DOWN must also re-declare it explicitly).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_job_watchers_job_instance ON job_watchers(job_id, instance_id);
