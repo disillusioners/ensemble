@@ -349,16 +349,30 @@ class TestPauseResumeRoot:
             "WorkerPool from re-claiming and racing)"
         )
 
-        # 5. Routing decision after resume: no longer a root candidate
-        # (CANCELLED is not PAUSED nor RUNNING, so the primitive
-        # returns None). The resume path has taken ownership; the
-        # WorkerPool will not re-claim this task.
+        # 5. Routing decision after resume: still a root candidate.
+        # The resume cascade transitions the task PAUSED → CANCELLED to
+        # prevent the WorkerPool from re-claiming (W2 fix), but the
+        # task is still the marker that this instance was paused-and-
+        # resumed. ``find_paused_or_running_by_instance`` MUST include
+        # CANCELLED in its status set so ``resume_processing_job`` can
+        # locate the task, run the stale-message cleanup, and route to
+        # ``_resume_processing_background`` (the root path).
+        #
+        # Without CANCELLED in the IN clause, ``resume_processing_job``
+        # falls through to the WorkerPool child path, enqueues a NEW
+        # task alongside the stale PAUSED/PROCESSING message from the
+        # paused turn, and the parent wedges at ``waiting_children``
+        # after the final LLM turn (the E2E
+        # ``test_pause_after_spawn_then_resume`` regression).
         routed_after_resume = task_repo.find_paused_or_running_by_instance(iid)
-        assert routed_after_resume is None, (
-            "find_paused_or_running_by_instance must return None after "
-            "resume cascade transitions the task PAUSED → CANCELLED; "
-            "the task is no longer a root-resume candidate"
+        assert routed_after_resume is not None, (
+            "find_paused_or_running_by_instance must return the CANCELLED "
+            "task after resume cascade; CANCELLED is the marker that the "
+            "instance was paused-and-resumed and needs the resume cleanup "
+            "path (stale message → COMPLETED + _resume_processing_background)"
         )
+        assert routed_after_resume.status == TaskStatus.CANCELLED.value
+        assert routed_after_resume.id == task_id
 
         # 6. Finalize WITHOUT a JobItem — the post-D13 no-JobItem path.
         # Step 1 (JobItem UPDATE) is skipped because ``job_id is None``;

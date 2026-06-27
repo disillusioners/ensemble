@@ -194,6 +194,20 @@ class TaskRepository:
                     Task.status.in_([
                         TaskStatus.PAUSED.value,
                         TaskStatus.RUNNING.value,
+                        # CANCELLED is included because ``_resume_cascade_db_sync``
+                        # transitions PAUSED tasks to CANCELLED atomically with
+                        # the instance resume (Phase 3 W2 fix). A CANCELLED task
+                        # is the marker that this instance was paused-and-resumed
+                        # and the resume driver ``resume_processing_job`` must run
+                        # the root cleanup path (stale message → COMPLETED, then
+                        # ``_resume_processing_background``). Without CANCELLED
+                        # in the IN clause, ``resume_processing_job`` finds no
+                        # task, misroutes the instance to the WorkerPool child
+                        # path, and the stale PENDING/PROCESSING message from the
+                        # paused turn wedges the parent at waiting_children after
+                        # the final LLM turn (E2E test_pause_after_spawn_then_resume
+                        # regression).
+                        TaskStatus.CANCELLED.value,
                     ])
                 )
                 .where(Task.task_type == TaskType.PROCESS_MESSAGE.value)
