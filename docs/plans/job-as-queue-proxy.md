@@ -114,6 +114,7 @@ A minimal enum, **queue vocabulary only**:
 
 - **`paused` is gone from the job.** Pause is an *Instance* concern. A paused job stays `active` with its lock held; the instance is `PAUSED`. The admission layer already gates correctly off instance status — `claim_pending_task` skips paused instances (`task/repository.py:555,575`), and `_process_next_job` already checks `instance.status == PAUSED` before `start_job` (`job_processor.py:634-646`). The pause cascade stops writing `job_queue_items.status='paused'` (`instance_lifecycle.py:2138-2165`) and writes only the instance. **Risk item — see §8.1.**
 - **`failed` is gone as a *resting* state.** The retry decision is made **synchronously at finalize** (it largely already is — `complete_job` FAILED branch calls `maybe_retry` inline, `job_queue_service.py:1579`). So finalize atomically does one of: `active → done` (no retry), `active → queued` (retry), or `active → dead` (DLQ). There is no window where a job sits `failed` with no living instance.
+- **A single terminal-write boundary with a required decision.** Every finalize path funnels through one entry point — `_finalize_terminal(instance_id, decision: Decision)` — where `Decision` is a closed, non-defaulted enum: `NO_RETRY` / `RETRY` / `DEAD_LETTER`. The admission transition (`done` / `queued` / `dead`) and the `maybe_retry` call are computed *inside* this boundary; callers cannot finalize an instance without stating the decision. This converts the §8.2 audit from a checklist into a structural guarantee — a future finalize path that forgets retry fails at instantiation, not in production. All of `_finalize_job`, `complete_job`, `complete_job_sync`, `JobRecoveryService._fail_orphaned_job`, and `cancel_job`'s terminal branch route through it. (Review §2.2.)
 - **Terminal classification (`completed` vs `failed` vs `cancelled`) moves to the read side**, read off `Instance.status` via the `WorkRecord` join. The job only knows `done`.
 
 ---
@@ -131,10 +132,10 @@ JobFeedbackObserver._process_event  (job_feedback_observer.py:641)
    │     > 0  → wait (no write)
    │     == 0 → _finalize_job
    ▼
-_finalize_job_db_sync  (atomic, one WriteGuardSession)
+_finalize_job_db_sync  (atomic, one WriteGuardSession, via _finalize_terminal)
    ├─ Step 0/0b: bus pending-children gate (in-session COUNT)   ← UNCHANGED
    ├─ Step 1 (NEW): UPDATE job_queue_items
-   │                 SET admission_state = (done | queued-retry | dead)
+   │                 SET admission_state = decision→(done | queued | dead)
    │                 WHERE job_id AND admission_state='active'
    │              (was: SET status=completed/failed — the redundant mirror)
    ├─ Step 2: UPDATE instances SET status=terminal  ← UNCHANGED (this is the authority)
@@ -159,12 +160,17 @@ Strategy: **the read landing zone (`WorkRecord`) already exists from D14.** We e
 - Confirm §3 admission-state vocabulary with a second reviewer.
 - Inventory every `count_active_jobs*` / `list_pending*` / defer-gate query that filters `status IN (...)` (§6.2) — these are the migration's load-bearing query sites.
 - Decide: derive `active` from lock presence vs. denormalize `admission_state`. **Recommend denormalize** (cheaper reads, explicit); note lock-presence as the invariant `admission_state='active'` must satisfy.
+- **Write `docs/architecture/job-as-queue-proxy-invariants.md`** stating the cross-table invariants the new model maintains (this is both the §2.1 enforcement spec and the Phase 9 test spec):
+  - `admission_state='active'` ⇔ a `JobLock` row exists with `instance_id = JobItem.instance_id`.
+  - `admission_state IN ('queued','active')` ⇔ `deleted_at IS NULL`.
+  - `admission_state='done'` ⇒ `instance_id` references a terminal instance.
+  - `admission_state='dead'` ⇒ a `DeadLetterItem` row exists for this `job_id`.
 
 ### Phase 1 — Read authority: route all job reads through Instance/WorkRecord
 
 Goal: no consumer reads execution state off `JobItem` directly.
 
-- `jobs_crud._job_to_response` / `JobResponse` schema (`routers/schemas.py:53-100`): join `instances` for `status`, timing, `result_summary`, `error`. Keep returning the legacy field names for API compatibility, sourced from the instance.
+- `jobs_crud._job_to_response` / `JobResponse` schema (`routers/schemas.py:53-100`): **reuse `WorkResolverService` to build the response — do not write a second independent instance-join.** Keep returning the legacy field names for API compatibility, but source them from the same resolver path D14 already proves is byte-identical across Task/Job/Instance sources (`test_jobs_streaming_resolver.py` asserts "byte-identical wire format"). A parallel hand-rolled join is exactly the divergence bug a separate review flagged (§12 R2.3) — we avoid it by not reimplementing. No `JobResponseV2` / schema-version field: D14's canonicalization already neutralizes the semantic-drift risk the review worried about (instance + job terminal are written in *one* transaction today, so latency is identical; after the refactor there's one write, not two).
 - `jobs_management` retry/cancel/restore terminal checks (`jobs_management.py:163,238,304,349`): switch from `job.status` to `WorkResolverService.get_work` (already instance-aware) or an instance-status join.
 - `jobs_streaming` legacy `_ResolvedWork.from_job` (`:52-62`): delete; route everything through `from_work_record`. The endpoint already dual-paths on `use_virtual_job_resolver`.
 - MCP `_job_item_to_work_record_shim` (`tools/job_queue.py:1139-1174`): delete; `job_get`/`job_list`/`watch_job` resolver-ON path already works.
@@ -187,7 +193,7 @@ Exit criterion: `admission_state` is correct and dual-written; nothing reads it 
 The load-bearing internal queries that today filter on `status`:
 
 - `list_pending_by_queue` / `list_pending_by_project` / `list_all_pending` (`repository.py:451-540`): `WHERE admission_state='queued'`.
-- `count_active_jobs_by_project`, `count_active_jobs_in_non_defer_queues` (`repository.py:361-390`): `WHERE admission_state='active'`. *(Invariant: `admission_state='active'` ⇔ a `JobLock` row exists for this job. Worth an assertion/CI check.)*
+- `count_active_jobs_by_project`, `count_active_jobs_in_non_defer_queues` (`repository.py:361-390`): `WHERE admission_state='active'`. *(Invariant: `admission_state='active'` ⇔ a `JobLock` row exists for this job — see §8.7.)*
 - `find_processing_jobs`, `find_jobs_by_instance` (`:487-520`): `WHERE admission_state='active'`.
 - `find_retryable_jobs` (`:1228-1258`): `WHERE admission_state='queued' AND next_retry_at <= now` (retried jobs are back in `queued`).
 - Defer idle-gate (`job_processor.py:399-418`): counts non-defer `active` jobs.
@@ -198,12 +204,14 @@ Exit criterion: all admission decisions use `admission_state`; `status` is write
 
 ### Phase 4 — Flip writers to instance-authoritative
 
+- **Introduce `_finalize_terminal(instance_id, decision)`** (§3.2) as the single terminal-write boundary with a required `Decision` enum. Route `_finalize_job`, `complete_job`, `complete_job_sync`, `JobRecoveryService._fail_orphaned_job`, and `cancel_job`'s terminal branch through it. `maybe_retry` is called *inside* it (§8.2 structural guarantee).
 - `_finalize_job_db_sync` Step 1: write `admission_state` only (per §4); stop deriving/writing `status`.
 - `_pause_cascade_db_sync` / resume cascade (`instance_lifecycle.py:2138-2165, 2407-2436`): **delete the `job_queue_items` status UPDATE**. Job stays `active`; only instance flips. (Verify §8.1.)
 - `_terminate_instance_db_sync` Step 2 (`:1786-1840`): cancel cascade sets `admission_state='done'` (single value, no longer splits processing/pending).
 - `JobRetryEngine.maybe_retry` (`job_retry_engine.py:173-336`): `active → queued` (retry) or `active → dead` (DLQ) — no intermediate `failed`.
 - `DeadLetterService.replay_from_dlq` (`:335-348`): `dead → queued`.
 - `cancel_job` (`job_queue_service.py:822-898`): `queued|active → done`.
+- **`work_status._STATUS_CANONICAL_MAP`**: delete the entries that mapped `JobStatus.*` (`processing`, `paused`, `cancelled`, `failed`). Add `admission_state='dead' → dead_letter`. All other canonical statuses now resolve from `Instance.status`. *(A stale entry firing on a removed enum value would raise on every job read — must land in this phase, not Phase 5.)*
 
 Exit criterion: `status` column is no longer written by any production path (only the dual-write shim from Phase 2, which we now remove).
 
@@ -211,7 +219,7 @@ Exit criterion: `status` column is no longer written by any production path (onl
 
 - Migration: drop `status`, `started_at`, `completed_at`, `result_summary`, `error_message`, `cancelled_at`, `failed_at` from `job_queue_items`; drop the status indexes.
 - Delete `JobStatus` enum, `job_state_machine.py` (or reduce to a 4-transition admission machine), the drift warning, the shim, the dead `stream_status_change(job_status=...)` parameter.
-- `WorkRecord` / `work_status.py`: `_STATUS_CANONICAL_MAP` loses the JobItem execution-status entries; only `admission_state → canonical` (for `dead`) and Instance-status mapping remain.
+- `WorkRecord` / `work_status.py`: confirm `_STATUS_CANONICAL_MAP` is fully consistent post-drop (Phase 4 already deleted the `JobStatus.*` entries; this phase verifies no residual references).
 
 Exit criterion: `JobItem` is a pure queue ticket.
 
@@ -224,6 +232,8 @@ Exit criterion: `JobItem` is a pure queue ticket.
 ### Phase 7 — Cleanup
 
 Remove `use_virtual_job_resolver` flag (now always-on), legacy branches in `tools/job_queue.py`, dead SSE param, and the dual-write shim. Update tests (§9).
+
+- **MCP schema-equivalence verification:** the legacy/resolver-OFF branches in `tools/job_queue.py` (`job_get`/`job_list`/`watch_job`/etc., ~100–200 lines of dual-path code with non-trivial result/error/retry-hint fields) must be shown to produce **byte-identical** result shapes to the resolver-ON path for a sample of inputs before deletion. External agents consume these tool results and may not survive a shape change. `test_jobs_streaming_resolver.py` already asserts this for the SSE endpoint; add an equivalent assertion for the MCP tool result layer.
 
 ---
 
@@ -270,7 +280,7 @@ Today pause is **dual-written atomically**: instance→`PAUSED` **and** job→`P
 
 ### 8.2 Retry-without-instance window
 
-Phase 4 makes the retry decision **synchronous at finalize** (`active → queued` or `active → dead` in the same transaction as the instance terminal write). Risk: any code path that finalizes the instance *without* consulting the retry engine would leave a job stranded. Audit all finalize callers (`_finalize_job`, `complete_job`, `complete_job_sync`, `JobRecoveryService._fail_orphaned_job`) to ensure each routes through `maybe_retry`. The retry engine already runs in `complete_job` FAILED branch (`:1579`) — extend the same to the recovery/orphan path.
+Phase 4 makes the retry decision **synchronous at finalize** (`active → queued` or `active → dead` in the same transaction as the instance terminal write). Risk: any code path that finalizes the instance *without* consulting the retry engine would leave a job stranded. **Mitigation is structural, not an audit:** the single `_finalize_terminal(instance_id, decision)` boundary (§3.2) takes a required `Decision` enum and calls `maybe_retry` internally — a new finalize path cannot be written without stating the decision, so it cannot silently skip retry. All existing callers (`_finalize_job`, `complete_job`, `complete_job_sync`, `_fail_orphaned_job`, `cancel_job`) route through it. The audit becomes "confirm every caller was migrated," which is a grep, not a judgment call.
 
 ### 8.3 Root own-queue gate (unaffected, noted for completeness)
 
@@ -284,9 +294,24 @@ Stays, but moves from `COMPLETED → PROCESSING` to `done → active` on the adm
 
 A job retried N times points to N terminal instances over its life; only the *current* attempt's `instance_id` is on the row. Reading "this job's history" requires joining by `(project_id, agent_id, message)` or a future attempts table — out of scope here, but flag it: today's single `instance_id` already has this limitation, so this plan makes it no worse.
 
+**Intentional limitation (documented):** successful-retry history is **not retained**. Only the current attempt's instance is addressable from the job row; failed attempts are addressable via `DeadLetterItem` (the DLQ autopsy); successful intermediate attempts leave no trace in any audit-friendly table. This is a pre-existing limitation (today's single `instance_id` has it too). If/when a job-history view is needed, it is a separate plan and a separate table — not bolted onto this refactor.
+
 ### 8.6 DLQ snapshot integrity
 
 `DeadLetterItem` keeps its own `error_message`/`retry_count`/`failed_at` (frozen at admission). After dropping those columns from `JobItem`, ensure `move_to_dlq` snapshots them *before* the job row loses them — i.e., Phase 5 drop must run after Phase 4's `move_to_dlq` captures the snapshot. Sequencing in the phases already enforces this.
+
+### 8.7 The `active ⇔ lock-held` invariant (concurrency correctness)
+
+`admission_state='active'` ⇔ a `JobLock` row exists for the job. This is the concurrency-correctness invariant of the whole system: if `active` without a lock, the worker pool can double-dispatch; if a lock without `active`, the defer-gate and `count_active_jobs*` miscount.
+
+**Enforcement — bidirectional, CI-first, not a per-write helper.** A separate review (§12 R2.1) asked for a `_assert_active_invariant` helper called from every write path. That is over-specified and partly self-defeating: such a helper runs *inside the same code path that already does the acquire/release*, so it cannot catch the actual failure mode — a *missing* release path. The robust mechanisms are:
+
+- **Bidirectional CI sweep** (both directions, since single-direction misses the silent "lock exists but job isn't active" case):
+  - daily: sample random `active` jobs → assert each has a `JobLock` row;
+  - nightly: sample random `JobLock` rows → assert each has an `active` job.
+- **Cheap assertion on the one hot path only:** in `start_job_atomic`, after lock acquisition and before commit, assert the row is (or is being set to) `active`. This is the single point where the invariant is *established*; asserting there is cheap and catches acquire/active skew. Finalize's release path is covered by the sweep, not a helper.
+
+This resolves the review's §2.1/§3.2 tension in favour of observability + a minimal hot-path check.
 
 ---
 
@@ -311,17 +336,38 @@ Large but mechanical. Major files:
 3. `_finalize_job_db_sync` Step 1 writes only `admission_state`; the `InstanceStatus→JobStatus` mapping is gone.
 4. The pause cascade writes only the instance; no job-status pause write remains. §8.1 integration test is green.
 5. The status-drift warning, `_job_item_to_work_record_shim`, and the dead `stream_status_change(job_status=...)` parameter are deleted.
-6. Every job execution-state read resolves through `Instance`/`WorkRecord`; `use_virtual_job_resolver` flag is removed (always-on).
+6. Every job execution-state read resolves through `Instance`/`WorkRecord`; `use_virtual_job_resolver` flag is removed (always-on). `JobResponse` is built by `WorkResolver`, not a hand-rolled join.
 7. `count_active_jobs*`, `list_pending*`, defer-gate, recovery, and stale-lock-sweep queries filter on `admission_state` (and lock presence).
-8. The `active ⇔ lock-held` invariant is asserted in CI.
+8. The `active ⇔ lock-held` invariant is enforced: hot-path assertion in `start_job_atomic` + a **bidirectional** CI sweep (§8.7).
 9. Frontend Jobs page renders from `Work` exclusively; `JobStatus` derives from canonical status.
 10. All existing tests green after reseed; new admission-state tests green.
+11. Every terminal write routes through `_finalize_terminal(instance_id, decision)` with a required `Decision`; no finalize path bypasses it (grep-verifiable).
+12. `docs/architecture/job-as-queue-proxy-invariants.md` exists (Phase 0) and the invariants it lists are enforced/checked per §8.7.
+13. Phase 7 MCP tool result shapes are byte-identical to the legacy path for the sample inputs.
 
 ---
 
 ## 11. Out of scope
 
 - Unifying the **Task** layer with Instance (Task = turn; orthogonal).
-- Adding a job-attempts/history table (§8.5).
+- Adding a job-attempts/history table (§8.5) — including retention of successful intermediate retry attempts.
 - Defer-queue on the message/task layer (separate plan, noted in D14).
 - Changing the `work_id` handle or the agent tool contract.
+- A versioned `JobResponseV2` / schema-version field — explicitly rejected (§12 R2.3): D14's byte-identical canonicalization already neutralizes the semantic-drift risk.
+
+---
+
+## 12. Review disposition (2026-06-28)
+
+A strategic review (`job-as-queue-proxy.review.md`) approved the destination and phasing with five "required" edits. Disposition, recorded here so the reasoning is auditable:
+
+| Review item | Disposition | Where |
+|---|---|---|
+| R2.1 enforce `active ⇔ lock-held` at write boundary | **Redirected** — per-write helper is self-defeating (shares the release code path); bidirectional CI sweep + hot-path assertion only | §8.7, DoD 8 |
+| R2.2 single `_finalize_terminal` with required `Decision` | **Adopted fully** — structural guarantee over an audit | §3.2, Phase 4, DoD 11 |
+| R2.3 `JobResponseV2` / frontend in Phase 2 | **Rejected** — over-engineering; D14 already guarantees byte-identical output. Adopted only the kernel: reuse `WorkResolver`, don't hand-roll a join | Phase 1, DoD 6, §11 |
+| R2.4 assign `_STATUS_CANONICAL_MAP` cleanup to a phase | **Adopted** — explicit Phase 4 bullet | Phase 4 |
+| R2.5 document successful-retry history loss | **Adopted** | §8.5, §11 |
+| R3.1 written invariants doc | **Adopted** | Phase 0, DoD 12 |
+| R3.2 bidirectional CI sweep | **Adopted** (folded into §8.7) | §8.7 |
+| R3.3 MCP schema-equivalence verification in Phase 7 | **Adopted** | Phase 7, DoD 13 |
