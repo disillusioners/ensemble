@@ -17,7 +17,7 @@ from sqlmodel import Session, select, col
 from .models import Project, ProjectTagLink, ProjectShortnameLink, ProjectStatus, ProjectType, ProjectHistoryEntry, CriticalNoteModel, ProjectMetadataRecord
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_NAME
 from daemon.repositories.instance.models import Instance, InstanceStatus, InstanceHierarchy
-from daemon.repositories.job_queue.models import JobItem, JobStatus, JobLock, DeadLetterItem, JobQueue
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobLock, DeadLetterItem, JobQueue
 from daemon.repositories.task.models import Task
 from daemon.repositories.event.models import Event
 from daemon.repositories.message_queue.models import MessageQueue
@@ -1106,19 +1106,28 @@ class SQLModelProjectRepository:
                         f"Use force=True to bypass this check."
                     )
             
-            # Check for running/processing jobs
+            # Check for running/active jobs
             if not force:
-                running_statuses = {JobStatus.PROCESSING.value}
-                # Count jobs with processing status for this project
+                # Phase 3 admission-decision migration: gate on
+                # ``admission_state='active'`` rather than
+                # ``status='processing'``. Under the new model
+                # ``admission_state='active'`` covers BOTH PROCESSING
+                # and PAUSED jobs (pause is an Instance concern; the lock
+                # is still held — see ``_STATUS_TO_ADMISSION``). This
+                # fixes a pre-existing bug where PAUSED jobs were not
+                # caught by the deletion safety check.
+                active_states = [AdmissionState.ACTIVE.value]
+                # Count jobs with active admission_state for this project
                 stmt = select(func.count()).select_from(JobItem).where(
                     JobItem.project_id == project_id,
-                    JobItem.status.in_(running_statuses)
+                    JobItem.admission_state.in_(active_states)
                 )
                 running_count = session.exec(stmt).one()
                 if running_count > 0:
                     raise RuntimeError(
                         f"Cannot delete project with running jobs. "
-                        f"Found {running_count} running/processing jobs. "
+                        f"Found {running_count} jobs in active admission "
+                        f"state (PROCESSING or PAUSED). "
                         f"Use force=True to bypass this check."
                     )
             

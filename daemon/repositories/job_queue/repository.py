@@ -590,17 +590,26 @@ class JobRepository:
         self,
         queue_id: str,
         statuses: list[str | None] = None,
+        admission_states: list[str | None] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[JobItem], int]:
         """List jobs for a specific queue with optional filters and pagination.
-        
+
         Args:
             queue_id: Queue identifier.
-            statuses: Optional list of status filters.
+            statuses: Optional list of ``JobStatus`` value filters. Mutually
+                inclusive with ``admission_states`` — both filters are
+                applied with ``AND`` semantics when supplied.
+            admission_states: Optional list of ``AdmissionState`` value
+                filters. Phase 3 admission-decision migration: prefer this
+                over ``statuses`` for any queue-admission query. PAUSED
+                jobs are ``admission_state='active'`` (lock held) and are
+                only matched via this filter, not via
+                ``statuses=['processing']``.
             limit: Maximum number of jobs to return.
             offset: Number of jobs to skip.
-            
+
         Returns:
             Tuple of (list of jobs, total count).
         """
@@ -611,6 +620,8 @@ class JobRepository:
             count_stmt = count_stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
                 count_stmt = count_stmt.where(JobItem.status.in_(statuses))
+            if admission_states:
+                count_stmt = count_stmt.where(JobItem.admission_state.in_(admission_states))
             total = db_session.exec(count_stmt).one()
 
             # Build list query with filters
@@ -618,14 +629,16 @@ class JobRepository:
             stmt = stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
                 stmt = stmt.where(JobItem.status.in_(statuses))
-            
+            if admission_states:
+                stmt = stmt.where(JobItem.admission_state.in_(admission_states))
+
             stmt = stmt.order_by(
                 col(JobItem.priority).desc(),
                 col(JobItem.created_at).desc()
             ).offset(offset).limit(limit)
-            
+
             jobs = list(db_session.exec(stmt))
-            
+
             return jobs, total
 
     # --------------------------------------------------------

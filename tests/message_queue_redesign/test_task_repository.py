@@ -378,10 +378,19 @@ class TestTaskClaiming:
         # has_pending_tasks_blocked_by_busy_instance should also report True
         assert repository.has_pending_tasks_blocked_by_busy_instance() is True
 
-        # Complete the job → t1 becomes claimable
+        # Complete the job → t1 becomes claimable. Phase 2 dual-write
+        # contract (see ``status_to_admission``): every status mutation
+        # must co-move ``admission_state`` in the same transaction.
+        # COMPLETED → admission_state='done', which is excluded by the
+        # new ``admission_state IN ('queued', 'active')`` predicate in
+        # claim_pending_task / has_blocked_pending_tasks (Phase 3
+        # admission-decision migration). Setting only ``status`` would
+        # leave ``admission_state`` at its default of 'queued' and the
+        # gate would never release.
         with SQLModelSession(engine) as session:
             job = session.get(JobItem, "job-J1")
             job.status = JobStatus.COMPLETED.value
+            job.admission_state = "done"
             session.commit()
 
         claimed = repository.claim_pending_task(worker_id="worker-1")

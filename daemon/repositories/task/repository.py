@@ -12,7 +12,6 @@ from sqlalchemy import delete as sql_delete, func, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
-from ..job_queue.models import JobStatus
 from ..instance.models import Instance, InstanceStatus
 from .models import Task, TaskStatus, TaskType
 
@@ -549,7 +548,17 @@ class TaskRepository:
                         OR instance_id NOT IN (
                             SELECT j.instance_id FROM job_queue_items j
                             LEFT JOIN instances i ON j.instance_id = i.instance_id
-                            WHERE j.status = :status_processing
+                            -- Phase 3 admission-decision migration: filter on
+                            -- admission_state IN ('queued', 'active') instead of
+                            -- ``status = 'processing'``. The legacy predicate
+                            -- excluded PAUSED jobs even though they still hold
+                            -- the lock (admission_state='active' under the new
+                            -- model — see ``_STATUS_TO_ADMISSION``). The IN-list
+                            -- also covers the B1 single-transaction window
+                            -- where a job briefly sits in admission_state='queued'
+                            -- while its lock is held (mirrors
+                            -- ``_ACTIVE_JOB_IDS_SUBQUERY`` in lock_repository.py).
+                            WHERE j.admission_state IN ('queued', 'active')
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
                               AND (i.status IS NULL OR i.status != :status_waiting_children)
@@ -571,7 +580,6 @@ class TaskRepository:
                 "started_at": now,
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running_guard": TaskStatus.RUNNING.value,
-                "status_processing": JobStatus.PROCESSING.value,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
                 "status_paused": InstanceStatus.PAUSED.value,
                 "status_terminated": InstanceStatus.TERMINATED.value,
@@ -1058,11 +1066,20 @@ class TaskRepository:
                         OR EXISTS (
                             SELECT 1 FROM job_queue_items j_running
                             LEFT JOIN instances i ON j_running.instance_id = i.instance_id
-                            WHERE j_running.status = :status_processing
-                            AND j_running.instance_id = t_pending.instance_id
-                            AND j_running.deleted_at IS NULL
-                            -- FIFO carve-out (mirrors claim_pending_task).
-                            AND (i.status IS NULL OR i.status != :status_waiting_children)
+                            -- Phase 3 admission-decision migration: mirrors
+                            -- ``claim_pending_task`` — MUST use the SAME
+                            -- predicate (see docstring above). The legacy
+                            -- ``status = 'processing'`` excluded PAUSED
+                            -- jobs that hold the lock
+                            -- (admission_state='active'); the IN-list also
+                            -- covers the B1 single-transaction window.
+                            -- See ``_ACTIVE_JOB_IDS_SUBQUERY`` in
+                            -- lock_repository.py for the canonical form.
+                            WHERE j_running.admission_state IN ('queued', 'active')
+                              AND j_running.instance_id = t_pending.instance_id
+                              AND j_running.deleted_at IS NULL
+                              -- FIFO carve-out (mirrors claim_pending_task).
+                              AND (i.status IS NULL OR i.status != :status_waiting_children)
                             -- Unified-dispatcher admission carve-out
                             -- (mirror of claim_pending_task). A TASK
                             -- job with a corresponding pending/running
@@ -1089,7 +1106,6 @@ class TaskRepository:
             row = conn.execute(stmt, {
                 "status_pending": TaskStatus.PENDING.value,
                 "status_running": TaskStatus.RUNNING.value,
-                "status_processing": JobStatus.PROCESSING.value,
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
             }).fetchone()
             return row is not None

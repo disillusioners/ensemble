@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from daemon.manager import InstanceManager
 
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.dependency_bus import get_dependency_bus
 from daemon.services.job_queue_service import (
     DemandState,
@@ -418,15 +419,23 @@ class JobProcessor:
                         continue
 
                 if not pending:
-                    # Also check for PROCESSING jobs that have instance_id set but no
-                    # spawned instance yet. These jobs were transitioned to PROCESSING
-                    # by trigger_next_job() but the JobProcessor missed them due to
+                    # Also check for ACTIVE-admission jobs that have instance_id set but
+                    # no spawned instance yet. These jobs were transitioned to
+                    # admission_state='active' (via status=PROCESSING) by
+                    # trigger_next_job() but the JobProcessor missed them due to
                     # event-driven or polling timing gaps.
-                    processing, _ = await asyncio.to_thread(
+                    #
+                    # Phase 3 admission-decision migration: filter on
+                    # ``admission_state='active'`` rather than
+                    # ``statuses=['processing']``. This catches PAUSED jobs too
+                    # (admission_state='active' under the new model — pause is
+                    # an Instance concern, lock still held), which the legacy
+                    # ``status='processing'`` filter silently dropped.
+                    active_jobs, _ = await asyncio.to_thread(
                         self._queue_service._repository.list_by_queue, queue.queue_id,
-                        statuses=["processing"]
+                        admission_states=[AdmissionState.ACTIVE.value]
                     )
-                    for proc_job in (processing or []):
+                    for proc_job in (active_jobs or []):
                         # NOTE: The legacy MESSAGE-specific orphan guard
                         # was removed in D11. The unified dispatcher owns message
                         # completion end-to-end — orphan PROCESSING rows are

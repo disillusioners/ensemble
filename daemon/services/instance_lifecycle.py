@@ -21,7 +21,7 @@ from ..repositories.dependency_bus.models import (
     DependencyWatcherState,
 )
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
-from ..repositories.job_queue.models import JobStatus, status_to_admission
+from ..repositories.job_queue.models import AdmissionState, JobStatus, status_to_admission
 from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
@@ -1748,19 +1748,35 @@ class InstanceLifecycleService:
             from ..repositories.job_queue.models import JobItem
 
             # Find all non-terminal jobs for this instance.
-            # ``paused`` is included so PAUSED jobs (Phase 1 of
-            # pause/resume redesign, 2026-06-25) are cleaned up on
-            # instance termination — without it the termination cascade
-            # would skip paused jobs and leave them in PAUSED forever,
-            # orphaned against the dead instance. PAUSED is non-terminal
-            # (see JobStatus.PAUSED docs at models.py:25-28) so it
-            # belongs in this cleanup set.
-            non_terminal_statuses = ("processing", "pending", "failed", "paused")
+            #
+            # Phase 3 admission-decision migration: filter on
+            # ``admission_state IN ('queued', 'active')`` rather than the
+            # legacy ``status IN ('processing','pending','failed','paused')``.
+            # Under the new model:
+            #   - PENDING   → admission_state='queued'
+            #   - PROCESSING → admission_state='active' (lock held)
+            #   - PAUSED    → admission_state='active' (lock held — pause
+            #                 is an Instance concern, see
+            #                 models.py:78-80) so PAUSED jobs are still
+            #                 cleaned up on instance termination;
+            #                 without this, the cascade would skip paused
+            #                 jobs and leave them orphaned against the
+            #                 dead instance.
+            #   - FAILED    → admission_state='queued' when awaiting retry
+            #                 (atomic_retry Phase 2) so they're included
+            #                 via that path; admission_state='done' when
+            #                 terminal, naturally excluded.
+            #
+            # This is the inline-duplicate of the already-migrated
+            # ``JobRepository.find_jobs_by_instance`` (repository.py:540).
             jobs = list(
                 session.exec(
                     select(JobItem.job_id, JobItem.status, JobItem.project_id)
                     .where(JobItem.instance_id == instance_id)
-                    .where(JobItem.status.in_(non_terminal_statuses))
+                    .where(JobItem.admission_state.in_([
+                        AdmissionState.QUEUED.value,
+                        AdmissionState.ACTIVE.value,
+                    ]))
                 )
             )
 
