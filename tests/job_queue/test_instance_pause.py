@@ -172,7 +172,7 @@ class TestJobQueueServiceInstancePause:
             instance_id, status=InstanceStatus.RUNNING.value
         )
 
-        # Mock start_job_atomic
+        # Mock start_job_atomic_with_lock (B1 single-transaction method)
         started_job = MockJob(
             job_id=job_id,
             project_id="project-1",
@@ -181,7 +181,10 @@ class TestJobQueueServiceInstancePause:
             instance_id=instance_id,
             job_type="message",
         )
-        mock_repository.start_job_atomic = MagicMock(return_value=started_job)
+        # B1: returns (JobItem, lock_acquired) tuple
+        mock_repository.start_job_atomic_with_lock = MagicMock(
+            return_value=(started_job, True)
+        )
 
         # Call start_job
         result = await job_queue_service.start_job(job_id)
@@ -213,7 +216,7 @@ class TestJobQueueServiceInstancePause:
         )
         mock_repository.get.return_value = job
 
-        # Mock start_job_atomic
+        # Mock start_job_atomic_with_lock (B1 single-transaction method)
         started_job = MockJob(
             job_id=job_id,
             project_id="project-1",
@@ -222,7 +225,9 @@ class TestJobQueueServiceInstancePause:
             instance_id="new-instance-123",  # Generated on start
             job_type="task",
         )
-        mock_repository.start_job_atomic = MagicMock(return_value=started_job)
+        mock_repository.start_job_atomic_with_lock = MagicMock(
+            return_value=(started_job, True)
+        )
 
         # Call start_job
         result = await job_queue_service.start_job(job_id)
@@ -265,7 +270,10 @@ class TestJobQueueServiceInstancePause:
             status=JobStatus.PROCESSING.value,
             job_type="task",
         )
-        mock_repository.start_job_atomic = MagicMock(return_value=started_job)
+        # B1: mock the single-transaction method
+        mock_repository.start_job_atomic_with_lock = MagicMock(
+            return_value=(started_job, True)
+        )
 
         # Should not raise
         result = await service.start_job(job_id)

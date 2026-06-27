@@ -1122,81 +1122,90 @@ class JobQueueService:
     
     async def _try_start_job(self, job: JobItem) -> bool:
         """Try to start a pending job.
-        
+
         Attempts to acquire the lock for the job's queue and start
         processing the job atomically.
-        
+
+        B1 Fix (Phase 2 of "Job as Queue Proxy"): the lock INSERT and
+        the status UPDATE happen in a SINGLE transaction via
+        ``JobRepository.start_job_atomic_with_lock``. This keeps the
+        PostgreSQL constraint trigger ``trg_job_locks_active_guard``
+        (installed in ``daemon/manager.py::_ensure_postgres_columns``)
+        happy at COMMIT — the trigger requires both the ``job_locks``
+        row AND the matching ``admission_state='active'`` row to be
+        visible together. The pre-fix two-transaction flow (lock acquire
+        → status UPDATE in separate commits) caused the trigger to
+        false-fire on every job start.
+
+        Because the two writes now share a transaction, a status
+        mismatch rolls back BOTH the lock INSERT and the failed UPDATE
+        — the caller no longer needs a try/finally to release the lock
+        on failure.
+
         Args:
             job: The pending job to start.
-            
+
         Returns:
             True if job was started, False otherwise.
         """
         instance_id = str(uuid.uuid4())
-        
+
         # If job has queue_id, use per-queue locking with concurrency limit
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
 
-            acquired = await self._lock_manager.acquire_queue_lock(
-                project_id=job.project_id,
-                queue_id=job.queue_id,
-                job_id=job.job_id,
-                instance_id=instance_id,
-                concurrency_limit=concurrency_limit,
-            )
-
-            if not acquired:
-                return False
-
-            # C11: try/finally ensures lock is released on ALL failure paths
-            # (not just ValueError — e.g. OperationalError, CancelledError, deadlocks).
-            # The ``except ValueError`` preserves the original "return False"
-            # behavior for callers; the finally block still drops the lock.
-            started_ok = False
+            # B1 Fix: single-transaction lock + status UPDATE. The trigger
+            # fires at COMMIT; both writes are staged together so the
+            # trigger sees matching state. On status mismatch the
+            # transaction rolls back atomically — no manual lock release
+            # required.
             try:
-                await asyncio.to_thread(
-                    self._repository.start_job_atomic, job.job_id, instance_id
+                job_obj, lock_acquired = await asyncio.to_thread(
+                    self._repository.start_job_atomic_with_lock,
+                    job.job_id,
+                    instance_id,
+                    job.project_id,
+                    job.queue_id,
+                    concurrency_limit,
                 )
-                started_ok = True
-                return True
             except ValueError:
-                # Job state changed (already started/cancelled)
+                # Job state changed (already started/cancelled) — the
+                # transaction (including the lock INSERT) rolled back
+                # automatically. Preserve the original "return False"
+                # behaviour for callers.
                 return False
-            finally:
-                if not started_ok:
-                    await self._lock_manager.release_queue_lock(
-                        job.project_id, job.queue_id, job.job_id
-                    )
 
-        # If job has project_id but no queue_id, use backward-compatible project-based locking
+            if not lock_acquired:
+                return False
+            return job_obj is not None
+
+        # If job has project_id but no queue_id, use backward-compatible
+        # project-based locking. Same B1 fix applies: the synthesized
+        # ``"project:{project_id}"`` queue_id also writes to ``job_locks``
+        # via the same INSERT OR IGNORE pattern, so the trigger fires at
+        # commit and the lock+status writes must be in one transaction.
         if job.project_id:
-            acquired = await self._lock_manager.acquire(
-                project_id=job.project_id,
-                job_id=job.job_id,
-                instance_id=instance_id,
-            )
-
-            if not acquired:
-                return False
-
-            # C11: try/finally ensures lock is released on ALL failure paths.
-            started_ok = False
             try:
-                await asyncio.to_thread(
-                    self._repository.start_job_atomic, job.job_id, instance_id
+                job_obj, lock_acquired = await asyncio.to_thread(
+                    self._repository.start_job_atomic_with_lock,
+                    job.job_id,
+                    instance_id,
+                    job.project_id,
+                    f"project:{job.project_id}",
+                    1,  # default concurrency for project-based locks
                 )
-                started_ok = True
-                return True
             except ValueError:
                 return False
-            finally:
-                if not started_ok:
-                    await self._lock_manager.release(job.project_id, job.job_id)
 
-        # No project_id - start immediately without locking
-        # No lock held here; keep the original try/except ValueError semantics
-        # so we still return False (not None) on a state mismatch.
+            if not lock_acquired:
+                return False
+            return job_obj is not None
+
+        # No project_id - start immediately without locking.
+        # No lock INSERT means no trigger to worry about, so the legacy
+        # two-transaction flow is fine. Keep the try/except ValueError
+        # semantics so we still return False (not None) on a state
+        # mismatch.
         try:
             await asyncio.to_thread(
                 self._repository.start_job_atomic, job.job_id, instance_id
@@ -1515,90 +1524,92 @@ class JobQueueService:
             f"for job={job_id[:8]}... (job_type={job.job_type})"
         )
 
-        # Acquire lock FIRST - if we can't get it, don't transition the job
-        lock_acquired = False
+        # B1 Fix (Phase 2 of "Job as Queue Proxy"): the lock INSERT and
+        # the status UPDATE happen in a SINGLE transaction via
+        # ``JobRepository.start_job_atomic_with_lock``. The PostgreSQL
+        # constraint trigger ``trg_job_locks_active_guard`` (installed in
+        # ``daemon/manager.py::_ensure_postgres_columns``) fires at COMMIT
+        # and requires the matching ``job_queue_items.admission_state =
+        # 'active'`` row to be visible together with the ``job_locks``
+        # row. Pre-fix flow ran two separate commits (lock first, status
+        # second) — the trigger false-fired at the lock commit and every
+        # job start in production aborted.
+        #
+        # On status mismatch the transaction rolls back BOTH the lock
+        # INSERT and the failed UPDATE atomically, so no try/finally is
+        # needed to release the lock on failure.
         if job.queue_id and job.project_id:
             concurrency_limit = await self._get_concurrency_limit(job.queue_id)
             logger.info(
                 f"[TRACE] start_job: acquiring queue lock for job {job_id[:8]}... "
                 f"queue={job.queue_id[:8]}... concurrency_limit={concurrency_limit}"
             )
-            
-            lock_acquired = await self._lock_manager.acquire_queue_lock(
-                project_id=job.project_id,
-                queue_id=job.queue_id,
-                job_id=job_id,
-                instance_id=instance_id,
-                concurrency_limit=concurrency_limit,
-            )
-            
+            try:
+                started_job, lock_acquired = await asyncio.to_thread(
+                    self._repository.start_job_atomic_with_lock,
+                    job_id,
+                    instance_id,
+                    job.project_id,
+                    job.queue_id,
+                    concurrency_limit,
+                )
+            except ValueError:
+                # Job state changed (already started/cancelled) — the
+                # transaction (including the lock INSERT) rolled back
+                # automatically. Preserve the original "return None"
+                # behaviour so callers can detect "lock held by another
+                # worker" without having to catch an exception.
+                return None
             if not lock_acquired:
-                # Can't acquire lock - another job is using the concurrency slot
-                # Don't transition the job to avoid the rollback loop
                 logger.info(
                     f"[TRACE] start_job: job {job_id[:8]}... SKIP — lock NOT acquired (concurrency limit)"
                 )
                 return None
+            logger.debug(
+                f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
+            )
+            return started_job
         elif job.project_id:
             logger.debug(f"[TRACE] start_job: acquiring project lock for job {job_id[:8]}...")
-            lock_acquired = await self._lock_manager.acquire(
-                project_id=job.project_id,
-                job_id=job_id,
-                instance_id=instance_id,
-            )
-            
+            # Project-only path uses the synthesized ``"project:{project_id}"``
+            # queue with concurrency_limit=1 — same ``job_locks`` table,
+            # same trigger, same single-transaction fix.
+            try:
+                started_job, lock_acquired = await asyncio.to_thread(
+                    self._repository.start_job_atomic_with_lock,
+                    job_id,
+                    instance_id,
+                    job.project_id,
+                    f"project:{job.project_id}",
+                    1,
+                )
+            except ValueError:
+                return None
             if not lock_acquired:
                 logger.debug(
                     f"[TRACE] start_job: job {job_id[:8]}... SKIP — project lock NOT acquired"
                 )
                 return None
-        
-        # Lock acquired (or no locking needed) - now try to start job atomically
-        logger.debug(f"[TRACE] start_job: attempting atomic transition PENDING→PROCESSING for job {job_id[:8]}...")
-        # C11: try/finally ensures lock is released on ALL failure paths
-        # (not just ValueError — e.g. OperationalError, CancelledError, deadlocks).
-        # On success, the lock is intentionally kept (JobProcessor holds it until
-        # the job completes/fails). ``started_ok`` guards against releasing on
-        # the success path, matching the original lock-on-success semantics.
-        # The ``except (ValueError, InvalidTransitionError)`` preserves the
-        # original "return None" behavior for callers (lock contention /
-        # already-started job / invalid status transition) — the lock release
-        # happens in the finally block so we still drop it on the caught-exception
-        # paths. ``InvalidTransitionError`` is NOT a ValueError subclass (see
-        # daemon/services/job_state_machine.py:35), so it must be caught
-        # explicitly when ``start_job_atomic`` raises it instead of ValueError.
-        started_ok = False
-        try:
-            started_job = await asyncio.to_thread(
-                self._repository.start_job_atomic, job_id, instance_id
-            )
-            started_ok = True
             logger.debug(
                 f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
             )
             return started_job
-        except (ValueError, InvalidTransitionError):
-            # Job state changed (already started/cancelled) — preserve original
-            # behavior of returning None so callers can detect "lock held by
-            # another worker" without having to catch an exception.
-            return None
-        finally:
-            if not started_ok and lock_acquired:
-                # Release the lock on ANY failure path: ValueError (caller
-                # sees None), OperationalError / CancelledError (caller sees
-                # the exception), or any other unexpected error. Without this
-                # finally, a non-ValueError would leak the lock permanently.
-                if job.queue_id and job.project_id:
-                    await self._lock_manager.release_queue_lock(
-                        project_id=job.project_id,
-                        queue_id=job.queue_id,
-                        job_id=job_id,
-                    )
-                elif job.project_id:
-                    await self._lock_manager.release(
-                        project_id=job.project_id,
-                        job_id=job_id,
-                    )
+        else:
+            # No project_id, no queue_id — no lock to acquire, no
+            # trigger to worry about. Legacy flow is fine here.
+            logger.debug(f"[TRACE] start_job: attempting atomic transition PENDING→PROCESSING for job {job_id[:8]}...")
+            try:
+                started_job = await asyncio.to_thread(
+                    self._repository.start_job_atomic, job_id, instance_id
+                )
+            except (ValueError, InvalidTransitionError):
+                # Job state changed (already started/cancelled) — preserve
+                # the original "return None" behaviour for callers.
+                return None
+            logger.debug(
+                f"[TRACE] start_job: SUCCESS job {job_id[:8]}... started with instance={instance_id[:8]}..."
+            )
+            return started_job
     
     async def complete_job(
         self,
@@ -1866,56 +1877,48 @@ class JobQueueService:
                 f"trigger_next_job_sync called with queue_id for job {job.job_id}. "
                 "Lock acquisition will not work properly. Use async trigger_next_job() instead."
             )
-            # Still try to start job atomically
+            # B1 note: this path does NOT acquire a lock (no INSERT into
+            # ``job_locks``), so the trigger ``trg_job_locks_active_guard``
+            # is not fired. ``start_job_atomic`` alone is safe here.
             try:
                 return self._repository.start_job_atomic(next_job.job_id, instance_id)
             except ValueError:
                 return None
-        
-        # If job has project_id but no queue_id, try backward-compatible locking
+
+        # If job has project_id but no queue_id, use the synthesized
+        # ``project:{project_id}`` queue with concurrency_limit=1.
+        #
+        # B1 Fix: the project-lock path used to acquire via the async
+        # lock manager (``asyncio.run_coroutine_threadsafe``) and then
+        # call ``start_job`` separately — two commits, trigger false-fires
+        # at the lock INSERT. ``start_job_atomic_with_lock`` collapses
+        # the lock INSERT and the status UPDATE into ONE ``engine.begin()``
+        # transaction so the trigger sees both rows at COMMIT. The method
+        # is synchronous and thread-safe, so it can be called from this
+        # sync entry point directly.
         if job.project_id:
-            # Use asyncio.run_coroutine_threadsafe to acquire async lock
-            if self._loop and self._loop.is_running():
-                future = asyncio.run_coroutine_threadsafe(
-                    self._lock_manager.acquire(
-                        project_id=job.project_id,
-                        job_id=next_job.job_id,
-                        instance_id=instance_id,
-                    ),
-                    self._loop,
-                )
-                try:
-                    acquired = future.result(timeout=5)
-                except Exception as e:
-                    logger.error(f"Failed to acquire project lock for job {next_job.job_id}: {e}")
-                    return None
-            else:
-                logger.warning(
-                    f"Cannot acquire project lock for job {next_job.job_id} - no event loop available"
-                )
-                return None
-            
-            if not acquired:
-                return None
-            
             try:
-                return self._repository.start_job(next_job.job_id, instance_id)
-            except ValueError:
-                # Release on failure - use async release
-                if self._loop and self._loop.is_running():
-                    release_future = asyncio.run_coroutine_threadsafe(
-                        self._lock_manager.release(job.project_id, next_job.job_id),
-                        self._loop,
+                started_job, lock_acquired = (
+                    self._repository.start_job_atomic_with_lock(
+                        next_job.job_id,
+                        instance_id,
+                        job.project_id,
+                        f"project:{job.project_id}",
+                        1,  # default concurrency for project-based locks
                     )
-                    try:
-                        release_future.result(timeout=5)
-                    except Exception as e:
-                        logger.error(f"Failed to release project lock after start failure: {e}")
+                )
+                if not lock_acquired:
+                    return None
+                return started_job
+            except ValueError:
+                # Status mismatch — transaction (including the lock
+                # INSERT) rolled back automatically.
                 return None
-        
-        # No project_id - start immediately without locking
+
+        # No project_id - start immediately without locking. No lock
+        # INSERT means no trigger to worry about; legacy flow is fine.
         try:
-            return self._repository.start_job(next_job.job_id, instance_id)
+            return self._repository.start_job_atomic(next_job.job_id, instance_id)
         except ValueError:
             return None
     

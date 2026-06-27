@@ -100,10 +100,24 @@ def mock_project_repo():
 
 @pytest.fixture
 def mock_repository():
-    """Create mock job repository."""
+    """Create mock job repository.
+
+    B1 Fix (Phase 2 of "Job as Queue Proxy"): ``start_job_atomic_with_lock``
+    replaces the pre-fix ``start_job_atomic`` in the lock-acquiring paths
+    of ``start_job`` / ``_try_start_job``. The mock repository exposes
+    BOTH for backward compatibility:
+    - ``start_job_atomic`` — the legacy no-lock path
+    - ``start_job_atomic_with_lock`` — the B1 single-transaction method,
+      defaulting to returning ``(None, True)`` so call sites that
+      ``return started_job`` end up returning ``None`` (preserving the
+      "vanishingly unlikely" race where the row vanishes between commit
+      and re-read).
+    """
     repo = MagicMock()
     repo.get = MagicMock()
     repo.start_job_atomic = MagicMock()
+    # B1 single-transaction method: returns ``(JobItem | None, lock_acquired: bool)``
+    repo.start_job_atomic_with_lock = MagicMock(return_value=(None, True))
     repo.atomic_transition = MagicMock()
     repo.get_by_instance = MagicMock(return_value=None)
     repo.find_jobs_by_instance = MagicMock(return_value=[])
@@ -182,6 +196,8 @@ class TestStartJobInstanceStatusChecks:
         )
         mock_repository.get.return_value = job
         mock_repository.start_job_atomic.return_value = job  # Simulate successful start
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (job, True)
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.TERMINATED.value
@@ -216,6 +232,8 @@ class TestStartJobInstanceStatusChecks:
         )
         mock_repository.get.return_value = job
         mock_repository.start_job_atomic.return_value = job
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (job, True)
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.COMPLETED.value
@@ -250,6 +268,8 @@ class TestStartJobInstanceStatusChecks:
         )
         mock_repository.get.return_value = job
         mock_repository.start_job_atomic.return_value = job
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (job, True)
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.ERROR.value
@@ -284,6 +304,8 @@ class TestStartJobInstanceStatusChecks:
         )
         mock_repository.get.return_value = job
         mock_repository.start_job_atomic.return_value = job
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (job, True)
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.FAILED.value
@@ -357,6 +379,8 @@ class TestStartJobInstanceStatusChecks:
             job_type="task",
         )
         mock_repository.start_job_atomic.return_value = started_job
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (started_job, True)
 
         result = await job_queue_service.start_job(job_id)
 
@@ -390,6 +414,8 @@ class TestStartJobInstanceStatusChecks:
             job_type="task",
         )
         mock_repository.start_job_atomic.return_value = started_job
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (started_job, True)
 
         result = await job_queue_service.start_job(job_id)
 
@@ -445,6 +471,8 @@ class TestStartJobInstanceStatusChecks:
         )
         mock_repository.get.return_value = job
         mock_repository.start_job_atomic.return_value = job
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (job, True)
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.TERMINATED.value
@@ -506,6 +534,8 @@ class TestStartJobInstanceStatusChecks:
         )
         mock_repository.get.return_value = job
         mock_repository.start_job_atomic.return_value = job
+        # B1: lock+status are one transaction. Mock the new method.
+        mock_repository.start_job_atomic_with_lock.return_value = (job, True)
 
         mock_instance_manager_with_repo._instance_repository.get.return_value = MockInstance(
             instance_id, status=InstanceStatus.TERMINATED.value

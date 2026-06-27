@@ -1108,30 +1108,55 @@ class TestNextJobTriggeredAfterCompletion:
 
 
 class TestStartJobLockReleaseOnFailure:
-    """C11: lock MUST be released on any non-success path of start_job_atomic."""
+    """B1: lock MUST be released on any non-success path of
+    ``start_job_atomic_with_lock``.
+
+    These tests verify the lock is released on ALL failure paths when
+    the new single-transaction lock+status flow raises. The pre-fix
+    code had a separate ``LockRepository.try_acquire_slot`` (TX-A) and
+    ``JobRepository.start_job_atomic`` (TX-B); on a B failure in TX-B
+    the lock from TX-A had to be released by a try/finally. The B1
+    fix (``start_job_atomic_with_lock``) collapses both writes into
+    ONE ``engine.begin()`` transaction, so a ValueError / OperationalError
+    / CancelledError raises the transaction rollback — the lock row
+    is undone automatically without any explicit release call.
+
+    Externally the behaviour is unchanged: ``start_job`` returns ``None``
+    on failure, the lock is not held afterwards. Internally the lock
+    release now happens via DB rollback instead of ``release_queue_lock``.
+    """
 
     @pytest.mark.asyncio
     async def test_start_job_releases_lock_on_value_error(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """ValueError from start_job_atomic → lock released (existing behavior)."""
+        """ValueError from start_job_atomic_with_lock → no lock held.
+
+        B1 Fix: the lock INSERT and status UPDATE happen in one
+        ``engine.begin()`` transaction. Raising inside that block
+        triggers SQLAlchemy rollback of both writes — no manual
+        ``release_queue_lock`` is needed and none should occur.
+        """
         queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
         assert queue is not None
 
         job = await job_queue_service.enqueue(**sample_job_data_service)
 
-        # Force start_job_atomic to raise ValueError (e.g., job already started)
+        # Force start_job_atomic_with_lock to raise ValueError. Pre-fix
+        # this patched ``start_job_atomic``; B1 routes through the new
+        # single-transaction method.
         from unittest.mock import patch
 
         with patch.object(
             job_queue_service._repository,
-            "start_job_atomic",
+            "start_job_atomic_with_lock",
             side_effect=ValueError("already started"),
         ):
             result = await job_queue_service.start_job(job.job_id)
 
         assert result is None
-        # Lock must be released even though the exception was caught
+        # Lock must NOT be held after the rollback (whether from explicit
+        # release or DB-level rollback of the lock INSERT).
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id
         ) is False
@@ -1140,10 +1165,14 @@ class TestStartJobLockReleaseOnFailure:
     async def test_start_job_releases_lock_on_operational_error(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """Non-ValueError exception (OperationalError) → lock MUST still be released.
+        """Non-ValueError exception (OperationalError) → lock MUST NOT be held.
 
-        This is the C11 regression test. Before the fix, OperationalError would
-        skip the except clause and leak the lock until process restart.
+        This is the B1 regression test. The pre-fix code's
+        ``except ValueError`` clause did not match OperationalError;
+        C11 added a try/finally to cover it. B1 takes the cleaner
+        route: the exception unwinds ``engine.begin()``, the DB
+        rollback handles both the lock and the status write, and no
+        manual release is required.
         """
         from unittest.mock import patch
 
@@ -1152,16 +1181,20 @@ class TestStartJobLockReleaseOnFailure:
 
         job = await job_queue_service.enqueue(**sample_job_data_service)
 
-        # Force a non-ValueError exception (simulates DB deadlock / driver error)
+        # Force a non-ValueError exception (simulates DB deadlock / driver error).
+        # Patch the new B1 method so the exception is raised BEFORE the
+        # transaction acquires any lock.
         with patch.object(
             job_queue_service._repository,
-            "start_job_atomic",
+            "start_job_atomic_with_lock",
             side_effect=RuntimeError("DB connection lost"),
         ):
             with pytest.raises(RuntimeError, match="DB connection lost"):
                 await job_queue_service.start_job(job.job_id)
 
-        # CRITICAL: lock MUST be released even when an unexpected exception fires
+        # Lock MUST NOT be held — start_job_atomic_with_lock raised before
+        # the engine.begin() block acquired any lock, so the DB has no
+        # lock row.
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id
         ) is False
@@ -1170,10 +1203,11 @@ class TestStartJobLockReleaseOnFailure:
     async def test_start_job_releases_lock_on_cancelled_error(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """CancelledError → lock MUST still be released.
+        """CancelledError → lock MUST NOT be held.
 
-        CancelledError is a BaseException subclass in 3.8+ so it would never
-        match ``except ValueError`` and would leak the lock before the fix.
+        CancelledError is a BaseException subclass in 3.8+ so it never
+        matched the pre-fix ``except ValueError``. C11 added a
+        try/finally; B1 simplifies via the engine.begin() rollback.
         """
         import asyncio
         from unittest.mock import patch
@@ -1185,13 +1219,13 @@ class TestStartJobLockReleaseOnFailure:
 
         with patch.object(
             job_queue_service._repository,
-            "start_job_atomic",
+            "start_job_atomic_with_lock",
             side_effect=asyncio.CancelledError(),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await job_queue_service.start_job(job.job_id)
 
-        # Lock MUST be released
+        # Lock MUST NOT be held
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id
         ) is False
@@ -1200,10 +1234,11 @@ class TestStartJobLockReleaseOnFailure:
     async def test_start_job_keeps_lock_on_success(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """Success path → lock is HELD (preserves original behavior).
+        """Success path → lock IS held (regression guard).
 
-        Regression guard: the new try/finally with ``started_ok`` flag must
-        not release the lock when start_job_atomic succeeds.
+        B1 fix: ``start_job_atomic_with_lock`` succeeds means both the
+        lock INSERT and the status UPDATE committed in one transaction.
+        The lock row IS in the DB, so ``is_queue_locked`` returns True.
         """
         queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
         assert queue is not None
@@ -1220,19 +1255,18 @@ class TestStartJobLockReleaseOnFailure:
 
 
 class TestTryStartJobLockReleaseOnFailure:
-    """C11: _try_start_job must release the lock on any non-success path."""
+    """B1: ``_try_start_job`` must NOT leak a lock on any non-success path.
+
+    Mirrors :class:`TestStartJobLockReleaseOnFailure` for the
+    internal ``_try_start_job`` entry point (the synchronous
+    ``list_pending_*`` → ``_try_start_job`` path).
+    """
 
     @pytest.mark.asyncio
     async def test_try_start_job_releases_lock_on_operational_error(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """Non-ValueError from start_job_atomic → lock released in _try_start_job.
-
-        The C11 fix: while the original behavior only released the lock on
-        ValueError, the new hybrid pattern releases it on ANY failure path
-        (via the finally block). Non-ValueError exceptions propagate to the
-        caller, but the lock MUST still be released first.
-        """
+        """Non-ValueError from start_job_atomic_with_lock → lock NOT held."""
         from unittest.mock import patch
 
         queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
@@ -1242,13 +1276,14 @@ class TestTryStartJobLockReleaseOnFailure:
 
         with patch.object(
             job_queue_service._repository,
-            "start_job_atomic",
+            "start_job_atomic_with_lock",
             side_effect=RuntimeError("DB gone"),
         ):
             with pytest.raises(RuntimeError, match="DB gone"):
                 await job_queue_service._try_start_job(job)
 
-        # Lock MUST be released (the whole point of the C11 fix)
+        # Lock MUST NOT be held (the new B1 path raised before any
+        # ``engine.begin()`` could acquire a lock)
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id
         ) is False
@@ -1257,7 +1292,7 @@ class TestTryStartJobLockReleaseOnFailure:
     async def test_try_start_job_releases_lock_on_cancelled_error(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """CancelledError → lock released in _try_start_job."""
+        """CancelledError from start_job_atomic_with_lock → lock NOT held."""
         import asyncio
         from unittest.mock import patch
 
@@ -1268,13 +1303,13 @@ class TestTryStartJobLockReleaseOnFailure:
 
         with patch.object(
             job_queue_service._repository,
-            "start_job_atomic",
+            "start_job_atomic_with_lock",
             side_effect=asyncio.CancelledError(),
         ):
             with pytest.raises(asyncio.CancelledError):
                 await job_queue_service._try_start_job(job)
 
-        # Lock MUST be released
+        # Lock MUST NOT be held
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id
         ) is False
@@ -1386,42 +1421,92 @@ class TestCompleteJobStatusFirstOrdering:
 
 
 # =============================================================================
-# Static structural verification: methods follow try/finally + status-first
+# Static structural verification: methods use B1 single-transaction flow
 # =============================================================================
 
 
 class TestLockOrderingStructure:
-    """Source-level guards: catch regressions if someone re-introduces try/except."""
+    """Source-level guards: catch regressions if someone reverts the B1 fix.
 
-    def test_try_start_job_uses_try_finally(self):
-        """_try_start_job queue/project lock branches must use try/finally."""
+    B1 collapsed the lock INSERT + status UPDATE into one
+    ``engine.begin()`` transaction (via
+    ``JobRepository.start_job_atomic_with_lock``). The pre-B1 code had
+    a separate ``acquire_queue_lock`` (TX-A) and ``start_job_atomic``
+    (TX-B) plus a try/finally for lock release on failure. The
+    PostgreSQL constraint trigger ``trg_job_locks_active_guard``
+    requires both rows at the SAME commit, which is impossible in the
+    pre-B1 two-transaction flow — every job start false-fired.
+
+    These tests pin the new pattern: every lock-acquiring path in
+    ``start_job`` and ``_try_start_job`` MUST route through
+    ``start_job_atomic_with_lock``, and the lock+status writes MUST be
+    in one transaction (engine.begin()), not two.
+    """
+
+    def test_try_start_job_uses_single_transaction_method(self):
+        """``_try_start_job`` MUST call ``start_job_atomic_with_lock``.
+
+        Source-level guard against reverting to the pre-B1 two-transaction
+        pattern (``acquire_queue_lock`` + ``start_job_atomic``). If this
+        test fails, someone has re-introduced the cross-commit trigger bug.
+        """
         import inspect
 
         from daemon.services.job_queue_service import JobQueueService
 
         source = inspect.getsource(JobQueueService._try_start_job)
-        # Must have at least one try/finally block (for the queue/project lock paths)
-        assert "try:" in source
-        assert "finally:" in source
-        # Must use the started_ok flag pattern
-        assert "started_ok" in source
-        # The release_queue_lock / release calls must appear inside a finally
-        # block (search for release + finally proximity).
-        assert "release_queue_lock" in source
-        assert "release(" in source or "self._lock_manager.release" in source
+        assert "start_job_atomic_with_lock" in source, (
+            "_try_start_job must route through start_job_atomic_with_lock "
+            "to keep the lock INSERT and status UPDATE in ONE transaction "
+            "(B1 fix — triggers trg_job_locks_active_guard fire at commit)"
+        )
+        # The pre-B1 pattern must NOT be present (the two-transaction flow
+        # that triggers the constraint false-fire).
+        assert "self._repository.start_job_atomic(" not in source, (
+            "_try_start_job must not call start_job_atomic directly — "
+            "that path bypasses the lock INSERT in the same transaction"
+        )
 
-    def test_start_job_uses_try_finally(self):
-        """start_job must use try/finally (not try/except) for lock release."""
+    def test_start_job_uses_single_transaction_method(self):
+        """``start_job`` MUST call ``start_job_atomic_with_lock`` (queue/project paths).
+
+        The no-project_id / no-queue_id path is exempt: no lock INSERT means
+        no trigger to fire. That branch is allowed to use the legacy
+        ``start_job_atomic`` direct call.
+        """
         import inspect
 
         from daemon.services.job_queue_service import JobQueueService
 
         source = inspect.getsource(JobQueueService.start_job)
-        assert "try:" in source
-        assert "finally:" in source
-        assert "started_ok" in source
-        # Lock release MUST be inside the finally block
-        assert "release_queue_lock" in source
+        # The queue-based path AND project-based path must use the new method.
+        # The legacy "no project_id, no queue_id" branch can still call
+        # start_job_atomic — no lock, no trigger.
+        assert "start_job_atomic_with_lock" in source, (
+            "start_job must route the lock+status flow through "
+            "start_job_atomic_with_lock (B1 fix)"
+        )
+
+    def test_repository_start_job_atomic_with_lock_is_single_transaction(self):
+        """``start_job_atomic_with_lock`` MUST open ONE ``engine.begin()`` block.
+
+        Catches a regression where someone splits the lock INSERT and the
+        status UPDATE into separate transactions — that re-introduces the
+        trigger false-fire.
+        """
+        import inspect
+
+        from daemon.repositories.job_queue.repository import JobRepository
+
+        source = inspect.getsource(JobRepository.start_job_atomic_with_lock)
+        # One engine.begin() block — single transaction shared by lock INSERT
+        # and status UPDATE.
+        begin_count = source.count("self.engine.begin()")
+        assert begin_count == 1, (
+            f"start_job_atomic_with_lock must open exactly ONE engine.begin() "
+            f"transaction (lock INSERT + status UPDATE together); got "
+            f"{begin_count}"
+        )
 
     def test_complete_job_transitions_before_releases(self):
         """_complete_job: status transition must come before lock release."""

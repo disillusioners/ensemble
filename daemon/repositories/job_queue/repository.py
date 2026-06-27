@@ -1012,7 +1012,7 @@ class JobRepository:
         instance_id: str,
     ) -> JobItem | None:
         """Start a job atomically (PENDING -> PROCESSING).
-        
+
         Note: No deleted_at IS NULL check needed here — defense is at the query level above
         (list_pending_by_project, list_all_pending, list_pending_by_queue all exclude deleted jobs)
         """
@@ -1024,6 +1024,201 @@ class JobRepository:
             started_at=now,
             instance_id=instance_id,
         )
+
+    def start_job_atomic_with_lock(
+        self,
+        job_id: str,
+        instance_id: str,
+        project_id: str,
+        queue_id: str,
+        concurrency_limit: int,
+    ) -> tuple[JobItem | None, bool]:
+        """Atomically acquire a queue lock AND transition PENDING -> PROCESSING
+        in a SINGLE transaction.
+
+        B1 Fix (Phase 2 of "Job as Queue Proxy"): the PostgreSQL constraint
+        trigger ``trg_job_locks_active_guard`` (installed in
+        ``daemon/manager.py::_ensure_postgres_columns``) fires at COMMIT
+        of every transaction that INSERTs into ``job_locks``. It requires
+        the matching ``job_queue_items.admission_state = 'active' AND
+        deleted_at IS NULL`` row to be visible at COMMIT time.
+
+        The pre-fix flow ran two SEPARATE transactions:
+
+            TX-A: ``LockRepository.try_acquire_slot`` — INSERT job_locks
+                  → COMMIT (trigger fires here, admission_state='queued' →
+                  raises ``integrity_constraint_violation``)
+            TX-B: ``JobRepository.start_job_atomic`` — UPDATE admission_state='active'
+                  → COMMIT
+
+        Every job start in production hit the trigger at the TX-A commit
+        and aborted. This method collapses both writes into one
+        ``engine.begin()`` block so the trigger sees both the lock row
+        AND the active admission_state at COMMIT.
+
+        Returns:
+            Tuple ``(job, lock_acquired)``:
+
+            - ``(JobItem, True)`` — lock acquired AND status transitioned
+              PENDING -> PROCESSING. Both writes committed atomically.
+            - ``(None, False)`` — no slot was available. Transaction
+              rolled back; no rows persisted (no lock, no status change).
+            - Raises ``ValueError`` — lock acquired but the status UPDATE
+              matched 0 rows (status was no longer PENDING: a concurrent
+              ``start_job`` / ``cancel_job`` / etc. changed it first).
+              Transaction rolled back so the lock is auto-released — the
+              caller does NOT need to release the lock manually.
+              Matches the contract of :meth:`start_job` /
+              :meth:`start_job_atomic` for "not in PENDING" so callers
+              (``_try_start_job``, ``start_job``, ``trigger_next_job_sync``)
+              keep their ``except ValueError`` handlers.
+
+        Args:
+            job_id: Job identifier.
+            instance_id: Pre-generated UUID for the new instance. MUST be
+                a fresh value; reused on retry within the same transaction
+                is fine because the rollback also discards the lock row.
+            project_id: Project owning the queue.
+            queue_id: Queue identifier. For the project-based legacy
+                path this is the synthesized ``"project:{project_id}"``.
+            concurrency_limit: Maximum concurrent jobs allowed on this
+                queue (``queue.concurrency_limit``). For the project-based
+                legacy path this is ``1``.
+
+        Raises:
+            ValueError: If the job exists but its status is not PENDING
+                when the UPDATE fires (concurrent transition). The
+                transaction — including the lock INSERT — is rolled back
+                atomically; no caller cleanup is required.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        dialect = self.engine.dialect.name
+
+        with self.engine.begin() as conn:
+            # 1. Atomically claim a slot. Same dialect-branching pattern
+            # as ``LockRepository.try_acquire_slot`` — raw ``text()`` so
+            # we stay inside the engine.begin() transaction.
+            if dialect == "postgresql":
+                lock_insert_stmt = text(
+                    """
+                    INSERT INTO job_locks
+                        (lock_id, project_id, queue_id, job_id,
+                         instance_id, lock_slot, acquired_at)
+                    VALUES
+                        (:lock_id, :project_id, :queue_id, :job_id,
+                         :instance_id, :slot, :now)
+                    ON CONFLICT (project_id, queue_id, lock_slot) DO NOTHING
+                    """
+                )
+            else:
+                lock_insert_stmt = text(
+                    """
+                    INSERT OR IGNORE INTO job_locks
+                        (lock_id, project_id, queue_id, job_id,
+                         instance_id, lock_slot, acquired_at)
+                    VALUES
+                        (:lock_id, :project_id, :queue_id, :job_id,
+                         :instance_id, :slot, :now)
+                    """
+                )
+
+            lock_acquired = False
+            for slot in range(concurrency_limit):
+                lock_id = str(uuid.uuid4())
+                result = conn.execute(
+                    lock_insert_stmt,
+                    {
+                        "lock_id": lock_id,
+                        "project_id": project_id,
+                        "queue_id": queue_id,
+                        "job_id": job_id,
+                        "instance_id": instance_id,
+                        "slot": slot,
+                        "now": now_iso,
+                    },
+                )
+                if (result.rowcount or 0) == 1:
+                    lock_acquired = True
+                    break
+
+            if not lock_acquired:
+                # All slots taken. ``engine.begin()`` commits the empty
+                # transaction on normal exit (no-op) — caller sees
+                # ``(None, False)``.
+                return None, False
+
+            # 2. UPDATE job_queue_items in the SAME transaction. The
+            # PostgreSQL ``trg_job_locks_active_guard`` trigger fires at
+            # COMMIT; because both the lock INSERT and this UPDATE are
+            # staged in one transaction, the trigger sees both at COMMIT
+            # and accepts the new active state.
+            #
+            # Raw ``text()`` SQL (not ``sqlmodel_update``) so we share
+            # the same transaction handle and can read ``rowcount``
+            # directly. ``status_to_admission`` keeps the dual-write
+            # consistent with the rest of the repository.
+            update_stmt = text(
+                """
+                UPDATE job_queue_items
+                SET status = :to_status,
+                    admission_state = :admission_state,
+                    started_at = :started_at,
+                    instance_id = :instance_id
+                WHERE job_id = :job_id
+                  AND status = :from_status
+                  AND deleted_at IS NULL
+                """
+            )
+            update_result = conn.execute(
+                update_stmt,
+                {
+                    "to_status": JobStatus.PROCESSING.value,
+                    "admission_state": status_to_admission(JobStatus.PROCESSING.value),
+                    "started_at": now_iso,
+                    "instance_id": instance_id,
+                    "job_id": job_id,
+                    "from_status": JobStatus.PENDING.value,
+                },
+            )
+
+            if (update_result.rowcount or 0) == 0:
+                # Status guard matched 0 rows: either the job doesn't
+                # exist, or its status is no longer PENDING (concurrent
+                # start_job / cancel_job / etc.). Disambiguate with a
+                # follow-up SELECT in the same transaction so we can
+                # raise the right exception. Whatever we decide, raising
+                # inside ``engine.begin()`` triggers ROLLBACK of BOTH the
+                # lock INSERT and the failed UPDATE — the caller never
+                # sees a partially-committed lock.
+                existing = conn.execute(
+                    text("SELECT status FROM job_queue_items WHERE job_id = :job_id"),
+                    {"job_id": job_id},
+                ).first()
+                current_status = existing[0] if existing is not None else None
+                if current_status is None:
+                    # Job doesn't exist — treat as "lock not acquired"
+                    # so callers' ``None-returning`` branches trigger.
+                    # The transaction rolls back via the raise below;
+                    # the lock INSERT is undone automatically.
+                    raise ValueError(
+                        f"Cannot start job '{job_id}': job not found"
+                    )
+                raise ValueError(
+                    f"Cannot start job in '{current_status}' state, "
+                    f"must be PENDING"
+                )
+
+        # Transaction committed successfully — re-read the row to
+        # return a fully-populated ``JobItem`` (mirrors ``start_job`` /
+        # ``atomic_transition``).
+        with SQLModelSession(self.engine) as session:
+            job = session.get(JobItem, job_id)
+            if job is None:
+                # Vanishingly unlikely race: row was deleted between the
+                # COMMIT and the SELECT. Preserve the "return None for
+                # missing job" contract rather than raising.
+                return None, True
+            return job, True
 
     def complete_job(
         self,

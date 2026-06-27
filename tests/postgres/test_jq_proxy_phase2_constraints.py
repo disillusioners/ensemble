@@ -63,6 +63,15 @@ from daemon.repositories.job_queue.models import (  # noqa: F401
     JobItem,
     JobLock,
 )
+from daemon.repositories.job_queue.repository import JobRepository
+from daemon.repositories.job_queue.queue_repository import JobQueueRepository
+from daemon.repositories.job_queue.lock_repository import LockRepository
+from daemon.services.job_lock_manager import JobLockManager
+from daemon.services.job_queue_service import JobQueueService
+from daemon.repositories.job_queue.models import (
+    JobStatus,
+    QueueType,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -1098,3 +1107,236 @@ def test_trigger_functions_use_integrity_constraint_violation_errcode(pg_engine)
             f"ERRCODE = 'integrity_constraint_violation' (SQLSTATE 23514); "
             f"body was:\n{body}"
         )
+
+
+# =============================================================================
+# Section G — Real service-layer job-start flow against live PG triggers
+# =============================================================================
+# W2 (Bug-Class B1 regression coverage).
+#
+# Background
+# ----------
+# The Phase 2 constraint triggers (``trg_job_locks_active_guard`` and
+# ``trg_job_queue_items_active_lock_guard``, installed by the
+# session-scoped ``_install_phase2_schema`` fixture above) enforce at
+# COMMIT time the cross-table invariant ``admission_state='active' ⇔
+# job_locks row exists``. Both are ``DEFERRABLE INITIALLY DEFERRED``
+# so they only fire at COMMIT — the production code MUST stage the
+# ``INSERT job_locks`` and ``UPDATE job_queue_items SET
+# admission_state='active'`` in a single transaction, otherwise the
+# trigger sees ``admission_state='queued'`` at the lock INSERT's COMMIT
+# and raises ``integrity_constraint_violation``.
+#
+# Pre-fix flow (Bug B1): two separate transactions:
+#
+#     TX-A: ``LockRepository.try_acquire_slot`` → COMMIT
+#           (trigger fires here, admission_state='queued' → raises)
+#     TX-B: ``JobRepository.start_job_atomic`` → COMMIT
+#
+# Every job start in production hit the trigger at TX-A's commit and
+# aborted. The fix (``JobRepository.start_job_atomic_with_lock``)
+# collapses both writes into a single ``engine.begin()`` block so the
+# trigger sees both rows at COMMIT and accepts the new active state.
+#
+# Why a service-layer test?
+# -------------------------
+# All the lower-level tests in Sections A–F exercise the DB-level
+# invariant directly with raw SQL. They would still pass even if the
+# production flow regressed back to the two-transaction pattern,
+# because they always wrote both rows in a single explicit
+# transaction. To prove the B1 fix is end-to-end live we need a test
+# that calls the REAL ``JobQueueService.start_job`` → ``_try_start_job``
+# → ``JobRepository.start_job_atomic_with_lock`` chain against a real
+# PostgreSQL engine with the constraint triggers installed. This
+# catches a regression where someone splits the single-transaction
+# flow back into two commits.
+#
+# If the B1 fix is reverted, this test will FAIL with
+# ``integrity_constraint_violation`` (SQLSTATE 23000) raised out of
+# ``start_job_atomic_with_lock`` — the lock INSERT's COMMIT fires the
+# trigger and the false-positive violation aborts the transaction.
+# =============================================================================
+
+
+async def test_real_job_start_does_not_false_fire_trigger(pg_engine, pg_repository_factory):
+    """Real ``JobQueueService.start_job`` flow against live PG constraint triggers.
+
+    Wires the production service stack against the shared PG engine
+    (PostgreSQL constraint triggers are installed by the session-scoped
+    ``_install_phase2_schema`` fixture at the top of this module). The
+    test then drives the real ``start_job`` code path:
+
+        JobQueueService.start_job
+          → JobRepository.get
+          → JobQueueService._try_start_job
+          → JobRepository.start_job_atomic_with_lock
+              (single ``engine.begin()`` tx: INSERT job_locks + UPDATE
+               job_queue_items SET admission_state='active')
+              → COMMIT  ← constraint trigger fires here
+            ↳ B1 fix: both rows visible at COMMIT ⇒ trigger passes
+            ↳ Pre-fix (B1 bug): only the lock row was visible ⇒
+              trigger raises ``integrity_constraint_violation``
+
+    Asserts the full B1-fix contract end-to-end:
+
+      1. ``start_job`` returns a non-None ``JobItem`` (the job actually
+         started — not a silent ``None`` from a swallowed error).
+      2. The returned ``JobItem`` is now ``status='processing'`` AND
+         ``admission_state='active'`` (the dual-write commit).
+      3. A ``job_locks`` row exists for this job (the lock was
+         acquired).
+      4. No ``IntegrityError`` / ``integrity_constraint_violation``
+         was raised (the trigger did NOT false-fire).
+
+    Why the assert that no ``IntegrityError`` was raised matters: even
+    if ``start_job`` returned ``None`` (silent failure), the rest of
+    the contract could still hold. The ``no exception`` clause plus the
+    ``is not None`` return check together prove the B1 fix is live.
+    """
+    # ── Service-stack wiring ────────────────────────────────────────────
+    # Repository + lock_manager + queue_repo are the production
+    # dependencies of JobQueueService. ``pg_repository_factory`` builds
+    # each from the shared ``pg_engine`` (defined in
+    # ``tests/postgres/conftest.py``).
+    repository = pg_repository_factory(JobRepository)
+    queue_repo = pg_repository_factory(JobQueueRepository)
+    lock_repo = pg_repository_factory(LockRepository)
+    lock_manager = JobLockManager(lock_repo=lock_repo)
+    job_queue_service = JobQueueService(
+        repository=repository,
+        lock_manager=lock_manager,
+        queue_repo=queue_repo,
+    )
+
+    # ── Set up: queue with concurrency_limit=1 ─────────────────────────
+    # concurrency_limit=1 maximises the B1-trigger sensitivity: a
+    # single slot means the lock INSERT must commit cleanly for the
+    # status UPDATE to be attempted.
+    project_id = "phase2-W2-project"
+    queue = queue_repo.create(
+        project_id=project_id,
+        queue_name="phase2-W2-queue",
+        queue_type=QueueType.FIFO.value,
+        concurrency_limit=1,
+    )
+
+    # ── Set up: pending job routed to that queue ───────────────────────
+    # status='pending' + admission_state='queued' is the B1-trigger
+    # false-fire state: admission_state='queued' with a job_locks row
+    # present violates trigger 2 at the lock INSERT's COMMIT.
+    job = repository.create(
+        agent_id="phase2-W2-agent",
+        agent_dir="agents/phase2-W2-agent",
+        message="W2 trigger-false-fire regression test",
+        source="api",
+        project_id=project_id,
+        priority=5,
+        queue_id=queue.queue_id,
+    )
+    # Defensive: confirm the pre-condition state the test is supposed
+    # to set up. If ``create`` ever changes its default
+    # ``admission_state`` from the model default we want the test to
+    # fail loudly, not silently.
+    assert job.status == JobStatus.PENDING.value
+    assert job.admission_state == AdmissionState.QUEUED.value
+
+    # ── Act: real service-layer flow ───────────────────────────────────
+    # ``start_job`` exercises the full production chain: get → pause
+    # check → instance-status check → instance_id mint → _try_start_job
+    # → start_job_atomic_with_lock (single tx, B1 fix).
+    #
+    # Wrap the call so we can assert NO ``IntegrityError`` was raised.
+    # Pre-fix flow raises ``IntegrityError`` with SQLSTATE 23000 here;
+    # B1-fix flow commits cleanly.
+    raised: Exception | None = None
+    started_job: JobItem | None = None
+    try:
+        started_job = await job_queue_service.start_job(job.job_id)
+    except Exception as exc:  # noqa: BLE001 — we re-raise below
+        raised = exc
+
+    # ── Assert 4: no IntegrityError raised ──────────────────────────────
+    # This is the headline assertion of W2: the B1 fix means the
+    # constraint trigger at the lock INSERT's COMMIT sees the matching
+    # ``admission_state='active'`` row and passes. Pre-fix this raises
+    # ``integrity_constraint_violation`` (SQLSTATE 23000).
+    if raised is not None:
+        sqlstate = _sqlstate(raised) if "IntegrityError" in type(raised).__name__ else None
+        assert sqlstate != "23000", (
+            f"B1 regression: constraint trigger false-fired at "
+            f"start_job() with SQLSTATE 23000 "
+            f"(integrity_constraint_violation). The lock INSERT and "
+            f"admission_state UPDATE must be in ONE transaction. "
+            f"Raised: {raised!r}"
+        )
+        # Any other exception is a genuine failure — surface it.
+        raise raised
+
+    # ── Assert 1: start_job returned a JobItem ──────────────────────────
+    assert started_job is not None, (
+        "start_job() returned None — the B1 fix should make the job "
+        "start cleanly. Check whether start_job_atomic_with_lock "
+        "rolled back silently."
+    )
+
+    # ── Assert 2: status dual-write committed ──────────────────────────
+    assert started_job.status == JobStatus.PROCESSING.value, (
+        f"Expected status='processing' after start_job(), got "
+        f"{started_job.status!r}. The status UPDATE inside "
+        "start_job_atomic_with_lock did not commit."
+    )
+    assert started_job.admission_state == AdmissionState.ACTIVE.value, (
+        f"Expected admission_state='active' after start_job(), got "
+        f"{started_job.admission_state!r}. The dual-write "
+        "UPDATE … SET admission_state='active' did not commit."
+    )
+    assert started_job.instance_id is not None, (
+        "Expected instance_id to be set after start_job() — the "
+        "start_job_atomic_with_lock UPDATE writes a fresh UUID."
+    )
+
+    # ── Assert 3: a job_locks row exists for this job ──────────────────
+    # The trigger ``trg_job_locks_active_guard`` is the canonical
+    # arbiter of "did the lock INSERT commit?". If the row is here,
+    # the trigger passed — i.e. the B1 fix worked end-to-end.
+    with pg_engine.connect() as conn:
+        lock_row = conn.execute(
+            text(
+                "SELECT lock_id, project_id, queue_id, instance_id "
+                "FROM job_locks WHERE job_id = :job_id"
+            ),
+            {"job_id": job.job_id},
+        ).first()
+    assert lock_row is not None, (
+        f"No job_locks row exists for job_id={job.job_id!r} after "
+        f"start_job() — the lock INSERT did not commit (or was "
+        f"rolled back by the trigger)."
+    )
+    lock_lock_id, lock_project_id, lock_queue_id, lock_instance_id = lock_row
+    assert lock_project_id == project_id, (
+        f"job_locks.project_id mismatch: expected {project_id!r}, "
+        f"got {lock_project_id!r}"
+    )
+    assert lock_queue_id == queue.queue_id, (
+        f"job_locks.queue_id mismatch: expected {queue.queue_id!r}, "
+        f"got {lock_queue_id!r}"
+    )
+    assert lock_instance_id == started_job.instance_id, (
+        f"job_locks.instance_id must equal JobItem.instance_id — "
+        f"expected {started_job.instance_id!r}, got "
+        f"{lock_instance_id!r}"
+    )
+
+    # ── Assert 5 (bonus): trigger fires correctly on a negative case
+    # ── Trigger 2 was happy at the lock INSERT because both rows were
+    # visible at COMMIT. Now we explicitly re-check the trigger fires
+    # if we manually try to add a SECOND lock for the same job (which
+    # would violate the uq_job_locks_slot UNIQUE constraint on
+    # (project_id, queue_id, lock_slot), but more importantly we want
+    # to confirm the trigger function is alive by inspecting pg_proc).
+    # We skip the negative-INSERT test here — Sections A–B already
+    # cover that exhaustively. The section above is the positive path.
+
+    # Sanity: lock_id is non-empty so the row is a real INSERT, not
+    # a synthetic placeholder.
+    assert lock_lock_id, "job_locks.lock_id must be non-empty"
