@@ -21,7 +21,7 @@ from ..repositories.dependency_bus.models import (
     DependencyWatcherState,
 )
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
-from ..repositories.job_queue.models import JobStatus
+from ..repositories.job_queue.models import JobStatus, status_to_admission
 from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
@@ -1787,6 +1787,11 @@ class InstanceLifecycleService:
                         text(
                             "UPDATE job_queue_items "
                             "SET status = 'cancelled', "
+                            # Phase 2 dual-write: status→admission_state
+                            # co-move (CANCELLED → DONE). Same transaction
+                            # boundary as the status UPDATE so the two
+                            # columns stay consistent across the cascade.
+                            "    admission_state = 'done', "
                             "    cancelled_at = :cancelled_at, "
                             "    completed_at = :completed_at, "
                             "    error_message = :err, "
@@ -1825,6 +1830,9 @@ class InstanceLifecycleService:
                         text(
                             "UPDATE job_queue_items "
                             "SET status = 'cancelled', "
+                            # Phase 2 dual-write: CANCELLED → DONE. Same
+                            # transaction boundary as the status UPDATE.
+                            "    admission_state = 'done', "
                             "    cancelled_at = :cancelled_at, "
                             "    error_message = COALESCE(error_message, :err) "
                             "WHERE job_id IN :job_ids "
@@ -2150,7 +2158,13 @@ status=InstanceStatus.IDLE.value,
             session.execute(
                 text(
                     "UPDATE job_queue_items "
-                    "SET status = :paused_status "
+                    "SET status = :paused_status, "
+                    # Phase 2 dual-write: PAUSED → ACTIVE (NOT a
+                    # separate admission state — pause is an Instance
+                    # concern; the job's lock is still held so the
+                    # admission layer must still see ``active``).
+                    # Plan §8.1 makes this explicit.
+                    "    admission_state = :active_admission "
                     "WHERE instance_id IN :tree_ids "
                     "  AND status = :processing_status "
                     "  AND deleted_at IS NULL"
@@ -2159,6 +2173,7 @@ status=InstanceStatus.IDLE.value,
                 ),
                 {
                     "paused_status": JobStatus.PAUSED.value,
+                    "active_admission": "active",
                     "processing_status": JobStatus.PROCESSING.value,
                     "tree_ids": updated_ids,
                 },
@@ -2421,7 +2436,13 @@ status=InstanceStatus.IDLE.value,
             session.execute(
                 text(
                     "UPDATE job_queue_items "
-                    "SET status = :processing_status "
+                    "SET status = :processing_status, "
+                    # Phase 2 dual-write: PROCESSING → ACTIVE in the
+                    # same guarded UPDATE. (status was PAUSED on this
+                    # row before the resume; admission_state was
+                    # already ACTIVE — same value, dual-write kept
+                    # for consistency with the dual-write contract.)
+                    "    admission_state = :active_admission "
                     "WHERE instance_id IN :tree_ids "
                     "  AND status = :paused_status "
                     "  AND deleted_at IS NULL"
@@ -2430,6 +2451,7 @@ status=InstanceStatus.IDLE.value,
                 ),
                 {
                     "processing_status": JobStatus.PROCESSING.value,
+                    "active_admission": "active",
                     "paused_status": JobStatus.PAUSED.value,
                     "tree_ids": tree_ids,
                 },

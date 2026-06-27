@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, List
 
 from daemon.repositories.job_queue import DeadLetterItem, JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
+from daemon.repositories.job_queue.models import status_to_admission
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -150,9 +151,17 @@ class DeadLetterService:
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
                 .where(JobItem.status == "failed")
-                .values(status="dead_letter")
+                # Phase 2 dual-write: DEAD_LETTER → admission_state =
+                # DEAD. Co-moved with status in the SAME guarded UPDATE
+                # so the two columns stay consistent at the queue/DLQ
+                # boundary. ``status_to_admission`` is the single
+                # source of truth.
+                .values(
+                    status="dead_letter",
+                    admission_state=status_to_admission("dead_letter"),
+                )
             )
-            
+
             if update_result.rowcount == 0:
                 # Concurrent process flipped this job out of 'failed'
                 # between our Python check and this UPDATE. Detach the
@@ -160,7 +169,7 @@ class DeadLetterService:
                 # insert a DLQ row for a job that is no longer failed.
                 session.expunge(dlq_item)
                 raise JobNotInFailedStateError(job_id, job.status)
-            
+
             # Let the caller commit the session
             return dlq_item
         except IntegrityError:
@@ -243,7 +252,12 @@ class DeadLetterService:
                     sqlmodel_update(JobItem)
                     .where(JobItem.job_id == job_id)
                     .where(JobItem.status == "failed")
-                    .values(status="dead_letter")
+                    # Phase 2 dual-write: DEAD_LETTER → admission_state
+                    # = DEAD in the same guarded UPDATE.
+                    .values(
+                        status="dead_letter",
+                        admission_state=status_to_admission("dead_letter"),
+                    )
                 )
                 
                 if update_result.rowcount == 0:
@@ -336,8 +350,13 @@ class DeadLetterService:
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
                 .where(JobItem.status == "dead_letter")
+                # Phase 2 dual-write: PENDING → admission_state =
+                # QUEUED. All retry/clear fields are reset in the SAME
+                # guarded UPDATE — including admission_state, which
+                # was previously DEAD on this row.
                 .values(
                     status="pending",
+                    admission_state=status_to_admission("pending"),
                     retry_count=0,
                     failed_at=None,
                     error_message=None,

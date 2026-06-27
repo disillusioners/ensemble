@@ -12,7 +12,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
-from .models import JobItem, JobQueue, JobStatus, QueueType
+from .models import AdmissionState, JobItem, JobQueue, JobStatus, QueueType, status_to_admission
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +106,12 @@ class JobRepository:
                 project_id=project_id,
                 priority=priority,
                 status=JobStatus.PENDING.value,
+                # Phase 2 dual-write: admission_state moves with status.
+                # PENDING → QUEUED via status_to_admission. Explicit
+                # here even though the field default matches — keeps
+                # the create() INSERT symmetric with the update paths
+                # that call status_to_admission().
+                admission_state=status_to_admission(JobStatus.PENDING.value),
                 job_metadata=job_metadata or {},
                 queue_id=queue_id,
                 idempotency_key=idempotency_key,
@@ -194,6 +200,10 @@ class JobRepository:
                 "project_id": project_id,
                 "priority": priority,
                 "status": JobStatus.PENDING.value,
+                # Phase 2 dual-write: admission_state co-moves with
+                # status. Set explicitly so the raw INSERT values
+                # mirror the ORM create() above.
+                "admission_state": status_to_admission(JobStatus.PENDING.value),
                 "metadata": job_metadata or {},  # DB column name, not job_metadata
                 "queue_id": queue_id,
                 "idempotency_key": idempotency_key,
@@ -653,7 +663,20 @@ class JobRepository:
         # keys override the default ``status`` only if they happen to be
         # named ``status`` (they shouldn't — ``to_status`` is the canonical
         # way to change status).
-        set_values: dict[str, Any] = {"status": to_status, **extra_updates}
+        #
+        # Phase 2 dual-write: ``admission_state`` is derived from
+        # ``to_status`` via :func:`status_to_admission` and added to the
+        # SAME UPDATE so the two columns move in lockstep. Because
+        # ``admission_state`` is set before ``**extra_updates``, any
+        # caller that passes ``admission_state=`` explicitly would
+        # override the mapping — that path is intentionally unsupported
+        # (the helper is the single source of truth) but documented
+        # here so a future caller knows.
+        set_values: dict[str, Any] = {
+            "status": to_status,
+            "admission_state": status_to_admission(to_status),
+            **extra_updates,
+        }
 
         with SQLModelSession(self.engine) as session:
             # Atomic UPDATE with status guard. PostgreSQL EvalPlanQual
@@ -768,6 +791,10 @@ class JobRepository:
                 .where(JobItem.retry_count < max_retries)
                 .values(
                     status=JobStatus.PENDING.value,
+                    # Phase 2 dual-write: FAILED → PENDING via the
+                    # status mapping, admission_state co-moves with
+                    # status to QUEUED in the same guarded UPDATE.
+                    admission_state=status_to_admission(JobStatus.PENDING.value),
                     retry_count=JobItem.retry_count + 1,
                     next_retry_at=next_retry_at,
                     failed_at=None,
@@ -859,6 +886,18 @@ class JobRepository:
                 "start_job_atomic / complete_job / fail_job / "
                 "cancel_job / terminate_job)"
             )
+        # Phase 2: ``admission_state`` co-moves with ``status``. Direct
+        # ORM writes to ``admission_state`` would bypass the
+        # ``status_to_admission`` invariant and create a row where the
+        # two columns disagree. Reject the same way ``status`` is
+        # rejected — every transition must go through ``atomic_transition``
+        # (or one of its wrappers) so the dual-write stays consistent.
+        if "admission_state" in updates:
+            raise ValueError(
+                "Use atomic_transition for admission_state changes "
+                "(see JobRepository.atomic_transition — it computes "
+                "admission_state via status_to_admission)"
+            )
 
         with SQLModelSession(self.engine) as db_session:
             job = db_session.get(JobItem, job_id)
@@ -915,6 +954,12 @@ class JobRepository:
         now_iso = datetime.now(timezone.utc).isoformat()
         set_values: dict[str, Any] = {
             "status": JobStatus.PROCESSING.value,
+            # Phase 2 dual-write: PENDING → PROCESSING maps to
+            # admission_state = ACTIVE in the same guarded UPDATE.
+            # ``start_job`` writes its own UPDATE rather than routing
+            # through ``atomic_transition`` (different SQL guard
+            # semantics) so the dual-write must be inlined here.
+            "admission_state": status_to_admission(JobStatus.PROCESSING.value),
             "started_at": now_iso,
             "instance_id": instance_id,
         }
@@ -1083,6 +1128,13 @@ class JobRepository:
                 .where(JobItem.status.in_(cancellable_states))
                 .values(
                     status=JobStatus.CANCELLED.value,
+                    # Phase 2 dual-write: CANCELLED → admission_state
+                    # = DONE in the same atomic UPDATE-WHERE-IN.
+                    # ``cancel_job`` uses a raw guarded UPDATE rather
+                    # than ``atomic_transition`` (status guard is
+                    # ``IN (...)`` not ``= ...``) so the dual-write
+                    # must be inlined.
+                    admission_state=status_to_admission(JobStatus.CANCELLED.value),
                     cancelled_at=now,
                 )
             )

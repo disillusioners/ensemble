@@ -59,7 +59,7 @@ from sqlalchemy import func, text as _sa_text
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import JobLock
+from daemon.repositories.job_queue.models import JobLock, status_to_admission
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
@@ -2436,6 +2436,13 @@ class JobFeedbackObserver:
             if job_id is not None:
                 update_values: dict[str, Any] = {
                     "status": to_status,
+                    # Phase 2 dual-write: to_status is COMPLETED or
+                    # FAILED (both map to admission_state = DONE) so
+                    # status_to_admission() collapses both to one
+                    # value. Co-moved with status in the same guarded
+                    # UPDATE so the two columns stay consistent
+                    # through the terminal cascade.
+                    "admission_state": status_to_admission(to_status),
                     "completed_at": now,
                 }
                 if terminal_status == InstanceStatus.COMPLETED.value:

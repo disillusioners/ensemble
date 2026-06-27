@@ -1711,6 +1711,24 @@ class InstanceManager:
           NO-OP on PG. SQLite counterpart lives in
           ``daemon/migrations/versions/20260627_000003_task_is_deferred.sql``.
           See feature/virtual-job-management-surface.
+        - job_queue_items.admission_state (Phase 2, 2026-06-28): the
+          queue-proxy admission column. Dual-writes with ``status``
+          in every write site; ``status`` becomes a write-only
+          mirror and is dropped in Phase 5. SQLite counterpart lives
+          in ``daemon/migrations/versions/20260628_000001_job_admission_state.sql``.
+          See feature/job-as-queue-proxy.
+        - ``idx_job_queue_admission_state`` (Phase 2, 2026-06-28):
+          index supporting the future ``WHERE admission_state IN
+          ('queued', 'active')`` predicates used by the work-resolver
+          sweep. Mirrors ``idx_job_queue_status`` for the new column.
+        - Constraint triggers (Phase 2, 2026-06-28, plan §8.7.1): the
+          ``job_queue_items_active_lock_guard`` and
+          ``job_locks_active_guard`` deferred CONSTRAINT TRIGGERs
+          enforce the ``active ⇔ JobLock row`` invariant at COMMIT.
+          First use of ``CREATE CONSTRAINT TRIGGER`` in the codebase
+          (no precedent). Idempotent via CREATE OR REPLACE FUNCTION
+          (functions) and DROP TRIGGER IF EXISTS + CREATE CONSTRAINT
+          TRIGGER (triggers).
         - idx_infra_assets_attributes_gin /
           idx_infra_assets_relationships_gin: GIN indexes on the
           JSONB ``attributes`` and ``relationships`` columns of
@@ -2014,6 +2032,49 @@ class InstanceManager:
             # re-run and on fresh databases where create_all already
             # created it from the model.
             "CREATE INDEX IF NOT EXISTS ix_task_is_deferred ON task(is_deferred)",
+            # ── Phase 2 admission_state column (Job-as-Queue-Proxy) ──
+            # Adds the ``admission_state`` column to ``job_queue_items``
+            # alongside the existing ``status`` column. Dual-write in
+            # Phase 2; ``status`` becomes a write-only mirror, then
+            # both columns are dropped/replaced in Phase 5. SQLite
+            # gets the column + backfill + index via
+            # ``daemon/migrations/versions/20260628_000001_job_admission_state.sql``
+            # (the .sql runner is a NO-OP on PG, so we mirror the
+            # statements here for parity with fresh databases where
+            # ``SQLModel.metadata.create_all()`` creates the column
+            # from the model field). Fresh PG databases also pick up
+            # the column from the model automatically.
+            #
+            # The backfill is idempotent via ``AND admission_state =
+            # 'queued'`` guards — only rows still at the default get
+            # updated, so re-running does not clobber rows already
+            # written by the dual-write code path.
+            "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS admission_state TEXT NOT NULL DEFAULT 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processing', 'paused') AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'done' WHERE status IN ('completed', 'failed', 'cancelled') AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter' AND admission_state = 'queued'",
+            "CREATE INDEX IF NOT EXISTS idx_job_queue_admission_state ON job_queue_items(admission_state)",
+            # ── Phase 2 invariant triggers (plan §8.7.1) ─────────────
+            # First CONSTRAINT TRIGGER / DEFERRABLE usage in the
+            # codebase (no precedent). Enforces the
+            # ``admission_state='active' ⇔ JobLock row exists``
+            # invariant at COMMIT, independent of which application
+            # code path ran — so it catches a missing-release path the
+            # application helper cannot. Deferred (not immediate) so
+            # the ``start_job`` acquire-then-set-active ordering inside
+            # one transaction does not false-fire.
+            #
+            # The trigger FUNCTIONS use CREATE OR REPLACE FUNCTION for
+            # idempotency. The CONSTRAINT TRIGGERS need DROP + CREATE
+            # because CREATE CONSTRAINT TRIGGER has no OR REPLACE
+            # form. The SQL is verbatim from plan §8.7.1.
+            "CREATE OR REPLACE FUNCTION job_queue_items_active_lock_guard() RETURNS TRIGGER AS $$ BEGIN IF NEW.admission_state = 'active' THEN IF NOT EXISTS (SELECT 1 FROM job_locks WHERE instance_id = NEW.instance_id) THEN RAISE EXCEPTION 'admission_state=active requires a job_locks row (instance_id=%)', NEW.instance_id USING ERRCODE = 'integrity_constraint_violation'; END IF; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql",
+            "CREATE OR REPLACE FUNCTION job_locks_active_guard() RETURNS TRIGGER AS $$ BEGIN IF NOT EXISTS (SELECT 1 FROM job_queue_items WHERE instance_id = NEW.instance_id AND admission_state = 'active' AND deleted_at IS NULL) THEN RAISE EXCEPTION 'job_locks row requires admission_state=active (instance_id=%)', NEW.instance_id USING ERRCODE = 'integrity_constraint_violation'; END IF; RETURN NEW; END; $$ LANGUAGE plpgsql",
+            "DROP TRIGGER IF EXISTS trg_job_queue_items_active_lock_guard ON job_queue_items",
+            "DROP TRIGGER IF EXISTS trg_job_locks_active_guard ON job_locks",
+            "CREATE CONSTRAINT TRIGGER trg_job_queue_items_active_lock_guard AFTER INSERT OR UPDATE OF admission_state ON job_queue_items DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION job_queue_items_active_lock_guard()",
+            "CREATE CONSTRAINT TRIGGER trg_job_locks_active_guard AFTER INSERT OR UPDATE ON job_locks DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION job_locks_active_guard()",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
@@ -2098,6 +2159,15 @@ class InstanceManager:
                     ]))
                     .values(
                         status=JobStatus.CANCELLED.value,
+                        # Phase 2 dual-write: CANCELLED → admission_state
+                        # = DONE. The bulk raw UPDATE must co-move both
+                        # columns — the helper is the single source of
+                        # truth so re-runs on already-cancelled rows
+                        # remain a no-op (the WHERE status guard
+                        # matches zero rows so admission_state is not
+                        # written). status_to_admission(CANCELLED) =
+                        # 'done'.
+                        admission_state=status_to_admission(JobStatus.CANCELLED.value),
                         cancelled_at=datetime.now(timezone.utc).isoformat(),
                         error_message=cancel_message,
                     )
