@@ -783,6 +783,71 @@ class JobQueueService:
             return None
         return await asyncio.to_thread(work_resolver.resolve_work, work_id)
 
+    async def list_work(
+        self,
+        *,
+        project_id: str | None = None,
+        status: str | None = None,
+        kind: str = "job",
+        root_only: bool = True,
+    ) -> list[WorkRecord]:
+        """Batched equivalent of :meth:`get_work` for the ``list_jobs`` path.
+
+        Phase 1 (Job as Queue Proxy): wraps
+        :meth:`WorkResolverService.list_work` so the HTTP ``GET /api/jobs``
+        endpoint can resolve an entire page of JobItems through the
+        resolver in a SINGLE database round-trip rather than issuing one
+        resolver call per job (the previous implementation was a classic
+        N+1 — 50 jobs → 50 ``get_work`` calls → 50 separate
+        ``SELECT … FROM instances`` queries).
+
+        Defaults are tuned for the ``list_jobs`` router call:
+
+        * ``kind="job"`` — restrict to the JobItem side of the union
+          (the HTTP API lists jobs, not worker-pool tasks).
+        * ``root_only=True`` — match the pre-Phase-1 ``list_jobs``
+          behaviour, which did not exclude child-instance jobs.
+
+        The resolver does not currently expose ``queue_id`` or
+        pagination (``limit``/``offset``); those filters remain on the
+        repository side (the JobItem list is the page-defining source of
+        truth, and the WorkRecord list is a per-row enrichment). The
+        caller matches the two lists by ``job_id == work_id``.
+
+        Args:
+            project_id: Optional project filter. Matches the
+                ``JobRepository.list`` filter so the batched result
+                covers the same rows.
+            status: Optional canonical-status filter, comma-separated
+                (e.g. ``"completed,failed"``). Passed straight through
+                to :meth:`WorkResolverService.list_work` which already
+                understands the canonical vocabulary.
+            kind: ``"job"`` by default — narrows to JobItem-backed
+                rows. Callers that need the union can pass ``None``.
+            root_only: When ``True`` (default), drop JobItems bound to
+                child instances. Matches the legacy ``list_jobs``
+                semantics which did not surface child-instance jobs.
+
+        Returns:
+            A list of :class:`WorkRecord` ordered newest-first. Empty
+            list when the resolver is not wired OR no rows match.
+        """
+        work_resolver = getattr(self, "_work_resolver", None)
+        if work_resolver is None:
+            # No resolver wired — partial-wiring / older test doubles.
+            # Returning ``[]`` keeps the call site simple: an empty
+            # WorkRecord map degrades to the legacy JobItem-mirror path
+            # in ``_job_to_response``, which is the documented
+            # behaviour for "resolver not available".
+            return []
+        return await asyncio.to_thread(
+            work_resolver.list_work,
+            project_id=project_id,
+            status=status,
+            kind=kind,
+            root_only=root_only,
+        )
+
     async def get_job_by_instance(self, instance_id: str) -> JobItem | None:
         """Get job by instance ID.
         

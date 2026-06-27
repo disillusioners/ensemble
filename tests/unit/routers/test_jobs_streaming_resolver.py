@@ -114,14 +114,25 @@ def service_with_resolver(
 @pytest.fixture
 def service_without_resolver(
     job_repo: JobRepository,
+    resolver: WorkResolverService,
 ) -> JobQueueService:
-    """Legacy JobQueueService — no resolver wired (force ``get_job`` branch)."""
-    return JobQueueService(
+    """Legacy JobQueueService — wired with the resolver but flag forced OFF.
+
+    Phase 1 (Job as Queue Proxy): the legacy JobItem-direct branch
+    in ``jobs_streaming._resolve`` has been removed. Both the ON and
+    OFF flag paths now route through ``service.get_work`` →
+    ``WorkResolverService.resolve_work``. Wiring the resolver in
+    this fixture is therefore required — without it ``get_work``
+    returns ``None`` and every endpoint call surfaces a 404.
+    """
+    svc = JobQueueService(
         repository=job_repo,
         lock_manager=MagicMock(),
         queue_repo=MagicMock(),
         instance_manager=MagicMock(),
     )
+    svc.set_work_resolver(resolver)
+    return svc
 
 
 # ─── App fixtures (one per branch) ───────────────────────────────────────────
@@ -318,10 +329,15 @@ def _read_sse_events(response, *, max_events: int = 4) -> list[dict]:
 
 
 class TestStreamJobEventsResolverOff:
-    """Legacy branch — polls ``JobItem`` directly via ``service.get_job``.
+    """Legacy branch — routes through the resolver even with the flag OFF.
 
-    The endpoint must keep emitting the exact JSON shape it did before the
-    Batch 4b rewire so the frontend does not need a coordinated change.
+    Phase 1 (Job as Queue Proxy): the legacy ``_ResolvedWork.from_job``
+    JobItem-direct branch has been removed. The OFF path now goes
+    through the same resolver call as the ON path; both branches
+    produce identical wire payloads (queue_id collapses to ``None``
+    on the unified WorkRecord view-model). The flag remains in the
+    config schema for Phase 7 cleanup but it no longer changes the
+    data path.
     """
 
     def test_completed_job_emits_terminal_events_with_legacy_fields(
@@ -331,7 +347,13 @@ class TestStreamJobEventsResolverOff:
         job_repo: JobRepository,
     ):
         """A completed JobItem must stream ``connected`` + ``completed`` with
-        ``result_summary`` / ``error_message`` / ``queue_id`` populated."""
+        ``result_summary`` / ``error_message`` populated.
+
+        Phase 1: ``queue_id`` collapses to ``None`` on the resolver path
+        (the WorkRecord does not surface JobItem queue affinity).
+        ``result_summary`` and ``error_message`` round-trip via the
+        WorkRecord (``record.result_summary`` / ``record.error``).
+        """
         jid = _seed_completed_job(engine, queue_id="queue-xyz")
 
         with client_resolver_off.stream(
@@ -346,14 +368,18 @@ class TestStreamJobEventsResolverOff:
         connected = events[0]["data"]
         assert connected["job_id"] == jid
         assert connected["status"] == "completed"
-        assert connected["queue_id"] == "queue-xyz"
+        # Phase 1 (Job as Queue Proxy): ``queue_id`` collapses to
+        # ``None`` on the resolver path even with the flag OFF. The
+        # legacy "verbatim queue_id" assertion no longer applies
+        # because both branches now route through the resolver.
+        assert connected["queue_id"] is None
 
         completed = events[1]["data"]
         assert completed["job_id"] == jid
         assert completed["status"] == "completed"
         assert completed["result_summary"] == "done"
         assert completed["error_message"] is None
-        assert completed["queue_id"] == "queue-xyz"
+        assert completed["queue_id"] is None
 
     def test_unknown_work_id_returns_404(
         self,
@@ -502,23 +528,30 @@ class TestStreamJobEventsResolverOn:
 class TestResolverFlagDefault:
     """The flag read helper recognises explicit ``use_virtual_job_resolver=False``.
 
-    Note: the Phase 3 ``tests/conftest.py::_ensure_app_state_manager``
-    autouse fixture auto-creates a ``MagicMock`` ``app.state.manager``
-    when missing, so the "no manager at all" branch in
-    :func:`daemon.routers.jobs_streaming._use_resolver` is suppressed in
-    the test suite. This class instead exercises the rollback path by
-    explicitly setting the flag to ``False`` — the production scenario
-    where operators turn off the resolver to bypass the merged read API
-    after a regression.
+    Phase 1 (Job as Queue Proxy): the legacy JobItem-direct branch
+    in ``jobs_streaming._resolve`` has been removed. Both the ON and
+    OFF flag paths now route through ``service.get_work`` →
+    ``WorkResolverService.resolve_work`` and project the result via
+    ``_ResolvedWork.from_work_record`` (which collapses ``queue_id``
+    to ``None``). The flag is preserved for compatibility with the
+    Phase 7 cleanup, but it no longer changes the data path.
     """
 
-    def test_resolver_flag_off_routes_through_jobitem_branch(
+    def test_resolver_flag_off_still_routes_through_resolver(
         self,
         engine: Engine,
         service_with_resolver: JobQueueService,
     ):
-        """``use_virtual_job_resolver=False`` → endpoint uses ``get_job`` and
-        the ``queue_id`` round-trips verbatim from the JobItem row."""
+        """``use_virtual_job_resolver=False`` → endpoint still uses the
+        resolver and ``queue_id`` collapses to ``None``.
+
+        Phase 1 collapsed the legacy ``_ResolvedWork.from_job`` branch
+        onto the resolver path, so even with the flag OFF the
+        endpoint reads through ``WorkResolverService.resolve_work``.
+        The wire-format contract (``queue_id=None`` on the unified
+        path) holds regardless of the flag — this is the post-Phase-1
+        behaviour the test pins down.
+        """
         app = FastAPI()
         app.include_router(streaming_router, prefix="/api")
         from daemon.routers.jobs_streaming import get_job_queue_service
@@ -526,8 +559,10 @@ class TestResolverFlagDefault:
         app.dependency_overrides[get_job_queue_service] = (
             lambda: service_with_resolver
         )
-        # Explicit OFF — should take the legacy JobItem branch even though
-        # the service has the resolver wired (the flag is authoritative).
+        # Explicit OFF — the legacy branch no longer exists in Phase 1,
+        # so the OFF path still routes through the resolver. The flag
+        # remains in the config schema for Phase 7 cleanup but it no
+        # longer changes the data path.
         from types import SimpleNamespace
         app.state.manager = SimpleNamespace(
             config=SimpleNamespace(
@@ -542,5 +577,8 @@ class TestResolverFlagDefault:
             events = _read_sse_events(response, max_events=2)
 
         completed = events[1]["data"]
-        # Legacy branch preserves queue_id verbatim from JobItem.
-        assert completed["queue_id"] == "queue-q"
+        # Phase 1 (Job as Queue Proxy): ``queue_id`` collapses to ``None``
+        # on the unified resolver path even when the flag is OFF. The
+        # WorkRecord view-model does not surface the JobItem-only
+        # ``queue_id`` column.
+        assert completed["queue_id"] is None

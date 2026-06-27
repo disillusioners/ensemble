@@ -495,7 +495,15 @@ class TestSerialization:
         assert isinstance(parsed, datetime)
 
     def test_response_field_shape(self, client: TestClient, engine: Engine):
-        """All advertised fields present, none extra, none missing."""
+        """All advertised fields present, none extra, none missing.
+
+        Phase 1 (Job as Queue Proxy): ``started_at`` and ``completed_at``
+        were added to the :class:`WorkRecord` to surface Instance
+        execution timing through the resolver. They appear on the wire
+        as ``None`` for Task-backed rows (the timing data lives on the
+        Instance, which the Task-side view-model doesn't model in
+        Phase 1).
+        """
         # Result is a JSON object — WorkResolverService's
         # ``_parse_task_result_summary`` re-serialises non-string JSON
         # values via ``json.dumps``, so the result_summary is the JSON
@@ -513,9 +521,18 @@ class TestSerialization:
             "work_id", "kind", "status", "instance_id",
             "project_id", "agent_id", "result_summary", "error",
             "created_at",
+            # Phase 1 (Job as Queue Proxy): execution-timing fields
+            # sourced from the joined Instance. ``None`` on Task rows.
+            "started_at",
+            "completed_at",
         }
         assert item["kind"] == "turn"
         assert item["result_summary"] == '{"output": "hello"}'
+        # Timing fields are present on the wire (Phase 1) but ``None``
+        # for Task-backed rows because the Task-side WorkRecord does
+        # not source Instance timing.
+        assert item["started_at"] is None
+        assert item["completed_at"] is None
 
     def test_none_fields_serialized_as_null(self, client: TestClient, engine: Engine):
         """None values round-trip as JSON null (not omitted)."""

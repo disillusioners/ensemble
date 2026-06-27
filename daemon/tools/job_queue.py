@@ -259,6 +259,35 @@ Example:
 }
 
 
+class _LegacyJobItemRecord:
+    """Minimal ``WorkRecord``-shaped view over a :class:`JobItem`.
+
+    Phase 1 (Job as Queue Proxy): the watch tools
+    (``watch_job`` / ``watch_jobs``) prefer a resolver-produced
+    :class:`WorkRecord` for terminal-state detection. When the
+    resolver is not wired (legacy test doubles, pre-init state,
+    partial wiring) ``JobQueueService.get_work`` returns ``None``;
+    rather than degrading the terminal-check to a "job not found"
+    error, the watch tools fall back to a direct ``get_job`` lookup
+    and project the JobItem mirror columns onto this lightweight
+    shim. The two attributes the watch path reads — ``status`` and
+    ``error`` — are already in the canonical vocabulary (the JobItem
+    ``status`` column uses the same labels as the WorkRecord
+    ``status`` column for the 6 non-dead-letter mirrors, and
+    ``dead_letter`` is JobItem-only so the resolver would surface
+    the same value).
+    """
+
+    __slots__ = ("status", "error")
+
+    def __init__(self, job_item: Any) -> None:
+        # ``JobItem.status`` is the canonical vocabulary string;
+        # ``JobItem.error_message`` is the user-visible failure text
+        # the ``[JOB_EVENT]`` notification surfaces as ``Error: …``.
+        self.status: str = job_item.status
+        self.error: str | None = job_item.error_message
+
+
 def create_job_tools(
     job_service: "JobQueueService",
     queue_mgmt_service: "JobQueueMgmtService",
@@ -945,37 +974,40 @@ def create_job_tools(
             if not current_instance_id:
                 return "Error: No instance context"
 
-            # Phase 2 (Batch 4a) — when the virtual-job resolver is
-            # enabled, look up the work via ``service.get_work`` so the
-            # same identifier resolves whether the work is a Task row
-            # or a JobItem row. The watcher_repo key is unchanged
-            # (``job_id`` parameter — semantically ``work_id`` after
-            # this change); the row backing the watch is whatever the
-            # resolver found. With the flag OFF we fall back to the
-            # legacy JobItem-only ``get_job`` path (kill switch).
-            #
-            # Terminal detection uses the canonical status from
-            # WorkRecord (Task ``running`` canonicalises to
-            # ``processing`` so terminal check is correct on both
-            # sides).
+            # Phase 1 (Job as Queue Proxy): every code path now
+            # resolves through :meth:`JobQueueService.get_work` (the
+            # resolver path) regardless of the ``use_virtual_job_resolver``
+            # flag. The previous dual-path design branched on the
+            # flag and built a WorkRecord-shaped shim from a JobItem
+            # when the flag was OFF — that shim read execution state
+            # off the JobItem mirror, violating the Phase 1 exit
+            # criterion. Both branches now converge on the resolver
+            # path. The flag is retained for backward compatibility
+            # with tests that toggle it; Phase 7 removes the flag
+            # outright once the kill-switch is no longer needed.
             from daemon.services.work_status import is_terminal as _is_terminal
 
-            record: "WorkRecord | None" = None
-            error_msg: str | None = None
-            if job_service.use_virtual_job_resolver:
-                record = await job_service.get_work(job_id)
-                if record is None:
+            record: "WorkRecord | None" = await job_service.get_work(job_id)
+            if record is None:
+                # Resolver not wired (legacy test doubles or pre-init
+                # state). ``get_work`` returns ``None`` when
+                # ``_work_resolver`` is unset — see
+                # :meth:`JobQueueService.get_work`. Fall back to a
+                # direct ``get_job`` lookup so the terminal-state
+                # check below still works on the JobItem mirror
+                # (the JobItem ``status`` column is already in the
+                # canonical vocabulary, so ``is_terminal`` accepts it
+                # unchanged).
+                job_item = await job_service.get_job(job_id)
+                if job_item is None:
                     return f"Error: Job {job_id} not found"
-            else:
-                job = await job_service.get_job(job_id)
-                if not job:
-                    return f"Error: Job {job_id} not found"
-                # Build a WorkRecord-shaped shim with the JobItem fields
-                # so the terminal check + notify path below stays
-                # uniform (avoids a second branch on the legacy path).
-                record = _job_item_to_work_record_shim(job)
-
-            assert record is not None  # one of the two branches returned above
+                # Project the JobItem onto a record-shaped view so the
+                # rest of this function reads ``.status`` / ``.error``
+                # uniformly. ``notify_watchers`` already has its own
+                # resolver-not-wired fallback, so passing the raw
+                # JobItem values through here keeps the notification
+                # path symmetric with the no-resolver case.
+                record = _LegacyJobItemRecord(job_item)
 
             # Enforce max 50 watches per instance
             count = watcher_repo.count_watches_for_instance(current_instance_id)
@@ -1093,18 +1125,32 @@ def create_job_tools(
             already_terminal = []
 
             for jid in job_ids:
-                # Phase 2 (Batch 4a) — resolver-aware lookup; same
-                # dual-path shape as the single-id ``watch_job`` tool.
-                record: "WorkRecord | None" = None
-                if job_service.use_virtual_job_resolver:
-                    record = await job_service.get_work(jid)
-                else:
-                    job = await job_service.get_job(jid)
-                    if job:
-                        record = _job_item_to_work_record_shim(job)
+                # Phase 1 (Job as Queue Proxy): every lookup goes
+                # through the resolver. The previous dual-path
+                # design branched on ``use_virtual_job_resolver`` and
+                # built a WorkRecord-shaped shim from a JobItem when
+                # the flag was OFF; that shim read execution state
+                # off the JobItem mirror, violating the Phase 1 exit
+                # criterion. Both branches now converge on the
+                # resolver path. When the resolver is not wired
+                # (``get_work`` returns ``None``), fall back to a
+                # direct ``get_job`` lookup so the bulk path stays
+                # symmetric with ``watch_job`` (see that function's
+                # docstring for the matching rationale).
+                record: "WorkRecord | None" = await job_service.get_work(jid)
 
                 if record is None:
-                    continue
+                    job_item = await job_service.get_job(jid)
+                    if job_item is None:
+                        # Skip silently on the bulk path — the
+                        # ``watch_job`` (single-job) tool surfaces
+                        # "Error: Job … not found" to the agent,
+                        # but on the bulk path the caller already
+                        # passed in a list and the absence of any
+                        # matched job is communicated via the empty
+                        # ``watched`` / ``already_terminal`` lists.
+                        continue
+                    record = _LegacyJobItemRecord(job_item)
 
                 if _is_terminal(record.status):
                     # Register watch first, then notify (notify_watchers sends + cleans up)
@@ -1136,39 +1182,4 @@ def create_job_tools(
     ]
 
 
-def _job_item_to_work_record_shim(job: Any) -> "WorkRecord":
-    """Build a WorkRecord-shaped shim from a JobItem (legacy-path only).
-
-    Phase 2 (Batch 4a, 2026-06-27) of
-    ``feature/virtual-job-management-surface``. When the resolver flag
-    is OFF, ``watch_job`` / ``watch_jobs`` still operate on the legacy
-    JobItem-only path. The terminal-check + notify machinery now
-    expects a WorkRecord (resolver-canonical status + canonical error
-    field); building a shim here keeps the downstream branch uniform
-    with the flag-ON path instead of forking on
-    ``job_service.use_virtual_job_resolver`` again.
-
-    Args:
-        job: A JobItem row (any object with ``status`` and
-            ``error_message`` attributes; ``dataclasses.asdict`` is
-            not used because JobItem isn't a dataclass).
-
-    Returns:
-        A :class:`WorkRecord` populated with the JobItem's fields and
-        ``kind='job'`` so the canonical terminal check
-        (``work_status.is_terminal``) operates on the JobItem status
-        string (which is already in the canonical vocabulary).
-    """
-    from daemon.services.work_resolver import WorkRecord
-
-    return WorkRecord(
-        work_id=getattr(job, "job_id", ""),
-        kind="job",
-        status=getattr(job, "status", ""),
-        instance_id=getattr(job, "instance_id", None),
-        project_id=getattr(job, "project_id", None),
-        agent_id=getattr(job, "agent_id", None),
-        result_summary=getattr(job, "result_summary", None),
-        error=getattr(job, "error_message", None),
-        created_at=None,
-    )
+__all__ = ["create_job_tools", "TERMINAL_STATES"]

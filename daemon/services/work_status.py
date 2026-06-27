@@ -71,6 +71,24 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     # entries below are the JobItem-only source values).
     "processing": "processing",
     "dead_letter": "dead_letter",
+    # Instance-side source values (Phase 1, Job as Queue Proxy).
+    # ``Instance.status`` is the execution authority for JobItem rows
+    # once ``job.instance_id`` is set. The mappings below are the
+    # canonical-vocabulary translation of the 10 ``InstanceStatus``
+    # enum values. The "active" cluster (``waiting`` /
+    # ``waiting_children`` / ``idle`` / ``queued`` / ``running``) all
+    # collapse onto ``processing`` because from the resolver's POV
+    # these are non-terminal "work is happening" states; finer-grained
+    # detail is available to consumers via the Instance detail view.
+    # Terminal-cluster mappings (completed → completed, error/failed →
+    # failed, terminated → cancelled) preserve the Plan §2.1 terminal
+    # classification invariant.
+    "idle": "processing",
+    "waiting": "processing",
+    "waiting_children": "processing",
+    "queued": "processing",
+    "error": "failed",
+    "terminated": "cancelled",
 }
 
 

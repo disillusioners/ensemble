@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
+from daemon.services.work_status import is_terminal as _is_terminal_canonical
 from daemon.repositories.job_queue.models import JobStatus
 from .schemas import (
     JobResponse,
@@ -29,6 +30,34 @@ def _get_manager(request: Request) -> Any:
     return request.app.state.manager
 
 
+async def _resolve_job_status(service: JobQueueService, job_id: str) -> str | None:
+    """Return the canonical status of ``job_id`` via the resolver, or ``None``.
+
+    Phase 1 (Job as Queue Proxy): the canonical ``status`` for a job
+    is sourced from the resolver (which reads the joined Instance)
+    rather than the JobItem mirror. This helper centralises that
+    read so the management endpoints' terminal-state gates operate
+    on instance-authoritative state.
+
+    Returns ``None`` if the resolver is not wired (older test doubles
+    that never call ``set_work_resolver``) — callers treat that as
+    "resolver not available, fall back to JobItem mirror" and check
+    the legacy ``JobStatus`` enum directly. This preserves the
+    pre-Phase-1 behaviour for partial wirings and for tests that
+    mock ``get_work`` to return ``None``.
+    """
+    try:
+        work_record = await service.get_work(job_id)
+    except Exception as exc:  # noqa: BLE001 — defensive broad catch
+        logger.warning(
+            "_resolve_job_status: resolver call failed for %s: %s", job_id, exc
+        )
+        return None
+    if work_record is None:
+        return None
+    return work_record.status
+
+
 # ==================== Management Endpoints ====================
 
 
@@ -46,11 +75,11 @@ async def delete_job(
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """Delete (cancel or soft-delete) a job.
-    
+
     - If job is PENDING or PROCESSING → cancel (existing behavior)
     - If job is in terminal state (completed, failed, cancelled, dead_letter) → soft delete
     - If job is already deleted → return 400
-    
+
     Returns:
         200 if cancelled/soft-deleted successfully
         400 if job is already deleted
@@ -60,7 +89,7 @@ async def delete_job(
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
-    
+
     if job is None:
         raise HTTPException(
             status_code=404,
@@ -69,7 +98,7 @@ async def delete_job(
                 job_id=job_id
             ).model_dump()
         )
-    
+
     # Check if already deleted
     if job.deleted_at is not None:
         raise HTTPException(
@@ -80,9 +109,21 @@ async def delete_job(
                 "job_id": job_id,
             }
         )
-    
+
+    # Phase 1 (Job as Queue Proxy): terminal check uses the
+    # instance-authoritative status surfaced by the resolver (see
+    # ``work_resolver._job_to_record``). Fall back to the JobItem
+    # mirror when the resolver isn't wired (legacy / partial-wiring
+    # test doubles) so the endpoint stays correct in those paths.
+    canonical_status = await _resolve_job_status(service, job_id)
+    is_terminal = (
+        _is_terminal_canonical(canonical_status)
+        if canonical_status is not None
+        else job.status in TERMINAL_STATUSES
+    )
+
     # Handle based on status
-    if job.status in TERMINAL_STATUSES:
+    if is_terminal:
         # Terminal state → soft delete
         updated_job = await service.soft_delete_job(job_id)
         if updated_job is None:
@@ -90,8 +131,13 @@ async def delete_job(
                 status_code=500,
                 detail={"error": "Failed to soft-delete job"}
             )
+        # Resolver-aware response: re-resolve so the soft-deleted
+        # row's execution state is sourced from the (now terminal)
+        # Instance rather than the JobItem mirror.
+        updated_work = await service.get_work(job_id)
         return _job_to_response(
             updated_job,
+            work_record=updated_work,
             message="Job soft-deleted successfully"
         )
     else:
@@ -106,8 +152,10 @@ async def delete_job(
                 }
             )
         updated_job = await service.get_job(job_id)
+        updated_work = await service.get_work(job_id)
         return _job_to_response(
             updated_job,
+            work_record=updated_work,
             message="Job cancelled successfully"
         )
 
@@ -126,9 +174,9 @@ async def cancel_job_endpoint(
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """Cancel a pending or processing job.
-    
+
     Explicit cancel endpoint for API consumers who want clear cancel semantics.
-    
+
     Returns:
         200 if cancelled successfully
         400 if job is already in a terminal state or deleted
@@ -138,7 +186,7 @@ async def cancel_job_endpoint(
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
-    
+
     if job is None:
         raise HTTPException(
             status_code=404,
@@ -147,7 +195,7 @@ async def cancel_job_endpoint(
                 job_id=job_id
             ).model_dump()
         )
-    
+
     # Check if already deleted
     if job.deleted_at is not None:
         raise HTTPException(
@@ -158,21 +206,38 @@ async def cancel_job_endpoint(
                 "job_id": job_id,
             }
         )
-    
+
+    # Phase 1 (Job as Queue Proxy): terminal check uses the
+    # instance-authoritative status surfaced by the resolver. Fall
+    # back to the JobItem mirror when the resolver isn't wired so
+    # the legacy path stays correct.
+    canonical_status = await _resolve_job_status(service, job_id)
+    is_terminal = (
+        _is_terminal_canonical(canonical_status)
+        if canonical_status is not None
+        else job.status in TERMINAL_STATUSES
+    )
+
     # Check if job is in a cancellable state
-    if job.status in TERMINAL_STATUSES:
+    if is_terminal:
+        # Use the JobItem mirror value as the user-visible
+        # ``current_status`` in the error detail. Once Phase 4
+        # stops writing the mirror, this field falls back to the
+        # canonical vocabulary ("completed" / "failed" / …) which
+        # matches the mirror 1:1 for the terminal set.
+        user_status = canonical_status or job.status
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "Job cannot be cancelled",
-                "message": f"Job is already in terminal state: {job.status}",
-                "current_status": job.status,
+                "message": f"Job is already in terminal state: {user_status}",
+                "current_status": user_status,
             }
         )
-    
+
     # Cancel the job
     success = await service.cancel_job(job_id)
-    
+
     if not success:
         raise HTTPException(
             status_code=400,
@@ -181,10 +246,12 @@ async def cancel_job_endpoint(
                 "message": f"Could not cancel job in state: {job.status}",
             }
         )
-    
+
     updated_job = await service.get_job(job_id)
+    updated_work = await service.get_work(job_id)
     return _job_to_response(
         updated_job,
+        work_record=updated_work,
         message="Job cancelled successfully"
     )
 
@@ -203,7 +270,7 @@ async def restore_job_endpoint(
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """Restore a soft-deleted job.
-    
+
     Returns:
         200 with restored job
         400 if job is not deleted or is in terminal state
@@ -213,7 +280,7 @@ async def restore_job_endpoint(
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
-    
+
     if job is None:
         raise HTTPException(
             status_code=404,
@@ -222,7 +289,7 @@ async def restore_job_endpoint(
                 job_id=job_id
             ).model_dump()
         )
-    
+
     # Check if job was deleted
     if job.deleted_at is None:
         raise HTTPException(
@@ -233,29 +300,42 @@ async def restore_job_endpoint(
                 "job_id": job_id,
             }
         )
-    
+
+    # Phase 1 (Job as Queue Proxy): terminal check uses the
+    # instance-authoritative status surfaced by the resolver. Fall
+    # back to the JobItem mirror when the resolver isn't wired.
+    canonical_status = await _resolve_job_status(service, job_id)
+    is_terminal = (
+        _is_terminal_canonical(canonical_status)
+        if canonical_status is not None
+        else job.status in TERMINAL_STATUSES
+    )
+
     # Check if job is in a terminal state (restore not allowed for terminal jobs)
-    if job.status in TERMINAL_STATUSES:
+    if is_terminal:
+        user_status = canonical_status or job.status
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "Job cannot be restored",
-                "message": f"Cannot restore a job in terminal state: {job.status}. Retry the job instead.",
-                "current_status": job.status,
+                "message": f"Cannot restore a job in terminal state: {user_status}. Retry the job instead.",
+                "current_status": user_status,
             }
         )
-    
+
     # Restore the job
     restored_job = await service.restore_job(job_id)
-    
+
     if restored_job is None:
         raise HTTPException(
             status_code=500,
             detail={"error": "Failed to restore job"}
         )
-    
+
+    restored_work = await service.get_work(job_id)
     return _job_to_response(
         restored_job,
+        work_record=restored_work,
         message="Job restored successfully"
     )
 
@@ -276,10 +356,10 @@ async def retry_job(
     dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ):
     """Retry a job by re-queuing it for processing.
-    
+
     - FAILED jobs: Creates a NEW job with the same parameters (leaves original as FAILED)
     - DEAD_LETTER jobs: Resets the existing job to PENDING via DLQ replay
-    
+
     Returns:
         200 with job details if retry successful
         400 if job is in neither FAILED nor DEAD_LETTER state
@@ -290,7 +370,7 @@ async def retry_job(
     if manager.is_write_paused:
         raise HTTPException(status_code=503, detail="Writes are paused for database migration")
     job = await service.get_job(job_id)
-    
+
     if job is None:
         raise HTTPException(
             status_code=404,
@@ -299,12 +379,27 @@ async def retry_job(
                 job_id=job_id
             ).model_dump()
         )
-    
+
+    # Phase 1 (Job as Queue Proxy): the canonical status (sourced
+    # from the joined Instance via the resolver) decides which
+    # retry path runs. The JobItem mirror is the fallback when the
+    # resolver isn't wired — both paths use the same vocabulary
+    # (canonical and JobItem share the 6 non-dead_letter terminal
+    # labels 1:1 today; ``dead_letter`` is JobItem-only).
+    canonical_status = await _resolve_job_status(service, job_id)
+    # Map resolver-canonical status to the JobStatus enum value the
+    # downstream branches still branch on. ``dead_letter`` is
+    # JobItem-only (it has no Instance equivalent) so when the
+    # resolver reports it, the JobItem mirror must agree — fall
+    # back to ``job.status`` which carries the authoritative
+    # ``dead_letter`` value (the resolver surfaces the same value).
+    status_for_branches = canonical_status or job.status
+
     # Handle DEAD_LETTER jobs - replay from DLQ
-    if job.status == JobStatus.DEAD_LETTER.value:
+    if status_for_branches == JobStatus.DEAD_LETTER.value:
         # Find the DLQ entry for this job
         dlq_item = dlq_service.get_dlq_by_job_id(job_id)
-        
+
         if dlq_item is None:
             raise HTTPException(
                 status_code=422,
@@ -314,7 +409,7 @@ async def retry_job(
                     "job_id": job_id,
                 }
             )
-        
+
         # Replay from DLQ - resets job to PENDING and deletes DLQ entry atomically
         try:
             updated_job = dlq_service.replay_from_dlq(dlq_item.dlq_id)
@@ -327,7 +422,7 @@ async def retry_job(
                     "message": str(e),
                 }
             )
-        
+
         # Get position in queue
         position = None
         if updated_job.project_id:
@@ -336,29 +431,31 @@ async def retry_job(
             except Exception:
                 pass
 
+        updated_work = await service.get_work(job_id)
         return _job_to_response(
             updated_job,
+            work_record=updated_work,
             position=position,
             message="Job replayed from DEAD_LETTER queue",
             dlq_reason=dlq_item.reason,
             retry_count=dlq_item.retry_count,
             moved_to_dlq_at=dlq_item.moved_to_dlq_at,
         )
-    
+
     # Handle FAILED jobs - create new job with same parameters
-    if job.status != JobStatus.FAILED.value:
+    if status_for_branches != JobStatus.FAILED.value:
         raise HTTPException(
             status_code=400,
             detail={
                 "error": "Job cannot be retried",
-                "message": f"Only FAILED or DEAD_LETTER jobs can be retried. Current status: {job.status}",
-                "current_status": job.status,
+                "message": f"Only FAILED or DEAD_LETTER jobs can be retried. Current status: {status_for_branches}",
+                "current_status": status_for_branches,
             }
         )
-    
+
     # Retry the job - creates a new job with same parameters
     new_job = await service.retry_job(job_id)
-    
+
     if new_job is None:
         raise HTTPException(
             status_code=400,
@@ -367,7 +464,7 @@ async def retry_job(
                 "message": "Could not create retry job",
             }
         )
-    
+
     # Get position if job is pending
     position = None
     if new_job.status == JobStatus.PENDING.value and new_job.project_id:
@@ -376,8 +473,10 @@ async def retry_job(
         except Exception:
             pass
 
+    new_work = await service.get_work(new_job.job_id)
     return _job_to_response(
         new_job,
+        work_record=new_work,
         position=position,
         message="Job queued for retry"
     )

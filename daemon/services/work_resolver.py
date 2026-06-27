@@ -157,6 +157,19 @@ class WorkRecord:
       Stored as ``datetime | None`` because the ``_normalize_created_at``
       helper returns ``None`` for unparseable JobItem strings rather
       than raise.
+    * ``started_at`` / ``completed_at`` — execution-timing fields
+      sourced from the joined ``Instance`` row when one is available
+      (Phase 1, Job as Queue Proxy). ``Instance.last_activity_at`` is
+      the best proxy for ``started_at`` (it advances the first time
+      the worker thread takes the work unit). ``Instance.updated_at``
+      is the best proxy for ``completed_at`` — for terminal instances
+      the last write before reaching a terminal status flips
+      ``updated_at`` to the transition time. ``Instance.created_at``
+      (ISO string) is a tertiary fallback when ``last_activity_at``
+      is not set. ISO-8601 strings on the wire — either parsed from
+      the Instance columns or sourced directly from the JobItem
+      mirror columns (``JobItem.started_at`` / ``JobItem.completed_at``)
+      which are still populated during Phase 1's transition period.
     """
 
     work_id: str
@@ -168,6 +181,8 @@ class WorkRecord:
     result_summary: str | None
     error: str | None
     created_at: datetime | None
+    started_at: str | None = None
+    completed_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this :class:`WorkRecord` to a JSON-friendly dict.
@@ -185,6 +200,11 @@ class WorkRecord:
         carries the ``+00:00`` offset — frontend code can rely on
         tz-awareness without parsing the string.
 
+        ``started_at`` / ``completed_at`` are passed through as ISO-8601
+        strings (already ISO on the JobItem side; ``_isoformat_or_none``
+        in :meth:`_job_to_record` formats the ``Instance.last_activity_at``
+        ``datetime`` value).
+
         Returns:
             A plain ``dict`` mirroring the WorkRecord fields, with
             ``created_at`` coerced to ISO-8601 (or ``None``).
@@ -199,6 +219,8 @@ class WorkRecord:
             "result_summary": self.result_summary,
             "error": self.error,
             "created_at": _serialize_created_at(self.created_at),
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
         }
 
 
@@ -333,6 +355,119 @@ def _parse_task_result_summary(task: Task) -> str | None:
     except (ValueError, TypeError):
         return raw
     return parsed if isinstance(parsed, str) else json.dumps(parsed)
+
+
+def _serialize_instance_datetime(value: Any) -> str | None:
+    """Return an ISO-8601 string for an Instance timestamp value, or ``None``.
+
+    The Instance table mixes ``datetime`` (``last_activity_at``) and
+    ``str`` (``created_at`` / ``updated_at`` / ``paused_at``) timestamp
+    shapes. ``JobResponse.started_at`` / ``JobResponse.completed_at``
+    expect ISO-8601 strings. ``datetime`` values are coerced to UTC
+    then formatted; ISO-8601 strings are returned verbatim; ``None`` or
+    other types return ``None``.
+
+    Args:
+        value: A ``datetime``, ISO-8601 string, or ``None``.
+
+    Returns:
+        An ISO-8601 string, or ``None``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+    if isinstance(value, str):
+        # ISO-8601 strings pass through verbatim. Already UTC for
+        # ``created_at`` / ``updated_at`` (set via
+        # ``datetime.now(timezone.utc).isoformat()`` in the model).
+        return value
+    return None
+
+
+def _instance_started_at(
+    instance: "Instance | None",
+    job: JobItem,
+) -> str | None:
+    """Resolve the ``started_at`` value for a JobItem-backed WorkRecord.
+
+    Phase 1 (Job as Queue Proxy) precedence:
+
+    1. ``Instance.last_activity_at`` — the worker pool's first heartbeat
+       on the instance; the closest analogue to "work began".
+    2. ``Instance.created_at`` — the Instance row's creation time as a
+       fallback when ``last_activity_at`` has not been set yet (e.g. a
+       freshly-spawned instance that has not yet checked in).
+    3. ``job.started_at`` — the JobItem mirror column, still populated
+       during Phase 1's transition period.
+
+    Args:
+        instance: Optional pre-fetched Instance row. ``None`` short-
+            circuits to the JobItem mirror.
+        job: The JobItem row whose mirror ``started_at`` is the fallback.
+
+    Returns:
+        An ISO-8601 string, or ``None`` if no timing source is available.
+    """
+    if instance is not None:
+        value = _serialize_instance_datetime(instance.last_activity_at)
+        if value is not None:
+            return value
+        value = _serialize_instance_datetime(instance.created_at)
+        if value is not None:
+            return value
+    return job.started_at
+
+
+def _instance_completed_at(
+    instance: "Instance | None",
+    *,
+    instance_status_canonical: str,
+    job: JobItem,
+) -> str | None:
+    """Resolve the ``completed_at`` value for a JobItem-backed WorkRecord.
+
+    Phase 1 (Job as Queue Proxy) precedence:
+
+    1. ``Instance.updated_at`` — only meaningful when the Instance is
+       in a terminal state. ``updated_at`` is the last write before the
+       terminal transition (the transaction that flips ``status`` and
+       the Instance mirrors is one DB write — see ``_finalize_job_db_sync``
+       Step 2).
+    2. ``job.completed_at`` — the JobItem mirror column, still populated
+       during Phase 1's transition period.
+
+    A non-terminal Instance is treated as "not yet completed" — we
+    surface ``None`` rather than the Instance ``updated_at`` so the
+    API contract matches the ``JobResponse`` semantics (a non-terminal
+    job should never report a completion time).
+
+    Args:
+        instance: Optional pre-fetched Instance row.
+        instance_status_canonical: The canonical status already
+            computed for this WorkRecord (``"processing"``, ``"completed"``,
+            ``"failed"``, ``"cancelled"``, ``"paused"``, etc.).
+        job: The JobItem row whose mirror ``completed_at`` is the fallback.
+
+    Returns:
+        An ISO-8601 string, or ``None``.
+    """
+    terminal_canonical = {
+        "completed",
+        "failed",
+        "cancelled",
+        "dead_letter",
+    }
+    if (
+        instance is not None
+        and instance_status_canonical in terminal_canonical
+    ):
+        value = _serialize_instance_datetime(instance.updated_at)
+        if value is not None:
+            return value
+    return job.completed_at
 
 
 # ── WorkResolverService ────────────────────────────────────────────────────
@@ -635,6 +770,20 @@ class WorkResolverService:
 
         if query_jobs_table:
             jobs = self._query_jobs(project_id, instance_id, source_statuses)
+            if jobs:
+                # Phase 1 (Job as Queue Proxy): batch-fetch Instance rows
+                # for all distinct ``job.instance_id`` values so
+                # ``_job_to_record`` doesn't N+1 the lookup. Each JobItem
+                # becomes a single ``SELECT … WHERE instance_id IN (...)``
+                # against the instances table — same pattern used by
+                # ``_batch_child_instance_ids`` below for the ``root_only``
+                # guard.
+                instance_ids = {
+                    j.instance_id for j in jobs if j.instance_id is not None
+                }
+                instances_by_id = self._batch_instances(instance_ids)
+            else:
+                instances_by_id = {}
             if root_only and jobs:
                 # Batch-resolve which of the JobItems' backing
                 # instances are children (parent_id IS NOT NULL).
@@ -648,11 +797,15 @@ class WorkResolverService:
                     {j.instance_id for j in jobs if j.instance_id is not None}
                 )
                 records.extend(
-                    self._job_to_record(j) for j in jobs
+                    self._job_to_record(j, instance=instances_by_id.get(j.instance_id))
+                    for j in jobs
                     if j.instance_id is None or j.instance_id not in child_instance_ids
                 )
             else:
-                records.extend(self._job_to_record(j) for j in jobs)
+                records.extend(
+                    self._job_to_record(j, instance=instances_by_id.get(j.instance_id))
+                    for j in jobs
+                )
 
         # P-C(i) (2026-06-27): Task-turn deduplication. When the
         # ``job_create`` flow runs, it emits BOTH a JobItem (the
@@ -765,13 +918,48 @@ class WorkResolverService:
             created_at=task.created_at,
         )
 
-    def _job_to_record(self, job: JobItem) -> WorkRecord:
+    def _job_to_record(
+        self,
+        job: JobItem,
+        instance: "Instance | None" = None,
+    ) -> WorkRecord:
         """Build a :class:`WorkRecord` from a JobItem row.
 
-        JobItem stores ``agent_id`` directly (the column is required,
-        populated at job creation from the originating agent), so no
-        instance lookup is needed on this branch. Field-name mapping
-        from JobItem → WorkRecord:
+        Phase 1 (Job as Queue Proxy): execution state (``status``) is
+        read from the joined ``Instance`` row when ``job.instance_id``
+        is set. The JobItem ``status`` column is a mirror — the
+        ``Instance.status`` is the authority. When ``instance_id`` is
+        ``None`` (job is still in the queue, not yet dequeued to an
+        instance), the canonical status is ``"pending"``.
+
+        **``dead_letter`` exception** — the canonical vocabulary
+        carries a ``"dead_letter"`` source value, but ``Instance``
+        has no equivalent (Phase 2 introduces ``admission_state='dead'``
+        to model the DLQ outcome; Phase 4 will rewrite the canonical
+        map entry). For Phase 1 the JobItem ``status`` mirror is the
+        only source for this state: when the JobItem row reports
+        ``dead_letter`` we surface ``"dead_letter"`` regardless of
+        whether the Instance exists or what its status is. This is a
+        documented exception to the "Instance-authoritative" rule
+        that lands in Phase 4 when ``admission_state`` arrives.
+
+        ``agent_id`` and ``project_id`` come off the JobItem row
+        natively (they're queue-payload columns, populated at job
+        creation). ``created_at`` also stays from the JobItem — it's a
+        queue-creation timestamp, not execution state.
+
+        ``result_summary`` / ``error`` are still sourced from the
+        JobItem mirror columns in this phase. ``Instance`` does not
+        currently model result/error columns; those storage locations
+        will land with the column-drop work in Phase 5 (the JobItem
+        columns are deprecated in Phase 4 and dropped in Phase 5 per
+        the migration plan). Until then the JobItem mirror is the only
+        available source. The exit criterion is satisfied for ``status``
+        (the load-bearing execution-state field) — the mirror is still
+        read for result/error only because there is no Instance column
+        to source them from yet.
+
+        Field-name mapping from JobItem → WorkRecord:
 
         * ``result_summary`` ← ``JobItem.result_summary`` (already a
           string in the DB — no JSON parse required).
@@ -781,17 +969,89 @@ class WorkResolverService:
           the virtual job surface wants to display).
         * ``created_at`` ← ISO-8601 string, parsed to ``datetime``
           via :func:`_parse_iso_datetime` for sort compatibility.
+
+        Args:
+            job: The JobItem row to convert.
+            instance: Optional pre-fetched :class:`Instance` for the
+                job's ``instance_id``. When supplied, the resolver
+                skips its own ``_lookup_instance`` call — this is the
+                P-1 batching optimisation path so ``list_work`` and
+                any other batched caller can do the lookup once and
+                reuse the same row to build each record. Defaults to
+                ``None`` (resolver performs the lookup), which keeps
+                ``resolve_work`` (single-row call site) unaffected.
         """
+        # Phase 1 dead_letter special-case: see method docstring.
+        # The JobItem mirror is the source of truth for this state
+        # until Phase 4 introduces ``admission_state='dead'``.
+        if job.status == "dead_letter":
+            status = "dead_letter"
+        else:
+            # Phase 1: source execution status from the joined Instance
+            # when possible. ``_lookup_instance`` is defensive —
+            # returns ``None`` for a missing instance row (e.g.
+            # instance was deleted) or a transient DB error, in which
+            # case we fall back to the JobItem mirror column so the
+            # read still produces a valid status. The status-drift
+            # warning at L692-712 continues to fire on this fallback
+            # path because the JobItem mirror may disagree with the
+            # canonical status the resolver would otherwise report;
+            # per the plan (DoD item 5), the warning is deleted in
+            # Phase 4 when the mirror stops being written.
+            #
+            # Two cases funnel through the same fallback:
+            #
+            # * ``job.instance_id is None`` — job is still in the
+            #   queue, not yet dequeued to an instance. The JobItem
+            #   ``status`` mirror is the only signal we have; we must
+            #   canonicalize it instead of hardcoding ``"pending"``
+            #   (the previous behaviour discarded the real status for
+            #   already-terminal jobs that had not yet been dispatched
+            #   to an instance — e.g. a JobItem seeded with
+            #   ``status="completed"`` and ``instance_id=None`` would
+            #   return ``"pending"`` and break the SSE terminal-status
+            #   detection loop).
+            # * ``job.instance_id is not None`` but the Instance row
+            #   is missing (orphan / deleted) — same fallback to the
+            #   JobItem mirror, canonicalized.
+            if job.instance_id is not None:
+                if instance is None:
+                    instance = self._lookup_instance(job.instance_id)
+                if instance is not None:
+                    status = canonicalize_status(instance.status)
+                else:
+                    status = canonicalize_status(job.status)
+            else:
+                # Job is queued, not yet dequeued to an instance.
+                # Use the JobItem mirror as the source of truth so the
+                # WorkRecord's ``status`` reflects the actual queue
+                # state instead of a hardcoded ``"pending"``.
+                status = canonicalize_status(job.status)
+
         return WorkRecord(
             work_id=job.job_id,
             kind="job",
-            status=canonicalize_status(job.status),
+            status=status,
             instance_id=job.instance_id,
             project_id=job.project_id,
             agent_id=job.agent_id,
+            # Phase 1 transitional: JobItem mirror columns. See the
+            # method docstring for why Instance-sourcing lands in a
+            # later phase.
             result_summary=job.result_summary,
             error=job.error_message,
             created_at=_parse_iso_datetime(job.created_at),
+            # Timing: prefer the Instance columns when an Instance row
+            # was provided (or just looked up above). ``last_activity_at``
+            # is the worker's first heartbeat, which is the closest
+            # analogue to "work began". ``updated_at`` is the last
+            # write; for a terminal Instance that flips to terminal in
+            # one transaction, ``updated_at`` IS the completion time.
+            # Both fields degrade to the JobItem mirror when no
+            # Instance is available — the mirror is still populated
+            # during Phase 1's transition period.
+            started_at=_instance_started_at(instance, job),
+            completed_at=_instance_completed_at(instance, instance_status_canonical=status, job=job),
         )
 
     def _lookup_instance(self, instance_id: str | None) -> "Instance | None":
@@ -939,6 +1199,43 @@ class WorkResolverService:
                 Instance.parent_id.isnot(None),
             )
             return {row for row in session.exec(stmt)}
+
+    def _batch_instances(
+        self,
+        instance_ids: set[str | None],
+    ) -> dict[str, "Instance"]:
+        """Return a ``{instance_id: Instance}`` map for the requested ids.
+
+        Phase 1 (Job as Queue Proxy): one batched SELECT replaces the
+        per-row ``_lookup_instance`` call that ``_job_to_record`` would
+        otherwise make. Used by ``list_work`` so the JobItem branch of
+        a 50-row page resolves all backing instances in a single
+        round-trip instead of 50.
+
+        ``None`` and empty inputs short-circuit to an empty dict
+        without hitting the DB. The map only contains ids that
+        actually exist in the database — missing ids are silently
+        dropped (the caller treats them as "instance unknown" and
+        falls back to the JobItem mirror status inside
+        ``_job_to_record``).
+
+        Args:
+            instance_ids: The distinct ``JobItem.instance_id`` values
+                to fetch. ``None`` entries are filtered out before the
+                query (the Instance PK is never null).
+
+        Returns:
+            A dict mapping ``instance_id`` → ``Instance``. Missing ids
+            are absent from the dict (caller treats them as unknown).
+        """
+        valid_ids = {iid for iid in instance_ids if iid is not None}
+        if not valid_ids:
+            return {}
+        from sqlmodel import Session as SQLModelSession
+
+        with SQLModelSession(self._instance_repo.engine) as session:
+            stmt = select(Instance).where(Instance.instance_id.in_(valid_ids))
+            return {row.instance_id: row for row in session.exec(stmt)}
 
 
 __all__ = ["WorkRecord", "WorkResolverService"]

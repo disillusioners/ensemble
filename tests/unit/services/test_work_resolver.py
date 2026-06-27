@@ -1133,9 +1133,20 @@ class TestListWorkDedup:
         status in sync with the driving Task turn — a disagreement
         is an ops signal, not a user-facing one (the user still
         sees a single, JobItem-backed row).
+
+        Phase 1 (Job as Queue Proxy): the JobItem's effective status
+        is now sourced from the joined Instance (the execution
+        authority) rather than the JobItem mirror. To preserve the
+        "drift between JobItem and Task" semantics the test seeds the
+        Instance in ``completed`` state — the WorkRecord surfaces
+        ``status="completed"`` (matching the JobItem mirror) and the
+        Task's ``running`` status is the one that drifts.
         """
         import logging
-        _seed_instance(engine, instance_id="inst-drift")
+        # Phase 1: set the Instance to ``completed`` so the JobItem's
+        # effective status (read off the Instance) is ``completed``
+        # and the drift surfaces against the Task's ``running``.
+        _seed_instance(engine, instance_id="inst-drift", status="completed")
         # JobItem in COMPLETED (canonical: "completed"). Task turn in
         # RUNNING (canonical: "processing"). The two disagree — drift.
         jid = _seed_job(
@@ -2010,8 +2021,19 @@ class TestJobListUnion:
         """One PENDING JobItem + one RUNNING Task → both surface in
         ``list_work()`` with the correct ``kind`` and canonical
         ``status``.
+
+        Phase 1 (Job as Queue Proxy): the JobItem's effective status
+        is sourced from the joined Instance when ``instance_id`` is
+        set. To keep the test's "PENDING-JobItem + RUNNING-Task"
+        intent, the JobItem is seeded WITHOUT an ``instance_id``
+        (queue-stage row) so the canonical status falls back to the
+        JobItem mirror (``"pending"``). The Task still gets its
+        ``RUNNING → processing`` canonicalization.
         """
-        _seed_instance(engine, instance_id="inst-union-job")
+        # No Instance seed for the JobItem — the JobItem is
+        # queue-stage (``instance_id=None``), so the JobItem mirror
+        # status (``pending``) is the source of truth under the
+        # Phase 1 ``canonicalize_status(job.status)`` fallback.
         _seed_instance(engine, instance_id="inst-union-task", agent_id="developer")
         task_id = _seed_task(
             engine,
@@ -2020,7 +2042,7 @@ class TestJobListUnion:
         )
         job_id = _seed_job(
             engine,
-            instance_id="inst-union-job",
+            instance_id=None,
             status=JobStatus.PENDING.value,
         )
 
@@ -2035,7 +2057,9 @@ class TestJobListUnion:
         assert set(by_kind.keys()) == {"turn", "job"}
 
         # The JobItem shows up with kind="job" and the canonical
-        # ``pending`` status (JobItem PENDING maps to PENDING).
+        # ``pending`` status (JobItem PENDING maps to PENDING; the
+        # JobItem mirror is the source for queue-stage rows under
+        # the Phase 1 ``instance_id is None`` fallback).
         assert by_kind["job"].work_id == job_id
         assert by_kind["job"].kind == "job"
         assert by_kind["job"].status == "pending"

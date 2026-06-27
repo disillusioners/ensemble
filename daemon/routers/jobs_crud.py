@@ -1,6 +1,7 @@
 """Job Queue CRUD API endpoints."""
 
 import logging
+from datetime import timezone as _tz
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -45,27 +46,125 @@ def _get_manager(request: Request) -> Any:
 
 def _job_to_response(
     job,
+    work_record: Any | None = None,
     position: int | None = None,
     message: str | None = None,
     dlq_reason: str | None = None,
     retry_count: int | None = None,
     moved_to_dlq_at: str | None = None,
 ) -> JobResponse:
-    """Convert JobItem to JobResponse."""
+    """Convert JobItem (and optional WorkRecord) to JobResponse.
+
+    Phase 1 (Job as Queue Proxy): execution state (``status``,
+    ``result_summary``, ``error_message``) is sourced from the
+    resolver-supplied ``WorkRecord`` when one is provided. The
+    resolver is instance-authoritative — ``status`` is read off the
+    joined ``Instance`` row, not the JobItem mirror column. When
+    ``work_record`` is ``None`` (legacy fallback path or batched
+    callers that haven't fetched a record yet) execution state falls
+    back to the JobItem columns so the response still has values to
+    serialise.
+
+    The JobItem-direct reads are kept for fields the WorkRecord
+    doesn't carry — these are queue-payload (``priority``,
+    ``agent_dir``, ``queue_id``, ``source``, ``job_metadata``,
+    ``idempotency_key``, ``deleted_at``, ``message``) and the
+    ``cancelled_at`` execution field (derivable from
+    ``Instance.status == TERMINATED``, which Phase 4 will surface).
+    Execution timing (``started_at`` / ``completed_at``) is sourced
+    from the WorkRecord, which reads ``Instance.last_activity_at``
+    (with ``Instance.created_at`` as fallback) for ``started_at``
+    and ``Instance.updated_at`` for ``completed_at`` on terminal
+    instances — the ``Instance`` table has carried these columns
+    since the original schema, and they are the authoritative
+    execution timestamps under the Job-as-Queue-Proxy model.
+
+    Args:
+        job: The ``JobItem`` row to project.
+        work_record: Optional :class:`WorkRecord` from
+            ``WorkResolverService.resolve_work`` — provides
+            instance-authoritative execution state. ``None`` falls
+            back to the JobItem mirror columns (legacy behaviour).
+        position: Optional queue position (only meaningful for
+            PENDING jobs; supplied by the caller).
+        message: Optional status message override (defaults to
+            ``job.message`` when omitted).
+        dlq_reason: Optional DLQ reason (populated for DEAD_LETTER
+            jobs by the caller from the matching DeadLetterItem).
+        retry_count: Optional retry count (same source as
+            ``dlq_reason``).
+        moved_to_dlq_at: Optional DLQ timestamp (same source as
+            ``dlq_reason``).
+    """
+    if work_record is not None:
+        # Resolver-aware path (Phase 1). Execution state comes from
+        # the WorkRecord, which sources ``status`` from the joined
+        # Instance and ``result_summary`` / ``error_message`` from the
+        # JobItem mirror columns (the Instance doesn't model these
+        # yet; see the Phase 1 transition note in
+        # ``work_resolver._job_to_record``).
+        status = work_record.status
+        instance_id = work_record.instance_id
+        result_summary = work_record.result_summary
+        error_message = work_record.error
+        # Timing: the WorkRecord carries ``started_at`` / ``completed_at``
+        # already sourced from the Instance columns
+        # (``last_activity_at`` → ``started_at``,
+        # ``updated_at`` → ``completed_at``) with the JobItem mirror
+        # as a fallback. Prefer the WorkRecord value so the API
+        # response stays in sync with the resolver's view.
+        started_at = work_record.started_at
+        completed_at = work_record.completed_at
+        # ``created_at`` is a tz-aware datetime on WorkRecord; the
+        # JobResponse schema expects an ISO-8601 string. Normalise
+        # via the resolver's helper-equivalent inline format so the
+        # wire output always carries the ``+00:00`` offset.
+        created_at = work_record.created_at
+        if created_at is not None:
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=_tz.utc)
+            created_at = created_at.isoformat()
+    else:
+        # Legacy fallback path. Execution state comes straight off
+        # the JobItem mirror columns — used by older tests / partial
+        # wirings where the resolver isn't reachable. The Phase 1
+        # exit criterion is "execution-state reads resolve through
+        # the instance/work layer"; this branch is the documented
+        # exception for callers that haven't migrated yet.
+        status = job.status
+        instance_id = job.instance_id
+        result_summary = job.result_summary
+        error_message = job.error_message
+        # Legacy timing: read directly from the JobItem mirror columns.
+        started_at = job.started_at
+        completed_at = job.completed_at
+        created_at = job.created_at
+
     return JobResponse(
         job_id=job.job_id,
-        status=job.status,
+        status=status,
         priority=job.priority,
         agent_id=job.agent_id,
         agent_dir=job.agent_dir,
         project_id=job.project_id,
         queue_id=job.queue_id,
-        instance_id=job.instance_id,
-        created_at=job.created_at,
-        started_at=job.started_at,
-        completed_at=job.completed_at,
-        result_summary=job.result_summary,
-        error_message=job.error_message,
+        instance_id=instance_id,
+        created_at=created_at,
+        # Phase 1 (Job as Queue Proxy): timing fields are sourced
+        # from the Instance via the resolver (``last_activity_at``
+        # → ``started_at``, ``updated_at`` → ``completed_at``), with
+        # the JobItem mirror columns as a defensive fallback for
+        # callers on the legacy branch. The previous Phase 1
+        # implementation hardcoded ``None`` for both fields based on
+        # an incorrect "Instance has no timing columns" claim — the
+        # Instance table has had ``last_activity_at`` /
+        # ``created_at`` / ``updated_at`` / ``paused_at`` since the
+        # original schema, and they are the authoritative execution
+        # timestamps under the new model.
+        started_at=started_at,
+        completed_at=completed_at,
+        result_summary=result_summary,
+        error_message=error_message,
         source=job.source,
         job_metadata=job.job_metadata,
         cancelled_at=job.cancelled_at,
@@ -176,8 +275,22 @@ async def create_job(
             position = await service._get_queue_position(job.job_id, job.project_id)
         except Exception:
             pass  # Best effort - position is optional
-    
-    response = _job_to_response(job, position=position, message="Job queued for processing")
+
+    # Phase 1 (Job as Queue Proxy): resolve the freshly-created job
+    # through the resolver so ``status`` is sourced from the unified
+    # ``WorkRecord`` rather than the JobItem mirror. At creation time
+    # ``job.instance_id`` is ``None`` (job hasn't been dequeued yet),
+    # so the resolver returns a ``WorkRecord`` with canonical
+    # ``status="pending"`` and ``instance_id=None`` — which is
+    # exactly what the JobResponse wants to surface.
+    work_record = await service.get_work(job.job_id)
+
+    response = _job_to_response(
+        job,
+        work_record=work_record,
+        position=position,
+        message="Job queued for processing",
+    )
     
     # Return 200 for idempotent returns, 201 for new jobs
     return JSONResponse(
@@ -199,13 +312,13 @@ async def get_job(
     dlq_service: DeadLetterService = Depends(get_dead_letter_svc),
 ) -> JobResponse:
     """Get job status and details by ID.
-    
+
     Returns:
         200 with job details
         404 if job doesn't exist
     """
     job = await service.get_job(job_id)
-    
+
     if job is None:
         raise HTTPException(
             status_code=404,
@@ -214,7 +327,7 @@ async def get_job(
                 job_id=job_id
             ).model_dump()
         )
-    
+
     # Get position if job is pending
     position = None
     if job.status == JobStatus.PENDING.value and job.project_id:
@@ -234,8 +347,16 @@ async def get_job(
             retry_count = dlq_item.retry_count
             moved_to_dlq_at = dlq_item.moved_to_dlq_at
 
+    # Phase 1 (Job as Queue Proxy): source execution state from the
+    # resolver rather than the JobItem mirror. The WorkRecord's
+    # ``status`` is read off the joined Instance (or "pending" when
+    # the job hasn't been dequeued yet) — see
+    # ``work_resolver._job_to_record``.
+    work_record = await service.get_work(job_id)
+
     return _job_to_response(
-        job, 
+        job,
+        work_record=work_record,
         position=position,
         dlq_reason=dlq_reason,
         retry_count=retry_count,
@@ -325,7 +446,44 @@ async def list_jobs(
         queue_id=queue_id,
         include_deleted=include_deleted,
     )
-    
+
+    # Phase 1 (Job as Queue Proxy): batch-resolve every JobItem
+    # through the resolver so the response rows carry
+    # instance-authoritative execution state (``status``, timing,
+    # ``result_summary``, ``error_message``). The previous
+    # implementation did a per-row ``asyncio.gather`` of
+    # ``service.get_work`` — a classic N+1 (50 jobs → 50 resolver
+    # calls → 50 ``SELECT … FROM instances`` round-trips). The
+    # batched path issues ONE ``WorkResolverService.list_work`` call
+    # which already does the per-page Instance lookup in a single
+    # ``SELECT … WHERE instance_id IN (...)`` (see
+    # ``work_resolver.list_work`` / ``_batch_instances``).
+    #
+    # Filter alignment: ``list_jobs`` accepts source-status values
+    # (e.g. ``"processing"``); ``list_work`` accepts the canonical
+    # vocabulary (``"processing"`` happens to be the canonical form
+    # so we pass it through unchanged). When the caller passes a
+    # multi-status filter (``"completed,failed"``) we join them into
+    # a comma-separated canonical string — ``list_work`` does the
+    # per-token canonical-to-source mapping internally.
+    work_records_by_id: dict[str, Any] = {}
+    if jobs:
+        status_filter = ",".join(statuses) if statuses else None
+        records = await service.list_work(
+            project_id=project_id,
+            status=status_filter,
+            kind="job",
+        )
+        for record in records:
+            # Defensive: only ``kind="job"`` rows belong on the
+            # ``list_jobs`` response. ``list_work(kind="job")``
+            # already filters server-side but a stale Test double or
+            # future kind filter change should not leak Task rows
+            # onto the JobResponse wire.
+            if record.kind != "job":
+                continue
+            work_records_by_id[record.work_id] = record
+
     # Convert to response format
     job_responses = []
     for job in jobs:
@@ -336,7 +494,7 @@ async def list_jobs(
                 position = await service._get_queue_position(job.job_id, job.project_id)
             except Exception:
                 pass
-        
+
         # Get DLQ info if job is in dead_letter state
         dlq_reason = None
         retry_count = None
@@ -347,15 +505,16 @@ async def list_jobs(
                 dlq_reason = dlq_item.reason
                 retry_count = dlq_item.retry_count
                 moved_to_dlq_at = dlq_item.moved_to_dlq_at
-        
+
         job_responses.append(_job_to_response(
-            job, 
+            job,
+            work_record=work_records_by_id.get(job.job_id),
             position=position,
             dlq_reason=dlq_reason,
             retry_count=retry_count,
             moved_to_dlq_at=moved_to_dlq_at,
         ))
-    
+
     return JobListResponse(
         jobs=job_responses,
         total=len(job_responses),  # Note: for accurate total, would need a count method

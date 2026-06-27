@@ -63,10 +63,28 @@ def dlq_service(job_repository, dlq_repository):
 
 @pytest.fixture
 def mock_job_queue_service():
-    """Create a mock JobQueueService for testing."""
+    """Create a mock JobQueueService for testing.
+
+    Phase 1 (Job as Queue Proxy): ``MagicMock(spec=JobQueueService)``
+    auto-mocks ``get_work`` (and every other async attribute) to return
+    an ``AsyncMock`` — which then fails JSON serialization inside
+    ``_job_to_response`` because ``record.status`` is itself an
+    ``AsyncMock``. These tests exercise the retry/DLQ HTTP contract on
+    the legacy JobItem-mirror path (the resolver is not wired here),
+    so we explicitly pin ``get_work`` to ``None`` to force the
+    ``work_record is None`` branch in ``_job_to_response`` and the
+    legacy ``job.status`` fallback in ``_resolve_job_status``. See
+    ``daemon/routers/jobs_management.py::_resolve_job_status`` for the
+    matching ``None`` contract.
+    """
     service = MagicMock(spec=JobQueueService)
-    # Make get_job and retry_job async-compatible
+    # Make get_job, get_work, and retry_job async-compatible.
     service.get_job = AsyncMock()
+    # Phase 1: resolver not wired → ``get_work`` returns None. Without
+    # this the auto-AsyncMock return trips ``TypeError: Object of type
+    # AsyncMock is not JSON serializable`` when ``_job_to_response``
+    # tries to project it onto a ``JobResponse``.
+    service.get_work = AsyncMock(return_value=None)
     service.retry_job = AsyncMock()
     return service
 

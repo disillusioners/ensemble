@@ -19,27 +19,28 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 # ── Resolver-gated read adapter ─────────────────────────────────────────────
-# Phase 2 (Batch 4b) of ``feature/virtual-job-management-surface``: when the
-# ``use_virtual_job_resolver`` flag is ON, ``stream_job_events`` reads through
-# :meth:`JobQueueService.get_work` (a :class:`WorkRecord`) instead of the
-# JobItem-only :meth:`JobQueueService.get_job`. The two return shapes do not
-# align on every field (``queue_id`` lives on JobItem but not on
-# ``WorkRecord``; ``error_message`` on JobItem maps to ``error`` on
-# ``WorkRecord``), so we project both shapes onto a single ``_ResolvedWork``
-# view that the SSE event payloads can read from uniformly. The wire format
-# stays byte-identical for the JobItem branch so the frontend does not need
-# a corresponding change.
+# Phase 1 (Job as Queue Proxy): every read path resolves through
+# :meth:`JobQueueService.get_work` (a :class:`WorkRecord`) so the
+# ``status`` is sourced from the joined Instance rather than the
+# JobItem mirror. The two-table dual-path (legacy ``from_job`` vs
+# resolver ``from_work_record``) has been collapsed onto the
+# resolver — the ``_ResolvedWork.from_job`` JobItem-direct branch is
+# deleted. ``_ResolvedWork`` projects the unified WorkRecord view
+# onto the SSE wire-format keys the frontend already consumes; the
+# ``queue_id`` field is forced to ``None`` because the WorkRecord
+# does not surface the JobItem-only queue affinity.
 
 
 @dataclass(frozen=True)
 class _ResolvedWork:
-    """Normalized view over JobItem or WorkRecord for SSE event payloads.
+    """Normalized view over a :class:`WorkRecord` for SSE event payloads.
 
-    Fields match the JSON keys emitted by every event payload. ``queue_id``
-    is set to ``None`` for ``WorkRecord``-backed rows because the unified
-    view-model does not carry the queue affinity (Task rows never had one;
-    JobItem rows lose it because ``WorkRecord`` is a deliberate
-    denormalisation).
+    Phase 1 (Job as Queue Proxy): the only construction path is
+    :meth:`from_work_record` — the JobItem-direct ``from_job``
+    branch has been removed. ``queue_id`` is always ``None`` because
+    the unified WorkRecord view-model does not carry the JobItem
+    queue affinity (Task rows never had one; JobItem rows lose it
+    because WorkRecord is a deliberate denormalisation).
     """
 
     work_id: str
@@ -50,20 +51,8 @@ class _ResolvedWork:
     error_message: str | None
 
     @classmethod
-    def from_job(cls, job: Any) -> "_ResolvedWork":
-        """Project a JobItem (legacy path) onto the SSE view."""
-        return cls(
-            work_id=job.job_id,
-            status=job.status,
-            instance_id=job.instance_id,
-            queue_id=job.queue_id,
-            result_summary=job.result_summary,
-            error_message=job.error_message,
-        )
-
-    @classmethod
     def from_work_record(cls, record: Any) -> "_ResolvedWork":
-        """Project a WorkRecord (resolver path) onto the SSE view.
+        """Project a :class:`WorkRecord` (resolver path) onto the SSE view.
 
         Field renames vs JobItem:
 
@@ -72,8 +61,10 @@ class _ResolvedWork:
         * ``queue_id`` is ``None`` — the resolver's :class:`WorkRecord`
           does not surface the JobItem ``queue_id`` column because the
           worker-pool ``task`` side has no equivalent concept.
-        * ``status`` is already canonicalized (Task ``running`` →
-          ``processing``, etc.) by the resolver, so it lines up with
+        * ``status`` is already canonicalized by the resolver — Task
+          ``running`` → ``processing``, and Instance statuses (e.g.
+          ``error`` → ``failed``, ``terminated`` → ``cancelled``) pass
+          through the same canonical map. The output lines up with
           :data:`TERMINAL_STATUSES` directly.
         """
         return cls(
@@ -128,21 +119,38 @@ def _use_resolver(request: Request) -> bool:
 async def _resolve(service: JobQueueService, work_id: str, use_resolver: bool):
     """Return a :class:`_ResolvedWork` view or ``None`` for an unknown id.
 
-    When the resolver flag is ON, looks up through
-    :meth:`JobQueueService.get_work` (a ``WorkRecord``); otherwise falls
-    back to :meth:`JobQueueService.get_job` (a ``JobItem``). Returns
-    ``None`` for either branch when the work id cannot be resolved —
-    the route handler maps that to HTTP 404.
+    Phase 1 (Job as Queue Proxy): the legacy JobItem-direct branch
+    (``from_job``) has been removed — every code path now resolves
+    through :meth:`JobQueueService.get_work` and projects the
+    resulting ``WorkRecord`` via :meth:`_ResolvedWork.from_work_record`.
+    The ``use_resolver`` parameter is retained for compatibility with
+    existing tests that toggle the flag, but both branches now produce
+    the same resolver-backed result. Phase 7 will remove the flag
+    entirely.
+
+    Returns ``None`` when the resolver cannot resolve the work id
+    (either ``get_work`` returned ``None`` or the underlying
+    ``WorkResolverService`` is not wired) — the route handler maps
+    that to HTTP 404.
     """
     if use_resolver:
         record = await service.get_work(work_id)
         if record is None:
             return None
         return _ResolvedWork.from_work_record(record)
-    job = await service.get_job(work_id)
-    if job is None:
+    # Phase 1 kill-switch path: ``use_virtual_job_resolver`` is OFF.
+    # The previous implementation called ``service.get_job`` and
+    # projected the JobItem via ``_ResolvedWork.from_job``. That
+    # branch violated the Phase 1 exit criterion ("no consumer reads
+    # execution state off JobItem directly"), so the JobItem-direct
+    # branch has been removed and the OFF path also routes through
+    # the resolver. When the resolver is not wired (``get_work``
+    # returns ``None``) we return ``None`` so the route surfaces a
+    # 404 instead of falling back to a JobItem-direct read.
+    record = await service.get_work(work_id)
+    if record is None:
         return None
-    return _ResolvedWork.from_job(job)
+    return _ResolvedWork.from_work_record(record)
 
 
 # ==================== Streaming Endpoints ====================
@@ -161,26 +169,29 @@ async def stream_job_events(
     service: JobQueueService = Depends(get_job_queue_service),
 ):
     """SSE stream for real-time job updates.
-    
+
     Streams events including:
     - connected: Initial connection event
     - status_update: Job status changes
     - completed: Job reached terminal state (completed, failed, or cancelled)
     - keepalive: Periodic keepalive to prevent timeout
-    
+
     The stream automatically closes when the job reaches a terminal state.
 
-    Phase 2 (Batch 4b) of ``feature/virtual-job-management-surface``: when
-    the ``use_virtual_job_resolver`` flag is ON, this endpoint resolves
-    ``job_id`` as a unified ``work_id`` (Task or JobItem) through the
-    ``WorkResolverService`` instead of a JobItem-only lookup. The wire
-    format is unchanged — the ``_ResolvedWork`` adapter maps WorkRecord
-    fields back onto the JobItem-shaped JSON keys the frontend already
-    consumes.
+    Phase 1 (Job as Queue Proxy): every read in this endpoint
+    resolves through the ``WorkResolverService`` (via
+    ``JobQueueService.get_work``). Execution state — including
+    ``status`` — is sourced from the joined Instance rather than
+    the JobItem mirror, satisfying the Phase 1 exit criterion that
+    ``job.status`` is read only by internal state-machine code. The
+    wire format is unchanged: ``_ResolvedWork.from_work_record``
+    projects the WorkRecord onto the same JSON keys the frontend
+    already consumes.
     """
     use_resolver = _use_resolver(request)
 
-    # Check work exists first (either JobItem or WorkRecord branch).
+    # Check work exists first. Phase 1: every branch goes through the
+    # resolver — see ``_resolve``.
     initial = await _resolve(service, job_id, use_resolver)
     if initial is None:
         raise HTTPException(
