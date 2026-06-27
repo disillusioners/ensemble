@@ -90,6 +90,16 @@ Note:
     "processing"]`` so the result excludes terminal Task rows, or
     post-filter the returned records client-side.
 
+    **Shows root-instance work by default** (``root_only=True``). The
+    jober manages work it bound to a root instance; child-instance
+    turns/reports (rows whose backing instance has a non-null
+    ``parent_id``) are internal mechanics of that root's job and
+    have **no link back to the originating ``job_id``**, so they are
+    filtered out by the resolver. ``process_report`` rows that
+    target the parent instance (per ``child_reports.py``) are
+    kept — they're the parent's inbound notification, not the
+    child's private execution.
+
 Returns:
     Dictionary with jobs list and count.""",
 
@@ -424,6 +434,7 @@ def create_job_tools(
                         normalised_statuses and len(normalised_statuses) == 1
                     ) else None,
                     kind=None,
+                    root_only=True,  # P-A: jober manages root-instance work only
                 )
 
                 # ``list_work`` only accepts a single ``status`` string
@@ -551,6 +562,24 @@ def create_job_tools(
     async def job_retry(job_id: str) -> str:
         """Retry a failed job. Use tool_help("job_retry") for details."""
         try:
+            # P-D (Phase 5, 2026-06-27): when the resolver is enabled,
+            # resolve the work_id FIRST so we can return a precise
+            # error if the caller passed a task-type work_id
+            # (``kind != "job"``). Without this guard a task work_id
+            # falls straight through to the JobItem-only retry path
+            # and returns the generic "may not be retryable" message
+            # — which is misleading because Task rows have no
+            # retry semantics by design. The kill-switch branch
+            # (``use_virtual_job_resolver == False``) preserves the
+            # legacy verbatim behavior.
+            if job_service.use_virtual_job_resolver:
+                record = await job_service.get_work(job_id)
+                if record is not None and record.kind != "job":
+                    return (
+                        f"ERROR: Operation not applicable: {job_id[:8]}... is "
+                        f"task-type work ({record.kind}), which has no retry path."
+                    )
+
             job_item = await job_service.retry_job(job_id)
             if job_item is not None:
                 return f"Job {job_id} retry initiated successfully."
@@ -559,11 +588,26 @@ def create_job_tools(
             return f"ERROR: Failed to retry job {job_id}: {str(e)}"
     job_retry._full_doc_ = _FULL_DOCS["job_retry"]
 
+
     @register_tool_category("job")
     @tool
     async def job_delete(job_id: str) -> str:
         """Soft delete a job. Use tool_help("job_delete") for details."""
         try:
+            # P-D (Phase 5, 2026-06-27): precise error for task-type
+            # work_ids — see ``job_retry`` comment for rationale.
+            # Tasks are not soft-deletable, so the JobItem-only
+            # ``soft_delete_job`` path is wrong for them. Resolver
+            # ON: resolve first and reject. Resolver OFF: legacy
+            # verbatim behavior (kill switch is a clean revert).
+            if job_service.use_virtual_job_resolver:
+                record = await job_service.get_work(job_id)
+                if record is not None and record.kind != "job":
+                    return (
+                        f"ERROR: Operation not applicable: {job_id[:8]}... is "
+                        f"task-type work ({record.kind}), which has no delete path."
+                    )
+
             job_item = await job_service.soft_delete_job(job_id)
             if job_item is not None:
                 return f"Job {job_id} deleted successfully."
@@ -572,11 +616,25 @@ def create_job_tools(
             return f"ERROR: Failed to delete job {job_id}: {str(e)}"
     job_delete._full_doc_ = _FULL_DOCS["job_delete"]
 
+
     @register_tool_category("job")
     @tool
     async def job_restore(job_id: str) -> str:
         """Restore a soft-deleted job. Use tool_help("job_restore") for details."""
         try:
+            # P-D (Phase 5, 2026-06-27): precise error for task-type
+            # work_ids — see ``job_retry`` comment for rationale.
+            # Tasks are not soft-deletable, so a restore against a
+            # task work_id is meaningless. Resolver ON: resolve first
+            # and reject. Resolver OFF: legacy verbatim behavior.
+            if job_service.use_virtual_job_resolver:
+                record = await job_service.get_work(job_id)
+                if record is not None and record.kind != "job":
+                    return (
+                        f"ERROR: Operation not applicable: {job_id[:8]}... is "
+                        f"task-type work ({record.kind}), which has no restore path."
+                    )
+
             job_item = await job_service.restore_job(job_id)
             if job_item is not None:
                 return f"Job {job_id} restored successfully."
@@ -600,32 +658,92 @@ def create_job_tools(
 
         Use tool_help("job_continue") for details."""
         try:
-            # 1. Look up old job
-            old_job = await job_service.get_job(old_job_id)
-            if old_job is None:
-                return {"error": f"Job {old_job_id} not found"}
+            # P-B (Phase 5, 2026-06-27): rewrite the LOOKUP half of
+            # ``job_continue`` to be resolver-aware. The previous
+            # implementation called ``job_service.get_job`` which is
+            # JobItem-only, so a task work_id (the typical handle the
+            # jober holds for continued-instance work — see plan
+            # §1.3 / D14 test #9) flowed straight to the "Job not
+            # found" error. The fix is to resolve ``old_job_id`` via
+            # ``job_service.get_work`` (kind-agnostic), then route
+            # the rest of the validation by ``record.kind``. Everything
+            # AFTER the lookup (soft-delete guard, terminal check,
+            # instance_status pre-check, in-flight Task pre-check,
+            # ``enqueue_message``) keys on ``instance_id`` and stays
+            # exactly as-is.
+            #
+            # The kill-switch branch (``use_virtual_job_resolver ==
+            # False``) keeps the legacy verbatim ``get_job`` path.
+            if job_service.use_virtual_job_resolver:
+                record = await job_service.get_work(old_job_id)
+                if record is None:
+                    return {"error": f"Job {old_job_id} not found"}
 
-            # 1a. Reject soft-deleted jobs — cannot continue a deleted job
-            if old_job.deleted_at is not None:
-                return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
+                # 1a. Reject soft-deleted jobs — JobItem-only guard.
+                #     ``WorkRecord`` has no ``deleted_at`` field; the
+                #     soft-delete concept only exists on JobItem. When
+                #     ``kind == "job"`` we do a cheap ``get_job`` for
+                #     the column; when ``kind != "job"`` (task / turn /
+                #     report) we SKIP the check — tasks are not
+                #     soft-deletable, so the check is meaningless and
+                #     would also force a second lookup for nothing.
+                if record.kind == "job":
+                    # Reviewer W3 — race guard: if ``get_work`` resolved
+                    # a job but the follow-up ``get_job`` returns None,
+                    # the row was deleted between the two calls.
+                    # Reject as deleted rather than fall through to
+                    # ``enqueue_message`` against a phantom work_id.
+                    old_job = await job_service.get_job(old_job_id)
+                    if old_job is None:
+                        return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
+                    if old_job.deleted_at is not None:
+                        return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
 
-            # 2. Validate the job is in a terminal state
-            #    Valid terminal job states: completed, failed, cancelled, dead_letter
-            #    (from ALL_TERMINAL_STATES in daemon/repositories/job_queue/watcher_models.py:12)
-            #    NOTE: "terminated" is an InstanceStatus, NOT a JobStatus — do not include.
-            if old_job.status not in TERMINAL_STATES:
-                return {
-                    "error": (
-                        f"Job {old_job_id} is not in a terminal state (current: {old_job.status}). "
-                        "Only completed/failed/cancelled/dead_letter jobs can be continued."
-                    )
-                }
+                # 2. Validate the work is in a terminal state.
+                #    Use the canonical vocabulary via
+                #    ``work_status.is_terminal`` so Task
+                #    ``"running"`` (canonical "processing") and JobItem
+                #    ``"processing"`` agree. Terminal set is the same
+                #    as the JobItem-only ``TERMINAL_STATES`` but goes
+                #    through one helper for both sides.
+                from daemon.services.work_status import is_terminal as _is_terminal
+                if not _is_terminal(record.status):
+                    return {
+                        "error": (
+                            f"Job {old_job_id} is not in a terminal state (current: {record.status}). "
+                            "Only completed/failed/cancelled/dead_letter jobs can be continued."
+                        )
+                    }
 
-            # 3. Extract instance_id
-            if not old_job.instance_id:
-                return {"error": f"Job {old_job_id} has no associated instance_id"}
+                # 3. Extract instance_id from the WorkRecord
+                #     (present on both Task and JobItem sides).
+                instance_id = record.instance_id
+                if not instance_id:
+                    return {"error": f"Job {old_job_id} has no associated instance_id"}
+            else:
+                # Kill-switch branch — verbatim legacy path.
+                old_job = await job_service.get_job(old_job_id)
+                if old_job is None:
+                    return {"error": f"Job {old_job_id} not found"}
 
-            instance_id = old_job.instance_id
+                # 1a. Reject soft-deleted jobs — cannot continue a deleted job
+                if old_job.deleted_at is not None:
+                    return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
+
+                # 2. Validate the job is in a terminal state
+                if old_job.status not in TERMINAL_STATES:
+                    return {
+                        "error": (
+                            f"Job {old_job_id} is not in a terminal state (current: {old_job.status}). "
+                            "Only completed/failed/cancelled/dead_letter jobs can be continued."
+                        )
+                    }
+
+                # 3. Extract instance_id
+                if not old_job.instance_id:
+                    return {"error": f"Job {old_job_id} has no associated instance_id"}
+
+                instance_id = old_job.instance_id
 
             # 4. Check manager is available
             if manager is None:
@@ -645,7 +763,7 @@ def create_job_tools(
             if instance_meta.status == InstanceStatus.PAUSED.value:
                 return {"error": "Instance is paused — unpause it first"}
 
-# 5a. Pre-check: reject if the instance has an in-flight Task. After
+            # 5a. Pre-check: reject if the instance has an in-flight Task. After
             #     D13 (Phase 2 of the decouple-architecture migration),
             #     messages create ``Task`` rows instead of ``JobItem``
             #     rows — the previous ``find_processing_message_jobs_by_instance``

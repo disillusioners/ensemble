@@ -32,13 +32,15 @@ export class WorkService {
   readonly error = signal<string | null>(null);
 
   /**
-   * GET /api/work?status=...&project_id=...&instance_id=...&kind=...
+   * GET /api/work?status=...&project_id=...&instance_id=...&kind=...&root_only=...
    *
    * Empty / undefined filter values are stripped before the request so
    * the backend only sees the params the caller actually filtered on.
-   * On error the works signal is left untouched and ``error`` is set —
-   * callers can opt to read the latest error via the ``error()`` signal
-   * or display a toast.
+   * ``root_only`` is always serialised as ``true`` or ``false`` (never
+   * omitted as a bare token) so the backend ``bool`` parser never has
+   * to guess. On error the works signal is left untouched and
+   * ``error`` is set — callers can opt to read the latest error via
+   * the ``error()`` signal or display a toast.
    *
    * Args:
    *     filters: Optional filter object. All fields are optional.
@@ -53,6 +55,12 @@ export class WorkService {
       if (filters.project_id) params = params.set('project_id', filters.project_id);
       if (filters.instance_id) params = params.set('instance_id', filters.instance_id);
       if (filters.kind) params = params.set('kind', filters.kind);
+      if (filters.root_only !== undefined) {
+        // Serialise explicitly so the query is ``root_only=true`` /
+        // ``root_only=false`` — never an empty token — matching the
+        // FastAPI ``bool`` coercion rules on /api/work.
+        params = params.set('root_only', filters.root_only ? 'true' : 'false');
+      }
     }
 
     // Mirror ``refreshWork`` — toggle the loading signal so the

@@ -1430,3 +1430,555 @@ class TestResolverRoutedTools:
         assert call_args.args[1] == "watcher-inst-1"
         # notify_watchers should NOT fire on a non-terminal record
         job_service.notify_watchers.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 5 (P-A / P-B / P-D) tests for the virtual-job tool completeness
+# hardening. See ``docs/plans/virtual-job-tool-completeness.md`` §6.
+#
+# P-A — ``job_list`` resolver path passes ``root_only=True`` (tool layer).
+# P-B — ``job_continue`` resolves both task and job work_ids (resolver-
+#       aware lookup).
+# P-D — ``job_retry`` / ``job_delete`` / ``job_restore`` return a
+#       precise "not applicable for task-type work" message for task
+#       work_ids under the resolver flag.
+#
+# All tests run with ``use_virtual_job_resolver=True`` so the
+# resolver-aware branches are exercised. The kill-switch
+# (``use_virtual_job_resolver=False``) tests live in the per-tool
+# classes above.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestJobListRootScoping:
+    """P-A tool-layer: ``job_list`` with the resolver flag ON passes
+    ``root_only=True`` to ``work_resolver.list_work`` so the jober's
+    management view is root-scoped (child-instance work filtered out).
+
+    Unit-level proof of the tool-layer change: we mock
+    ``work_resolver.list_work`` and verify the ``root_only=True`` kwarg
+    is passed. The actual filtering lives inside ``list_work``
+    (Phase 5 P-A, ``daemon/services/work_resolver.py``) — tested
+    separately by the integration suite.
+    """
+
+    @pytest.mark.asyncio
+    async def test_job_list_resolver_excludes_children(self):
+        """``job_list`` resolver path calls ``list_work`` with
+        ``root_only=True``. The MagicMock accepts the kwarg; the
+        assertion is on the contract (the resolver receives the
+        filter so it can drop child-instance rows).
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        work_resolver = MagicMock(name="WorkResolverService")
+        job_service._work_resolver = work_resolver
+
+        # Return only root-scoped rows — the resolver would have
+        # filtered them out before returning. This mirrors the
+        # production behavior so the tool output is realistic.
+        rec_root = _make_work_record(
+            "job-aaaa1111", kind="job", status="pending",
+            instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
+        )
+        work_resolver.list_work = MagicMock(return_value=[rec_root])
+
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_list = tools[2]
+
+        result = await job_list.ainvoke({})
+
+        # The tool must have called list_work with root_only=True
+        work_resolver.list_work.assert_called_once()
+        call_kwargs = work_resolver.list_work.call_args.kwargs
+        assert call_kwargs.get("root_only") is True, (
+            "job_list must pass root_only=True to work_resolver.list_work "
+            "so the jober's management view excludes child-instance work"
+        )
+        # And the result reflects the (already filtered) records
+        assert result["count"] == 1
+        assert result["jobs"][0]["work_id"] == "job-aaaa1111"
+        # Legacy list_jobs must NOT have been called
+        job_service.list_jobs.assert_not_called()
+
+
+class TestJobRetryDeleteRestoreTaskKindMessage:
+    """P-D: ``job_retry`` / ``job_delete`` / ``job_restore`` return a
+    precise "not applicable for task-type work" message when the
+    resolver resolves a task work_id (``kind != "job"``).
+
+    Before P-D, these tools called ``job_service.retry_job`` /
+    ``soft_delete_job`` / ``restore_job`` directly with the work_id
+    — JobItem-only lookups — so a task work_id produced the generic
+    "may not exist / not be retryable" message. P-D adds a
+    resolve-then-classify guard so the caller knows the work is a
+    task and that the operation isn't applicable by design.
+    """
+
+    @staticmethod
+    def _build_resolver_service(task_work_id="task-aaaa1111", kind="turn",
+                                  instance_id="inst-1"):
+        """Build a job_service mock where the resolver returns a
+        task-kind WorkRecord and the legacy retry/delete/restore path
+        would have raised a confusing generic error.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        # Resolver returns a task-kind record (P-D guard should fire)
+        record = _make_work_record(
+            task_work_id, kind=kind, status="completed",
+            instance_id=instance_id, project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        # Legacy path should NOT be called when P-D guard fires
+        job_service.retry_job = AsyncMock(return_value=None)
+        job_service.soft_delete_job = AsyncMock(return_value=None)
+        job_service.restore_job = AsyncMock(return_value=None)
+        return job_service
+
+    @pytest.mark.asyncio
+    async def test_job_retry_task_kind_message(self):
+        """``job_retry`` against a task ``work_id`` returns the
+        precise "no retry path" message and does NOT call the
+        JobItem-only ``retry_job`` path.
+        """
+        job_service = self._build_resolver_service(
+            task_work_id="task-abcdef12-3456", kind="turn"
+        )
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_retry = tools[4]
+
+        result = await job_retry.ainvoke({"job_id": "task-abcdef12-3456"})
+
+        # P-D message format (matches other "ERROR: ..." prefixes in the file)
+        assert result.startswith("ERROR:")
+        assert "task-abc" in result  # 8-char prefix slice ([:8])
+        assert "task-type work" in result
+        assert "turn" in result  # the kind name
+        assert "retry path" in result
+        # The legacy JobItem path must NOT have been called
+        job_service.retry_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_delete_task_kind_message(self):
+        """``job_delete`` against a task ``work_id`` returns the
+        precise "no delete path" message and does NOT call the
+        JobItem-only ``soft_delete_job`` path.
+        """
+        job_service = self._build_resolver_service(
+            task_work_id="task-abcdef12-3456", kind="report"
+        )
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_delete = tools[5]
+
+        result = await job_delete.ainvoke({"job_id": "task-abcdef12-3456"})
+
+        assert result.startswith("ERROR:")
+        assert "task-abc" in result
+        assert "task-type work" in result
+        assert "report" in result
+        assert "delete path" in result
+        job_service.soft_delete_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_restore_task_kind_message(self):
+        """``job_restore`` against a task ``work_id`` returns the
+        precise "no restore path" message and does NOT call the
+        JobItem-only ``restore_job`` path.
+        """
+        job_service = self._build_resolver_service(
+            task_work_id="task-abcdef12-3456", kind="turn"
+        )
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_restore = tools[6]
+
+        result = await job_restore.ainvoke({"job_id": "task-abcdef12-3456"})
+
+        assert result.startswith("ERROR:")
+        assert "task-abc" in result
+        assert "task-type work" in result
+        assert "turn" in result
+        assert "restore path" in result
+        job_service.restore_job.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_retry_job_kind_falls_through(self):
+        """P-D regression: when the resolver returns a job-kind
+        record, the tool falls through to the legacy ``retry_job``
+        path. Verifies the P-D guard only fires for ``kind != "job"``.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        record = _make_work_record(
+            "job-aaaa1111", kind="job", status="failed",
+            instance_id="inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        mock_job_item = MagicMock()
+        job_service.retry_job = AsyncMock(return_value=mock_job_item)
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_retry = tools[4]
+
+        result = await job_retry.ainvoke({"job_id": "job-aaaa1111"})
+
+        # Falls through to retry_job, returns success
+        assert result == "Job job-aaaa1111 retry initiated successfully."
+        job_service.retry_job.assert_awaited_once_with("job-aaaa1111")
+
+    @pytest.mark.asyncio
+    async def test_job_retry_resolver_returns_none_falls_through(self):
+        """P-D regression: when ``get_work`` returns ``None``
+        (legacy id, flag off, or genuinely a job), the tool falls
+        through to the legacy ``retry_job`` path — the precise error
+        is only for confirmed task-kind work.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        job_service.get_work = AsyncMock(return_value=None)  # not found by resolver
+        # Legacy path returns None too → generic error
+        job_service.retry_job = AsyncMock(return_value=None)
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(job_service, queue_mgmt_service, dead_letter_service)
+        job_retry = tools[4]
+
+        result = await job_retry.ainvoke({"job_id": "missing-job-1"})
+
+        # Legacy verbatim behavior — generic "may not be in a retryable state"
+        assert result == "ERROR: Could not retry job missing-job-1. Job may not be in a retryable state."
+        job_service.retry_job.assert_awaited_once_with("missing-job-1")
+
+
+class TestJobContinueResolverAware:
+    """P-B: ``job_continue`` resolves task work_ids through the
+    resolver so the typical jober round-trip
+    (``job_continue`` → returns ``new_job_id`` (task work_id) →
+    ``job_continue`` again) works without "Job not found" errors.
+
+    The pre-P-B implementation called ``job_service.get_job`` which is
+    JobItem-only — task work_ids (the typical handle the jober holds
+    for continued-instance work) returned "Job not found". The
+    rewrite resolves via ``job_service.get_work`` (kind-agnostic) and
+    routes the rest of the validation by ``record.kind``.
+    """
+
+    @staticmethod
+    def _build_continue_services(*, instance_id="root-inst-1"):
+        """Build a (job_service, manager) pair ready for the happy
+        path under ``use_virtual_job_resolver=True``.
+        """
+        job_service = AsyncMock()
+        job_service.use_virtual_job_resolver = True
+        manager = MagicMock()
+        instance_repo = MagicMock()
+        manager._instance_repository = instance_repo
+        manager.enqueue_message = AsyncMock()
+        task_repo = MagicMock()
+        task_repo.has_inflight_task = MagicMock(return_value=False)
+        manager._task_repo = task_repo
+        return job_service, manager
+
+    @pytest.mark.asyncio
+    async def test_job_continue_from_task_work_id(self):
+        """The D14 test #9 gap: ``job_continue`` accepts a task
+        ``work_id`` (the handle ``job_continue`` itself returned as
+        ``new_job_id`` on the prior call) and resolves the instance
+        through the WorkRecord. Asserts the resolver path is used
+        (NOT the legacy ``get_job`` lookup) and that the returned
+        ``instance_id`` matches the WorkRecord's instance_id
+        (reviewer finding — must equal the original root instance).
+        """
+        from daemon.manager import AsyncMessageResult
+
+        job_service, manager = self._build_continue_services(instance_id="root-inst-1")
+        task_work_id = "task-abcdef12-3456"
+        record = _make_work_record(
+            task_work_id, kind="turn", status="completed",
+            instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        # No follow-up get_job call needed — task-kind skips the
+        # soft-delete guard (no deleted_at on tasks).
+        job_service.get_job = AsyncMock(return_value=None)
+
+        # Instance healthy
+        instance_meta = MagicMock()
+        instance_meta.status = "running"
+        manager._instance_repository.get.return_value = instance_meta
+        manager.enqueue_message.return_value = AsyncMessageResult(
+            message_id="msg-2",
+            instance_id="root-inst-1",
+            status="queued",
+            job_id="task-zzzz9999",  # the new turn's work_id (task-shaped)
+        )
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_continue = tools[12]
+
+        result = await job_continue.ainvoke({
+            "old_job_id": task_work_id,
+            "message": "Continue working on this",
+        })
+
+        # Resolver path was used
+        job_service.get_work.assert_awaited_once_with(task_work_id)
+        # CRITICAL: returned instance_id matches the WorkRecord's
+        # instance_id (the original root, not a phantom or the child)
+        assert result["instance_id"] == "root-inst-1"
+        assert result["old_job_id"] == task_work_id
+        assert result["new_job_id"] == "task-zzzz9999"
+        assert result["status"] == "queued"
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_from_job_work_id(self):
+        """Regression: ``job_continue`` against a legacy JobItem
+        ``work_id`` (``kind="job"``) still works. The P-B rewrite
+        must not break the legacy path — it adds a branch where
+        ``get_job`` is called for the soft-delete check, but the
+        end-to-end behavior is preserved.
+        """
+        from daemon.manager import AsyncMessageResult
+
+        job_service, manager = self._build_continue_services(instance_id="root-inst-1")
+        job_work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            job_work_id, kind="job", status="completed",
+            instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        # JobItem exists with no deleted_at (legacy path proceeds)
+        old_job = MagicMock()
+        old_job.deleted_at = None
+        job_service.get_job = AsyncMock(return_value=old_job)
+
+        instance_meta = MagicMock()
+        instance_meta.status = "running"
+        manager._instance_repository.get.return_value = instance_meta
+        manager.enqueue_message.return_value = AsyncMessageResult(
+            message_id="msg-2",
+            instance_id="root-inst-1",
+            status="queued",
+            job_id="task-zzzz9999",
+        )
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_continue = tools[12]
+
+        result = await job_continue.ainvoke({
+            "old_job_id": job_work_id,
+            "message": "Continue",
+        })
+
+        # Resolver then legacy get_job for deleted_at check
+        job_service.get_work.assert_awaited_once_with(job_work_id)
+        job_service.get_job.assert_awaited_once_with(job_work_id)
+        assert result["instance_id"] == "root-inst-1"
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_soft_deleted_job_rejected(self):
+        """``kind="job"`` + ``deleted_at`` set → rejected with the
+        "has been deleted and cannot be continued" message. The P-B
+        rewrite must check ``deleted_at`` on the JobItem branch even
+        though ``WorkRecord`` doesn't carry the column.
+        """
+        job_service, manager = self._build_continue_services()
+        job_work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            job_work_id, kind="job", status="completed",
+            instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        # JobItem exists with deleted_at SET (soft-deleted)
+        old_job = MagicMock()
+        old_job.deleted_at = MagicMock()  # any non-None value
+        job_service.get_job = AsyncMock(return_value=old_job)
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_continue = tools[12]
+
+        result = await job_continue.ainvoke({
+            "old_job_id": job_work_id,
+            "message": "Continue",
+        })
+
+        assert result == {"error": f"Job {job_work_id} has been deleted and cannot be continued"}
+        # CRITICAL: enqueue must NOT have been called
+        manager.enqueue_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_task_kind_skips_deleted_check(self):
+        """``kind="turn"`` (task) → NO ``get_job`` call, NO
+        deleted_at check (tasks are not soft-deletable). The P-B
+        rewrite SKIPS the ``get_job`` follow-up entirely on the
+        task branch so the lookup cost stays constant.
+        """
+        from daemon.manager import AsyncMessageResult
+
+        job_service, manager = self._build_continue_services(instance_id="root-inst-1")
+        task_work_id = "task-abcdef12-3456"
+        record = _make_work_record(
+            task_work_id, kind="turn", status="completed",
+            instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        job_service.get_job = AsyncMock(return_value=None)  # would be confusing if called
+
+        instance_meta = MagicMock()
+        instance_meta.status = "running"
+        manager._instance_repository.get.return_value = instance_meta
+        manager.enqueue_message.return_value = AsyncMessageResult(
+            message_id="msg-2",
+            instance_id="root-inst-1",
+            status="queued",
+            job_id="task-zzzz9999",
+        )
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_continue = tools[12]
+
+        result = await job_continue.ainvoke({
+            "old_job_id": task_work_id,
+            "message": "Continue",
+        })
+
+        # Resolver called
+        job_service.get_work.assert_awaited_once_with(task_work_id)
+        # Legacy get_job must NOT have been called for the task branch
+        job_service.get_job.assert_not_called()
+        # And the enqueue happened normally
+        assert result["instance_id"] == "root-inst-1"
+        manager.enqueue_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_get_work_race(self):
+        """Reviewer W3 race guard: ``get_work`` returns a job-kind
+        record, but the follow-up ``get_job`` returns ``None`` (row
+        was deleted between the two calls). The tool must reject as
+        "deleted" rather than falling through to ``enqueue_message``
+        against a phantom work_id.
+        """
+        job_service, manager = self._build_continue_services()
+        job_work_id = "job-abcdef12-3456"
+        record = _make_work_record(
+            job_work_id, kind="job", status="completed",
+            instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+        # Race: get_job returns None (row deleted between calls)
+        job_service.get_job = AsyncMock(return_value=None)
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_continue = tools[12]
+
+        result = await job_continue.ainvoke({
+            "old_job_id": job_work_id,
+            "message": "Continue",
+        })
+
+        # Reject as deleted — message uses the same "has been deleted" wording
+        # so callers can't distinguish the race from a real soft-delete.
+        assert result == {"error": f"Job {job_work_id} has been deleted and cannot be continued"}
+        # CRITICAL: enqueue must NOT have been called (no phantom work_id flow)
+        manager.enqueue_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_resolver_not_found(self):
+        """``get_work`` returns ``None`` (neither task nor job) →
+        existing "Job not found" message (no behavior change for
+        the truly-missing case).
+        """
+        job_service, manager = self._build_continue_services()
+        job_service.get_work = AsyncMock(return_value=None)
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_continue = tools[12]
+
+        result = await job_continue.ainvoke({
+            "old_job_id": "missing-work-id",
+            "message": "Continue",
+        })
+
+        assert result == {"error": "Job missing-work-id not found"}
+        # enqueue must NOT have been called
+        manager.enqueue_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_job_continue_task_kind_not_terminal(self):
+        """``kind="turn"`` + non-terminal status → rejected. The P-B
+        rewrite uses ``work_status.is_terminal`` (canonical) so a
+        Task's "running" (canonical "processing") is correctly
+        classified as non-terminal.
+        """
+        job_service, manager = self._build_continue_services()
+        task_work_id = "task-abcdef12-3456"
+        record = _make_work_record(
+            task_work_id, kind="turn", status="processing",  # canonical non-terminal
+            instance_id="root-inst-1", project_id="proj-1", agent_id="developer",
+        )
+        job_service.get_work = AsyncMock(return_value=record)
+
+        queue_mgmt_service = AsyncMock()
+        dead_letter_service = MagicMock()
+        tools = create_job_tools(
+            job_service, queue_mgmt_service, dead_letter_service,
+            manager=manager,
+        )
+        job_continue = tools[12]
+
+        result = await job_continue.ainvoke({
+            "old_job_id": task_work_id,
+            "message": "Continue",
+        })
+
+        assert "error" in result
+        assert "not in a terminal state" in result["error"]
+        assert "processing" in result["error"]
+        # No follow-up get_job, no enqueue
+        job_service.get_job.assert_not_called()
+        manager.enqueue_message.assert_not_awaited()

@@ -54,13 +54,13 @@ from typing import TYPE_CHECKING, Any
 from sqlmodel import col, select
 from sqlalchemy.exc import SQLAlchemyError
 
+from daemon.repositories.instance.models import Instance
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.task.models import Task
 
 from .work_status import _STATUS_CANONICAL_MAP, canonicalize_status
 
 if TYPE_CHECKING:
-    from daemon.repositories.instance.models import Instance
     from daemon.repositories.instance.repository import SQLModelInstanceRepository
     from daemon.repositories.job_queue.repository import JobRepository
     from daemon.repositories.task.repository import TaskRepository
@@ -423,6 +423,7 @@ class WorkResolverService:
         instance_id: str | None = None,
         status: str | None = None,
         kind: str | None = None,
+        root_only: bool = True,
     ) -> list[WorkRecord]:
         """List work records matching the supplied filters, newest first.
 
@@ -469,6 +470,39 @@ class WorkResolverService:
           * ``None`` (default) — query both tables, no
             ``task_type`` filter.
 
+        * ``root_only`` — P-A (2026-06-27) root-instance scoping.
+          When ``True`` (default), drop any work whose backing
+          instance has a non-null ``parent_id``. The jober manages
+          work it bound to a root instance; child turns/reports are
+          internal mechanics of that root's job and have **no link
+          back to the originating ``job_id``** — surfacing them as
+          first-class work units is noise that breaks the "one
+          virtual job per root" mental model. The filter is applied
+          **before** any future pagination/limit so a capped page
+          cannot shrink unpredictably after the slice (reviewer W1
+          in ``docs/plans/virtual-job-tool-completeness.md``).
+
+          **Note (reviewer S2):** ``process_report`` and
+          ``send_report`` Task rows are *parent-bound* — see
+          ``daemon/services/child_reports.py:649-656`` which sets
+          ``Task.instance_id = instance.parent_id`` when the child
+          files its completion report. So reports surface under the
+          root instance and are **kept** by ``root_only=True`` — only
+          child-instance ``process_message`` turns (the ones that
+          actually drove the child) are excluded. This is the
+          intended behaviour: a child turn is the child's private
+          execution step; a report is the parent's inbound
+          notification about that step.
+
+          JobItem-side filtering does a single batched lookup
+          (``SELECT instance_id FROM instances WHERE instance_id IN
+          (...) AND parent_id IS NOT NULL``) so we don't N+1 the
+          per-row ``_lookup_instance`` we use on the Task side.
+          JobItems with ``instance_id IS NULL`` (queue-stage rows,
+          not yet dispatched to an instance) are kept — they have no
+          parent relationship and are part of the jober's
+          management view.
+
         Sort order is ``created_at DESC`` across the merged result.
         JobItem ``created_at`` is a string and Task ``created_at``
         is a ``datetime``; we normalise both to ``datetime`` via
@@ -490,6 +524,11 @@ class WorkResolverService:
                 unioned.
             kind: Optional kind filter (``"job"``, ``"turn"``,
                 ``"report"``, ``"task"``).
+            root_only: When ``True`` (default), drop work whose
+                backing instance has a non-null ``parent_id``.
+                ``False`` returns the union of root + child work
+                (the pre-P-A behaviour, useful as a debug escape
+                hatch).
 
         Returns:
             A list of :class:`WorkRecord` ordered by ``created_at``
@@ -548,16 +587,48 @@ class WorkResolverService:
             # project_id from the matching instance row in
             # ``_task_to_record``). JobItem keeps its SQL-level filter
             # in ``_query_jobs`` because it does carry the column.
+            #
+            # P-A: ``root_only`` is applied HERE, against the
+            # already-fetched instance, so we don't pay a second
+            # round-trip to evaluate the parent_id guard. The lookup
+            # is reused by ``_task_to_record`` via the optional
+            # ``instance=`` parameter.
             tasks = self._query_tasks(instance_id, source_statuses, task_type_filter)
-            records.extend(
-                record
-                for record in (self._task_to_record(t) for t in tasks)
-                if project_id is None or record.project_id == project_id
-            )
+            for task in tasks:
+                instance = self._lookup_instance(task.instance_id)
+                # Reviewer S2: report tasks are parent-bound (their
+                # ``Task.instance_id`` is set to the ROOT instance by
+                # ``child_reports.py:649-656``), so this guard only
+                # excludes child-instance ``process_message`` turns —
+                # the child's private execution rows. Reports stay
+                # visible under ``root_only=True``.
+                if root_only and instance is not None and instance.parent_id:
+                    continue
+                record = self._task_to_record(task, instance=instance)
+                if project_id is not None and record.project_id != project_id:
+                    continue
+                records.append(record)
 
         if query_jobs_table:
             jobs = self._query_jobs(project_id, instance_id, source_statuses)
-            records.extend(self._job_to_record(j) for j in jobs)
+            if root_only and jobs:
+                # Batch-resolve which of the JobItems' backing
+                # instances are children (parent_id IS NOT NULL).
+                # One SQL round-trip instead of N+1; the result is
+                # the small set of child instance_ids which we then
+                # use to drop the corresponding JobItem rows.
+                # JobItems with ``instance_id IS NULL`` (queue-stage,
+                # not yet dispatched) have no parent relationship and
+                # are kept — they ARE the jober's management surface.
+                child_instance_ids = self._batch_child_instance_ids(
+                    {j.instance_id for j in jobs if j.instance_id is not None}
+                )
+                records.extend(
+                    self._job_to_record(j) for j in jobs
+                    if j.instance_id is None or j.instance_id not in child_instance_ids
+                )
+            else:
+                records.extend(self._job_to_record(j) for j in jobs)
 
         # Sort newest-first. Use ``_normalize_sort_key`` to coerce
         # every key to tz-aware UTC — Task rows come back from SQLite
@@ -570,7 +641,11 @@ class WorkResolverService:
 
     # ── Private helpers ───────────────────────────────────────────────────
 
-    def _task_to_record(self, task: Task) -> WorkRecord:
+    def _task_to_record(
+        self,
+        task: Task,
+        instance: "Instance | None" = None,
+    ) -> WorkRecord:
         """Build a :class:`WorkRecord` from a Task row.
 
         Neither ``agent_id`` nor ``project_id`` lives on the Task table —
@@ -582,8 +657,21 @@ class WorkResolverService:
         returns ``None`` and the WorkRecord's ``agent_id`` and
         ``project_id`` are both ``None`` — callers see the work unit as
         orphaned but the rest of the fields still resolve.
+
+        Args:
+            task: The Task row to convert.
+            instance: Optional pre-fetched :class:`Instance` for the
+                Task's ``instance_id``. When supplied, the resolver
+                skips its own ``_lookup_instance`` call — this is the
+                P-A optimisation path so ``list_work`` can do the
+                lookup once, perform the ``root_only`` parent-id
+                guard, and reuse the same row to build the record.
+                Defaults to ``None`` (resolver performs the lookup),
+                which keeps ``resolve_work`` (single-row call site)
+                unaffected.
         """
-        instance = self._lookup_instance(task.instance_id)
+        if instance is None:
+            instance = self._lookup_instance(task.instance_id)
         return WorkRecord(
             work_id=task.work_id,
             kind=_kind_from_task_type(task.task_type),
@@ -733,6 +821,43 @@ class WorkResolverService:
                 stmt = stmt.where(JobItem.status.in_(source_statuses))
             stmt = stmt.order_by(col(JobItem.created_at).desc())
             return list(session.exec(stmt))
+
+    def _batch_child_instance_ids(self, instance_ids: set[str]) -> set[str]:
+        """Return the subset of ``instance_ids`` whose instances are children.
+
+        P-A: ``list_work(root_only=True)`` needs to drop JobItem rows
+        whose backing instance has a non-null ``parent_id``. JobItem
+        carries ``instance_id`` directly so there is no per-row
+        instance lookup in the JobItem branch of ``list_work`` — we
+        resolve parentage in one batched SELECT against the
+        ``instances`` table:
+
+            SELECT instance_id FROM instances
+             WHERE instance_id IN (...)
+               AND parent_id IS NOT NULL
+
+        The returned set is the child-instance ids, which the caller
+        uses to filter out the corresponding JobItems. An empty input
+        set short-circuits to an empty result without hitting the DB.
+
+        Args:
+            instance_ids: The distinct ``JobItem.instance_id`` values
+                in the current page (already filtered to non-None).
+
+        Returns:
+            The subset of ``instance_ids`` whose ``Instance.parent_id``
+            is non-null. An empty set means "no children in this set".
+        """
+        if not instance_ids:
+            return set()
+        from sqlmodel import Session as SQLModelSession
+
+        with SQLModelSession(self._instance_repo.engine) as session:
+            stmt = select(Instance.instance_id).where(
+                Instance.instance_id.in_(instance_ids),
+                Instance.parent_id.isnot(None),
+            )
+            return {row for row in session.exec(stmt)}
 
 
 __all__ = ["WorkRecord", "WorkResolverService"]

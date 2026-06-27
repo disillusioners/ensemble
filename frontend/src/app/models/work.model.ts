@@ -54,12 +54,22 @@ export interface Work {
  * All fields are optional; ``null``/empty values are stripped before
  * being sent as query params so the backend does not see
  * ``?project_id=``.
+ *
+ * ``root_only`` (P-A of the Virtual Job Tool Completeness plan):
+ * when ``true``, the backend ``GET /api/work`` excludes work whose
+ * backing instance is a child of another instance. The Jobs page
+ * "All Work" view deliberately passes ``false`` so the user sees
+ * every row the resolver can find — the view name is a contract.
+ * When ``undefined`` the param is omitted and the backend default
+ * (root-scoped) applies; callers that want the default should leave
+ * the field unset rather than passing ``true`` explicitly.
  */
 export interface WorkFilters {
   status?: string;
   project_id?: string;
   instance_id?: string;
   kind?: string;
+  root_only?: boolean;
 }
 
 // ── Helper functions ─────────────────────────────────────────────────────

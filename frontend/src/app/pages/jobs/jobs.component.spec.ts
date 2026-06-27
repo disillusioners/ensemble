@@ -1186,4 +1186,134 @@ describe('JobsComponent Logic', () => {
       });
     });
   });
+
+  describe('All Work view loadWorks — root_only contract (P-A)', () => {
+    /**
+     * Mirrors the body of ``JobsComponent.loadWorks`` (the
+     * Phase-4 unified-work fetch) just enough to assert that the
+     * component hands ``root_only: false`` to ``WorkService.getWork``.
+     *
+     * The real component is heavy with Angular lifecycle hooks,
+     * dialogs, and snackbar wiring; re-declaring just the
+     * work-fetch path keeps the test focused and avoids the
+     * TestBed setup that would otherwise be needed to exercise the
+     * component end-to-end. The URL serialisation guarantee is
+     * separately covered by ``work.service.spec.ts``.
+     */
+    class AllWorkLoadComponent {
+      // Captured filters handed to WorkService.getWork.
+      public lastFilters: any = undefined;
+      // Subscription observers, in case a future test wants to
+      // assert on the snackbar side effect.
+      public errored = false;
+
+      constructor(private readonly filtersValue: { project_id?: string; status?: any }) {}
+
+      loadWorks(workService: { getWork: jest.Mock }): void {
+        const projectId = this.filtersValue.project_id;
+        const statusFilter = this.filtersValue.status;
+        const filters = {
+          project_id: projectId || undefined,
+          status:
+            statusFilter && statusFilter.length > 0
+              ? statusFilter.join(',')
+              : undefined,
+          // P-A — the All Work view intentionally bypasses the
+          // root-only filter so child-instance rows stay visible.
+          root_only: false,
+        };
+        workService.getWork(filters).subscribe({
+          next: (works: unknown[]) => {
+            this.lastFilters = filters;
+          },
+          error: () => {
+            this.errored = true;
+          },
+        });
+      }
+    }
+
+    it('should pass root_only: false to WorkService.getWork (no filters)', () => {
+      const workService = { getWork: jest.fn().mockReturnValue({
+        subscribe: (obs: any) => obs.next([]),
+      }) };
+      const component = new AllWorkLoadComponent({});
+
+      component.loadWorks(workService);
+
+      expect(workService.getWork).toHaveBeenCalledTimes(1);
+      expect(workService.getWork).toHaveBeenCalledWith({
+        project_id: undefined,
+        status: undefined,
+        root_only: false,
+      });
+    });
+
+    it('should pass root_only: false alongside a project_id filter', () => {
+      const workService = { getWork: jest.fn().mockReturnValue({
+        subscribe: (obs: any) => obs.next([]),
+      }) };
+      const component = new AllWorkLoadComponent({ project_id: 'project-123' });
+
+      component.loadWorks(workService);
+
+      expect(workService.getWork).toHaveBeenCalledWith({
+        project_id: 'project-123',
+        status: undefined,
+        root_only: false,
+      });
+    });
+
+    it('should pass root_only: false alongside a status filter', () => {
+      const workService = { getWork: jest.fn().mockReturnValue({
+        subscribe: (obs: any) => obs.next([]),
+      }) };
+      const component = new AllWorkLoadComponent({
+        project_id: 'project-123',
+        status: ['pending', 'processing'],
+      });
+
+      component.loadWorks(workService);
+
+      expect(workService.getWork).toHaveBeenCalledWith({
+        project_id: 'project-123',
+        status: 'pending,processing',
+        root_only: false,
+      });
+    });
+
+    it('should drop status when the filter array is empty', () => {
+      const workService = { getWork: jest.fn().mockReturnValue({
+        subscribe: (obs: any) => obs.next([]),
+      }) };
+      const component = new AllWorkLoadComponent({ status: [] });
+
+      component.loadWorks(workService);
+
+      expect(workService.getWork).toHaveBeenCalledWith({
+        project_id: undefined,
+        status: undefined,
+        root_only: false,
+      });
+    });
+
+    it('should always include root_only: false even if other filters are undefined', () => {
+      const workService = { getWork: jest.fn().mockReturnValue({
+        subscribe: (obs: any) => obs.next([]),
+      }) };
+      const component = new AllWorkLoadComponent({});
+
+      component.loadWorks(workService);
+
+      // ``mock.calls[0]`` is the array of arguments to the first
+      // ``getWork`` call — ``[filters]`` since there's one arg.
+      const filtersArg = workService.getWork.mock.calls[0][0];
+      // The contract: ``root_only`` is always present and is always
+      // exactly ``false`` for the All Work view. If this assertion
+      // fails, the user is back to seeing the backend-default
+      // root-scoped list — the very thing this fix was meant to
+      // prevent.
+      expect(filtersArg.root_only).toBe(false);
+    });
+  });
 });

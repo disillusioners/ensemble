@@ -216,7 +216,7 @@ If a job has been running longer than expected:
 
 ### Handle Semantics: Jobs and Continued-Instance Work
 
-The `job_id` returned by `job_create` (and surfaced as `new_job_id` by `job_continue`) is a `work_id` handle — a stable UUID4 minted on Task/JobItem creation. The same handle is accepted by `watch_job` and `job_get` for **both** traditional job queue items and continued-instance work (subsequent message turns on an instance). In practice this means: if you call `job_continue` against a completed instance to send a follow-up message, the returned `new_job_id` can be passed directly to `watch_job` to receive a `[JOB_EVENT]` when the new turn finishes — no separate "instance watch" tool is needed.
+The `job_id` returned by `job_create` (and surfaced as `new_job_id` by `job_continue`) is a `work_id` handle — a stable UUID4 minted on Task/JobItem creation. The same handle is accepted by `watch_job`, `job_get`, and `job_continue` for **both** traditional job queue items and continued-instance work (subsequent message turns on an instance). In practice this means: if you call `job_continue` against a completed instance to send a follow-up message, the returned `new_job_id` can be passed directly to `watch_job` to receive a `[JOB_EVENT]` when the new turn finishes — no separate "instance watch" tool is needed. `job_continue` resolves both task and job work_ids (Phase 5 P-B, 2026-06-27), so continuing from the task `work_id` returned by a prior `job_continue` works without manual handle translation. `job_list` shows root-instance work by default (Phase 5 P-A, 2026-06-27) — child-instance turns/reports are filtered out by the resolver so the management view is not drowned in noise.
 
 ---
 

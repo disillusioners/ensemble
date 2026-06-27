@@ -449,6 +449,15 @@ export class JobsComponent implements OnInit, OnDestroy {
    * filter payload — that filter would force the backend to return
    * ONLY queued work, defeating the unified surface.
    *
+   * ``root_only`` is hard-coded to ``false`` here (P-A of the Virtual
+   * Job Tool Completeness plan). The "All Work" view is contractually
+   * named — it must show every row the resolver can find, including
+   * child-instance turns and reports. The backend default is
+   * ``root_only=true`` (jober-management view, excludes children);
+   * we override that default at the only call site that represents
+   * "all" to the user. The Queues view goes through ``JobService``
+   * and is unaffected.
+   *
    * Errors are non-fatal — the legacy Jobs list still renders and the
    * snackbar gives the operator a hint about why the work list is
    * empty.
@@ -459,6 +468,10 @@ export class JobsComponent implements OnInit, OnDestroy {
     this.workService.getWork({
       project_id: projectId || undefined,
       status: statusFilter && statusFilter.length > 0 ? statusFilter.join(',') : undefined,
+      // P-A — the All Work view intentionally bypasses the root-only
+      // filter so child-instance rows stay visible. See the method
+      // docstring for the rationale.
+      root_only: false,
     }).subscribe({
       next: (works) => {
         this.works.set(works);

@@ -138,8 +138,15 @@ def _seed_instance(
     instance_id: str | None = None,
     agent_id: str = "developer",
     project_id: str | None = "test-project",
+    parent_id: str | None = None,
 ) -> str:
-    """Insert an Instance row and return its ID."""
+    """Insert an Instance row and return its ID.
+
+    ``parent_id`` defaults to ``None`` (a root instance); the
+    P-A ``root_only`` tests pass a non-null value here to seed a
+    child instance and assert that the GET /work endpoint omits
+    work bound to it by default.
+    """
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -153,6 +160,7 @@ def _seed_instance(
             created_at=now_iso,
             updated_at=now_iso,
             paused_at=None,
+            parent_id=parent_id,
         )
         s.add(inst)
         s.commit()
@@ -523,3 +531,53 @@ class TestSerialization:
         # Belt-and-suspenders: decoded nulls are Python None.
         assert item["result_summary"] is None
         assert item["error"] is None
+
+
+# ─── P-A: GET /api/work root_only query param ───────────────────────────────
+# Phase 5 (2026-06-27) of ``feature/virtual-job-management-surface``.
+# The router forwards the ``root_only`` query parameter to
+# ``WorkResolverService.list_work``. Default is ``true`` (omits
+# child-instance work); ``?root_only=false`` returns the full union.
+
+
+class TestRootOnlyParam:
+    """``GET /api/work?root_only=...`` controls P-A child-instance scoping."""
+
+    def test_work_endpoint_root_only_param(
+        self, client: TestClient, engine: Engine
+    ):
+        """Default omits child-instance rows; ``?root_only=false``
+        includes them.
+
+        Mirrors the resolver-level test in
+        ``tests/unit/services/test_work_resolver.py`` at the HTTP
+        boundary — proves the new query param is plumbed through
+        end-to-end and that the management view defaults to the
+        root-scoped subset the jober cares about.
+        """
+        root_id = _seed_instance(engine, instance_id="inst-router-root")
+        child_id = _seed_instance(
+            engine,
+            instance_id="inst-router-child",
+            parent_id="inst-router-root",
+        )
+        root_wid = _seed_task(engine, instance_id=root_id)
+        child_wid = _seed_task(engine, instance_id=child_id)
+
+        # Default (root_only=True) → only the root task is returned.
+        resp = client.get("/api/work")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert {item["work_id"] for item in body} == {root_wid}
+
+        # Explicit ?root_only=false → both come back.
+        resp = client.get("/api/work?root_only=false")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert {item["work_id"] for item in body} == {root_wid, child_wid}
+
+        # Explicit ?root_only=true matches the default.
+        resp = client.get("/api/work?root_only=true")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert {item["work_id"] for item in body} == {root_wid}

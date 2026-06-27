@@ -114,8 +114,15 @@ def _seed_instance(
     agent_id: str = "developer",
     project_id: str | None = "test-project",
     status: str = "running",
+    parent_id: str | None = None,
 ) -> str:
-    """Insert an ``Instance`` row. Returns the ``instance_id``."""
+    """Insert an ``Instance`` row. Returns the ``instance_id``.
+
+    ``parent_id`` defaults to ``None`` (a root instance). Tests for the
+    P-A ``root_only`` scoping pass a non-null value here to seed a
+    child instance, then assert that work bound to it is filtered
+    out by ``list_work(root_only=True)``.
+    """
     iid = instance_id or f"inst-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -129,6 +136,7 @@ def _seed_instance(
             created_at=now_iso,
             updated_at=now_iso,
             paused_at=None,
+            parent_id=parent_id,
         )
         s.add(inst)
         s.commit()
@@ -697,6 +705,186 @@ class TestListWork:
             assert r.project_id == "proj-match"
             assert r.instance_id == "i-match"
             assert r.status == "processing"
+
+
+# ─── P-A: WorkResolverService.list_work root_only scoping ──────────────────
+# Phase 5 (2026-06-27) of ``feature/virtual-job-management-surface``.
+# ``list_work(root_only=True)`` drops work whose backing instance has
+# a non-null ``parent_id`` so the jober's management view stays
+# scoped to the roots it bound jobs to. These tests cover the
+# Task-side guard, the JobItem-side batched parent_id lookup, the
+# report-tasks-are-parent-bound exception (reviewer S2), and the
+# filter-before-pagination ordering (reviewer W1).
+
+
+class TestListWorkRootOnly:
+    """``list_work(root_only=True)`` excludes child-instance work.
+
+    The jober manages work it bound to a root instance. Child
+    turns are internal mechanics of that root's job and have no
+    link back to the originating ``job_id`` — surfacing them as
+    first-class work units is noise. ``root_only=True`` (default)
+    drops them; ``root_only=False`` restores the full union.
+    """
+
+    def test_list_work_root_only_excludes_children(
+        self, engine, resolver
+    ):
+        """With ``root_only=True`` only the root's Task is returned;
+        ``root_only=False`` returns both root and child.
+
+        The default ``root_only=True`` (P-A) drops child-instance
+        Task rows. The explicit ``False`` opt-out returns the union
+        so callers can still get the pre-P-A view.
+        """
+        # Seed a root instance + a child instance, one Task each.
+        root_id = _seed_instance(engine, instance_id="inst-root")
+        child_id = _seed_instance(
+            engine, instance_id="inst-child", parent_id="inst-root"
+        )
+        root_wid = _seed_task(engine, instance_id="inst-root")
+        child_wid = _seed_task(engine, instance_id="inst-child")
+
+        # Default (root_only=True) → only root.
+        root_scoped = resolver.list_work()
+        assert {r.work_id for r in root_scoped} == {root_wid}
+        assert root_scoped[0].instance_id == root_id
+
+        # Explicit root_only=False → both.
+        all_work = resolver.list_work(root_only=False)
+        assert {r.work_id for r in all_work} == {root_wid, child_wid}
+        instance_ids = {r.instance_id for r in all_work}
+        assert instance_ids == {root_id, child_id}
+
+    def test_list_work_root_only_keeps_jobs(
+        self, engine, resolver
+    ):
+        """JobItem bound to a root is kept under ``root_only=True``;
+        JobItem whose instance is a child is excluded.
+
+        The JobItem branch uses a single batched SELECT against
+        ``instances`` to identify child backing instances, then
+        drops the corresponding JobItem rows post-fetch. JobItems
+        with ``instance_id IS NULL`` (queue-stage) are kept — they
+        have no parent relationship.
+        """
+        root_id = _seed_instance(engine, instance_id="inst-job-root")
+        child_id = _seed_instance(
+            engine, instance_id="inst-job-child", parent_id="inst-job-root"
+        )
+        # Root-bound JobItem → kept.
+        root_jid = _seed_job(
+            engine, instance_id=root_id, status=JobStatus.PENDING.value
+        )
+        # Child-bound JobItem → excluded.
+        _seed_job(
+            engine, instance_id=child_id, status=JobStatus.PENDING.value
+        )
+        # Queue-stage JobItem (instance_id None) → kept.
+        queued_jid = _seed_job(
+            engine, instance_id=None, status=JobStatus.PENDING.value
+        )
+
+        records = resolver.list_work()
+        work_ids = {r.work_id for r in records}
+
+        assert root_jid in work_ids
+        assert queued_jid in work_ids
+        # The child-bound JobItem must NOT appear.
+        assert len(records) == 2
+
+    def test_list_work_root_only_reports_not_excluded(
+        self, engine, resolver
+    ):
+        """Report tasks (``process_report`` / ``send_report``) are
+        parent-bound — ``child_reports.py:649-656`` sets their
+        ``Task.instance_id`` to the ROOT instance's id, not the
+        child's. So they are STILL visible under ``root_only=True``.
+
+        Reviewer S2: this is the intended behaviour. Only child
+        ``process_message`` turns (the child's private execution
+        rows) are excluded — reports surface under the root and
+        are part of the jober's management view.
+        """
+        root_id = _seed_instance(engine, instance_id="inst-report-root")
+        # A report task is attributed to the ROOT instance (not the
+        # child). We model that here by seeding a Task whose
+        # instance_id is the root, with task_type=process_report.
+        report_wid = _seed_task(
+            engine,
+            instance_id=root_id,
+            task_type="process_report",
+            status=TaskStatus.PENDING.value,
+        )
+        # Contrast: a child-instance process_message turn IS
+        # excluded.
+        child_id = _seed_instance(
+            engine, instance_id="inst-report-child", parent_id="inst-report-root"
+        )
+        _seed_task(
+            engine,
+            instance_id=child_id,
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+        )
+
+        records = resolver.list_work()
+
+        # Report (root-bound) survives the filter; child turn is
+        # dropped.
+        work_ids = {r.work_id for r in records}
+        assert report_wid in work_ids
+        assert len(records) == 1
+        assert records[0].kind == "report"
+
+        # Confirm the symmetry with root_only=False.
+        all_records = resolver.list_work(root_only=False)
+        assert {r.work_id for r in all_records} == work_ids | {
+            r.work_id for r in all_records if r.instance_id == child_id
+        }
+
+    def test_list_work_root_only_pagination_order(
+        self, engine, resolver
+    ):
+        """``root_only`` filter is applied BEFORE any future
+        pagination/limit, so a capped page cannot shrink
+        unpredictably after the slice (reviewer W1).
+
+        Concretely: seed 30 tasks where 10 are child-instance
+        (excluded). With ``root_only=True`` the resolver returns
+        exactly 20 records — proving the filter happened at the
+        resolver layer (not deferred to a router/UI slice where a
+        limit=20 would yield 10 records).
+        """
+        root_id = _seed_instance(engine, instance_id="inst-pg-root")
+        child_id = _seed_instance(
+            engine, instance_id="inst-pg-child", parent_id="inst-pg-root"
+        )
+        root_wids: list[str] = []
+        for _ in range(20):
+            root_wids.append(
+                _seed_task(engine, instance_id=root_id)
+            )
+        child_wids: list[str] = []
+        for _ in range(10):
+            child_wids.append(
+                _seed_task(engine, instance_id=child_id)
+            )
+
+        # root_only=True: only the 20 root tasks come back.
+        records = resolver.list_work()
+        assert len(records) == 20
+        assert {r.work_id for r in records} == set(root_wids)
+        # Sanity: every returned record is root-bound.
+        assert {r.instance_id for r in records} == {root_id}
+
+        # root_only=False: the full union of 30 rows comes back.
+        all_records = resolver.list_work(root_only=False)
+        assert len(all_records) == 30
+        assert (
+            {r.work_id for r in all_records}
+            == set(root_wids) | set(child_wids)
+        )
 
 
 # ─── Phase 2 (Batch 3): JobQueueService.get_work and reconcile_terminal_watches ─

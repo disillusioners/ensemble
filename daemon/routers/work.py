@@ -121,6 +121,14 @@ async def list_work(
         default=None,
         description="Work kind: job, turn, report, or task",
     ),
+    root_only: bool = Query(
+        default=True,
+        description=(
+            "When true (default), exclude work whose backing instance "
+            "has a non-null parent_id — i.e. child-instance turns. "
+            "Set false to return the full root + child union."
+        ),
+    ),
     resolver: "WorkResolverService" = Depends(get_work_resolver),
 ) -> list[dict[str, Any]]:
     """List work records across both worker-pool and job-queue tables.
@@ -140,6 +148,12 @@ async def list_work(
         kind: Optional kind filter (``job``, ``turn``, ``report``,
             or ``task`` for the backward-compatible turn+report
             union).
+        root_only: When ``True`` (default), drop child-instance
+            work so the management view stays scoped to the roots
+            the jober bound jobs to. ``False`` returns the full
+            union (debug escape hatch). See
+            ``WorkResolverService.list_work`` for the rationale
+            (P-A, ``docs/plans/virtual-job-tool-completeness.md``).
         resolver: Injected WorkResolverService (via Depends).
 
     Returns:
@@ -164,6 +178,7 @@ async def list_work(
         instance_id=instance_id,
         status=status,
         kind=kind,
+        root_only=root_only,
     )
     return [r.to_dict() for r in records]
 
