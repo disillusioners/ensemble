@@ -1237,10 +1237,19 @@ class TestCleanupTerminalJobLocks:
             priority=5, job_metadata=None,
         )
         from sqlalchemy import text
+        from daemon.repositories.job_queue.models import status_to_admission
         with repository.engine.begin() as conn:
             conn.execute(
-                text("UPDATE job_queue_items SET status='completed' WHERE job_id=:id"),
-                {"id": job.job_id},
+                text(
+                    "UPDATE job_queue_items "
+                    "SET status=:status, admission_state=:admission_state "
+                    "WHERE job_id=:id"
+                ),
+                {
+                    "status": "completed",
+                    "admission_state": status_to_admission("completed"),
+                    "id": job.job_id,
+                },
             )
         from daemon.repositories.job_queue.models import JobLock
         lock = JobLock(

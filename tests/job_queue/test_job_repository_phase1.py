@@ -135,8 +135,17 @@ class TestFindJobsByInstance:
 
         assert len(results) == 0
 
-    def test_includes_failed_jobs(self, repository, sample_job_data):
-        """Test it INCLUDES failed jobs (Fix 3: FAILED jobs can be cancelled during termination cleanup)."""
+    def test_excludes_failed_jobs(self, repository, sample_job_data):
+        """Test it EXCLUDES failed jobs (Phase 3 admission_state cutover).
+
+        Under the new model, FAILED maps to admission_state='done' (a
+        terminal state). ``find_jobs_by_instance`` queries
+        admission_state IN ('queued', 'active') — terminal jobs are no
+        longer included because they are already terminal and don't need
+        cancellation during termination cleanup. The status column still
+        carries 'failed' for backward-compatible API responses; the
+        admission_state column carries 'done'.
+        """
         instance_id = "failed-instance"
 
         job = repository.create(**sample_job_data)
@@ -145,10 +154,8 @@ class TestFindJobsByInstance:
 
         results = repository.find_jobs_by_instance(instance_id)
 
-        # FAILED jobs are now included so they can be cancelled during termination cleanup
-        assert len(results) == 1
-        assert results[0].job_id == started_job.job_id
-        assert results[0].status == "failed"
+        # Phase 3: FAILED jobs are excluded (admission_state='done').
+        assert len(results) == 0
 
     def test_excludes_cancelled_jobs(self, repository, sample_job_data):
         """Test it excludes cancelled jobs."""

@@ -88,7 +88,19 @@ def retry_engine(job_repo, queue_repo, dlq_service, default_config):
 
 
 def create_job(engine, **kwargs) -> JobItem:
-    """Helper to create a job directly in the database."""
+    """Helper to create a job directly in the database.
+
+    Phase 3: when ``status`` is supplied, also compute and set the
+    corresponding ``admission_state`` via :func:`status_to_admission`
+    (unless the caller already passed an explicit ``admission_state``).
+    Production code keeps the two columns in sync via the dual-write in
+    atomic_transition / atomic_retry / start_job — this helper bypasses
+    those paths and must maintain the invariant itself so the new
+    ``admission_state``-based queries see the correct state.
+    """
+    from daemon.repositories.job_queue.models import status_to_admission
+    if "status" in kwargs and "admission_state" not in kwargs:
+        kwargs["admission_state"] = status_to_admission(kwargs["status"])
     job = JobItem(**kwargs)
     with Session(engine) as session:
         session.add(job)
@@ -742,7 +754,13 @@ class TestFindRetryableJobs:
     """Tests for JobRetryEngine.find_retryable_jobs() method."""
 
     def test_find_retryable_jobs_past_due(self, retry_engine, job_repo, engine):
-        """Test finding jobs with next_retry_at in the past."""
+        """Test finding jobs with next_retry_at in the past.
+
+        Phase 3: under the new model, a "retryable" job is one that
+        atomic_retry has already scheduled (status='pending',
+        admission_state='queued', next_retry_at set) and whose retry
+        window has passed. The old model used status='failed' here.
+        """
         past_time = datetime.utcnow() - timedelta(hours=1)
         create_job(
             engine,
@@ -752,14 +770,14 @@ class TestFindRetryableJobs:
             message="Test message",
             source="api",
             project_id="project-abc",
-            status="failed",
+            status="pending",  # Phase 3: post-atomic_retry state
             retry_count=1,
             max_retries=3,
             next_retry_at=past_time.isoformat(),
         )
-        
+
         results = retry_engine.find_retryable_jobs()
-        
+
         assert len(results) == 1
         assert results[0].job_id == "job-123"
 
@@ -774,20 +792,20 @@ class TestFindRetryableJobs:
             message="Test message",
             source="api",
             project_id="project-abc",
-            status="failed",
+            status="pending",  # Phase 3
             retry_count=1,
             max_retries=3,
             next_retry_at=future_time.isoformat(),
         )
-        
+
         results = retry_engine.find_retryable_jobs()
-        
+
         assert len(results) == 0
 
     def test_find_retryable_jobs_with_project_filter(self, retry_engine, job_repo, engine):
         """Test filtering retryable jobs by project_id."""
         past_time = datetime.utcnow() - timedelta(hours=1)
-        
+
         create_job(
             engine,
             job_id="job-1",
@@ -796,7 +814,7 @@ class TestFindRetryableJobs:
             message="Test message",
             source="api",
             project_id="project-a",
-            status="failed",
+            status="pending",  # Phase 3
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
@@ -808,18 +826,22 @@ class TestFindRetryableJobs:
             message="Test message",
             source="api",
             project_id="project-b",
-            status="failed",
+            status="pending",  # Phase 3
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
-        
+
         results = retry_engine.find_retryable_jobs(project_id="project-a")
-        
+
         assert len(results) == 1
         assert results[0].job_id == "job-1"
 
     def test_find_retryable_jobs_excludes_non_failed(self, retry_engine, job_repo, engine):
-        """Test that non-FAILED jobs are excluded."""
+        """Test that jobs in a non-queued admission state are excluded.
+
+        Phase 3: COMPLETED maps to admission_state='done' (terminal),
+        so it is correctly excluded from find_retryable_jobs.
+        """
         past_time = datetime.utcnow() - timedelta(hours=1)
         create_job(
             engine,
@@ -829,13 +851,13 @@ class TestFindRetryableJobs:
             message="Test message",
             source="api",
             project_id="project-abc",
-            status="completed",  # Not failed
+            status="completed",  # Not retry-eligible (terminal)
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
-        
+
         results = retry_engine.find_retryable_jobs()
-        
+
         assert len(results) == 0
 
     def test_find_retryable_jobs_excludes_without_next_retry_at(self, retry_engine, job_repo, engine):

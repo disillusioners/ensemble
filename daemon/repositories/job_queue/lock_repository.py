@@ -17,12 +17,17 @@ logger = logging.getLogger(__name__)
 
 # Subquery used by ``clear_stale_job_locks`` / ``clear_terminal_job_locks``
 # to identify job_ids that still hold an active (non-terminal, non-deleted)
-# job. Matches the JobStatus enum values and the soft-delete convention
-# (deleted_at IS NULL). Defined at module scope so both cleanup paths and
-# tests share one source of truth.
+# job.
+#
+# Phase 3: queries admission_state instead of status. Must include BOTH
+# 'queued' AND 'active' (C3 fix) — the stale-lock sweep uses this in a
+# NOT IN clause. If only 'active' were matched, a 'queued' job that just
+# acquired its lock (but hasn't yet transitioned to 'active' in the same
+# transaction — the B1 single-transaction window) would have its lock
+# race-deleted. Including both states protects the entire admission window.
 _ACTIVE_JOB_IDS_SUBQUERY = (
     "SELECT job_id FROM job_queue_items "
-    "WHERE status IN ('pending', 'processing') "
+    "WHERE admission_state IN ('queued', 'active') "
     "  AND deleted_at IS NULL"
 )
 

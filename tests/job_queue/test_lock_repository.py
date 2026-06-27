@@ -584,12 +584,26 @@ class TestClearStaleJobLocks:
         )
 
     def _force_status(self, repository, job_id, status):
-        """Direct UPDATE to set job status (bypass normal flow for tests)."""
+        """Direct UPDATE to set job status (bypass normal flow for tests).
+
+        Phase 3: also writes the corresponding ``admission_state`` via
+        :func:`status_to_admission`. Production code (atomic_transition,
+        atomic_retry, start_job, etc.) does the dual-write automatically,
+        but this helper bypasses those paths so it must keep the two
+        columns in sync itself — otherwise the stale-lock subquery (which
+        now filters on admission_state) would treat a ``status='failed'``
+        row as active and leave its lock behind.
+        """
         from sqlalchemy import text
+        from daemon.repositories.job_queue.models import status_to_admission
         with repository.engine.begin() as conn:
             conn.execute(
-                text("UPDATE job_queue_items SET status = :s WHERE job_id = :id"),
-                {"s": status, "id": job_id},
+                text(
+                    "UPDATE job_queue_items "
+                    "SET status = :s, admission_state = :a "
+                    "WHERE job_id = :id"
+                ),
+                {"s": status, "a": status_to_admission(status), "id": job_id},
             )
 
     def test_orphan_lock_with_no_job_is_cleared(self, engine, lock_repo):

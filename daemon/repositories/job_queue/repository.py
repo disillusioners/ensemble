@@ -308,11 +308,13 @@ class JobRepository:
             return job
 
     def get_active_by_instance(self, instance_id: str) -> JobItem | None:
-        """Get the most recent active (PENDING or PROCESSING) job for an instance.
+        """Get the most recent active (QUEUED or ACTIVE) job for an instance.
 
-        Excludes terminal states (COMPLETED, FAILED, CANCELLED, DEAD_LETTER) and
-        soft-deleted rows. Used by callers that need to find the current live
-        job — never a historical one.
+        Filters on ``admission_state`` (not ``status``) so callers see jobs in
+        any admission-active state regardless of status mirror value. Excludes
+        terminal admission states (``COMPLETED``, ``FAILED``, ``CANCELLED``,
+        ``DEAD_LETTER``) and soft-deleted rows. Used by callers that need to
+        find the current live job — never a historical one.
 
         Args:
             instance_id: Instance identifier.
@@ -326,8 +328,8 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.instance_id == instance_id)
                 .where(JobItem.deleted_at.is_(None))
-                .where(JobItem.status.in_(
-                    [JobStatus.PENDING.value, JobStatus.PROCESSING.value]
+                .where(JobItem.admission_state.in_(
+                    [AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]
                 ))
                 .order_by(JobItem.created_at.desc(), JobItem.job_id)
             )
@@ -353,12 +355,18 @@ class JobRepository:
             return job
 
     def count_active_jobs_by_project(self, project_id: str) -> int:
-        """Count active jobs (PENDING + PROCESSING) for a project across all queues,
-        excluding soft-deleted jobs.
-        
+        """Count active jobs (QUEUED + ACTIVE admission_state) for a project
+        across all queues, excluding soft-deleted jobs.
+
+        Phase 3: queries admission_state instead of status. The defer
+        idle-gate uses this count to decide "is there pending work?" so
+        both 'queued' and 'active' must be included — a project with
+        only 'queued' jobs (no 'active' yet) must still block defer
+        queues (C2 fix for FIFO priority).
+
         Args:
             project_id: Project identifier.
-            
+
         Returns:
             Count of active jobs for the project.
         """
@@ -367,33 +375,40 @@ class JobRepository:
                 select(func.count())
                 .select_from(JobItem)
                 .where(JobItem.project_id == project_id)
-                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
+                .where(JobItem.admission_state.in_([AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]))
                 .where(JobItem.deleted_at.is_(None))
             )
             return db_session.exec(stmt).one()
 
     def count_active_jobs_in_non_defer_queues(self, project_id: str) -> int:
-        """Count active jobs (PENDING + PROCESSING) for a project in non-defer queues only.
-        
+        """Count active jobs (QUEUED + ACTIVE admission_state) for a project in
+        non-defer queues only.
+
         Used for defer queue idle check to avoid deadlock when multiple defer queues
         exist. This JOINs with job_queues table to exclude defer queue types.
-        
+
+        Phase 3: queries admission_state instead of status. Must include BOTH
+        'queued' AND 'active' (C2 fix) — the defer idle-gate in
+        ``job_processor.py`` uses this to decide whether non-defer queues are
+        idle; a project with only 'queued' work must still block defer queues
+        to preserve FIFO priority.
+
         Args:
             project_id: Project identifier.
-            
+
         Returns:
             Count of active jobs in non-defer queues for the project.
         """
         with SQLModelSession(self.engine) as db_session:
             # Import JobQueue model here to avoid circular imports
             from .models import JobQueue
-            
+
             stmt = (
                 select(func.count())
                 .select_from(JobItem)
                 .join(JobQueue, JobItem.queue_id == JobQueue.queue_id)
                 .where(JobItem.project_id == project_id)
-                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value]))
+                .where(JobItem.admission_state.in_([AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]))
                 .where(JobItem.deleted_at.is_(None))
                 .where(JobQueue.queue_type != QueueType.DEFER.value)
             )
@@ -460,10 +475,14 @@ class JobRepository:
 
     def list_pending_by_project(self, project_id: str) -> list[JobItem]:
         """List pending jobs for a specific project, ordered by priority.
-        
+
+        Phase 3: queries admission_state='queued' instead of status='pending'.
+        Under the new model, 'queued' is the admission bucket that covers
+        PENDING-status jobs (the dual-write keeps status in sync).
+
         Args:
             project_id: Project identifier.
-            
+
         Returns:
             List of pending JobItem objects for the project.
         """
@@ -471,7 +490,7 @@ class JobRepository:
             stmt = (
                 select(JobItem)
                 .where(JobItem.project_id == project_id)
-                .where(JobItem.status == JobStatus.PENDING.value)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
@@ -480,14 +499,16 @@ class JobRepository:
 
     def list_all_pending(self) -> list[JobItem]:
         """List all pending jobs (for jobs without project_id).
-        
+
+        Phase 3: queries admission_state='queued' instead of status='pending'.
+
         Returns:
             List of all pending JobItem objects.
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = (
                 select(JobItem)
-                .where(JobItem.status == JobStatus.PENDING.value)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), col(JobItem.created_at).asc())
             )
@@ -495,15 +516,22 @@ class JobRepository:
             return jobs
 
     def find_processing_jobs(self) -> list[JobItem]:
-        """Find all jobs currently in PROCESSING status.
+        """Find all jobs currently in ACTIVE admission_state.
 
         Used for startup recovery to identify orphaned jobs.
+
+        Phase 3: queries admission_state='active' instead of status='processing'.
+        Under the new model, 'active' includes both PROCESSING-status jobs AND
+        PAUSED-status jobs (a paused job keeps its lock and stays 'active' in
+        admission — pause is an Instance concern). See ``JobRecoveryService``.
+        The PAUSED-instance branch in recover_on_startup distinguishes
+        paused-vs-orphaned via Instance.status, NOT via this query's result.
 
         Returns:
             List of all processing JobItem objects.
         """
         with SQLModelSession(self.engine) as db_session:
-            stmt = select(JobItem).where(JobItem.status == JobStatus.PROCESSING.value).where(
+            stmt = select(JobItem).where(JobItem.admission_state == AdmissionState.ACTIVE.value).where(
                 JobItem.deleted_at.is_(None)
             )
             jobs = list(db_session.exec(stmt))
@@ -516,13 +544,20 @@ class JobRepository:
 
         Used for termination cleanup: cancel ALL MESSAGE jobs for an instance.
         Uses JobItem.instance_id column (indexed) — no JSON filtering needed.
+
+        Phase 3: queries admission_state IN ('queued', 'active') instead of
+        status IN ('pending', 'processing', 'failed', 'paused'). Under the
+        new model, any queued-or-active job for an instance should be found;
+        terminal ('done'/'dead') jobs are excluded. FAILED-status jobs that
+        are awaiting retry are admission_state='queued' (set by atomic_retry
+        in Phase 2) and remain included via that path.
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = (
                 select(JobItem)
                 .where(JobItem.instance_id == instance_id)
                 .where(JobItem.deleted_at.is_(None))
-                .where(JobItem.status.in_([JobStatus.PENDING.value, JobStatus.PROCESSING.value, JobStatus.FAILED.value, JobStatus.PAUSED.value]))
+                .where(JobItem.admission_state.in_([AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]))
             )
             stmt = stmt.order_by(JobItem.created_at.asc())
             if job_type:
@@ -531,10 +566,12 @@ class JobRepository:
 
     def list_pending_by_queue(self, queue_id: str) -> list[JobItem]:
         """List pending jobs for a specific queue, ordered by priority.
-        
+
+        Phase 3: queries admission_state='queued' instead of status='pending'.
+
         Args:
             queue_id: Queue identifier.
-            
+
         Returns:
             List of pending JobItem objects for the queue.
         """
@@ -542,7 +579,7 @@ class JobRepository:
             stmt = (
                 select(JobItem)
                 .where(JobItem.queue_id == queue_id)
-                .where(JobItem.status == JobStatus.PENDING.value)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )
@@ -1473,32 +1510,41 @@ class JobRepository:
             return result.rowcount
 
     def find_retryable_jobs(self, project_id: str = None) -> list[JobItem]:
-        """Find jobs eligible for retry (FAILED with next_retry_at <= now).
-        
-        IMPORTANT: This method only finds jobs that are FAILED with next_retry_at
-        set and passed. Jobs that are being cancelled (transitioning to CANCELLED)
-        are naturally excluded because their status will not be FAILED.
-        
+        """Find jobs eligible for retry (QUEUED admission_state with
+        next_retry_at set and passed).
+
+        Phase 3: queries admission_state='queued' AND next_retry_at IS NOT NULL
+        AND next_retry_at <= now. Under the new model, retried jobs are
+        back in admission_state='queued' (set by ``atomic_retry`` in Phase 2).
+        A fresh queued job (never tried) also matches
+        admission_state='queued' but has ``next_retry_at IS NULL`` — so
+        the ``next_retry_at IS NOT NULL`` clause is the discriminator that
+        selects ONLY retried jobs waiting for their retry window.
+
+        Jobs that are being cancelled (transitioning to admission_state='done')
+        are naturally excluded because their admission_state is no longer
+        'queued'.
+
         Args:
             project_id: Optional project ID to filter by.
-            
+
         Returns:
-            List of JobItem objects that are FAILED and their next_retry_at
-            has passed.
+            List of JobItem objects that are QUEUED with a non-null
+            next_retry_at <= now.
         """
         with SQLModelSession(self.engine) as session:
             now = datetime.now(timezone.utc).isoformat()
             stmt = (
                 select(JobItem)
-                .where(JobItem.status == JobStatus.FAILED.value)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
                 .where(JobItem.next_retry_at.is_not(None))
                 .where(col(JobItem.next_retry_at) <= now)
                 .where(JobItem.deleted_at.is_(None))
             )
-            
+
             if project_id is not None:
                 stmt = stmt.where(JobItem.project_id == project_id)
-            
+
             stmt = stmt.order_by(
                 col(JobItem.priority).desc(), JobItem.created_at.desc()
             )
