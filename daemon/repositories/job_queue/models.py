@@ -251,7 +251,16 @@ class JobItem(SQLModel, table=True):
     # :func:`status_to_admission`). Defaults to QUEUED so freshly-
     # inserted rows are already in the correct admission bucket
     # without needing a backfill on the INSERT path.
-    admission_state: str = Field(default=AdmissionState.QUEUED.value)
+    admission_state: str = Field(
+        default=AdmissionState.QUEUED.value,
+        # ``server_default`` keeps ``SQLModel.metadata.create_all()`` (used
+        # by the PG test conftest) in sync with the Alembic migration's
+        # ``DEFAULT 'queued'``. Without it, raw-SQL INSERTs that omit
+        # the column (e.g. tests/postgres/test_optimistic_locking.py)
+        # violate the NOT NULL constraint. Phase 5 will drop both the
+        # column and this default.
+        sa_column_kwargs={"server_default": text("'queued'")},
+    )
 
     # Timing
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
