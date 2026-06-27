@@ -124,8 +124,8 @@ def _insert_task(engine, instance_id: str, status: str) -> int:
         result = conn.execute(
             text(
                 "INSERT INTO task "
-                "(task_type, instance_id, status, created_at, version) "
-                "VALUES (:ttype, :iid, :status, :created_at, :version)"
+                "(task_type, instance_id, status, created_at, version, work_id) "
+                "VALUES (:ttype, :iid, :status, :created_at, :version, :work_id)"
             ),
             {
                 "ttype": "process_message",
@@ -133,6 +133,7 @@ def _insert_task(engine, instance_id: str, status: str) -> int:
                 "status": status,
                 "created_at": now,
                 "version": 0,
+                "work_id": str(uuid.uuid4()),
             },
         )
         # SQLite's lastrowid; matches the autoincrement integer id
@@ -164,7 +165,9 @@ _TASK_SCHEMA_DDL = (
     "  started_at DATETIME,"
     "  completed_at DATETIME,"
     "  last_heartbeat_at DATETIME,"
-    "  version INTEGER NOT NULL DEFAULT 0"
+    "  version INTEGER NOT NULL DEFAULT 0,"
+    "  work_id VARCHAR NOT NULL,"
+    "  UNIQUE(work_id)"
     ")"
 )
 _TASK_INDEXES_DDL = (

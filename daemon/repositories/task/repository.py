@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -108,6 +109,33 @@ class TaskRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = select(Task).where(Task.message_id == message_id)
+            return db_session.exec(stmt).first()
+
+    def get_by_work_id(self, work_id: str) -> Task | None:
+        """Get a task by its stable cross-system work identifier.
+
+        Phase 1 (Batch 2, 2026-06-27) of
+        feature/virtual-job-management-surface. The ``work_id``
+        column (UUID4 string, declared ``unique=True`` on the Task
+        SQLModel) is the virtual job resolver's correlation key
+        between a Task row and its corresponding JobItem row (or a
+        logical work unit spanning both). Lookups against the unique
+        index are O(log n) on both SQLite and PostgreSQL.
+
+        Mirrors :meth:`get_by_message` (same SQLModelSession
+        handling, same query style) so the data access layer stays
+        uniform across all the by-foreign-key lookup helpers.
+
+        Args:
+            work_id: The UUID4 work identifier assigned at Task
+                creation by the model's ``default_factory``.
+
+        Returns:
+            Task object or None if no task with that ``work_id``
+            exists.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = select(Task).where(Task.work_id == work_id)
             return db_session.exec(stmt).first()
 
     def find_running_by_instance(self, instance_id: str) -> Task | None:
@@ -682,6 +710,7 @@ class TaskRepository:
             task_type=row.task_type,
             instance_id=row.instance_id,
             message_id=row.message_id,
+            work_id=row.work_id,
             status=row.status,
             worker_id=row.worker_id,
             retry_count=row.retry_count if hasattr(row, 'retry_count') else 0,
@@ -1160,15 +1189,19 @@ class TaskRepository:
             # Pass Python booleans so the bound parameters are typed
             # correctly for both SQLite and PostgreSQL. This INSERT is
             # in the same transaction as the parent UPDATE above, so
-            # both succeed atomically or both roll back.
+            # both succeed atomically or both roll back. The new
+            # ``work_id`` column is a NOT NULL UUID4 generated here so
+            # the retry child has its own virtual-job identifier —
+            # distinct from the parent's work_id, since the retry is
+            # logically a new work attempt.
             result = conn.execute(
                 text("""
                     INSERT INTO task (task_type, instance_id, message_id, status,
                                       retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled)
+                                      cancel_requested, retry_scheduled, work_id)
                     VALUES (:task_type, :instance_id, :message_id, :status_pending,
                             :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled)
+                            :cancel_requested, :retry_scheduled, :work_id)
                     RETURNING *
                 """),
                 {
@@ -1181,6 +1214,7 @@ class TaskRepository:
                     "created_at": now,
                     "cancel_requested": False,
                     "retry_scheduled": False,
+                    "work_id": str(uuid.uuid4()),
                 }
             ).fetchone()
 
@@ -1424,14 +1458,17 @@ class TaskRepository:
             )
 
             # Create retry child. Same transaction as the parent UPDATE.
+            # New ``work_id`` is generated for the same reason as in
+            # ``schedule_retry`` above: a retry is a fresh logical work
+            # attempt and gets its own virtual-job identifier.
             result = conn.execute(
                 text("""
                     INSERT INTO task (task_type, instance_id, message_id, status,
                                       retry_count, next_retry_at, created_at,
-                                      cancel_requested, retry_scheduled)
+                                      cancel_requested, retry_scheduled, work_id)
                     VALUES (:task_type, :instance_id, :message_id, :status_pending,
                             :retry_count, :next_retry_at_str, :created_at,
-                            :cancel_requested, :retry_scheduled)
+                            :cancel_requested, :retry_scheduled, :work_id)
                     RETURNING *
                 """),
                 {
@@ -1444,6 +1481,7 @@ class TaskRepository:
                     "created_at": now,
                     "cancel_requested": False,
                     "retry_scheduled": False,
+                    "work_id": str(uuid.uuid4()),
                 },
             ).fetchone()
 

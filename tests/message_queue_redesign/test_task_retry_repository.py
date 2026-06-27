@@ -3,6 +3,7 @@
 import os
 import tempfile
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -93,11 +94,11 @@ def create_task_with_status(
                 INSERT INTO task (task_type, instance_id, message_id, status,
                                   retry_count, next_retry_at, cancel_requested,
                                   retry_scheduled, started_at, created_at,
-                                  cancel_requested_at)
+                                  cancel_requested_at, work_id)
                 VALUES (:task_type, :instance_id, :message_id, :status,
                         :retry_count, :next_retry_at, :cancel_requested,
                         :retry_scheduled, :started_at, :created_at,
-                        :cancel_requested_at)
+                        :cancel_requested_at, :work_id)
             """),
             {
                 "task_type": task_type,
@@ -111,6 +112,7 @@ def create_task_with_status(
                 "started_at": started_at,
                 "created_at": created_at,
                 "cancel_requested_at": created_at.isoformat() if cancel_requested else None,
+                "work_id": str(uuid.uuid4()),
             }
         )
         task_id = result.lastrowid

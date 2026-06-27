@@ -2,6 +2,7 @@
 
 import pytest
 import json
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -32,10 +33,10 @@ def _create_task_with_status(
                 """
                 INSERT INTO task (task_type, instance_id, message_id, status,
                                   retry_count, created_at, cancel_requested,
-                                  retry_scheduled)
+                                  retry_scheduled, work_id)
                 VALUES (:task_type, :instance_id, :message_id, :status,
                         :retry_count, :created_at, :cancel_requested,
-                        :retry_scheduled)
+                        :retry_scheduled, :work_id)
                 """
             ),
             {
@@ -47,6 +48,7 @@ def _create_task_with_status(
                 "created_at": created_at,
                 "cancel_requested": False,
                 "retry_scheduled": False,
+                "work_id": str(uuid.uuid4()),
             },
         )
         task_id = result.lastrowid

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import enum
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -70,6 +71,13 @@ class Task(SQLModel, table=True):
 
     # Primary key (INTEGER PRIMARY KEY AUTOINCREMENT for SQLite)
     id: int | None = Field(default=None, primary_key=True)
+
+    # Stable cross-system work identifier (UUID4 string). Lets the virtual
+    # job resolver correlate a Task row with a corresponding JobItem row
+    # (or a logical work unit that spans both) without depending on the
+    # integer primary key. Unique + indexed for O(1) lookup. See
+    # feature/virtual-job-management-surface.
+    work_id: str = Field(default_factory=lambda: str(uuid.uuid4()), index=True, unique=True, nullable=False)
 
     # Task identification
     task_type: str = Field(default=TaskType.PROCESS_MESSAGE.value)
@@ -143,6 +151,7 @@ class Task(SQLModel, table=True):
 
         return {
             "id": self.id,
+            "work_id": self.work_id,
             "task_type": self.task_type,
             "instance_id": self.instance_id,
             "message_id": self.message_id,

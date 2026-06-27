@@ -382,9 +382,9 @@ def _insert_task(
             text(
                 "INSERT INTO task "
                 "(task_type, instance_id, status, created_at, version, "
-                " retry_count, cancel_requested, retry_scheduled) "
+                " retry_count, cancel_requested, retry_scheduled, work_id) "
                 "VALUES (:ttype, :iid, :status, :created_at, :version, "
-                " :retry_count, :cancel_requested, :retry_scheduled) "
+                " :retry_count, :cancel_requested, :retry_scheduled, :work_id) "
                 "RETURNING id"
             ),
             {
@@ -396,6 +396,7 @@ def _insert_task(
                 "retry_count": 0,
                 "cancel_requested": False,
                 "retry_scheduled": False,
+                "work_id": str(uuid.uuid4()),
             },
         )
         return result.scalar()

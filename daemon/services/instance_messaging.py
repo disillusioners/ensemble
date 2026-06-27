@@ -138,6 +138,18 @@ class _PreparedEnqueueContext(NamedTuple):
     # semantic shift from JobItem UUID → Task int is intentional and
     # documented on AsyncMessageResult.job_id).
     task_id: int | None
+    # Virtual Job Management Surface (Phase 1, Batch 3,
+    # 2026-06-27). The stable cross-system ``work_id`` (UUID4 string)
+    # minted at Task row creation. This is the truthful handle for the
+    # virtual job resolver — callers pass it back to ``GET /work/{id}``
+    # and ``work_resolver.resolve_work`` looks it up uniformly across
+    # ``task`` and ``job_queue_items``. Supersedes ``task_id`` as the
+    # ``AsyncMessageResult.job_id`` payload (see
+    # ``enqueue_message``); ``task_id`` is retained for callers that
+    # still want the int PK (currently nobody does, but it stays in the
+    # NamedTuple for the existing test surface). ``None`` only when
+    # the Task insert itself failed (mirrors ``task_id``).
+    work_id: str | None
 
 
 class ActivityCallbackHandler(BaseCallbackHandler):
@@ -807,6 +819,15 @@ class InstanceMessagingService:
         # ``new_job_id`` (the semantic shift from JobItem UUID → Task int
         # is intentional and documented on AsyncMessageResult.job_id).
         task_id: int | None = None
+        # Virtual Job Management Surface (Phase 1, Batch 3,
+        # 2026-06-27): capture ``Task.work_id`` alongside ``task.id``.
+        # The Task model's ``work_id`` column has a ``default_factory``
+        # that mints a UUID4 at construction, so the value is available
+        # immediately after ``session.add(task)`` — no DB round-trip
+        # needed to read it (unlike ``task.id``, which requires the
+        # post-commit ``refresh()``). Populated by ``default_factory``
+        # on row construction.
+        work_id: str | None = None
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
@@ -836,6 +857,12 @@ class InstanceMessagingService:
                 created_at=datetime.now(timezone.utc),
             )
             session.add(task)
+            # ``task.work_id`` is populated by the model's
+            # ``default_factory`` at construction (UUID4 string,
+            # ``unique=True, index=True``). Capture it now so we don't
+            # have to wait for the post-commit ``refresh()`` to read it
+            # back from the DB. See feature/virtual-job-management-surface.
+            work_id = task.work_id
 
             # 3. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED.
             #    COMPLETED instances are reactivated on new messages (conversation continues).
@@ -911,6 +938,7 @@ class InstanceMessagingService:
             instance_agent_id=instance_agent_id,
             previous_status=previous_status,
             task_id=task_id,
+            work_id=work_id,
         )
 
     async def enqueue_message(
@@ -934,11 +962,14 @@ class InstanceMessagingService:
         This eliminates the dual-record coupling that caused the
         06f500af-class bugs.
 
-        ``AsyncMessageResult.job_id`` is set to ``str(task_id)`` as an
-        adapter for the removed ``JobItem.job_id``. The HTTP route discards
-        ``job_id``; the ``job_continue`` tool returns it as ``new_job_id``
-        — both continue to work because the Task PK is a stable identifier
-        the calling agent can later reference for status.
+        ``AsyncMessageResult.job_id`` is set to ``task.work_id`` (the
+        stable cross-system UUID4 handle introduced in Phase 1, Batch
+        3 of ``feature/virtual-job-management-surface``). The HTTP
+        route discards ``job_id``; the ``job_continue`` tool returns it
+        as ``new_job_id``. This supersedes the prior ``str(task_id)``
+        adapter — the int PK was a stop-gap until ``work_id`` was
+        added; the resolver now resolves ``work_id`` uniformly across
+        ``task`` and ``job_queue_items``.
 
         New-message-during-pause behaviour:
 
@@ -985,13 +1016,18 @@ class InstanceMessagingService:
         if self._manager._worker_pool is not None:
             self._manager._worker_pool.notify_work()
 
-        # ``job_id`` adapter: ``str(task_id)`` preserves the API contract for
-        # the only consumer that reads it (``job_continue`` tool → returns
-        # as ``new_job_id`` to the calling agent). The HTTP ``send_message``
-        # route discards ``job_id`` entirely. The semantic shift from
-        # ``JobItem.job_id`` (UUID) to ``Task.id`` (int) is intentional and
-        # documented on ``AsyncMessageResult.job_id``.
-        job_id = str(ctx.task_id) if ctx.task_id is not None else None
+        # ``job_id`` adapter: ``task.work_id`` (UUID4) is the stable
+        # cross-system handle minted by the Task model's
+        # ``default_factory``. The HTTP ``send_message`` route discards
+        # ``job_id`` entirely; the ``job_continue`` tool surfaces it as
+        # ``new_job_id`` to the calling agent — both work because the
+        # UUID4 is universally unique and the resolver
+        # (``daemon.services.work_resolver``) accepts it on both the
+        # ``task`` and ``job_queue_items`` sides of the union.
+        # ``work_id`` is always populated by the Task model's
+        # ``default_factory`` (NOT NULL on the column), so no fallback
+        # is needed.
+        job_id = ctx.work_id
 
         logger.debug(
             f"Enqueued message {ctx.message_id} for instance {instance_id} "

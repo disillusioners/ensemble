@@ -17,7 +17,9 @@ What's verified here:
   * Task row is created in the same transaction.
   * WorkerPool is notified.
   * Instance ``version`` + ``last_activity_at`` are bumped.
-  * ``AsyncMessageResult.job_id`` is ``str(task_id)``.
+  * ``AsyncMessageResult.job_id`` is ``task.work_id`` (the stable
+    cross-system UUID4 handle — Virtual Job Management Surface
+    Phase 1, Batch 3).
   * ``images`` and ``priority`` are stored on the MessageQueue row.
   * SSE ``status_change`` is emitted on transitions.
   * PAUSED instances are NOT auto-resumed.
@@ -342,13 +344,23 @@ class TestUnifiedEnqueueDispatcher:
         )
 
     @pytest.mark.asyncio
-    async def test_7_returns_async_message_result_with_job_id_str_task_id(
+    async def test_7_returns_async_message_result_with_job_id_task_work_id(
         self, engine, manager, messaging_service
     ):
-        """``AsyncMessageResult.job_id`` = ``str(task_id)`` — stable identifier
-        for callers (the ``job_continue`` tool returns it as ``new_job_id``).
-        The semantic shift from ``JobItem.job_id`` (UUID) to ``Task.id`` (int)
-        is intentional and documented on ``AsyncMessageResult.job_id``.
+        """``AsyncMessageResult.job_id`` = ``task.work_id`` — stable
+        cross-system UUID4 handle minted at Task row creation by the
+        model's ``default_factory``.
+
+        Phase 1 (Batch 3, 2026-06-27) of
+        ``feature/virtual-job-management-surface`` flipped the
+        ``job_id`` payload from ``str(task.id)`` (int PK, a stop-gap
+        after D13 retired the JobItem UUID) to ``task.work_id``
+        (UUID4, the truthful resolver handle). The HTTP
+        ``send_message`` route discards ``job_id``; the
+        ``job_continue`` tool surfaces it as ``new_job_id`` to the
+        calling agent — both work because the resolver
+        (``daemon.services.work_resolver``) accepts ``work_id`` on
+        both the ``task`` and ``job_queue_items`` sides of the union.
         """
         _seed_instance(engine, instance_id="inst-1")
 
@@ -361,8 +373,19 @@ class TestUnifiedEnqueueDispatcher:
         assert result.message_id
         assert result.instance_id == "inst-1"
         assert result.status == "queued"
-        assert result.job_id is not None and result.job_id.isdigit(), (
-            f"job_id must be str(task_id) (stringified int), got {result.job_id!r}"
+        # ``work_id`` is a UUID4 string (``xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx``
+        # with hex digits and hyphens). The old assertion
+        # (``isdigit()``) tested for the int-PK adapter which has now
+        # been superseded; the new contract is "is a UUID4 string".
+        assert result.job_id is not None, "job_id must be set"
+        # Verify the UUID4 shape: 8-4-4-4-12 hex digits, hyphens at
+        # fixed positions, and version nibble '4' at position 14.
+        import re
+        uuid4_pattern = re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+        assert uuid4_pattern.match(result.job_id), (
+            f"job_id must be a UUID4 (task.work_id), got {result.job_id!r}"
         )
 
     @pytest.mark.asyncio

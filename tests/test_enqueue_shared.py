@@ -770,11 +770,21 @@ class TestDispatchLayerInvariants:
         manager._job_queue_service.enqueue.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_returns_job_id_as_str_of_task_id(
+    async def test_returns_job_id_as_task_work_id(
         self, engine, manager, messaging_service
     ):
-        """``AsyncMessageResult.job_id`` = ``str(task_id)`` — stable identifier
-        for callers (the ``job_continue`` tool returns it as ``new_job_id``).
+        """``AsyncMessageResult.job_id`` = ``task.work_id`` — stable
+        cross-system UUID4 handle minted at Task row creation by the
+        model's ``default_factory``.
+
+        Phase 1 (Batch 3, 2026-06-27) of
+        ``feature/virtual-job-management-surface`` flipped the
+        ``job_id`` payload from ``str(task.id)`` (int PK, a stop-gap
+        after D13 retired the JobItem UUID) to ``task.work_id``
+        (UUID4, the truthful resolver handle). The HTTP
+        ``send_message`` route discards ``job_id``; the
+        ``job_continue`` tool surfaces it as ``new_job_id`` to the
+        calling agent.
         """
         _seed_instance(engine, instance_id="inst-1", status=InstanceStatus.RUNNING.value)
         with patch(
@@ -784,8 +794,14 @@ class TestDispatchLayerInvariants:
                 instance_id="inst-1", message="x", source="api"
             )
 
-        # ``job_id`` must be a stringified int (Task PK), not None, not
-        # the legacy ``"job-test-123"`` JobItem.job_id sentinel from the mock.
+        # ``job_id`` must be a UUID4 (task.work_id), not None, not the
+        # legacy ``"job-test-123"`` JobItem.job_id sentinel from the mock,
+        # and not a stringified int (the previous adapter contract).
         assert result.job_id is not None
-        assert result.job_id.isdigit()
-        assert int(result.job_id) > 0
+        import re
+        uuid4_pattern = re.compile(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        )
+        assert uuid4_pattern.match(result.job_id), (
+            f"job_id must be a UUID4 (task.work_id), got {result.job_id!r}"
+        )

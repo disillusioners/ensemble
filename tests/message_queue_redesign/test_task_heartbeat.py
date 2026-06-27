@@ -16,6 +16,7 @@ Covers:
 
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
@@ -168,13 +169,14 @@ class TestBackfillHeartbeats:
                 text(
                     "INSERT INTO task (task_type, instance_id, message_id, "
                     "status, worker_id, started_at, last_heartbeat_at, created_at, "
-                    "retry_count, cancel_requested, retry_scheduled) "
+                    "retry_count, cancel_requested, retry_scheduled, work_id) "
                     "VALUES ('process_message', 'legacy-inst', 'legacy-msg', "
-                    "'running', 'old-worker', :started, NULL, :created, 0, 0, 0)"
+                    "'running', 'old-worker', :started, NULL, :created, 0, 0, 0, :wid)"
                 ),
                 {
                     "started": datetime.now(timezone.utc) - timedelta(minutes=2),
                     "created": datetime.now(timezone.utc) - timedelta(minutes=3),
+                    "wid": str(uuid.uuid4()),
                 },
             )
 
@@ -201,13 +203,14 @@ class TestBackfillHeartbeats:
                 text(
                     "INSERT INTO task (task_type, instance_id, message_id, "
                     "status, started_at, last_heartbeat_at, created_at, "
-                    "retry_count, cancel_requested, retry_scheduled) "
+                    "retry_count, cancel_requested, retry_scheduled, work_id) "
                     "VALUES ('process_message', 'r', 'm', 'running', "
-                    ":s, NULL, :c, 0, 0, 0)"
+                    ":s, NULL, :c, 0, 0, 0, :wid)"
                 ),
                 {
                     "s": datetime.now(timezone.utc),
                     "c": datetime.now(timezone.utc),
+                    "wid": str(uuid.uuid4()),
                 },
             )
             # One COMPLETED with NULL heartbeat
@@ -215,13 +218,14 @@ class TestBackfillHeartbeats:
                 text(
                     "INSERT INTO task (task_type, instance_id, message_id, "
                     "status, started_at, last_heartbeat_at, created_at, "
-                    "retry_count, cancel_requested, retry_scheduled) "
+                    "retry_count, cancel_requested, retry_scheduled, work_id) "
                     "VALUES ('process_message', 'c', 'm', 'completed', "
-                    ":s, NULL, :c, 0, 0, 0)"
+                    ":s, NULL, :c, 0, 0, 0, :wid)"
                 ),
                 {
                     "s": datetime.now(timezone.utc) - timedelta(hours=1),
                     "c": datetime.now(timezone.utc) - timedelta(hours=1),
+                    "wid": str(uuid.uuid4()),
                 },
             )
         n = repository.backfill_heartbeats()
@@ -287,11 +291,11 @@ class TestRecoveryUsesHeartbeat:
                 text(
                     "INSERT INTO task (task_type, instance_id, message_id, "
                     "status, started_at, last_heartbeat_at, created_at, "
-                    "retry_count, cancel_requested, retry_scheduled) "
+                    "retry_count, cancel_requested, retry_scheduled, work_id) "
                     "VALUES ('process_message', 'legacy', 'm', 'running', "
-                    ":s, NULL, :c, 0, 0, 0)"
+                    ":s, NULL, :c, 0, 0, 0, :wid)"
                 ),
-                {"s": old_started, "c": old_started},
+                {"s": old_started, "c": old_started, "wid": str(uuid.uuid4())},
             )
 
         stale = repository.find_stale_running_tasks(threshold_minutes=5)

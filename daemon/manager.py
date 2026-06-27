@@ -1671,6 +1671,19 @@ class InstanceManager:
         - idx_task_running_heartbeat: partial index used by the
           recovery predicate; keeps stale-task lookups O(log n)
           even as completed/old rows accumulate.
+        - task.work_id + idx_task_work_id (Phase 1 Batch 2,
+          2026-06-27): stable cross-system work identifier (UUID4
+          string) so the virtual job resolver can correlate a Task
+          row with a corresponding JobItem row without depending on
+          the integer primary key. The column is declared
+          ``unique=True, nullable=False`` on the Task SQLModel, so
+          fresh Postgres databases get column + index via
+          ``SQLModel.metadata.create_all()``; existing databases
+          need the ADD COLUMN + backfill (gen_random_uuid) +
+          CREATE UNIQUE INDEX + SET NOT NULL chain. The SQLite
+          counterpart lives in
+          ``daemon/migrations/versions/20260627_000001_virtual_job_work_id.sql``.
+          See feature/virtual-job-management-surface.
         - idx_infra_assets_attributes_gin /
           idx_infra_assets_relationships_gin: GIN indexes on the
           JSONB ``attributes`` and ``relationships`` columns of
@@ -1912,6 +1925,36 @@ class InstanceManager:
             "UPDATE projects SET creator_agent_id = 'developer' WHERE creator_agent_id = 'coder'",
             # Legacy table (may not exist on fresh DBs — wrapped in exception handler)
             "DO $$ BEGIN UPDATE jobqueue SET agent_id = 'developer', agent_dir = REPLACE(agent_dir, '/agents/coder', '/agents/developer') WHERE agent_id = 'coder'; EXCEPTION WHEN undefined_table THEN NULL; END $$",
+            # ── Virtual Job Work ID (Phase 1 Batch 2, 2026-06-27) ──────────
+            # Phase 1 of feature/virtual-job-management-surface. The Task
+            # table gets a stable cross-system work identifier (UUID4
+            # string) so the virtual job resolver can correlate a Task
+            # row with a corresponding JobItem row (or a logical work
+            # unit that spans both) without depending on the integer
+            # primary key. The SQLite path lives in
+            # ``daemon/migrations/versions/20260627_000001_virtual_job_work_id.sql``;
+            # this block is the PostgreSQL counterpart for existing
+            # production databases (the .sql runner is a NO-OP on PG).
+            # Fresh Postgres databases get the column + unique index via
+            # ``SQLModel.metadata.create_all()`` from
+            # ``Task.__table_args__`` / the work_id Field declaration.
+            #
+            # Order matters: ADD COLUMN (nullable) → backfill → unique
+            # index → SET NOT NULL. The NOT NULL constraint can only be
+            # added AFTER backfill guarantees no NULLs remain. The
+            # IF NOT EXISTS clauses keep every statement idempotent on
+            # re-run (this method runs on every PG startup).
+            "ALTER TABLE task ADD COLUMN IF NOT EXISTS work_id TEXT",
+            # Backfill historical rows with a real UUID4 so future
+            # writes (which all go through uuid.uuid4()) don't collide.
+            # gen_random_uuid() is provided by pgcrypto; the daemon
+            # enables it via ``CREATE EXTENSION`` in init scripts.
+            "UPDATE task SET work_id = gen_random_uuid()::text WHERE work_id IS NULL",
+            # Unique index matches the name used by the SQLite
+            # migration so both paths converge on the same index.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_task_work_id ON task(work_id)",
+            # Promote to NOT NULL now that backfill is complete.
+            "ALTER TABLE task ALTER COLUMN work_id SET NOT NULL",
         ]
         with self._engine.begin() as conn:
             for stmt in statements:
@@ -3073,22 +3116,24 @@ class InstanceManager:
         on the same event loop until the holder releases; there is no
         contention return path.
 
-        Phase 2.5 (2026-06-27, D13 consumption-site rewrite): ``old_job_id``
-        is now the WorkerPool Task ID (the row that
-        ``_pause_cascade_db_sync`` transitioned ``RUNNING → PAUSED``).
-        It is passed through to ``_process_resume_finalize`` and
-        ultimately ``_finalize_job_db_sync`` as the logical ``job_id``
-        — when there is no ``JobItem`` for the message (the post-D13
-        norm), ``_finalize_job_db_sync`` accepts ``job_id=None`` and
-        skips Step 1 (JobItem UPDATE) while still running Steps 2+3
-        (instance status + lock release).
+        Phase 1 (2026-06-27, Virtual Job Management Surface): ``old_job_id``
+        is now the Task's stable ``work_id`` (UUID4 string) — the same
+        identifier ``AsyncMessageResult.job_id`` carries. It is passed
+        through to ``_process_resume_finalize`` and ultimately
+        ``_finalize_job_db_sync`` as the logical ``job_id`` — when there
+        is no ``JobItem`` for the message (the post-D13 norm),
+        ``_finalize_job_db_sync`` accepts ``job_id=None`` and skips Step
+        1 (JobItem UPDATE) while still running Steps 2+3 (instance
+        status + lock release).
 
         Args:
             instance_id: The instance ID.
             message: The resume message text.
             message_id: The internal tracking message ID.
-            old_job_id: The WorkerPool Task ID (Phase 2.5; pre-D13
-                this was a ``JobItem.job_id``).
+            old_job_id: The Task's stable ``work_id`` (UUID4 string);
+                Phase 1 (Virtual Job Management Surface); pre-D13 this
+                was a ``JobItem.job_id``, Phase 2.5 it was the int Task
+                ``id``.
             silent: If True, resume from checkpoint without injecting a new message.
             images: Optional list of base64-encoded images for multimodal content.
             cancellation_token: Optional token for cooperative cancellation.
@@ -3264,28 +3309,30 @@ class InstanceManager:
 
             except Exception as e:
                 logger.error(f"[RESUME] instance={instance_id[:8]} background processing failed: {type(e).__name__}: {e}")
-                # Mark the Task as FAILED on failure. Phase 2.5: there is
-                # no JobItem to complete — ``old_job_id`` is the Task ID.
-                # We explicitly transition the task to FAILED so the
-                # per-instance guard releases — otherwise the next
-                # ``job_continue`` call is blocked by
-                # ``has_inflight_task`` (which counts PENDING + RUNNING
-                # tasks for the instance, see Task 2.5.8).
+                # Mark the Task as FAILED on failure. Phase 1 (Virtual
+                # Job Management Surface): ``old_job_id`` is now the
+                # Task's stable ``work_id`` (UUID4 string), not the int
+                # primary key — the int() parse was always ValueError so
+                # this safety net was dead code. Look the Task up by
+                # ``work_id`` and fail it by ``id`` so the per-instance
+                # guard releases — otherwise the next ``job_continue``
+                # call is blocked by ``has_inflight_task`` (which counts
+                # PENDING + RUNNING tasks for the instance).
                 try:
-                    task_id_int = int(old_job_id)
-                    await asyncio.to_thread(
-                        self._task_repo.fail_task,
-                        task_id_int,
-                        f"Resume failed: {e}",
+                    task = await asyncio.to_thread(
+                        self._task_repo.get_by_work_id, old_job_id
                     )
-                except (ValueError, TypeError):
-                    # ``old_job_id`` was a non-integer (e.g. a legacy
-                    # JobQueue UUID). Pre-D13 fallback — best-effort
-                    # only. Skip silently.
-                    logger.debug(
-                        f"[RESUME] could not parse old_job_id "
-                        f"{old_job_id!r} as Task ID, skipping fail_task"
-                    )
+                    if task is not None:
+                        await asyncio.to_thread(
+                            self._task_repo.fail_task,
+                            task.id,
+                            f"Resume failed: {e}",
+                        )
+                    else:
+                        logger.debug(
+                            f"[RESUME] no task found for work_id "
+                            f"{old_job_id!r}, skipping fail_task"
+                        )
                 except Exception:
                     pass
 
