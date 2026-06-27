@@ -2896,40 +2896,97 @@ class InstanceManager:
                 msg for msg in all_messages
                 if msg.status in (MessageStatus.PENDING.value, MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value)
             ]
+            completed_count = 0
+            skipped_phantom_count = 0
             for msg in pending_messages:
                 if msg.status in (MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value):
+                    # ANTIPHANTOM-RACE-FIX (Root Cause B — PRIMARY FIX):
+                    # Look up the corresponding task BEFORE marking this
+                    # PROCESSING/RETRYING message as COMPLETED. The race:
+                    # after ``_resume_cascade_db_sync`` lifted the pause and
+                    # woke the WorkerPool, a freshly-claimed PROCESS_REPORT
+                    # task (status RUNNING) may have transitioned its message
+                    # READY → PROCESSING just before this cleanup runs.
+                    # Marking such a message COMPLETED would "phantom-complete"
+                    # it and the subsequent ``cancel_task`` would kill the
+                    # worker's in-flight LLM call, stranding the parent (no
+                    # lifecycle event emitted).
+                    #
+                    # Safe to clean up the message ONLY when the task is in a
+                    # terminal/stale state — i.e. no worker will (or can)
+                    # deliver it. Task statuses that mean "safe to mark
+                    # message COMPLETED + cancel task":
+                    #   • PAUSED  — cascade hadn't reached it yet (defensive)
+                    #   • CANCELLED — cascade already cancelled it (PAUSED→CANCELLED)
+                    #   • COMPLETED / FAILED — task finished; message is orphan
+                    # Task statuses that mean "leave it alone — worker is/will be driving":
+                    #   • PENDING  — worker will claim naturally
+                    #   • RUNNING  — worker has claimed and is processing (LLM call active)
+                    # No task row at all → defensive: do NOT touch orphan messages.
+                    try:
+                        stale_task = await asyncio.to_thread(
+                            self._task_repo.get_by_message, msg.message_id
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to look up task for message {msg.message_id[:8]}...; "
+                            f"skipping cleanup (phantom-completion guard): {e}"
+                        )
+                        continue
+
+                    if stale_task is None:
+                        # Defensive: no task row → don't touch orphan messages.
+                        logger.info(
+                            f"[RESUME] skipping message {msg.message_id[:8]}... "
+                            f"— no task found (phantom-completion guard)"
+                        )
+                        skipped_phantom_count += 1
+                        continue
+
+                    if stale_task.status in (
+                        TaskStatus.PENDING.value,
+                        TaskStatus.RUNNING.value,
+                    ):
+                        # Worker is processing (RUNNING) or about to claim
+                        # (PENDING). Marking the message COMPLETED here would
+                        # kill the active LLM call or skip natural delivery.
+                        logger.info(
+                            f"[RESUME] skipping message {msg.message_id[:8]}... "
+                            f"— task {stale_task.id} status={stale_task.status} "
+                            f"is worker-driven (phantom-completion guard)"
+                        )
+                        skipped_phantom_count += 1
+                        continue
+
+                    # stale_task.status is PAUSED / CANCELLED / COMPLETED /
+                    # FAILED — the task will not deliver this message, so
+                    # it is safe to mark COMPLETED and cancel the task.
                     try:
                         await asyncio.to_thread(self._queue_repository.complete, msg.message_id)
+                        completed_count += 1
                         logger.info(f"Completed stale message entry {msg.message_id[:8]}... for resume")
                     except Exception as e:
                         logger.warning(f"Failed to complete stale message {msg.message_id[:8]}...: {e}")
                     # Cancel the WorkerPool task that drives this message so it
                     # is NOT re-armed/re-claimed on resume. ``_resume_cascade_db_sync``
-                    # transitions paused tasks PAUSED→PENDING; without cancelling
+                    # transitions PAUSED tasks PAUSED→CANCELLED; without cancelling
                     # here, the re-claimed ``process_message`` task would re-drive
                     # the graph a SECOND time (a duplicate turn that races with
                     # ``_resume_processing_background`` and corrupts the checkpoint
                     # — the add_messages reducer replaces the project-context
                     # message with a bare re-injection of the same ID).
                     try:
-                        stale_task = await asyncio.to_thread(
-                            self._task_repo.get_by_message, msg.message_id
+                        await asyncio.to_thread(
+                            self._task_repo.cancel_task,
+                            stale_task.id,
+                            "Superseded by resume_processing_job graph driver",
                         )
-                        if stale_task is not None and stale_task.status in (
-                            TaskStatus.PENDING.value,
-                            TaskStatus.RUNNING.value,
-                            TaskStatus.PAUSED.value,
-                        ):
-                            await asyncio.to_thread(
-                                self._task_repo.cancel_task,
-                                stale_task.id,
-                                "Superseded by resume_processing_job graph driver",
-                            )
-                            logger.info(
-                                f"[RESUME] cancelled stale task {stale_task.id} "
-                                f"(message {msg.message_id[:8]}...) — graph driving "
-                                f"owned by resume_processing_job"
-                            )
+                        logger.info(
+                            f"[RESUME] cancelled stale task {stale_task.id} "
+                            f"(message {msg.message_id[:8]}..., prior status="
+                            f"{stale_task.status}) — graph driving owned by "
+                            f"resume_processing_job"
+                        )
                     except Exception as e:
                         logger.warning(
                             f"Failed to cancel stale task for message "
@@ -2937,10 +2994,15 @@ class InstanceManager:
                         )
                 elif msg.status == MessageStatus.PENDING.value:
                     logger.info(f"Preserving PENDING message {msg.message_id[:8]}... for post-resume delivery")
-            completed_count = sum(1 for msg in pending_messages if msg.status in (MessageStatus.PROCESSING.value, MessageStatus.RETRYING.value))
             pending_count = sum(1 for msg in pending_messages if msg.status == MessageStatus.PENDING.value)
-            if completed_count > 0 or pending_count > 0:
-                logger.info(f"[RESUME] instance={instance_id[:8]} cleaned {completed_count} stale PROCESSING/RETRYING messages, preserved {pending_count} PENDING messages")
+            if completed_count > 0 or pending_count > 0 or skipped_phantom_count > 0:
+                logger.info(
+                    f"[RESUME] instance={instance_id[:8]} cleaned "
+                    f"{completed_count} stale PROCESSING/RETRYING messages, "
+                    f"preserved {pending_count} PENDING messages, "
+                    f"skipped {skipped_phantom_count} phantom-completion "
+                    f"guards (active worker)"
+                )
         except Exception as e:
             logger.warning(f"Failed to find/complete stale messages for {instance_id[:8]}...: {e}")
 

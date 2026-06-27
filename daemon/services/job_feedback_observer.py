@@ -311,6 +311,18 @@ class JobFeedbackObserver:
         self._subscriber_id: str = "job_feedback_observer"
         self._queue: asyncio.Queue | None = None
         self._task: asyncio.Task | None = None
+        # Strong references to in-flight ``_deferred_finalize_check``
+        # background tasks (B1 fix, 2026-06-27). Python's event loop
+        # only keeps weak references to ``asyncio.Task`` objects, so
+        # a fire-and-forget ``asyncio.create_task(...)`` whose return
+        # value is discarded can be garbage-collected mid-flight.
+        # Storing the task here (a set of strong refs) keeps the
+        # task alive until completion; the ``add_done_callback`` at
+        # every call site auto-removes the entry when the task
+        # finishes. The set is also drained and cancelled in
+        # :meth:`stop` (B2 fix) so deferred checks do not fire
+        # against a torn-down observer.
+        self._deferred_finalize_tasks: set[asyncio.Task] = set()
 
     def _bus_count_pending_for_target_sync(
         self, target_instance_id: str
@@ -444,6 +456,28 @@ class JobFeedbackObserver:
                 await self._task
             except asyncio.CancelledError:
                 pass
+
+        # B2 fix (2026-06-27): cancel any in-flight deferred
+        # finalize tasks (see ``self._deferred_finalize_tasks`` in
+        # ``__init__``). These background tasks sleep for ``delay``
+        # seconds (default 5s) before re-checking the bus. Without
+        # explicit cancellation at shutdown they would either (a)
+        # fire a stale finalize against a torn-down observer, or
+        # (b) leak task references that the event loop cannot
+        # clean up. ``_deferred_finalize_check`` propagates
+        # ``CancelledError`` so cancellation is clean.
+        for task in list(self._deferred_finalize_tasks):
+            if not task.done():
+                task.cancel()
+        if self._deferred_finalize_tasks:
+            # ``return_exceptions=True`` lets a stale ``CancelledError``
+            # not mask other unexpected errors raised by the tasks'
+            # cleanup paths (the deferred check swallows everything
+            # except ``CancelledError``).
+            await asyncio.gather(
+                *self._deferred_finalize_tasks, return_exceptions=True
+            )
+            self._deferred_finalize_tasks.clear()
 
         # Unsubscribe from EventBus
         self._event_bus.unsubscribe_all(self._subscriber_id)
@@ -710,8 +744,35 @@ class JobFeedbackObserver:
                             f"Skipping in_progress emit for "
                             f"{instance_id[:8]}... — no JobItem to "
                             f"notify (post-D13 MESSAGE path); "
-                            f"bus_pending={bus_pending} will resolve "
-                            f"via subsequent lifecycle event"
+                            f"bus_pending={bus_pending} — scheduling deferred finalize check"
+                        )
+                        # B3 fix (2026-06-27): the silent return that
+                        # previously lived here is the same
+                        # phantom-completion race that
+                        # ``_process_resume_finalize`` just patched in
+                        # Phase 2.5. The natural
+                        # child-completion → PROCESS_REPORT → lifecycle
+                        # event path SHOULD drive the finalize, but if
+                        # that chain breaks (e.g., the report Task
+                        # fires its lifecycle event before the
+                        # child-completion signal reaches the bus
+                        # watcher) the parent is left permanently
+                        # stuck. Schedule a deferred finalize check as
+                        # a safety net. The task reference is stored
+                        # in ``self._deferred_finalize_tasks`` (B1
+                        # fix) so the GC does not collect it during
+                        # the 5s sleep; ``add_done_callback`` auto-
+                        # removes the entry when the task completes;
+                        # ``stop()`` (B2 fix) cancels any in-flight
+                        # deferred tasks at observer shutdown.
+                        task = asyncio.create_task(
+                            self._deferred_finalize_check(
+                                instance_id, delay=5.0
+                            )
+                        )
+                        self._deferred_finalize_tasks.add(task)
+                        task.add_done_callback(
+                            self._deferred_finalize_tasks.discard
                         )
                         return
                     await self._emit_in_progress(ctx, instance_id)
@@ -1528,9 +1589,32 @@ class JobFeedbackObserver:
                 logger.debug(
                     f"Skipping in_progress emit for "
                     f"{instance_id[:8]}... — no JobItem to notify "
-                    f"(post-D13 MESSAGE path); bus_pending={bus_pending} "
-                    f"will resolve via subsequent lifecycle event"
+                    f"(post-D13 MESSAGE path); bus_pending={bus_pending}; "
+                    f"scheduling deferred finalize check as safety net"
                 )
+                # Schedule a deferred finalize as a safety net. The natural
+                # child-completion → PROCESS_REPORT → lifecycle event path
+                # SHOULD drive the finalize, but if that chain breaks (e.g.,
+                # the phantom completion race observed in the pause/resume
+                # E2E suite), this deferred check ensures the parent still
+                # reaches a terminal state. The check is idempotent:
+                # _finalize_job's internal guards (instance-status + bus
+                # gate re-check) prevent double-finalization.
+                #
+                # B1 fix (2026-06-27): the task reference MUST be stored
+                # in ``self._deferred_finalize_tasks``. Python's event loop
+                # only keeps weak references to ``asyncio.Task`` — a
+                # fire-and-forget task whose return value is discarded can
+                # be garbage-collected mid-flight (during the 5s sleep
+                # below). The strong reference in the set keeps the task
+                # alive; ``add_done_callback`` auto-removes the entry
+                # when the task finishes so the set does not grow
+                # unbounded.
+                task = asyncio.create_task(
+                    self._deferred_finalize_check(instance_id, delay=5.0)
+                )
+                self._deferred_finalize_tasks.add(task)
+                task.add_done_callback(self._deferred_finalize_tasks.discard)
                 return
             await self._emit_in_progress(ctx, instance_id)
             return
@@ -1549,6 +1633,170 @@ class JobFeedbackObserver:
         # _resolve_finalize_status → _finalize_job. The method maps
         # the string to InstanceStatus.COMPLETED.value internally.
         await self._finalize_job(ctx, instance_id, "completed", error=None)
+
+    async def _deferred_finalize_check(
+        self,
+        instance_id: str,
+        delay: float = 5.0,
+    ) -> None:
+        """Deferred safety net for resume finalize when ``ctx.job_id is None``.
+
+        Phase 2.5 (2026-06-27, D13): when a resume graph turn spawns a
+        child (``bus_pending > 0``) and there is no JobItem (post-D13
+        MESSAGE path), :meth:`_process_resume_finalize` cannot emit
+        ``in_progress`` (no JobItem to notify) and historically
+        returned silently — assuming a subsequent
+        child-completion → PROCESS_REPORT → lifecycle event chain
+        would finalize the parent.
+
+        That assumption can break (the phantom completion race observed
+        in the pause/resume E2E suite, where the report Task fires its
+        lifecycle event before the child-completion signal reaches the
+        bus watcher). When that happens the parent is left
+        permanently stuck in ``WAITING_CHILDREN``.
+
+        This method is a defense-in-depth backstop: after ``delay``
+        seconds, re-check the bus. If children are no longer pending
+        AND the instance is not already terminal, drive
+        :meth:`_finalize_job` ourselves. The internal guards in
+        :meth:`_finalize_job` (instance-status pre-check + bus gate
+        re-check inside :meth:`_finalize_job_db_sync`) make this
+        safe to call multiple times — a duplicate fire is a no-op.
+
+        The method is a background safety net: every code path is
+        wrapped in try/except so an exception here can never
+        propagate into the observer's main loop or wedge the daemon.
+        ``CancelledError`` IS propagated so the task is cleaned up
+        cleanly when the observer shuts down.
+
+        Args:
+            instance_id: The instance to re-check.
+            delay: Seconds to wait before the re-check (default 5.0).
+        """
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            # Observer is shutting down — propagate so the task is cleaned up.
+            raise
+        except Exception as e:
+            logger.warning(
+                f"Observer: deferred finalize sleep raised for "
+                f"{instance_id[:8]}...: {e}"
+            )
+            return
+
+        try:
+            bus = get_dependency_bus()
+            if bus is None:
+                logger.debug(
+                    f"Observer: deferred finalize skipped for "
+                    f"{instance_id[:8]}... — DependencyBus is None"
+                )
+                return
+
+            bus_pending = await bus.count_pending_for_target(instance_id)
+            if bus_pending > 0:
+                # Children still resolving — the natural
+                # lifecycle-event path will drive the finalize when
+                # the last child resolves (or another deferred check
+                # will fire if it does not). Nothing to do.
+                logger.debug(
+                    f"Observer: deferred finalize for "
+                    f"{instance_id[:8]}... found bus_pending={bus_pending} "
+                    f"— natural path or another deferred check will handle it"
+                )
+                return
+
+            ctx = await self._get_processing_job_for_instance(instance_id)
+            if ctx is None:
+                logger.debug(
+                    f"Observer: deferred finalize for "
+                    f"{instance_id[:8]}... — no processing context "
+                    f"available, skipping"
+                )
+                return
+
+            # Pre-check instance terminal status to avoid redundant
+            # work. The sync helper inside :meth:`_finalize_job` also
+            # has this guard, but checking here lets us emit a precise
+            # DEBUG log and skip the async finalize chain entirely
+            # when the lifecycle-event path already ran.
+            instance_status = await asyncio.to_thread(
+                self._read_instance_status_sync, instance_id
+            )
+            if instance_status is None:
+                logger.debug(
+                    f"Observer: deferred finalize for "
+                    f"{instance_id[:8]}... — instance row missing, skipping"
+                )
+                return
+            if instance_status in _TERMINAL_INSTANCE_STATUSES:
+                logger.debug(
+                    f"Observer: deferred finalize for "
+                    f"{instance_id[:8]}... — instance already terminal "
+                    f"(status='{instance_status}'), skipping"
+                )
+                return
+
+            logger.info(
+                f"Observer: deferred finalize firing for "
+                f"{instance_id[:8]}... (bus_pending=0, "
+                f"status='{instance_status}') — natural lifecycle event "
+                f"path did not arrive in {delay}s; driving finalize "
+                f"as safety net"
+            )
+            # B4 fix (2026-06-27): consult ``_resolve_finalize_status``
+            # so the parent-error override is applied here just as it
+            # is in :meth:`_process_event`. The "any child errored →
+            # parent finalizes as ERROR" rule must be uniform across
+            # every finalize path; without this consultation a parent
+            # whose last child errored but whose bus pending count
+            # happened to drop to 0 (e.g., the child completed with
+            # an error recorded) would be silently finalized as
+            # "completed" instead of "error". The default
+            # ``"completed"``/``None`` pair is the safe fallback for
+            # the no-bus-pending case — same hardcoded value as the
+            # prior call site, now routed through the central
+            # resolver so future overrides apply automatically.
+            status_to_finalize, error_for_finalize = _resolve_finalize_status(
+                bus, instance_id, "completed", None
+            )
+            await self._finalize_job(
+                ctx,
+                instance_id,
+                status_to_finalize,
+                error=error_for_finalize,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # Safety net: never propagate. Log at WARNING so the
+            # failure surfaces in operator logs without breaking the
+            # observer's main loop.
+            logger.warning(
+                f"Observer: deferred finalize raised for "
+                f"{instance_id[:8]}...: {e}"
+            )
+
+    def _read_instance_status_sync(self, instance_id: str) -> str | None:
+        """Read ``Instance.status`` for ``instance_id``. Returns ``None`` if missing.
+
+        Sync helper for use with ``asyncio.to_thread`` from
+        :meth:`_deferred_finalize_check`. Uses a plain ``Session``
+        (no ``WriteGuardSession``) because this is a read-only
+        pre-check — the authoritative terminal-state guard lives
+        inside :meth:`_finalize_job_db_sync` Step 2.
+
+        Args:
+            instance_id: The instance ID to look up.
+
+        Returns:
+            The ``status`` string (e.g. ``"running"``, ``"completed"``),
+            or ``None`` when the row is missing.
+        """
+        with Session(self._instance_manager.engine) as session:
+            instance = session.get(Instance, instance_id)
+            return instance.status if instance is not None else None
 
     async def _finalize_instance(
         self,
