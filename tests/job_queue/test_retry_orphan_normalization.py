@@ -65,7 +65,7 @@ def repository(engine):
     repo = JobRepository(engine)
     yield repo
     # Clean up after test
-    repo.hard_delete_completed()
+    repo.hard_delete_terminal()
     repo.hard_delete_by_project("__test_system_default__")
 
 

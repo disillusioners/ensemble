@@ -182,8 +182,9 @@ async def stream_job_events(
     resolves through the ``WorkResolverService`` (via
     ``JobQueueService.get_work``). Execution state — including
     ``status`` — is sourced from the joined Instance rather than
-    the JobItem mirror, satisfying the Phase 1 exit criterion that
-    ``job.status`` is read only by internal state-machine code. The
+    the JobItem mirror. Phase 4 froze the ``status`` column at the
+    INSERT default; ``admission_state`` is the sole authority and
+    is read only by internal state-machine code. The
     wire format is unchanged: ``_ResolvedWork.from_work_record``
     projects the WorkRecord onto the same JSON keys the frontend
     already consumes.

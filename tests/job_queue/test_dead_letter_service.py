@@ -200,7 +200,7 @@ class TestMoveToDLQ:
                     reason="MAX_RETRIES",
                 )
             assert exc_info.value.job_id == job.job_id
-            assert exc_info.value.current_status == JobStatus.PENDING.value
+            assert exc_info.value.current_status == AdmissionState.QUEUED.value
 
     def test_move_to_dlq_atomicity_both_succeed(self, engine, job_repository, dlq_repository, dead_letter_service, failed_job):
         """Test atomicity: both job transition and DLQ item creation succeed."""
@@ -303,7 +303,7 @@ class TestMoveToDLQStandalone:
                 reason="MAX_RETRIES",
             )
         assert exc_info.value.job_id == job.job_id
-        assert exc_info.value.current_status == JobStatus.PENDING.value
+        assert exc_info.value.current_status == AdmissionState.ACTIVE.value
         
         # Verify job is still in PROCESSING state (not modified)
         updated_job = job_repository.get(job.job_id)
@@ -468,7 +468,7 @@ class TestReplayFromDLQ:
         with pytest.raises(InvalidTransitionError) as exc_info:
             dead_letter_service.replay_from_dlq(dlq_item.dlq_id)
         
-        assert exc_info.value.from_status == JobStatus.FAILED.value
+        assert exc_info.value.from_status == AdmissionState.DONE.value
         assert exc_info.value.to_status == JobStatus.PENDING.value
 
 

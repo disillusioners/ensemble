@@ -932,10 +932,10 @@ class InstanceLifecycleService:
                     instance_id, job_type=None
                 )
                 for remaining_job in all_jobs:
-                    if remaining_job.status in ("completed", "cancelled", "dead_letter"):
+                    if remaining_job.admission_state in (AdmissionState.DONE.value, AdmissionState.DEAD.value):
                         continue
                     try:
-                        if remaining_job.status == "processing":
+                        if remaining_job.admission_state == AdmissionState.ACTIVE.value:
                             # Defensive: the helper should have already
                             # transitioned PROCESSING jobs to CANCELLED in
                             # the same transaction. complete_job() here is

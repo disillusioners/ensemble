@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from daemon.services.dead_letter_service import DeadLetterService, DLQItemNotFoundError
-from daemon.repositories.job_queue.models import DeadLetterItem as DLQModel
+from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS, DeadLetterItem as DLQModel
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT, MAX_SCHEDULE_EXECUTION_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -495,7 +495,7 @@ async def replay_dlq_item(
         
         return DLQReplayResponse(
             job_id=job.job_id,
-            status=job.status,
+            status=ADMISSION_STATE_TO_STATUS.get(job.admission_state, "pending"),
             message="Job queued for replay"
         )
     except DLQItemNotFoundError:

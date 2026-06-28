@@ -11,7 +11,7 @@ from pydantic import ValidationError
 from daemon.services.job_queue_service import JobQueueService, normalize_statuses
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS, AdmissionState, JobStatus
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
 from daemon.utils import create_service_dependency, validate_agent_id
 from .schemas import (
@@ -131,7 +131,9 @@ def _job_to_response(
         # exit criterion is "execution-state reads resolve through
         # the instance/work layer"; this branch is the documented
         # exception for callers that haven't migrated yet.
-        status = job.status
+        status = ADMISSION_STATE_TO_STATUS.get(
+            job.admission_state, JobStatus.PENDING.value
+        )
         instance_id = job.instance_id
         result_summary = job.result_summary
         error_message = job.error_message
@@ -266,7 +268,7 @@ async def create_job(
     # and was already non-pending when returned
     is_idempotent_return = False
     if body.idempotency_key and job.idempotency_key == body.idempotency_key:
-        if job.status != JobStatus.PENDING.value:
+        if job.admission_state != AdmissionState.QUEUED.value:
             is_idempotent_return = True
     
     # Job is always PENDING at creation - return position if project_id provided
@@ -331,7 +333,7 @@ async def get_job(
 
     # Get position if job is pending
     position = None
-    if job.status == JobStatus.PENDING.value and job.project_id:
+    if job.admission_state == AdmissionState.QUEUED.value and job.project_id:
         try:
             position = await service._get_queue_position(job.job_id, job.project_id)
         except Exception:
@@ -341,7 +343,7 @@ async def get_job(
     dlq_reason = None
     retry_count = None
     moved_to_dlq_at = None
-    if job.status == JobStatus.DEAD_LETTER.value:
+    if job.admission_state == AdmissionState.DEAD.value:
         dlq_item = dlq_service.get_dlq_by_job_id(job_id)
         if dlq_item:
             dlq_reason = dlq_item.reason
@@ -490,7 +492,7 @@ async def list_jobs(
     for job in jobs:
         # Get position if pending
         position = None
-        if job.status == JobStatus.PENDING.value and job.project_id:
+        if job.admission_state == AdmissionState.QUEUED.value and job.project_id:
             try:
                 position = await service._get_queue_position(job.job_id, job.project_id)
             except Exception:
@@ -500,7 +502,7 @@ async def list_jobs(
         dlq_reason = None
         retry_count = None
         moved_to_dlq_at = None
-        if job.status == JobStatus.DEAD_LETTER.value:
+        if job.admission_state == AdmissionState.DEAD.value:
             dlq_item = dlq_service.get_dlq_by_job_id(job.job_id)
             if dlq_item:
                 dlq_reason = dlq_item.reason

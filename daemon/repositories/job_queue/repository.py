@@ -716,8 +716,8 @@ class JobRepository:
         check and clobber each other's terminal-status writes).
 
         The new implementation issues a single
-        ``UPDATE job_queue_items SET status = :to_status, ...extra
-         WHERE job_id = :job_id AND status = :from_status``
+        ``UPDATE job_queue_items SET admission_state = :to_admission, ...extra
+         WHERE job_id = :job_id AND admission_state = :from_admission``
         and inspects ``rowcount``. On PostgreSQL, the EvalPlanQual
         recheck guarantees the status predicate is re-evaluated after the
         row lock is acquired, so a concurrent writer that flipped the
@@ -884,8 +884,7 @@ class JobRepository:
         Single guarded UPDATE::
 
             UPDATE job_queue_items
-            SET status = 'pending',
-                admission_state = 'queued',
+            SET admission_state = 'queued',
                 retry_count = retry_count + 1,   -- atomic SQL increment
                 next_retry_at = :next_retry_at,
                 failed_at = NULL,
@@ -1571,10 +1570,10 @@ class JobRepository:
         statement:
 
             UPDATE job_queue_items
-            SET status='cancelled', cancelled_at=:now
-            WHERE job_id=:job_id AND status IN ('pending','processing','failed')
+            SET admission_state='done', cancelled_at=:now
+            WHERE job_id=:job_id AND admission_state IN ('queued','active')
 
-        On PostgreSQL, EvalPlanQual re-evaluates the status-IN predicate
+        On PostgreSQL, EvalPlanQual re-evaluates the admission_state-IN predicate
         after the row lock is acquired, so a concurrent writer that
         flipped the status between our check and our write cannot slip
         past us. On SQLite, the single-statement UPDATE is atomic at
@@ -1739,8 +1738,13 @@ class JobRepository:
                 "agent_dir": job.agent_dir,
             }
 
-    def hard_delete_completed(self) -> int:
-        """Hard delete all completed jobs — use soft_delete() for normal operations.
+    def hard_delete_terminal(self) -> int:
+        """Hard delete all terminal jobs (admission_state='done').
+
+        Phase 4: renamed from ``hard_delete_completed``. The query now
+        gates on ``admission_state='done'`` which covers COMPLETED,
+        FAILED, and CANCELLED (all terminal jobs). Use soft_delete()
+        for normal operations.
         
         Returns:
             Number of jobs deleted.

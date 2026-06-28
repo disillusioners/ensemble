@@ -68,6 +68,19 @@ class AdmissionState(str, enum.Enum):
         return value in cls._value2member_map_
 
 
+# Reverse map: admission_state → representative legacy status.
+# Phase 4: the ``status`` column is frozen at INSERT default.
+# ``to_dict()`` and other serialization paths derive a representative
+# status from ``admission_state`` so downstream consumers that still
+# read the ``status`` key see an accurate value.
+ADMISSION_STATE_TO_STATUS: dict[str, str] = {
+    AdmissionState.QUEUED.value: JobStatus.PENDING.value,
+    AdmissionState.ACTIVE.value: JobStatus.PROCESSING.value,
+    AdmissionState.DONE.value: JobStatus.COMPLETED.value,
+    AdmissionState.DEAD.value: JobStatus.DEAD_LETTER.value,
+}
+
+
 class Decision(str, enum.Enum):
     """Required decision for terminal admission transitions (Phase 4).
 
@@ -315,7 +328,9 @@ class JobItem(SQLModel, table=True):
             "project_id": self.project_id,
             "queue_id": self.queue_id,
             "priority": self.priority,
-            "status": self.status,
+            "status": ADMISSION_STATE_TO_STATUS.get(
+                self.admission_state, JobStatus.PENDING.value
+            ),
             "admission_state": self.admission_state,
             "created_at": self.created_at,
             "started_at": self.started_at,

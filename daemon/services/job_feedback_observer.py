@@ -603,7 +603,7 @@ class JobFeedbackObserver:
         # — preserved as the service call so the existing test mock surface
         # (``mock_jqs.get_job_by_instance``) keeps working.
         job = await self._job_queue_service.get_job_by_instance(instance_id)
-        if job is not None and job.status == JobStatus.PROCESSING.value:
+        if job is not None and job.admission_state == AdmissionState.ACTIVE.value:
             # Happy path: PROCESSING JobItem exists. Pre-D13
             # returned the JobItem directly; post-D13 we wrap it in
             # the context so downstream code (which uses ``job_id``
@@ -624,7 +624,7 @@ class JobFeedbackObserver:
             )
             if (
                 active_job is not None
-                and active_job.status == JobStatus.PROCESSING.value
+                and active_job.admission_state == AdmissionState.ACTIVE.value
             ):
                 return _ProcessingJobContext(
                     instance_id=instance_id, job_id=active_job.job_id
@@ -655,7 +655,7 @@ class JobFeedbackObserver:
           1. **No pending watchers in the bus** (``bus_pending == 0``) —
              the instance either never spawned children, or all children
              already resolved. The idempotency guard in ``_finalize_job``
-             (``job.status != PROCESSING``) prevents double-completion.
+             (``job.admission_state != ACTIVE``) prevents double-completion.
 
           2. **Bus singleton missing** (``get_dependency_bus()`` returns
              ``None``) — invalid state, the in-process check falls through
@@ -1862,7 +1862,7 @@ class JobFeedbackObserver:
           4. SSE ``status_change`` broadcast via the live hub.
           5. ``CompletionRegistry.complete()`` — unblocks ``invoke_agent_and_wait()`` callers.
           6. Lifecycle event published via the EventBus — this re-enters the
-             observer via ``_process_event``, but the ``job.status != PROCESSING``
+             observer via ``_process_event``, but the ``job.admission_state != ACTIVE``
              idempotency guard there returns early.
 
         Args:
@@ -2015,8 +2015,8 @@ class JobFeedbackObserver:
 
         # Step 4: Publish lifecycle event. The event bus broadcasts to all
         # global subscribers — including this observer. The
-        # ``_process_event`` re-entry is caught by the ``job.status !=
-        # PROCESSING`` idempotency guard (the job is already terminal at
+        # ``_process_event`` re-entry is caught by the ``job.admission_state !=
+        # ACTIVE`` idempotency guard (the job is already terminal at
         # this point, set by ``_finalize_job`` immediately before this call).
         events_service = getattr(self._instance_manager, "_events_service", None)
         if events_service is not None:
@@ -2152,9 +2152,9 @@ class JobFeedbackObserver:
         JobItem.
 
         Phase 2 audit (2026-06-25, pause/resume redesign):
-          PAUSED jobs are EXCLUDED by the ``WHERE JobItem.status ==
-          JobStatus.PROCESSING.value`` guard in Step 1 (see the
-          ``.where(JobItem.status == JobStatus.PROCESSING.value)`` clause
+          PAUSED jobs are EXCLUDED by the ``WHERE JobItem.admission_state ==
+          AdmissionState.ACTIVE.value`` guard in Step 1 (see the
+          ``.where(JobItem.admission_state == AdmissionState.ACTIVE.value)`` clause
           in the in-session UPDATE below). After the pause cascade
           transitions a job PROCESSING → PAUSED, this UPDATE rowcount-
           drops to 0 — the helper falls through to the

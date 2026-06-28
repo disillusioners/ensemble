@@ -570,6 +570,24 @@ class InstanceManager:
             # ALTER TABLE ... DROP COLUMN IF EXISTS statements are
             # executed here. Idempotent via IF EXISTS.
             self._ensure_postgres_drop_legacy_columns()
+            # ── Phase 5: drop the seven legacy job_queue_items columns ──
+            # (status, started_at, completed_at, result_summary,
+            # error_message, cancelled_at, failed_at). admission_state
+            # is the sole authority after Phase 4 cleanup.
+            #
+            # WARNING: This call drops columns that the JobItem SQLModel
+            # still maps. It MUST remain commented out (or gated) until
+            # the model is cleaned up (the seven fields removed from
+            # JobItem and all production reads converted to
+            # admission_state). Activating it prematurely will break
+            # every JobItem INSERT/SELECT on PostgreSQL — the primary
+            # database — because the ORM generates SQL referencing
+            # columns that no longer exist. See
+            # _ensure_postgres_drop_admission_legacy() docstring.
+            #
+            # To activate Phase 5 on PostgreSQL: uncomment the line
+            # below AFTER removing the columns from the JobItem model.
+            # self._ensure_postgres_drop_admission_legacy()
 
         # ── D13 data migration: cancel in-flight MESSAGE JobItems ──────────
         # Runs on BOTH SQLite and PostgreSQL. After D13 (Phase 2 of the
@@ -2106,6 +2124,74 @@ class InstanceManager:
                 conn.execute(text(stmt))
         logger.debug(
             "Phase 4 column drop: ``waiting_for`` and ``children`` removed (or absent) on PostgreSQL"
+        )
+
+    def _ensure_postgres_drop_admission_legacy(self) -> None:
+        """Drop the seven legacy ``job_queue_items`` columns on PostgreSQL.
+
+        Phase 5 of the Job-as-Queue-Proxy migration. After Phase 4
+        cleanup (commit 4eb1758a), ``admission_state`` is the sole
+        authority and these columns are dead artifacts:
+
+          * ``status``          (frozen at INSERT default 'pending')
+          * ``started_at``      * ``completed_at``
+          * ``result_summary``  * ``error_message``
+          * ``cancelled_at``    * ``failed_at``
+
+        Three legacy indexes referencing ``status`` are dropped first
+        (the index depends on the column, so order matters). The
+        replacement index ``idx_job_queue_admission_state`` is NOT
+        touched.
+
+        The SQLite migration
+        ``20260628_000002_drop_job_queue_legacy_columns.sql`` drops the
+        same objects. On PostgreSQL the migration runner is a NO-OP, so
+        the equivalent ``DROP`` statements run here at startup.
+
+        **Idempotency**: every statement uses ``IF EXISTS`` and each is
+        wrapped in its own ``try/except`` so that a column or index
+        that is already gone (e.g. second startup, or fresh database
+        where ``create_all`` never created it) is a silent no-op.
+
+        **Activation gate**: This method MUST NOT be called until the
+        JobItem SQLModel (daemon/repositories/job_queue/models.py) no
+        longer maps these seven columns and all production reads have
+        been converted to ``admission_state``. See the call-site
+        comment in :meth:`_run_startup_migrations`.
+        """
+        from sqlalchemy import text
+
+        # Drop indexes first — an index on a column must be dropped
+        # before the column itself.
+        index_statements = [
+            "DROP INDEX IF EXISTS idx_job_queue_status",
+            "DROP INDEX IF EXISTS idx_job_queue_items_status_type_instance",
+            "DROP INDEX IF EXISTS idx_job_queue_items_project_status_deleted",
+        ]
+        # Then the seven legacy columns.
+        column_statements = [
+            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS status",
+            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS started_at",
+            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS completed_at",
+            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS result_summary",
+            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS error_message",
+            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS cancelled_at",
+            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS failed_at",
+        ]
+        with self._engine.begin() as conn:
+            for stmt in index_statements:
+                try:
+                    conn.execute(text(stmt))
+                except Exception as exc:  # noqa: BLE001 — idempotent
+                    logger.debug("Phase 5 index drop skipped (%s): %s", stmt, exc)
+            for stmt in column_statements:
+                try:
+                    conn.execute(text(stmt))
+                except Exception as exc:  # noqa: BLE001 — idempotent
+                    logger.debug("Phase 5 column drop skipped (%s): %s", stmt, exc)
+        logger.debug(
+            "Phase 5 column drop: seven legacy job_queue_items columns "
+            "removed (or absent) on PostgreSQL"
         )
 
     def _migrate_cancel_inflight_message_jobitems(self) -> None:

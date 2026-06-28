@@ -676,7 +676,7 @@ class JobProcessor:
                     logger.debug(
                         f"[TRACE] _process_next_job: started_job {started_job.job_id[:8]}... "
                         f"instance={started_job.instance_id[:8] if started_job.instance_id else 'N/A'}... "
-                        f"status={started_job.status}"
+                        f"admission_state={started_job.admission_state}"
                     )
 
                     # D13 (Phase 2): the legacy MESSAGE dispatch branch

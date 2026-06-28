@@ -73,6 +73,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# ── Admission-state → representative status map ───────────────────────────
+# Phase 4: the ``status`` column is frozen at the INSERT default. When
+# the Instance is unavailable (job not yet dequeued or Instance row
+# missing), we derive a representative legacy status from
+# ``admission_state`` and pass it through ``canonicalize_status`` so
+# the WorkRecord carries an accurate status instead of always
+# reporting ``"pending"``.
+_ADMISSION_STATE_TO_STATUS: dict[str, str] = {
+    AdmissionState.QUEUED.value: "pending",
+    AdmissionState.ACTIVE.value: "processing",
+    AdmissionState.DONE.value: "completed",
+    AdmissionState.DEAD.value: "dead_letter",
+}
+
+
 # ── Kind discrimination within the Task side ─────────────────────────────
 # The Task table carries a ``task_type`` column that distinguishes
 # message turns (user→agent) from report tasks (child→parent completion
@@ -1063,10 +1078,10 @@ class WorkResolverService:
                 ``None`` (resolver performs the lookup), which keeps
                 ``resolve_work`` (single-row call site) unaffected.
         """
-        # Phase 1 dead_letter special-case: see method docstring.
-        # The JobItem mirror is the source of truth for this state
-        # until Phase 4 introduces ``admission_state='dead'``.
-        if job.status == "dead_letter":
+        # Phase 4 cleanup: the frozen ``status`` column is no longer
+        # written — ``admission_state`` is the sole authority. Dead
+        # jobs have ``admission_state='dead'``.
+        if job.admission_state == AdmissionState.DEAD.value:
             status = "dead_letter"
         else:
             # Phase 1: source execution status from the joined Instance
@@ -1102,13 +1117,21 @@ class WorkResolverService:
                 if instance is not None:
                     status = canonicalize_status(instance.status)
                 else:
-                    status = canonicalize_status(job.status)
+                    status = canonicalize_status(
+                        _ADMISSION_STATE_TO_STATUS.get(
+                            job.admission_state, "pending"
+                        )
+                    )
             else:
                 # Job is queued, not yet dequeued to an instance.
-                # Use the JobItem mirror as the source of truth so the
+                # Use admission_state as the source of truth so the
                 # WorkRecord's ``status`` reflects the actual queue
-                # state instead of a hardcoded ``"pending"``.
-                status = canonicalize_status(job.status)
+                # state instead of the frozen ``status`` column.
+                status = canonicalize_status(
+                    _ADMISSION_STATE_TO_STATUS.get(
+                        job.admission_state, "pending"
+                    )
+                )
 
         return WorkRecord(
             work_id=job.job_id,

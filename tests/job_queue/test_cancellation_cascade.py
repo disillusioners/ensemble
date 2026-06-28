@@ -16,6 +16,18 @@ from daemon.repositories.job_queue import JobRepository, JobStatus
 class MockJobItem:
     """Mock JobItem for testing."""
 
+    # Map legacy status → admission_state (Phase 4: status is frozen,
+    # admission_state is the sole authority).
+    _STATUS_TO_ADMISSION = {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }
+
     def __init__(
         self,
         job_id: str = None,
@@ -23,12 +35,14 @@ class MockJobItem:
         instance_id: str = None,
         project_id: str = "test-project",
         queue_id: str = "test-queue-id",
+        admission_state: str = None,
     ):
         self.job_id = job_id or "test-job-id"
         self.status = status
         self.instance_id = instance_id or "test-instance-id"
         self.project_id = project_id
         self.queue_id = queue_id
+        self.admission_state = admission_state or self._STATUS_TO_ADMISSION.get(status, "queued")
 
 
 class MockInstanceMeta:

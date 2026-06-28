@@ -577,7 +577,7 @@ class TestIntegrationCrashRecovery:
         assert all(j.admission_state == AdmissionState.DONE.value for j in jobs)
         
         # Cleanup completed jobs
-        deleted = integration_service._repository.hard_delete_completed()
+        deleted = integration_service._repository.hard_delete_terminal()
         
         assert deleted == 5
         

@@ -31,6 +31,19 @@ from daemon.services.job_feedback_observer import (
 from daemon.services.job_state_machine import InvalidTransitionError
 
 
+# Map legacy status → admission_state (Phase 4: status is frozen,
+# admission_state is the sole authority).
+_STATUS_TO_ADMISSION = {
+    "pending": "queued",
+    "processing": "active",
+    "paused": "active",
+    "completed": "done",
+    "failed": "done",
+    "cancelled": "done",
+    "dead_letter": "dead",
+}
+
+
 def make_fake_sync(
     *,
     skip: bool = False,
@@ -104,6 +117,7 @@ def create_mock_job(
     mock_job.job_id = job_id
     mock_job.status = status
     mock_job.instance_id = instance_id
+    mock_job.admission_state = _STATUS_TO_ADMISSION.get(status, "queued")
     return mock_job
 
 

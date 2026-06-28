@@ -98,7 +98,7 @@ def repository(engine):
     repo = JobRepository(engine)
     yield repo
     # Clean up after test (use hard_delete since tests may create jobs in various states)
-    repo.hard_delete_completed()
+    repo.hard_delete_terminal()
     repo.hard_delete_by_project("test-project")
 
 

@@ -32,6 +32,19 @@ class MockProject:
 
 class MockJob:
     """Mock job object for testing."""
+
+    # Map legacy status → admission_state (Phase 4: status is frozen,
+    # admission_state is the sole authority).
+    _STATUS_TO_ADMISSION = {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }
+
     def __init__(
         self,
         job_id: str,
@@ -41,12 +54,14 @@ class MockJob:
         status: str = JobStatus.PENDING.value,
         instance_id: str | None = None,
         job_type: str = "task",
+        admission_state: str | None = None,
     ):
         self.job_id = job_id
         self.agent_id = agent_id
         self.project_id = project_id
         self.queue_id = queue_id
         self.status = status
+        self.admission_state = admission_state or self._STATUS_TO_ADMISSION.get(status, "queued")
         self.instance_id = instance_id
         self.job_type = job_type
         self.message = "test message"

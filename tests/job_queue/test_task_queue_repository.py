@@ -460,8 +460,8 @@ class TestRepositoryDelete:
         assert result["deleted"] is False
         assert "error" in result
 
-    def test_hard_delete_completed_jobs(self, repository, sample_job_data):
-        """Test hard_delete_completed() removes all completed jobs."""
+    def test_hard_delete_terminal_jobs(self, repository, sample_job_data):
+        """Test hard_delete_terminal() removes all terminal jobs."""
         # Create and complete some jobs
         job1 = repository.create(**sample_job_data)
         job2 = repository.create(**sample_job_data)
@@ -473,7 +473,7 @@ class TestRepositoryDelete:
         repository.complete_job(job2.job_id)
         # job3 remains pending
         
-        deleted_count = repository.hard_delete_completed()
+        deleted_count = repository.hard_delete_terminal()
         
         assert deleted_count == 2
         assert repository.get(job1.job_id) is None
@@ -496,9 +496,9 @@ class TestRepositoryDelete:
         assert repository.get(job2.job_id) is None
         assert repository.get(job3.job_id) is not None
 
-    def test_hard_delete_completed_when_none(self, repository):
-        """Test hard_delete_completed() when no completed jobs exist."""
-        count = repository.hard_delete_completed()
+    def test_hard_delete_terminal_when_none(self, repository):
+        """Test hard_delete_terminal() when no terminal jobs exist."""
+        count = repository.hard_delete_terminal()
         assert count == 0
 
 

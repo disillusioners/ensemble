@@ -46,6 +46,19 @@ from daemon.services.job_processor import JobProcessor
 from daemon.services.dependency_bus import set_dependency_bus
 
 
+# Map legacy status → admission_state (Phase 4: status is frozen,
+# admission_state is the sole authority).
+_STATUS_TO_ADMISSION = {
+    "pending": "queued",
+    "processing": "active",
+    "paused": "active",
+    "completed": "done",
+    "failed": "done",
+    "cancelled": "done",
+    "dead_letter": "dead",
+}
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Phase 5 fixture: DependencyBus is the SOLE completion authority (ADR-011).
 # The legacy ``use_legacy_waiting_for_cascade`` kill switch was removed in
@@ -93,6 +106,7 @@ def make_mock_job(
     mock_job.error_message = None
     mock_job.project_id = "test-project"
     mock_job.queue_id = "system_fifo_queue"
+    mock_job.admission_state = _STATUS_TO_ADMISSION.get(status, "queued")
     return mock_job
 
 
@@ -451,6 +465,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         job.project_id = "test-project"
         job.queue_id = "system_parallel_queue"
         job.status = JobStatus.PROCESSING.value
+        job.admission_state = _STATUS_TO_ADMISSION.get(job.status, "queued")
         job.instance_id = instance_id
         job.job_type = job_type
         return job

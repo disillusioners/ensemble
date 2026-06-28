@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS, AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
 
@@ -281,10 +282,16 @@ class _LegacyJobItemRecord:
     __slots__ = ("status", "error")
 
     def __init__(self, job_item: Any) -> None:
-        # ``JobItem.status`` is the canonical vocabulary string;
+        # Derive the canonical vocabulary string from
+        # ``admission_state`` (Phase 4: the ``status`` column is frozen
+        # at the INSERT default). ``ADMISSION_STATE_TO_STATUS`` maps
+        # the 4-value admission_state back to a representative legacy
+        # status string.
         # ``JobItem.error_message`` is the user-visible failure text
         # the ``[JOB_EVENT]`` notification surfaces as ``Error: …``.
-        self.status: str = job_item.status
+        self.status: str = ADMISSION_STATE_TO_STATUS.get(
+            job_item.admission_state, "pending"
+        )
         self.error: str | None = job_item.error_message
 
 
@@ -358,7 +365,7 @@ def create_job_tools(
             if watch and watcher_repo is not None and current_instance_id:
                 count = watcher_repo.count_watches_for_instance(current_instance_id)
                 if count >= 50:
-                    return {"error": "Maximum watch limit (50) reached for this instance", "job_id": job_item.job_id, "status": job_item.status}
+                    return {"error": "Maximum watch limit (50) reached for this instance", "job_id": job_item.job_id, "status": ADMISSION_STATE_TO_STATUS.get(job_item.admission_state, "pending")}
                 watcher_repo.add_watch(job_item.job_id, current_instance_id)
             return job_item.to_dict()
         except ValueError as e:
@@ -760,11 +767,11 @@ def create_job_tools(
                     return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
 
                 # 2. Validate the job is in a terminal state
-                if old_job.status not in TERMINAL_STATES:
+                if old_job.admission_state not in (AdmissionState.DONE.value, AdmissionState.DEAD.value):
                     return {
                         "error": (
-                            f"Job {old_job_id} is not in a terminal state (current: {old_job.status}). "
-                            "Only completed/failed/cancelled/dead_letter jobs can be continued."
+                            f"Job {old_job_id} is not in a terminal state (admission_state={old_job.admission_state}). "
+                            "Only terminal jobs (done/dead) can be continued."
                         )
                     }
 

@@ -135,10 +135,10 @@ class DeadLetterService:
         # matching ``admission_state`` predicate at COMMIT.
         if from_admission_state == AdmissionState.ACTIVE.value:
             if job.admission_state != AdmissionState.ACTIVE.value:
-                raise JobNotInFailedStateError(job_id, job.status)
+                raise JobNotInFailedStateError(job_id, job.admission_state)
         else:
             if job.admission_state != AdmissionState.DONE.value:
-                raise JobNotInFailedStateError(job_id, job.status)
+                raise JobNotInFailedStateError(job_id, job.admission_state)
         
         # Ensure project_id is normalized (defense-in-depth)
         if job.project_id is None:
@@ -207,14 +207,14 @@ class DeadLetterService:
                 # the pending DLQ item so the caller's commit does not
                 # insert a DLQ row for a job that is no longer eligible.
                 session.expunge(dlq_item)
-                raise JobNotInFailedStateError(job_id, job.status)
+                raise JobNotInFailedStateError(job_id, job.admission_state)
 
             # Let the caller commit the session
             return dlq_item
         except IntegrityError:
             # Concurrent process already moved this job to DLQ
             session.rollback()
-            raise JobNotInFailedStateError(job_id, job.status)
+            raise JobNotInFailedStateError(job_id, job.admission_state)
     
     def move_to_dlq_standalone(
         self,
@@ -270,10 +270,10 @@ class DeadLetterService:
             # UPDATE below enforces the matching predicate.
             if from_admission_state == AdmissionState.ACTIVE.value:
                 if job.admission_state != AdmissionState.ACTIVE.value:
-                    raise JobNotInFailedStateError(job_id, job.status)
+                    raise JobNotInFailedStateError(job_id, job.admission_state)
             else:
                 if job.admission_state != AdmissionState.DONE.value:
-                    raise JobNotInFailedStateError(job_id, job.status)
+                    raise JobNotInFailedStateError(job_id, job.admission_state)
             
             # Ensure project_id is normalized (defense-in-depth)
             if job.project_id is None:
@@ -341,7 +341,7 @@ class DeadLetterService:
                     # committed.
                     session.expunge(dlq_item)
                     session.rollback()
-                    raise JobNotInFailedStateError(job_id, job.status)
+                    raise JobNotInFailedStateError(job_id, job.admission_state)
 
                 # Commit both operations atomically
                 session.commit()
@@ -358,7 +358,7 @@ class DeadLetterService:
             except IntegrityError:
                 # Concurrent process already moved this job to DLQ
                 session.rollback()
-                raise JobNotInFailedStateError(job_id, job.status)
+                raise JobNotInFailedStateError(job_id, job.admission_state)
 
     def replay_from_dlq(self, dlq_id: str) -> Any:
         """Atomically replay a job from the dead letter queue.
@@ -416,7 +416,7 @@ class DeadLetterService:
                 from daemon.services.job_state_machine import InvalidTransitionError
                 raise InvalidTransitionError(
                     job_id=job_id,
-                    from_status=job.status,
+                    from_status=job.admission_state,
                     to_status="pending",
                 )
 
@@ -454,7 +454,7 @@ class DeadLetterService:
                 from daemon.services.job_state_machine import InvalidTransitionError
                 raise InvalidTransitionError(
                     job_id=job_id,
-                    from_status=job.status,
+                    from_status=job.admission_state,
                     to_status="pending",
                 )
             

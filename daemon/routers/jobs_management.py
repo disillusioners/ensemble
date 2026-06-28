@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.work_status import is_terminal as _is_terminal_canonical
-from daemon.repositories.job_queue.models import AdmissionState, JobStatus
+from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS, AdmissionState, JobStatus
 from .schemas import (
     JobResponse,
     JobNotFoundResponse,
@@ -397,9 +397,11 @@ async def retry_job(
     # downstream branches still branch on. ``dead_letter`` is
     # JobItem-only (it has no Instance equivalent) so when the
     # resolver reports it, the JobItem mirror must agree — fall
-    # back to ``job.status`` which carries the authoritative
+    # back to ``job.admission_state`` which carries the authoritative
     # ``dead_letter`` value (the resolver surfaces the same value).
-    status_for_branches = canonical_status or job.status
+    status_for_branches = canonical_status or ADMISSION_STATE_TO_STATUS.get(
+        job.admission_state, JobStatus.PENDING.value
+    )
 
     # Handle DEAD_LETTER jobs - replay from DLQ
     if status_for_branches == JobStatus.DEAD_LETTER.value:
@@ -473,7 +475,7 @@ async def retry_job(
 
     # Get position if job is pending
     position = None
-    if new_job.status == JobStatus.PENDING.value and new_job.project_id:
+    if new_job.admission_state == AdmissionState.QUEUED.value and new_job.project_id:
         try:
             position = await service._get_queue_position(new_job.job_id, new_job.project_id)
         except Exception:

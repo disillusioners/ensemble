@@ -26,6 +26,7 @@ from daemon.repositories.job_queue import (
     JobItem,
     JobStatus,
 )
+from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
@@ -477,16 +478,16 @@ class JobQueueService:
         scenarios (older tests that don't call ``set_work_resolver``)
         continue to exercise the JobItem-only reconcile semantics.
         """
-        terminal_states = set(ALL_TERMINAL_STATES)
+        terminal_admission = {AdmissionState.DONE.value, AdmissionState.DEAD.value}
 
         all_watches = self._watcher_repo.get_all_active_watches()
         reconciled = 0
 
         for watch in all_watches:
             job = await asyncio.to_thread(self._repository.get, watch.job_id)
-            if job and job.status in terminal_states:
+            if job and job.admission_state in terminal_admission:
                 await self.notify_watchers(
-                    watch.job_id, job.status, job.error_message
+                    watch.job_id, job.admission_state, job.error_message
                 )
                 reconciled += 1
 
@@ -654,15 +655,14 @@ class JobQueueService:
                     pass
 
                 if job is not None:
-                    terminal_statuses = {
-                        JobStatus.COMPLETED.value,
-                        JobStatus.CANCELLED.value,
-                        JobStatus.DEAD_LETTER.value,
+                    terminal_admission = {
+                        AdmissionState.DONE.value,
+                        AdmissionState.DEAD.value,
                     }
-                    if job.status not in terminal_statuses:
+                    if job.admission_state not in terminal_admission:
                         logger.debug(
                             f"Idempotency key '{idempotency_key}' matched existing job {job.job_id} "
-                            f"(status={job.status})"
+                            f"(admission_state={job.admission_state})"
                         )
                         return job
                     logger.info(
@@ -946,14 +946,19 @@ class JobQueueService:
         # Pre-validate with state machine for better error messages. This
         # is a best-effort check; the atomic repo.cancel_job is the source
         # of truth and will raise ValueError for non-cancellable states.
-        if not job_state_machine.can_transition(job.status, JobStatus.CANCELLED.value):
+        # Phase 4: translate admission_state to representative status for
+        # the state machine check.
+        representative_status = ADMISSION_STATE_TO_STATUS.get(
+            job.admission_state, JobStatus.PENDING.value
+        )
+        if not job_state_machine.can_transition(representative_status, JobStatus.CANCELLED.value):
             return False
 
-        # Special case: PROCESSING with an alive instance requires a
+        # Special case: ACTIVE with an alive instance requires a
         # cascade — ``terminate_instance`` will mark the job CANCELLED
         # itself. Lock release happens first regardless of instance
         # liveness (matches pre-fix semantics).
-        if job.status == JobStatus.PROCESSING.value:
+        if job.admission_state == AdmissionState.ACTIVE.value:
             instance_id = job.instance_id
 
             # Release any locks held by this job first
@@ -1057,8 +1062,9 @@ class JobQueueService:
         if job is None:
             return None
         
-        # Can only retry FAILED jobs
-        if job.status != JobStatus.FAILED.value:
+        # Can only retry FAILED jobs (admission_state='done' with
+        # failed_at set — only failed jobs carry the timestamp).
+        if job.admission_state != AdmissionState.DONE.value or job.failed_at is None:
             return None
         
         # Create a new job and use enqueue logic to determine if it should
@@ -1823,13 +1829,13 @@ class JobQueueService:
         
         # [TRACE] Log job details
         logger.debug(
-            f"[TRACE] start_job: job={job_id[:8]}... status={job.status} "
+            f"[TRACE] start_job: job={job_id[:8]}... admission_state={job.admission_state} "
             f"instance={job.instance_id[:8] if job.instance_id else 'N/A'}... job_type={getattr(job, 'job_type', 'task')}"
         )
         
-        # Check if job is still pending (could have been cancelled)
-        if job.status != JobStatus.PENDING.value:
-            logger.debug(f"[TRACE] start_job: job {job_id[:8]}... SKIP — not PENDING (status={job.status})")
+        # Check if job is still queued (could have been cancelled)
+        if job.admission_state != AdmissionState.QUEUED.value:
+            logger.debug(f"[TRACE] start_job: job {job_id[:8]}... SKIP — not QUEUED (admission_state={job.admission_state})")
             return None
         
         # CENTRALIZED PAUSE CHECK - protects ALL callers
@@ -2483,8 +2489,8 @@ class JobQueueService:
         if job is None:
             return None
         
-        # Check if job is still pending
-        if job.status != JobStatus.PENDING.value:
+        # Check if job is still queued
+        if job.admission_state != AdmissionState.QUEUED.value:
             return None
         
         # Generate new instance ID for this job

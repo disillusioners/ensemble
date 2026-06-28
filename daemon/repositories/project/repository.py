@@ -1106,18 +1106,30 @@ class SQLModelProjectRepository:
                         f"Use force=True to bypass this check."
                     )
             
-            # Check for running/active jobs
+            # Check for running/active jobs (admission_state-based).
+            # Phase 4: gate on admission_state IN ('queued', 'active')
+            # rather than the frozen ``status`` column. Both QUEUED
+            # (awaiting dequeue) and ACTIVE (lock held, instance
+            # spawned) jobs are non-terminal and must block deletion.
             if not force:
-                # Phase 3 admission-decision migration: gate on
-                # ``admission_state='active'`` rather than
-                # ``status='processing'``. Under the new model
-                # ``admission_state='active'`` covers BOTH PROCESSING
-                # and PAUSED jobs (pause is an Instance concern; the
-                # lock is still held — see Plan §8.1 /
-                # ``models.JobStatus.PAUSED``). This fixes a
-                # pre-existing bug where PAUSED jobs were not
-                # caught by the deletion safety check.
-                active_states = [AdmissionState.ACTIVE.value]
+                active_job_stmt = (
+                    select(func.count())
+                    .select_from(JobItem)
+                    .where(JobItem.project_id == project_id)
+                    .where(
+                        JobItem.admission_state.in_([
+                            AdmissionState.QUEUED.value,
+                            AdmissionState.ACTIVE.value,
+                        ])
+                    )
+                    .where(JobItem.deleted_at.is_(None))
+                )
+                active_job_count = session.exec(active_job_stmt).one()
+                if active_job_count > 0:
+                    raise RuntimeError(
+                        f"Cannot delete project {project_id}: "
+                        f"{active_job_count} active job(s) still running"
+                    )
 
 
 

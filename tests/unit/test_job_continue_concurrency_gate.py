@@ -50,7 +50,11 @@ def job_service():
     """Async ``JobQueueService`` mock — the gate doesn't read it, but
     the tool's happy-path pre-flight (job lookup) does.
     """
-    return AsyncMock()
+    svc = AsyncMock()
+    # Legacy kill-switch path (pre-resolver) — tests exercise the
+    # get_job branch, not the get_work resolver path.
+    svc.use_virtual_job_resolver = False
+    return svc
 
 
 @pytest.fixture
@@ -109,7 +113,11 @@ def job_continue(tools):
 def _make_old_job(*, instance_id: str = "inst-1"):
     """Build a MagicMock standing in for a JobItem returned by ``job_service.get_job``."""
     old_job = MagicMock()
-    old_job.status = "completed"
+    # NOTE: we must set status via a direct assignment that is NOT
+    # itself a MagicMock — the job_continue path calls get_work which
+    # returns a WorkRecord whose .status is read directly.
+    type(old_job).status = property(lambda self: "completed")
+    type(old_job).admission_state = property(lambda self: "done")
     old_job.instance_id = instance_id
     old_job.deleted_at = None
     return old_job
