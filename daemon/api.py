@@ -388,6 +388,13 @@ async def lifespan(app: FastAPI):
     retry_engine._job_queue_service = job_queue_service  # Wire for Path 6 notifications
     retry_engine._loop = asyncio.get_running_loop()       # Wire event loop
 
+    # Phase 4 (Job as Queue Proxy): wire the DLQ service into
+    # JobQueueService so ``_finalize_terminal`` can route the
+    # ``Decision.DEAD_LETTER`` path through ``move_to_dlq_standalone``.
+    # Done after the retry engine so the dead_letter_service is fully
+    # constructed first.
+    job_queue_service.set_dlq_service(dead_letter_service)
+
     # Wire dead_letter_service into InstanceManager
     manager.set_dead_letter_service(dead_letter_service)
     

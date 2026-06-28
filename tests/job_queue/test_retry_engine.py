@@ -731,27 +731,34 @@ class TestRetryEngineIntegration:
         assert result1.retry_count == 1
         
         # Simulate failure by directly updating the job in the database
-        # (bypassing state machine for test purposes)
+        # (bypassing state machine for test purposes). Phase 4: also
+        # flip ``admission_state`` to ``'done'`` so the dual-write
+        # mapping ``status_to_admission('failed')='done'`` is
+        # honored — ``atomic_retry``'s SQL guard checks both the
+        # admission_state AND status columns.
         with SQLModelSession(engine) as session:
             from daemon.repositories.job_queue.models import JobItem
             job_update = session.get(JobItem, "job-cycle")
             job_update.status = JobStatus.FAILED.value
+            job_update.admission_state = "done"
             job_update.error_message = "Second failure"
             job_update.failed_at = datetime.utcnow().isoformat()
             job_update.next_retry_at = None  # Clear next_retry_at for retry
             session.commit()
-        
+
         # Step 3: Second retry
         result2 = retry_engine.maybe_retry("job-cycle")
         assert result2 is not None
         assert result2.status == JobStatus.PENDING.value
         assert result2.retry_count == 2
-        
-        # Simulate failure again (exhaust retries)
+
+        # Simulate failure again (exhaust retries). Phase 4: also
+        # flip ``admission_state`` (see comment above).
         with SQLModelSession(engine) as session:
             from daemon.repositories.job_queue.models import JobItem
             job_update = session.get(JobItem, "job-cycle")
             job_update.status = JobStatus.FAILED.value
+            job_update.admission_state = "done"
             job_update.error_message = "Third failure"
             job_update.failed_at = datetime.utcnow().isoformat()
             job_update.next_retry_at = None  # Clear next_retry_at for retry

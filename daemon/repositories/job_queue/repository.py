@@ -780,6 +780,7 @@ class JobRepository:
         job_id: str,
         max_retries: int,
         next_retry_at: str,
+        from_admission_state: str = AdmissionState.DONE.value,
     ) -> JobItem | None:
         """Atomically retry a failed job.
 
@@ -787,23 +788,40 @@ class JobRepository:
 
             UPDATE job_queue_items
             SET status = 'pending',
+                admission_state = 'queued',
                 retry_count = retry_count + 1,   -- atomic SQL increment
                 next_retry_at = :next_retry_at,
                 failed_at = NULL,
                 error_message = NULL
             WHERE job_id = :job_id
-              AND status = 'failed'
+              AND admission_state = :from_admission_state
               AND retry_count < :max_retries
             RETURNING *
 
-        The SQL-level ``status = 'failed' AND retry_count < :max_retries``
-        guard is the race-safety boundary. PostgreSQL EvalPlanQual
-        re-evaluates the predicate after acquiring the row lock (so a
-        concurrent writer that flipped the status between the
-        caller's read and this UPDATE cannot slip past us); SQLite's
-        single-statement UPDATE is atomic at the database level.
-        The ``retry_count = retry_count + 1`` expression lets the
-        database compute the increment atomically — no
+        Phase 4 (Job as Queue Proxy): the SQL guard moved from
+        ``status = 'failed'`` to ``admission_state = :from_admission_state``
+        (default ``'done'`` — the dual-write mirror for
+        ``status='failed'``). The plan's §3.2 retry-without-instance
+        guarantee removes the intermediate FAILED state in NEW code
+        paths — the canonical ``_finalize_terminal(Decision.RETRY)``
+        transitions ``active → queued`` directly via the dual-write
+        co-move and never visits ``status='failed'`` as an
+        intermediate. The legacy ``fail_job`` helper still produces
+        rows with ``status='failed'`` + ``admission_state='done'``
+        (Phase 2 dual-write mapping) — those are the rows this
+        method's default ``from_admission_state='done'`` matches.
+        Phase 4 callers that operate on a freshly-finalized active
+        job pass ``from_admission_state='active'`` explicitly so
+        the SQL guard matches the canonical source state.
+
+        The SQL-level ``admission_state = :from_admission_state AND
+        retry_count < :max_retries`` guard is the race-safety boundary.
+        PostgreSQL EvalPlanQual re-evaluates the predicate after
+        acquiring the row lock (so a concurrent writer that flipped the
+        status between the caller's read and this UPDATE cannot slip
+        past us); SQLite's single-statement UPDATE is atomic at the
+        database level. The ``retry_count = retry_count + 1`` expression
+        lets the database compute the increment atomically — no
         read-modify-write race where two concurrent callers could
         both observe ``retry_count = N`` and both write ``N + 1``.
 
@@ -817,12 +835,17 @@ class JobRepository:
                 reached this value the UPDATE is a no-op.
             next_retry_at: ISO timestamp for the next retry attempt
                 (already backoff-computed by the caller).
+            from_admission_state: Admission-state guard (default
+                ``'done'`` for legacy ``fail_job`` callers; Phase 4
+                callers operating on a canonical active job pass
+                ``'active'``). The job is transitioned to
+                ``'queued'`` only if this guard matches.
 
         Returns:
             The updated ``JobItem`` after the UPDATE commits, or
             ``None`` if no row matched — i.e. the job does not
-            exist, its status is no longer ``failed`` (concurrent
-            ``CANCELLED`` / ``DEAD_LETTER`` transition), or its
+            exist, its admission_state is no longer ``from_admission_state``
+            (concurrent ``done`` / ``dead`` transition), or its
             ``retry_count`` has already reached ``max_retries``.
             Callers treat ``None`` uniformly as "skip retry".
         """
@@ -830,13 +853,25 @@ class JobRepository:
             # Atomic guarded UPDATE. ``retry_count = retry_count + 1``
             # is a SQL expression (not a Python read-then-add), so the
             # increment happens server-side and is not subject to a
-            # read-modify-write race. The ``status = 'failed'`` clause
-            # is what makes concurrent retries safe: after the first
-            # writer commits, the row's status is ``'pending'`` and the
+            # read-modify-write race. The SQL guard is what makes
+            # concurrent retries safe: after the first writer
+            # commits, the row's status is ``'pending'`` and the
             # second writer's UPDATE matches zero rows.
+            #
+            # Phase 4 (Job as Queue Proxy): the guard now lives on
+            # the ``admission_state`` column (the queue-proxy
+            # authority per Plan §3.1), but ALSO gates on
+            # ``status='failed'`` so a row in another DONE cluster
+            # (CANCELLED, COMPLETED) — which would also match
+            # ``admission_state='done'`` under the dual-write mapping
+            # — is correctly excluded. This dual-key guard preserves
+            # the legacy race-safety invariant (the test
+            # ``test_atomic_retry_skips_when_status_not_failed`` in
+            # ``test_job_retry_engine.py`` asserts it).
             stmt = (
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
+                .where(JobItem.admission_state == from_admission_state)
                 .where(JobItem.status == JobStatus.FAILED.value)
                 .where(JobItem.retry_count < max_retries)
                 .values(
@@ -889,6 +924,123 @@ class JobRepository:
                 next_retry_at,
             )
 
+            return job
+
+    def finalize_active_to_done(
+        self,
+        job_id: str,
+        derived_status: str,
+        result_summary: str | None = None,
+        error_message: str | None = None,
+    ) -> JobItem | None:
+        """Phase 4 (Job as Queue Proxy): transition ``active → done``.
+
+        This is the low-level building block behind the single
+        terminal-write boundary ``JobQueueService._finalize_terminal``
+        (Plan §3.2 / §6.1). Phase 4 makes ``admission_state`` the
+        primary write authority; ``status`` is written as a derived
+        mirror for backward compatibility (Phase 5 drops the column).
+
+        Single guarded UPDATE::
+
+            UPDATE job_queue_items
+            SET admission_state = 'done',
+                status          = :derived_status,     -- mirror
+                completed_at    = :now,
+                result_summary  = :result_summary,    -- COMPLETED path
+                error_message   = :error_message,     -- ERROR/TERMINATED path
+                cancelled_at    = :cancelled_at       -- TERMINATED path
+            WHERE job_id = :job_id
+              AND admission_state = 'active'
+            RETURNING *
+
+        The ``admission_state = 'active'`` predicate is the race-safety
+        guard: a concurrent writer that flipped the job out of ACTIVE
+        (e.g. concurrent CANCELLED via ``_terminate_instance_db_sync``)
+        sees rowcount=0 and we no-op. Mirrors the gold-template
+        ``atomic_transition`` pattern, but the canonical column is now
+        ``admission_state``.
+
+        Args:
+            job_id: The job to finalize.
+            derived_status: Backward-compat ``status`` mirror — derived
+                from the Instance terminal status by the caller
+                (COMPLETED → 'completed', ERROR/FAILED → 'failed',
+                TERMINATED → 'cancelled'). The caller must NOT pass a
+                status that contradicts ``admission_state='done'``;
+                the SQL guard will still accept it because the guard
+                is on the admission column, but semantic integrity is
+                the caller's responsibility.
+            result_summary: Filled for COMPLETED; ``None`` is acceptable
+                for ERROR/TERMINATED (the caller can pass ``None`` to
+                keep the prior value, or pass an explicit string to
+                overwrite).
+            error_message: Filled for ERROR/TERMINATED; same rules as
+                ``result_summary``.
+
+        Returns:
+            The updated ``JobItem`` after the UPDATE commits, or
+            ``None`` if no row matched — i.e. the job does not exist
+            or its ``admission_state`` is no longer ``'active'``
+            (concurrent terminal transition).
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        # Build SET clause dynamically — only write the columns the
+        # caller wants to set. ``cancelled_at`` is set for TERMINATED
+        # so consumers reading the legacy column can still derive the
+        # cancellation timestamp.
+        set_values: dict[str, Any] = {
+            "admission_state": AdmissionState.DONE.value,
+            "status": derived_status,
+            "completed_at": now,
+        }
+        if derived_status == JobStatus.CANCELLED.value:
+            set_values["cancelled_at"] = now
+        if result_summary is not None:
+            set_values["result_summary"] = result_summary
+        if error_message is not None:
+            set_values["error_message"] = error_message
+
+        with SQLModelSession(self.engine) as session:
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                # Phase 4: admission_state is the authoritative guard.
+                # ``status`` is still written for backward compat but
+                # is no longer the gate.
+                .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
+                .values(**set_values)
+            )
+            result = session.exec(stmt)
+            session.commit()
+
+            if result.rowcount == 0:
+                # Two possibilities: job doesn't exist, or it already
+                # left ACTIVE (concurrent terminal transition).
+                # Disambiguate via follow-up SELECT.
+                existing = session.get(JobItem, job_id)
+                if existing is None:
+                    logger.debug(
+                        "finalize_active_to_done: job %s not found", job_id
+                    )
+                    return None
+                logger.debug(
+                    "finalize_active_to_done: job %s no-op "
+                    "(admission_state=%s, expected 'active')",
+                    job_id,
+                    existing.admission_state,
+                )
+                return None
+
+            # Re-read to return a fully-populated JobItem.
+            job = session.get(JobItem, job_id)
+            if job is None:
+                return None
+            logger.info(
+                "Job finalized (active → done): %s | status=%s | admission_state=done",
+                job_id,
+                derived_status,
+            )
             return job
 
     # --------------------------------------------------------

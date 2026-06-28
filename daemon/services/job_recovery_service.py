@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import Decision, JobStatus
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -189,17 +189,22 @@ class JobRecoveryService:
     async def _fail_orphaned_job(
         self, job: "JobItem", error_message: str, stats: dict[str, int]
     ) -> bool:
-        """Mark an orphaned job as FAILED and release its lock.
+        """Mark an orphaned job as failed and release its lock.
 
-        Lock release ordering is critical: the status transition runs FIRST
-        and the lock is released SECOND (in a ``finally`` block). This
-        prevents a double-claim window where the job sits in PROCESSING
-        state with no lock to protect it.
+        Phase 4 (Job as Queue Proxy): routes through the single
+        terminal-write boundary ``JobQueueService._finalize_terminal``
+        with ``Decision.NO_RETRY``. The boundary handles the
+        ``active → done`` write (admission_state='done',
+        status='failed') and the lock release in its finally block
+        — guaranteeing the lock is released on every code path
+        (success, ``InvalidTransitionError``, unexpected exceptions).
 
-        If the transition raises, the job stays in PROCESSING and will be
-        picked up by the next recovery cycle. The ``finally`` block
-        guarantees the lock is released on ALL code paths (success,
-        ``InvalidTransitionError``, and unexpected exceptions).
+        Pre-fix, this method issued ``atomic_transition(processing
+        → failed)`` directly and released the lock in a ``finally``
+        block. The structural guarantee is preserved (the lock is
+        always released), but the work now goes through the
+        boundary so a future recovery code path cannot silently
+        bypass retry/DLQ handling.
 
         Args:
             job: The job to fail.
@@ -210,28 +215,68 @@ class JobRecoveryService:
             True if job was successfully transitioned, False if transition was
             skipped (e.g., already transitioned by another actor) or failed.
         """
+        # Phase 4: route through the single terminal-write boundary.
+        # The recovery path never retries (the job's instance is
+        # gone/terminal, so retrying would loop on the same dead
+        # instance) — NO_RETRY is correct.
         try:
-            # 1. Transition status FIRST. If this raises, the job remains in
-            #    PROCESSING and the finally-block still releases the lock so
-            #    a later recovery cycle can retry.
-            now = datetime.now(timezone.utc).isoformat()
-            await asyncio.to_thread(
-                self._job_repository.atomic_transition,
-                job.job_id,
-                from_status="processing",
-                to_status="failed",
-                completed_at=now,
-                error_message=error_message,
-            )
-            stats["recovered"] += 1
-
-            # 2. Notify watchers after successful transition.
             if self._job_queue_service is not None:
-                await self._job_queue_service.notify_watchers(
-                    job.job_id, "failed", error_message
+                # Preferred path: use the boundary on JobQueueService.
+                canonical_job_id, _ = await self._job_queue_service._finalize_terminal(
+                    instance_id=job.instance_id or "",
+                    decision=Decision.NO_RETRY,
+                    job_id=job.job_id,
+                    error_message=error_message,
                 )
-
-            return True
+                if canonical_job_id is not None:
+                    stats["recovered"] += 1
+                    if self._job_queue_service is not None:
+                        try:
+                            await self._job_queue_service.notify_watchers(
+                                job.job_id, "failed", error_message
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"_fail_orphaned_job: notify_watchers failed "
+                                f"for {job.job_id[:8]}...: {e}"
+                            )
+                    return True
+                # Boundary returned None — the job was not in
+                # admission_state='active' (already transitioned by
+                # another actor). Fall through to the InvalidTransition
+                # handling below.
+                logger.debug(
+                    f"_fail_orphaned_job: _finalize_terminal no-op for "
+                    f"job {job.job_id[:8]}... (already transitioned)"
+                )
+                return False
+            else:
+                # No JobQueueService wired (rare — only in tests).
+                # Fall back to the legacy direct atomic_transition +
+                # lock release. Preserves the pre-fix semantics so
+                # tests that construct JobRecoveryService without a
+                # JobQueueService keep working.
+                now = datetime.now(timezone.utc).isoformat()
+                await asyncio.to_thread(
+                    self._job_repository.atomic_transition,
+                    job.job_id,
+                    from_status="processing",
+                    to_status="failed",
+                    completed_at=now,
+                    error_message=error_message,
+                )
+                stats["recovered"] += 1
+                if self._job_queue_service is not None:
+                    try:
+                        await self._job_queue_service.notify_watchers(
+                            job.job_id, "failed", error_message
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"_fail_orphaned_job (legacy): notify_watchers failed "
+                            f"for {job.job_id[:8]}...: {e}"
+                        )
+                return True
         except InvalidTransitionError:
             # Job was already transitioned by another actor — this is expected.
             logger.info(
@@ -242,9 +287,12 @@ class JobRecoveryService:
             logger.error(f"Failed to recover job {job.job_id[:8]}...: {e}")
             return False
         finally:
-            # 3. Release lock AFTER the transition attempt. This runs on
-            #    success, InvalidTransitionError, and unexpected exception
-            #    paths, guaranteeing the lock is never leaked.
+            # 3. Release lock AFTER the transition attempt. The
+            #    ``_finalize_terminal`` boundary already releases in
+            #    its own finally block; this is a defense-in-depth
+            #    guarantee for the legacy fallback path (where the
+            #    boundary is bypassed). The lock is keyed by
+            #    ``instance_id`` (matches the start_job contract).
             if job.instance_id:
                 try:
                     await asyncio.to_thread(

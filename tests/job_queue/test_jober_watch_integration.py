@@ -130,6 +130,14 @@ class TestJoberWatchIntegration:
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
         job.status = "processing"
+        # Phase 4 (Job as Queue Proxy): ``admission_state`` is the
+        # new write authority. Set it explicitly on the mock so the
+        # ``_finalize_terminal`` boundary's admission_state check
+        # (``!= 'active'`` short-circuits non-ACTIVE jobs) accepts
+        # the mock — the underlying MagicMock would otherwise return
+        # a MagicMock for any undeclared attribute, falling through
+        # the boundary as a no-op.
+        job.admission_state = "active"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
         job.instance_id = "instance-123"
@@ -195,7 +203,13 @@ class TestJoberWatchIntegration:
 
         # Mock repository calls
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
+        # Phase 4 (Job as Queue Proxy): ``_finalize_terminal`` calls
+        # ``finalize_active_to_done`` (the new ``active → done``
+        # write boundary), not the legacy ``complete_job`` helper.
+        # Mock both so the test is robust regardless of which method
+        # the production code path ultimately dispatches through.
         job_queue_service._repository.complete_job = MagicMock(return_value=mock_job_item)
+        job_queue_service._repository.finalize_active_to_done = MagicMock(return_value=mock_job_item)
 
         await job_queue_service.complete_job(
             mock_job_item.job_id,
@@ -215,6 +229,12 @@ class TestJoberWatchIntegration:
 
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
         job_queue_service._repository.terminate_job = MagicMock(return_value=mock_job_item)
+        # Phase 4 (Job as Queue Proxy): the cancel path routes
+        # through ``_finalize_terminal(Decision.NO_RETRY)`` which
+        # calls ``finalize_active_to_done`` (target_status='cancelled')
+        # — see ``daemon/services/job_queue_service.py:990``. Mock
+        # the new boundary method too.
+        job_queue_service._repository.finalize_active_to_done = MagicMock(return_value=mock_job_item)
 
         await job_queue_service.complete_job(
             mock_job_item.job_id,
@@ -904,6 +924,14 @@ class TestNotifyWatchersEdgeCases:
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
         job.status = "processing"
+        # Phase 4 (Job as Queue Proxy): ``admission_state`` is the
+        # new write authority. Set it explicitly on the mock so the
+        # ``_finalize_terminal`` boundary's admission_state check
+        # (``!= 'active'`` short-circuits non-ACTIVE jobs) accepts
+        # the mock — the underlying MagicMock would otherwise return
+        # a MagicMock for any undeclared attribute, falling through
+        # the boundary as a no-op.
+        job.admission_state = "active"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
         job.instance_id = "instance-123"
@@ -1019,6 +1047,14 @@ class TestReconcileTerminalWatches:
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
         job.status = "processing"
+        # Phase 4 (Job as Queue Proxy): ``admission_state`` is the
+        # new write authority. Set it explicitly on the mock so the
+        # ``_finalize_terminal`` boundary's admission_state check
+        # (``!= 'active'`` short-circuits non-ACTIVE jobs) accepts
+        # the mock — the underlying MagicMock would otherwise return
+        # a MagicMock for any undeclared attribute, falling through
+        # the boundary as a no-op.
+        job.admission_state = "active"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
         job.instance_id = "instance-123"

@@ -1741,7 +1741,7 @@ class InstanceLifecycleService:
                 {"iid": instance_id, "now": now_iso},
             )
 
-            # ── Step 2: cancel jobs in the SAME transaction ──
+# ── Step 2: cancel jobs in the SAME transaction ──
             # Imported lazily to keep the module-level import surface
             # small and avoid circular-import risk through the job_queue
             # service.
@@ -1749,7 +1749,7 @@ class InstanceLifecycleService:
 
             # Find all non-terminal jobs for this instance.
             #
-            # Phase 3 admission-decision migration: filter on
+            # Phase 4 admission-decision migration: filter on
             # ``admission_state IN ('queued', 'active')`` rather than the
             # legacy ``status IN ('processing','pending','failed','paused')``.
             # Under the new model:
@@ -1767,8 +1767,14 @@ class InstanceLifecycleService:
             #                 via that path; admission_state='done' when
             #                 terminal, naturally excluded.
             #
-            # This is the inline-duplicate of the already-migrated
-            # ``JobRepository.find_jobs_by_instance`` (repository.py:540).
+            # Phase 4 (Job as Queue Proxy): the cascade below uses a
+            # SINGLE ``UPDATE job_queue_items SET admission_state='done',
+            # status='cancelled' WHERE admission_state IN ('queued',
+            # 'active')`` — no more processing vs non-processing split.
+            # ``admission_state`` is the authority (Plan §3.1); the
+            # legacy ``status`` is written as the backward-compat
+            # mirror. The previous two-UPDATE split (processing vs
+            # non-processing) is collapsed into one statement.
             jobs = list(
                 session.exec(
                     select(JobItem.job_id, JobItem.status, JobItem.project_id)
@@ -1780,92 +1786,76 @@ class InstanceLifecycleService:
                 )
             )
 
-            message_jobs_cancelled = 0
             all_jobs_cancelled = 0
             cancelled_project_ids: set[str] = set()
 
             if jobs:
-                processing_job_ids = [j for j in jobs if j.status == "processing"]
-                non_processing_job_ids = [j for j in jobs if j.status != "processing"]
-
-                # PROCESSING → CANCELLED with the canonical transition.
-                # We issue the atomic UPDATE with a status guard so a
-                # concurrent finalizer (bus completion callback) that already moved
-                # the job to COMPLETED/FAILED sees rowcount=0 and we
-                # no-op. The JobItem.version_id_col additionally appends
-                # ``AND version = :expected`` on the ORM path; the Core
-                # UPDATE below is even safer — no version check, but the
-                # ``status='processing'`` predicate is the guard.
+                # Phase 4 single-update cancel cascade.
+                #
+                # Pre-fix (Phase 3 follow-up): the cascade issued TWO
+                # ``UPDATE job_queue_items`` statements — one for the
+                # single PROCESSING job (with a ``status='processing'``
+                # guard) and one bulk update for PENDING/FAILED/PAUSED
+                # jobs (with a ``status IN (...)`` guard). The split
+                # existed because the ``result_summary`` column on the
+                # processing UPDATE had to be set to NULL (preserve the
+                # original result) while the non-processing UPDATE
+                # left it untouched. Under the new model both columns
+                # share the same ``admission_state IN ('queued',
+                # 'active')`` guard, the ``status='cancelled'`` write
+                # is identical for both, and the ``result_summary``
+                # NULL is applied uniformly (Plan §2.1: terminal
+                # classification moves to the read side via the
+                # Instance, so the JobItem's result_summary mirror
+                # stays consistent across cancel paths).
+                #
+                # The single statement covers ``queued`` and ``active``
+                # in one atomic UPDATE — a concurrent finalizer that
+                # already moved the job to ``done``/``dead`` sees
+                # rowcount=0 on the affected row and we no-op for
+                # that row (the guard predicate fails).
                 completed_at = now_iso
                 cancelled_at = now_iso
-                if processing_job_ids:
-                    session.execute(
-                        text(
-                            "UPDATE job_queue_items "
-                            "SET status = 'cancelled', "
-                            # Phase 2 dual-write: status→admission_state
-                            # co-move (CANCELLED → DONE). Same transaction
-                            # boundary as the status UPDATE so the two
-                            # columns stay consistent across the cascade.
-                            "    admission_state = 'done', "
-                            "    cancelled_at = :cancelled_at, "
-                            "    completed_at = :completed_at, "
-                            "    error_message = :err, "
-                            "    result_summary = NULL "
-                            "WHERE job_id IN :job_ids "
-                            "  AND status = 'processing'"
-                        ).bindparams(
-                            bindparam("job_ids", expanding=True),
-                        ),
-                        {
-                            "job_ids": [j.job_id for j in processing_job_ids],
-                            "cancelled_at": cancelled_at,
-                            "completed_at": completed_at,
-                            "err": "Instance terminated",
-                        },
-                    )
-                    # Capture the project_id of the processing job for
-                    # the trigger-next-job follow-up. The async caller
-                    # does the actual trigger (we cannot reach the
-                    # dispatch bus from this sync helper).
-                    for j in processing_job_ids:
-                        if j.project_id:
-                            cancelled_project_ids.add(j.project_id)
+                session.execute(
+                    text(
+                        "UPDATE job_queue_items "
+                        "SET admission_state = :done_admission, "
+                        "    status = :cancelled_status, "
+                        # Phase 2 dual-write: status→admission_state
+                        # co-move (CANCELLED → DONE). Same transaction
+                        # boundary as the status UPDATE so the two
+                        # columns stay consistent across the cascade.
+                        "    cancelled_at = :cancelled_at, "
+                        "    completed_at = :completed_at, "
+                        "    error_message = :err, "
+                        "    result_summary = NULL "
+                        "WHERE instance_id = :iid "
+                        "  AND admission_state IN ("
+                        "    :queued_admission, :active_admission"
+                        "  )"
+                    ),
+                    {
+                        "iid": instance_id,
+                        "done_admission": AdmissionState.DONE.value,
+                        "cancelled_status": JobStatus.CANCELLED.value,
+                        "queued_admission": AdmissionState.QUEUED.value,
+                        "active_admission": AdmissionState.ACTIVE.value,
+                        "cancelled_at": cancelled_at,
+                        "completed_at": completed_at,
+                        "err": "Instance terminated",
+                    },
+                )
 
-                # PENDING / FAILED / PAUSED → CANCELLED (idempotent —
-                # these statuses can also flip to CANCELLED directly).
-                # PAUSED is included per Phase 1 W1 contract: a paused
-                # instance's job is non-terminal and must be cleaned up
-                # on termination, otherwise it survives the cascade and
-                # is orphaned against the dead instance. The matching
-                # ``non_terminal_statuses`` set at the top of this block
-                # (line ~1595) also includes ``paused`` for the same
-                # reason — this UPDATE keeps the two in sync.
-                if non_processing_job_ids:
-                    session.execute(
-                        text(
-                            "UPDATE job_queue_items "
-                            "SET status = 'cancelled', "
-                            # Phase 2 dual-write: CANCELLED → DONE. Same
-                            # transaction boundary as the status UPDATE.
-                            "    admission_state = 'done', "
-                            "    cancelled_at = :cancelled_at, "
-                            "    error_message = COALESCE(error_message, :err) "
-                            "WHERE job_id IN :job_ids "
-                            "  AND status IN ('pending', 'failed', 'paused')"
-                        ).bindparams(
-                            bindparam("job_ids", expanding=True),
-                        ),
-                        {
-                            "job_ids": [j.job_id for j in non_processing_job_ids],
-                            "cancelled_at": cancelled_at,
-                            "err": "Instance terminated",
-                        },
-                    )
+                # Capture the project_ids of the cancelled jobs for the
+                # trigger-next-job follow-up. The async caller does
+                # the actual trigger (we cannot reach the dispatch bus
+                # from this sync helper).
+                for j in jobs:
+                    if j.project_id:
+                        cancelled_project_ids.add(j.project_id)
 
                 # D13: no separate MESSAGE-job count — MESSAGE-type
                 # JobItems no longer exist (see enqueue_message).
-                message_jobs_cancelled = 0
                 all_jobs_cancelled = len(jobs)
 
             # ── Step 3: delete ``job_locks`` rows for this instance ──
@@ -1924,6 +1914,13 @@ class InstanceLifecycleService:
             # the task-table cleanup that closes the message-not-found
             # orphan window).
             session.commit()
+
+            # Phase 4: ``message_jobs_cancelled`` is always 0 (D13
+            # collapsed MESSAGE-type jobs; the field survives on
+            # ``_TerminateResult`` for backward compat with the
+            # async caller at line 883 which sums it into
+            # ``jobs_cancelled``).
+            message_jobs_cancelled = 0
 
             return _TerminateResult(
                 skip=False,
@@ -2075,22 +2072,31 @@ status=InstanceStatus.IDLE.value,
         either pauses the entire tree or none of it.
 
         Phase 2 (pause/resume redesign, 2026-06-25) — W1 atomicity:
-        the same ``WriteGuardSession`` transaction now performs THREE
+        the same ``WriteGuardSession`` transaction now performs TWO
         batched UPDATEs so a single crash leaves no half-paused state
         across tables:
 
           1. ``instances`` (PAUSED)   — eligible non-terminal statuses
-          2. ``job_queue_items`` (PROCESSING → PAUSED)  — pause gate for
-             the per-project worker / job-processor (JobProcessor only
-             picks up PROCESSING rows)
-          3. ``task`` (RUNNING → PAUSED)  — pause gate for the per-task
+          2. ``task`` (RUNNING → PAUSED)  — pause gate for the per-task
              worker (``claim_pending_task`` already excludes PAUSED
              instances; the task row itself must also reflect PAUSED so
              the worker's ``complete_task`` cannot flip PAUSED →
              COMPLETED in the finally block — B2 race protection)
 
-        The three UPDATEs share ONE ``WriteGuardSession`` so the
-        commit is atomic (all-or-nothing). The pre-DB side effects
+        Phase 4 (Job as Queue Proxy): the ``job_queue_items`` UPDATE
+        (formerly UPDATE 2 in Phase 3 — flipping status PROCESSING →
+        PAUSED) was DELETED. Pause is an *Instance* concern, not a
+        queue concern. The job stays in ``admission_state='active'``
+        with its lock held; the ``claim_pending_task`` SQL guard on
+        ``instance.status == PAUSED`` (``task/repository.py:552-577``)
+        and ``_process_next_job``'s ``instance.status == PAUSED``
+        pre-check (``job_processor.py:634-646``) prevent the
+        JobProcessor from claiming work for a paused instance. Plan
+        §8.1 makes this explicit and the integration test in
+        ``test_cascade_pause_resume.py`` covers it.
+
+        The two remaining UPDATEs share ONE ``WriteGuardSession`` so
+        the commit is atomic (all-or-nothing). The pre-DB side effects
         (graph task cancellation + ``request_registry.cancel_by_instance``)
         remain in-memory and out-of-band — they fire BEFORE the helper
         runs (see ``pause_instance_cascade``).
@@ -2159,43 +2165,7 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # ─── UPDATE 2: job_queue_items → PAUSED (Phase 2 / W1) ────
-            # At the same transaction boundary as UPDATE 1, transition
-            # any PROCESSING job for a paused instance to PAUSED. The
-            # ``WHERE status = processing`` guard makes the UPDATE
-            # idempotent and racy-safe (a row that flipped to a terminal
-            # status in a concurrent transition is left alone).
-            #
-            # Effect: a paused instance's job is no longer claimable by
-            # the JobProcessor's queue sweep (which only picks up
-            # PENDING rows for ``start_job``). The job remains in the
-            # DB row-locked state for resume to re-arm. Job locks are
-            # NOT released — Phase 3 owns the resume contract.
-            session.execute(
-                text(
-                    "UPDATE job_queue_items "
-                    "SET status = :paused_status, "
-                    # Phase 2 dual-write: PAUSED → ACTIVE (NOT a
-                    # separate admission state — pause is an Instance
-                    # concern; the job's lock is still held so the
-                    # admission layer must still see ``active``).
-                    # Plan §8.1 makes this explicit.
-                    "    admission_state = :active_admission "
-                    "WHERE instance_id IN :tree_ids "
-                    "  AND status = :processing_status "
-                    "  AND deleted_at IS NULL"
-                ).bindparams(
-                    bindparam("tree_ids", expanding=True),
-                ),
-                {
-                    "paused_status": JobStatus.PAUSED.value,
-                    "active_admission": "active",
-                    "processing_status": JobStatus.PROCESSING.value,
-                    "tree_ids": updated_ids,
-                },
-            )
-
-            # ─── UPDATE 3: task → PAUSED (Phase 2 / W1) ───────────────
+            # ─── UPDATE 2: task → PAUSED (Phase 2 / W1) ───────────────
             # At the same transaction boundary as UPDATE 1, transition
             # any RUNNING task for a paused instance to PAUSED. The
             # ``WHERE status = running`` guard mirrors ``complete_task``'s
@@ -2234,9 +2204,11 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # Single commit for ALL three DB writes (Phase 2 / W1
-            # atomicity). If any UPDATE raises, none of them commit —
-            # the ``WriteGuardSession.__exit__`` rolls back via the
+            # Single commit for ALL DB writes (Phase 2 / W1
+            # atomicity, Phase 4 / Plan §8.1 — pause is an Instance
+            # concern, job_queue_items is no longer touched here).
+            # If any UPDATE raises, none of them commit — the
+            # ``WriteGuardSession.__exit__`` rolls back via the
             # underlying ``Session.close``.
             session.commit()
 
@@ -2357,16 +2329,12 @@ status=InstanceStatus.IDLE.value,
         (...)`` statement instead of N+1 per-node updates.
 
         Phase 3 (pause/resume redesign, 2026-06-25) — W2 atomicity:
-        the same ``WriteGuardSession`` transaction now performs THREE
+        the same ``WriteGuardSession`` transaction now performs TWO
         batched UPDATEs so a single crash leaves no half-resumed state
         across tables (mirrors Phase 2's ``_pause_cascade_db_sync``):
 
           1. ``instances`` (PAUSED → RUNNING) — clears ``paused_at``.
-          2. ``job_queue_items`` (PAUSED → PROCESSING) — re-arms the
-             job so ``JobProcessor``'s queue sweep (``start_job``) sees
-             it on the next tick. The ``WHERE status = 'paused'``
-             guard makes the UPDATE idempotent.
-          3. ``task`` (PAUSED → CANCELLED) — the cascade cancels paused
+          2. ``task`` (PAUSED → CANCELLED) — the cascade cancels paused
              tasks (``cancel_requested=true``, ``retry_scheduled=true``)
              rather than re-arming them to ``PENDING``. On resume,
              ``resume_processing_job`` owns the graph turn for the root
@@ -2386,8 +2354,16 @@ status=InstanceStatus.IDLE.value,
              the resume driver owns the outcome, so no retry is
              desired.
 
-        The three UPDATEs share ONE ``WriteGuardSession`` so the
-        commit is atomic (all-or-nothing).
+        Phase 4 (Job as Queue Proxy): the ``job_queue_items`` UPDATE
+        (formerly UPDATE 2 in Phase 3 — flipping status PAUSED →
+        PROCESSING) was DELETED. Resume is an *Instance* concern; the
+        job was never paused in admission (Phase 4 paused-cascade
+        removal) so its ``admission_state='active'`` and lock remain
+        intact through the pause/resume cycle. Plan §8.1 makes this
+        explicit.
+
+        The two remaining UPDATEs share ONE ``WriteGuardSession`` so
+        the commit is atomic (all-or-nothing).
 
         Returns ``_CascadeUpdateResult`` with the updated IDs.
         """
@@ -2435,45 +2411,7 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # ─── UPDATE 2: job_queue_items → PROCESSING (Phase 3 / W2) ────
-            # At the same transaction boundary as UPDATE 1, transition
-            # any PAUSED job for a resumed instance back to PROCESSING.
-            # The ``WHERE status = 'paused'`` guard makes the UPDATE
-            # idempotent and racy-safe: a row that flipped to a
-            # terminal status in a concurrent transition is left
-            # alone.
-            #
-            # Effect: the JobProcessor's queue sweep can re-discover
-            # the job on the next tick (``start_job`` requires
-            # ``status = 'pending'`` so the worker race in the
-            # resume path stays inside the existing claim contract).
-            # The job's ``started_at`` is preserved from the original
-            # transition — we only flip status, not lifecycle columns.
-            session.execute(
-                text(
-                    "UPDATE job_queue_items "
-                    "SET status = :processing_status, "
-                    # Phase 2 dual-write: PROCESSING → ACTIVE in the
-                    # same guarded UPDATE. (status was PAUSED on this
-                    # row before the resume; admission_state was
-                    # already ACTIVE — same value, dual-write kept
-                    # for consistency with the dual-write contract.)
-                    "    admission_state = :active_admission "
-                    "WHERE instance_id IN :tree_ids "
-                    "  AND status = :paused_status "
-                    "  AND deleted_at IS NULL"
-                ).bindparams(
-                    bindparam("tree_ids", expanding=True),
-                ),
-                {
-                    "processing_status": JobStatus.PROCESSING.value,
-                    "active_admission": "active",
-                    "paused_status": JobStatus.PAUSED.value,
-                    "tree_ids": tree_ids,
-                },
-            )
-
-            # ─── UPDATE 3: task → CANCELLED (resume re-claim bug fix) ────
+            # ─── UPDATE 2: task → CANCELLED (resume re-claim bug fix) ────
             # At the same transaction boundary as UPDATE 1, transition
             # any PAUSED task for a resumed instance to CANCELLED (NOT
             # PENDING). The ``WHERE status = 'paused'`` guard makes the
@@ -2531,9 +2469,11 @@ status=InstanceStatus.IDLE.value,
                 },
             )
 
-            # Single commit for ALL three DB writes (Phase 3 / W2
-            # atomicity). If any UPDATE raises, none of them commit —
-            # the ``WriteGuardSession.__exit__`` rolls back via the
+            # Single commit for ALL DB writes (Phase 3 / W2 atomicity;
+            # Phase 4 / Plan §8.1 — pause/resume is an Instance concern,
+            # job_queue_items is no longer touched here). If any UPDATE
+            # raises, none of them commit — the
+            # ``WriteGuardSession.__exit__`` rolls back via the
             # underlying ``Session.close``.
             session.commit()
 

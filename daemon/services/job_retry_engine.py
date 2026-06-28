@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from sqlmodel import Session as SQLModelSession
 
 from daemon.config import JobSystemConfig
-from daemon.repositories.job_queue import JobItem, JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.services.dead_letter_service import DeadLetterService
 
@@ -163,6 +163,18 @@ class JobRetryEngine:
             return False
         
         # Must be in FAILED state
+        # Phase 4 (Job as Queue Proxy): the dual-write mapping
+        # ``status_to_admission('failed') = 'done'`` means a legacy
+        # FAILED job lives in ``admission_state='done'``. Under the
+        # new Phase 4 design (Plan §3.2 retry-without-instance
+        # guarantee) the ``_finalize_terminal`` boundary directly
+        # transitions ACTIVE → QUEUED without an intermediate
+        # FAILED, so this retry path is the LEGACY path for
+        # jobs that already flipped to ``status='failed'`` via the
+        # ``fail_job`` helper (e.g. crash recovery, observer
+        # failure callbacks). The new canonical path is in
+        # ``_finalize_terminal(Decision.RETRY)`` (active → queued
+        # direct).
         if job.status != "failed":
             return False
         
@@ -189,7 +201,7 @@ class JobRetryEngine:
 
         New flow (status guard + atomic retry_count++ in SQL):
 
-        1. Read the job for **decision only** (status check,
+        1. Read the job for **decision only** (``admission_state`` check,
            ``should_retry()``, ``calculate_backoff()``, and
            ``get_max_retries()`` — which carries the fallback chain
            ``job.max_retries → queue.default_max_retries →
@@ -200,27 +212,33 @@ class JobRetryEngine:
            * Compute effective ``max_retries`` for the SQL guard.
            * Call ``JobRepository.atomic_retry``, which issues a
              single guarded UPDATE
-             ``SET status='pending', retry_count=retry_count+1, ...
-              WHERE job_id=:job_id AND status='failed'
+             ``SET status='pending', admission_state='queued', retry_count=retry_count+1, ...
+              WHERE job_id=:job_id AND admission_state='active'
                     AND retry_count < :max_retries``.
              Two concurrent callers cannot both succeed — the SQL
              predicates are re-evaluated after the row lock is
              acquired (PostgreSQL EvalPlanQual) or the
              single-statement UPDATE is atomic at the database
-             level (SQLite). Returns ``None`` if the row's status
-             flipped concurrently (CANCELLED / DEAD_LETTER) or
+             level (SQLite). Returns ``None`` if the row's
+             admission_state flipped concurrently (DONE / DEAD) or
              ``retry_count`` already hit ``max_retries``.
            * If ``atomic_retry`` returns ``None``, the job was
              concurrently mutated — return ``None`` (no DLQ retry
-             here, the caller that flipped the status owns the
-             transition).
+             here, the caller that flipped the admission_state owns
+             the transition).
         3. If ``should_retry`` is False (retries exhausted):
            * Call ``DeadLetterService.move_to_dlq`` (which already
-             holds a row lock + status check, see
+             holds a row lock + admission_state check, see
              ``daemon/services/dead_letter_service.py``). The
-             ``UPDATE job_queue_items SET status='dead_letter'``
+             ``UPDATE job_queue_items SET admission_state='dead'``
              inside that helper is therefore safe — no additional
              guard is required at this layer.
+
+        Phase 4 (Job as Queue Proxy): the eligibility check moved
+        from ``status == 'failed'`` to ``admission_state == 'active'``
+        — Plan §3.2 retry-without-instance guarantee removes the
+        intermediate FAILED state. The atomic_retry SQL guard moved in
+        lockstep (see ``JobRepository.atomic_retry``).
 
         Args:
             job_id: The job ID to retry.
@@ -229,9 +247,10 @@ class JobRetryEngine:
 
         Returns:
             The updated JobItem if retry was triggered, None if job not found,
-            not FAILED, concurrently cancelled / dead_lettered, or moved to DLQ.
+            not ACTIVE, concurrently transitioned to terminal, or moved to DLQ.
         """
         from daemon.services.job_state_machine import job_state_machine
+        from daemon.repositories.job_queue.models import AdmissionState
 
         # 1. Read-only decision pass. We do NOT mutate anything in
         # this session — the actual retry is a single guarded
@@ -244,7 +263,25 @@ class JobRetryEngine:
             if job is None:
                 return None
 
-            if job.status != "failed":
+            # Phase 4: eligibility accepts both the new canonical state
+            # (``admission_state='active'``, the queue-proxy
+            # authority under the retry-without-instance
+            # guarantee from Plan §3.2) and the legacy mirror state
+            # (``admission_state='done'`` WITH
+            # ``status='failed'`` via the dual-write mapping).
+            # The latter is the ``fail_job`` helper's output
+            # (e.g. crash-recovery paths, observer failure
+            # callbacks). A ``status='completed'`` (or
+            # ``cancelled`` / ``dead_letter``) job also has
+            # ``admission_state='done'`` but is NOT retryable
+            # (terminal); the ``status != 'failed'`` guard
+            # excludes those. The companion SQL guard in
+            # ``atomic_retry`` enforces the matching
+            # ``admission_state`` predicate at COMMIT.
+            if job.admission_state not in (
+                AdmissionState.ACTIVE.value,
+                AdmissionState.DONE.value,
+            ) or job.status != "failed":
                 return None
 
         # 2. Decide retry vs DLQ. should_retry() and the backoff /
@@ -266,9 +303,31 @@ class JobRetryEngine:
 
             # Validate transition is allowed (cheap fail-fast before
             # opening a session / issuing the UPDATE).
-            job_state_machine.validate_transition("failed", "pending")
+            # Phase 4: the JobStatus state machine
+            # (``job_state_machine.py``) operates on JobStatus enum
+            # values. The legacy retry path is ``failed → pending``
+            # (job_state_machine.py:29), which is what the
+            # ``fail_job`` → ``atomic_retry`` flow exercises. The new
+            # Phase 4 path (Plan §3.2 retry-without-instance
+            # guarantee) goes ``active → queued`` directly through
+            # ``_finalize_terminal(Decision.RETRY)`` and doesn't
+            # call this method (it uses the repository's
+            # ``atomic_transition`` with the dual-write, which
+            # internally handles the FAILED→PENDING transition via
+            # ``status_to_admission``). The validate here is
+            # therefore the LEGACY path's check.
+            job_state_machine.validate_transition(
+                "failed", "pending"
+            )
 
-            # 3. Atomic UPDATE with status + retry_count guards.
+            # 3. Atomic UPDATE with admission_state + retry_count guards.
+            # Phase 4: the legacy default ``from_admission_state='done'``
+            # matches the dual-write mirror for ``status='failed'``
+            # (the ``fail_job`` helper's output). New Phase 4 callers
+            # operating on a freshly-finalized active job (via
+            # ``_finalize_terminal(Decision.RETRY)``) go directly
+            # ``active → queued`` through the dual-write co-move and
+            # don't call this method.
             updated_job = self._job_repo.atomic_retry(
                 job_id=job_id,
                 max_retries=max_retries,
@@ -276,8 +335,8 @@ class JobRetryEngine:
             )
 
             if updated_job is None:
-                # The row's status flipped (concurrent CANCELLED or
-                # DEAD_LETTER) between our read and the UPDATE, or
+                # The row's admission_state flipped (concurrent DONE or
+                # DEAD) between our read and the UPDATE, or
                 # retry_count already reached max_retries. In all
                 # three cases, no further action is taken here —
                 # the owning writer is responsible for the next
@@ -298,16 +357,28 @@ class JobRetryEngine:
 
         # 4. Retries exhausted — move to DLQ.
         # DeadLetterService.move_to_dlq holds a row lock
-        # (with_for_update) and re-checks status == 'failed' under
-        # the lock, so the FAILED → DEAD_LETTER transition is safe
+        # (with_for_update) and re-checks admission_state == 'active'
+        # under the lock, so the ACTIVE → DEAD transition is safe
         # against concurrent retries / cancellations. The atomic
         # UPDATE inside atomic_retry above (which also enforces
-        # status='failed' + retry_count < max_retries) and the lock
-        # + status check inside move_to_dlq together cover the full
-        # maybe_retry → DLQ path.
+        # admission_state='active' + retry_count < max_retries) and
+        # the lock + admission_state check inside move_to_dlq
+        # together cover the full maybe_retry → DLQ path.
+        #
+        # Phase 4: the ACTIVE → DEAD transition is direct (no
+        # DLQ transition: the legacy ``maybe_retry`` path operates on a
+        # ``status='failed'`` row (the ``fail_job`` helper's output).
+        # Pass ``failed`` as the ``from_admission_state`` so
+        # ``move_to_dlq``'s eligibility check (legacy status check)
+        # accepts the row.
         try:
             with SQLModelSession(self._job_repo.engine) as session:
-                self._dlq_service.move_to_dlq(session, job_id, reason="MAX_RETRIES")
+                self._dlq_service.move_to_dlq(
+                    session,
+                    job_id,
+                    reason="MAX_RETRIES",
+                    from_admission_state="failed",
+                )
                 session.commit()
 
             # Re-read after commit to capture the dead-letter state

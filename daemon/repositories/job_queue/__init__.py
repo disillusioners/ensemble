@@ -6,7 +6,7 @@ from .lock_repository import LockRepository
 from .dead_letter_repository import DeadLetterRepository
 from .watcher_repository import JobWatcherRepository
 from .models import JobItem, JobLock, JobLockInfo, JobQueue, QueueType
-from .models import JobStatus, DeadLetterItem
+from .models import JobStatus, DeadLetterItem, AdmissionState, Decision
 from .watcher_models import JobWatcher
 
 __all__ = [
@@ -23,4 +23,6 @@ __all__ = [
     "QueueType",
     "DeadLetterItem",
     "JobWatcher",
+    "AdmissionState",
+    "Decision",
 ]

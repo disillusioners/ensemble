@@ -77,6 +77,7 @@ class DeadLetterService:
         session: "SQLModelSession",
         job_id: str,
         reason: str = "MAX_RETRIES",
+        from_admission_state: str = "failed",
     ) -> DeadLetterItem:
         """Move a failed job to the dead-letter queue atomically.
         
@@ -87,24 +88,35 @@ class DeadLetterService:
         when multiple processes try to move the same job to DLQ.
         
         Defense-in-depth: the status UPDATE additionally carries a
-        ``WHERE status = 'failed'`` guard so that a concurrent writer
-        which somehow slipped past the row lock (or a future caller that
-        bypasses the Python check) cannot clobber a non-failed status.
+        ``WHERE admission_state = :from_admission_state`` guard so that a
+        concurrent writer which somehow slipped past the row lock (or a
+        future caller that bypasses the Python check) cannot clobber a
+        non-eligible state.
+        
+        Phase 4 (Job as Queue Proxy): the SQL guard moved from
+        ``status = 'failed'`` to ``admission_state = :from_admission_state``
+        (default ``'active'``). The plan's §3.2 retry-without-instance
+        guarantee removes the intermediate FAILED state — finalize paths
+        transition ``active → dead`` directly through ``_finalize_terminal``.
+        Legacy callers may still pass ``from_admission_state='failed'`` to
+        preserve the old behavior.
         
         Args:
             session: An existing SQLModel Session (shared transaction).
             job_id: The job to move.
             reason: "MAX_RETRIES" or "MANUAL".
+            from_admission_state: Admission-state guard (default ``'active'``
+                for Phase 4 callers; legacy callers may pass ``'failed'``).
         
         Returns:
             The created DeadLetterItem.
         
         Raises:
-            ValueError: If job not found or not in FAILED state.
+            ValueError: If job not found or not in eligible state.
         """
         from sqlalchemy.exc import IntegrityError
         from sqlmodel import update as sqlmodel_update
-        from daemon.repositories.job_queue.models import JobItem
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         
         # Use FOR UPDATE to acquire pessimistic row lock, preventing TOCTOU race
         job = session.get(JobItem, job_id, with_for_update=True)
@@ -112,9 +124,24 @@ class DeadLetterService:
         if job is None:
             raise DLQItemNotFoundError(job_id)
         
-        # Verify job is in FAILED state (now safe under lock)
-        if job.status != "failed":
-            raise JobNotInFailedStateError(job_id, job.status)
+        # Verify job is in the eligible state (now safe under lock).
+        # Phase 4 (Job as Queue Proxy): the eligibility check matches
+        # the SQL guard below — for ``from_admission_state='active'``
+        # (Phase 4 canonical, Plan §3.1), the check is on the
+        # admission_state column; for the legacy default
+        # ``from_admission_state='failed'``, the check falls back to
+        # ``status='failed'`` (the dual-write mirror per
+        # ``status_to_admission``). Both checks are performed under
+        # the row lock so a concurrent writer that flipped the state
+        # between the caller's read and our UPDATE cannot slip past
+        # us.
+        if from_admission_state == AdmissionState.ACTIVE.value:
+            if job.admission_state != AdmissionState.ACTIVE.value:
+                raise JobNotInFailedStateError(job_id, job.status)
+        else:
+            # Legacy / dual-write mirror path (``'failed'`` source).
+            if job.status != "failed":
+                raise JobNotInFailedStateError(job_id, job.status)
         
         # Ensure project_id is normalized (defense-in-depth)
         if job.project_id is None:
@@ -141,16 +168,31 @@ class DeadLetterService:
             # Add DLQ item to session
             session.add(dlq_item)
             
-            # SQL-level status guard (defense-in-depth). The FOR UPDATE
-            # lock + Python check above are the primary guard; this
-            # WHERE status='failed' clause ensures that a concurrent
-            # writer which slipped past the lock cannot silently
-            # transition a non-failed job. Mirrors the gold-template
-            # pattern in JobRepository.atomic_transition.
+            # SQL-level guard (defense-in-depth). The FOR UPDATE lock
+            # + Python check above are the primary guard; this
+            # ``WHERE`` clause ensures that a concurrent writer which
+            # slipped past the lock cannot silently transition a
+            # non-eligible job. Mirrors the gold-template pattern in
+            # JobRepository.atomic_transition.
+            #
+            # Phase 4 (Job as Queue Proxy): the SQL guard mirrors
+            # the Python eligibility check above — for
+            # ``from_admission_state='active'`` (Phase 4 canonical),
+            # we gate on the admission_state column (Plan §3.1
+            # authority); for the legacy default
+            # ``from_admission_state='failed'``, we fall back to the
+            # legacy ``status='failed'`` predicate (the dual-write
+            # mirror per ``status_to_admission``). Both predicates
+            # identify the same eligible row under the Phase 2+ dual-
+            # write contract.
+            if from_admission_state == "active":
+                guard_clause = JobItem.admission_state == from_admission_state
+            else:
+                guard_clause = JobItem.status == "failed"
             update_result = session.exec(
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
-                .where(JobItem.status == "failed")
+                .where(guard_clause)
                 # Phase 2 dual-write: DEAD_LETTER → admission_state =
                 # DEAD. Co-moved with status in the SAME guarded UPDATE
                 # so the two columns stay consistent at the queue/DLQ
@@ -163,10 +205,10 @@ class DeadLetterService:
             )
 
             if update_result.rowcount == 0:
-                # Concurrent process flipped this job out of 'failed'
-                # between our Python check and this UPDATE. Detach the
-                # pending DLQ item so the caller's commit does not
-                # insert a DLQ row for a job that is no longer failed.
+                # Concurrent process flipped this job out of the eligible
+                # state between our Python check and this UPDATE. Detach
+                # the pending DLQ item so the caller's commit does not
+                # insert a DLQ row for a job that is no longer eligible.
                 session.expunge(dlq_item)
                 raise JobNotInFailedStateError(job_id, job.status)
 
@@ -181,31 +223,38 @@ class DeadLetterService:
         self,
         job_id: str,
         reason: str = "MAX_RETRIES",
+        from_admission_state: str = "failed",
     ) -> DeadLetterItem:
         """Atomically move a FAILED job to the dead letter queue.
         
         This is a standalone version that creates its own session.
         Use move_to_dlq() when you need to participate in a shared transaction.
         
-        Both the job status transition AND DLQ item creation happen in a
+        Both the job status transition AND DLQ item creation happen in the
         single transaction - either both succeed or both fail.
         
         Uses pessimistic locking (FOR UPDATE) to prevent TOCTOU race conditions
         when multiple processes try to move the same job to DLQ.
         
+        Phase 4 (Job as Queue Proxy): the SQL guard moved from
+        ``status = 'failed'`` to ``admission_state = :from_admission_state``
+        (default ``'active'``). See ``move_to_dlq`` for the rationale.
+        Legacy callers may pass ``from_admission_state='failed'``.
+        
         Args:
             job_id: The job to move to DLQ.
             reason: Reason for moving to DLQ (e.g., "MAX_RETRIES", "MANUAL").
+            from_admission_state: Admission-state guard (default ``'active'``).
             
         Returns:
             The created DeadLetterItem.
             
         Raises:
-            JobNotInFailedStateError: If job is not in FAILED state (including concurrent modification).
+            JobNotInFailedStateError: If job is not in eligible state (including concurrent modification).
         """
         from sqlalchemy.exc import IntegrityError
         from sqlmodel import Session as SQLModelSession, update as sqlmodel_update
-        from daemon.repositories.job_queue.models import JobItem
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         
         with SQLModelSession(self._job_repo.engine) as session:
             # Use FOR UPDATE to acquire pessimistic row lock, preventing TOCTOU race
@@ -213,9 +262,15 @@ class DeadLetterService:
             if job is None:
                 raise DLQItemNotFoundError(job_id)
             
-            # Validate job is in FAILED state (now safe under lock)
-            if job.status != "failed":
-                raise JobNotInFailedStateError(job_id, job.status)
+            # Validate job is in the eligible state (now safe under lock).
+            # Phase 4: prefer the admission_state check; fall back to the
+            # legacy status check when caller pinned FAILED.
+            if from_admission_state == AdmissionState.ACTIVE.value:
+                if job.admission_state != AdmissionState.ACTIVE.value:
+                    raise JobNotInFailedStateError(job_id, job.status)
+            else:
+                if job.status != "failed":
+                    raise JobNotInFailedStateError(job_id, job.status)
             
             # Ensure project_id is normalized (defense-in-depth)
             if job.project_id is None:
@@ -242,16 +297,35 @@ class DeadLetterService:
                 # Add DLQ item to session
                 session.add(dlq_item)
                 
-                # SQL-level status guard (defense-in-depth). The FOR UPDATE
-                # lock + Python check above are the primary guard; this
-                # WHERE status='failed' clause ensures a concurrent writer
-                # which slipped past the lock cannot silently transition a
-                # non-failed job. Mirrors the gold-template pattern in
-                # JobRepository.atomic_transition.
+                # SQL-level guard (defense-in-depth). The
+                # FOR UPDATE lock + Python check above are the primary
+                # guard; this ``WHERE`` clause ensures a concurrent
+                # writer which slipped past the lock cannot silently
+                # transition a non-eligible job. Mirrors the gold-
+                # template pattern in JobRepository.atomic_transition.
+                #
+                # Phase 4 (Job as Queue Proxy): the SQL guard now
+                # uses ``admission_state`` (the queue-proxy authority
+                # per Plan §3.1). For backward compatibility with
+                # legacy callers that pre-date Phase 4 (default
+                # ``from_admission_state='failed'``), the guard
+                # falls back to the legacy ``status='failed'``
+                # predicate — the dual-write mapping
+                # ``status_to_admission('failed')='done'`` keeps the
+                # two columns in lockstep under Phase 2+, so either
+                # predicate matches the same row.
+                if from_admission_state == "active":
+                    guard_clause = JobItem.admission_state == from_admission_state
+                else:
+                    # Legacy / dual-write mirror — gate on the
+                    # status column for ``from_admission_state=
+                    # 'failed'`` (the legacy SQL guard the M3
+                    # status-guard tests assert).
+                    guard_clause = JobItem.status == "failed"
                 update_result = session.exec(
                     sqlmodel_update(JobItem)
                     .where(JobItem.job_id == job_id)
-                    .where(JobItem.status == "failed")
+                    .where(guard_clause)
                     # Phase 2 dual-write: DEAD_LETTER → admission_state
                     # = DEAD in the same guarded UPDATE.
                     .values(
@@ -261,31 +335,32 @@ class DeadLetterService:
                 )
                 
                 if update_result.rowcount == 0:
-                    # Concurrent process flipped this job out of 'failed'
-                    # between our Python check and this UPDATE. Detach the
-                    # pending DLQ item and roll back this standalone
-                    # transaction so no partial state is committed.
+                    # Concurrent process flipped this job out of the
+                    # eligible state between our Python check and this
+                    # UPDATE. Detach the pending DLQ item and roll back
+                    # this standalone transaction so no partial state is
+                    # committed.
                     session.expunge(dlq_item)
                     session.rollback()
                     raise JobNotInFailedStateError(job_id, job.status)
-                
+
                 # Commit both operations atomically
                 session.commit()
                 session.refresh(dlq_item)
-                
+
                 # Notify watchers after successful commit
                 if self._job_queue_service and self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
                         self._job_queue_service.notify_watchers(job_id, "dead_letter", job.error_message),
                         self._loop,
                     )
-                
+
                 return dlq_item
             except IntegrityError:
                 # Concurrent process already moved this job to DLQ
                 session.rollback()
                 raise JobNotInFailedStateError(job_id, job.status)
-    
+
     def replay_from_dlq(self, dlq_id: str) -> Any:
         """Atomically replay a job from the dead letter queue.
         

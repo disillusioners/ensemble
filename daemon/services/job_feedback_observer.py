@@ -59,7 +59,7 @@ from sqlalchemy import func, text as _sa_text
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import JobLock, status_to_admission
+from daemon.repositories.job_queue.models import AdmissionState, JobLock, status_to_admission
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
@@ -2435,14 +2435,14 @@ class JobFeedbackObserver:
             # ``skip`` value.
             if job_id is not None:
                 update_values: dict[str, Any] = {
-                    "status": to_status,
-                    # Phase 2 dual-write: to_status is COMPLETED or
-                    # FAILED (both map to admission_state = DONE) so
-                    # status_to_admission() collapses both to one
-                    # value. Co-moved with status in the same guarded
-                    # UPDATE so the two columns stay consistent
-                    # through the terminal cascade.
-                    "admission_state": status_to_admission(to_status),
+                    # Phase 4 (Job as Queue Proxy): admission_state is
+                    # now the PRIMARY write target. The status column is
+                    # still written (Phase 5 drops it) as a derived
+                    # mirror — completed/failed both map to
+                    # AdmissionState.DONE so the co-move contract is
+                    # satisfied in one guarded UPDATE.
+                    "admission_state": AdmissionState.DONE.value,
+                    "status": to_status,  # backward-compat mirror
                     "completed_at": now,
                 }
                 if terminal_status == InstanceStatus.COMPLETED.value:
@@ -2454,7 +2454,19 @@ class JobFeedbackObserver:
                 stmt = (
                     sqlmodel_update(JobItem)
                     .where(JobItem.job_id == job_id)
-                    .where(JobItem.status == JobStatus.PROCESSING.value)
+                    # Phase 4: admission_state is the authority; the
+                    # legacy ``status == 'processing'`` guard was
+                    # replaced. Paused jobs are still excluded by the
+                    # new predicate because pause keeps the job in
+                    # admission_state='active' (its lock is held) but
+                    # the ``_pause_cascade_db_sync`` UPDATE in
+                    # ``instance_lifecycle.py`` no longer touches the
+                    # job row — see Plan §8.1. Concurrent
+                    # ``_terminate_instance_db_sync`` callers that flip
+                    # admission_state to 'done' cause rowcount=0 here
+                    # and the helper falls through to the disambiguation
+                    # SELECT below.
+                    .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
                     .values(**update_values)
                 )
                 result = session.exec(stmt)

@@ -35,7 +35,11 @@ from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import (
+    JobItem,
+    JobStatus,
+    status_to_admission,
+)
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
@@ -219,7 +223,14 @@ def _seed_job(
     created_at: str | None = None,
     deleted_at: str | None = None,
 ) -> str:
-    """Insert a ``JobItem`` row. Returns the ``job_id`` (auto-generated if None)."""
+    """Insert a ``JobItem`` row. Returns the ``job_id`` (auto-generated if None).
+
+    Phase 4 (Job as Queue Proxy): ``admission_state`` is derived from
+    ``status`` via :func:`status_to_admission` so test seeds honor the
+    dual-write contract introduced in Phase 2. PROCESSING/PAUSED →
+    ACTIVE; PENDING → QUEUED; COMPLETED/FAILED/CANCELLED → DONE;
+    DEAD_LETTER → DEAD.
+    """
     jid = job_id or str(uuid.uuid4())
     created = created_at or datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -232,6 +243,7 @@ def _seed_job(
             project_id=project_id,
             priority=5,
             status=status,
+            admission_state=status_to_admission(status),
             result_summary=result_summary,
             error_message=error_message,
             instance_id=instance_id,
@@ -590,21 +602,39 @@ class TestListWork:
 
     def test_list_work_filter_by_status_canonical(self, engine, resolver):
         """A canonical ``status`` filter matches both Task ``running`` and
-        JobItem ``processing`` (the two source values that canonicalise
-        to ``"processing"``)."""
+        JobItem whose Instance is ``running`` (the two source values
+        that canonicalise to ``"processing"``).
+
+        Phase 4 (Job as Queue Proxy): the JobItem ``status`` column is
+        no longer the authority for execution state — the Instance
+        ``status`` is. So we seed a job with an ``instance_id`` whose
+        ``Instance.status == 'running'`` to model a real in-flight
+        job, and verify the resolver canonicalizes ``running`` →
+        ``processing`` for the JobItem side as it does for the Task
+        side.
+        """
         _seed_task(engine, instance_id="i1", status=TaskStatus.RUNNING.value)
         _seed_task(engine, instance_id="i2", status=TaskStatus.PENDING.value)
-        _seed_job(engine, status=JobStatus.PROCESSING.value)
-        _seed_job(engine, status=JobStatus.PENDING.value)
+        # Phase 4: jobs need an instance to source execution status.
+        # The Instance ``running`` status canonicalizes to
+        # ``"processing"`` via the work_status map.
+        _seed_instance(engine, instance_id="i-job-1", status="running")
+        _seed_instance(engine, instance_id="i-job-2", status="pending")
+        _seed_job(
+            engine, instance_id="i-job-1", status=JobStatus.PROCESSING.value,
+        )
+        _seed_job(
+            engine, instance_id="i-job-2", status=JobStatus.PENDING.value,
+        )
 
         records = resolver.list_work(status="processing")
 
         assert len(records) == 2
         assert {r.status for r in records} == {"processing"}
-        # One Task (status="running") and one JobItem (status="processing")
-        # both canonicalise to "processing". Phase 4 (2026-06-27):
-        # the Task row surfaces as ``kind="turn"`` (process_message →
-        # turn), not the legacy ``kind="task"``.
+        # One Task (status="running") and one JobItem (instance
+        # status="running") both canonicalise to "processing". Phase
+        # 4 (2026-06-27): the Task row surfaces as ``kind="turn"``
+        # (process_message → turn), not the legacy ``kind="task"``.
         assert {r.kind for r in records} == {"turn", "job"}
 
     def test_list_work_filter_by_status_dead_letter_only_matches_jobs(

@@ -62,7 +62,12 @@ from daemon.repositories.instance.models import (
     InstanceHierarchy,
     InstanceStatus,
 )
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import (
+    AdmissionState,
+    JobItem,
+    JobStatus,
+    status_to_admission,
+)
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
@@ -156,7 +161,13 @@ def _seed_job(
     instance_id: str,
     status: str = JobStatus.PROCESSING.value,
 ) -> str:
-    """Insert a JobItem row. Returns the job_id."""
+    """Insert a JobItem row. Returns the job_id.
+
+    Phase 4 (Job as Queue Proxy): ``admission_state`` is now derived
+    from ``status`` via ``status_to_admission`` so test seeds honor
+    the dual-write contract. PROCESSING/PAUSED → ACTIVE; PENDING →
+    QUEUED; terminal statuses → DONE/DEAD.
+    """
     jid = f"job-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -169,6 +180,7 @@ def _seed_job(
             project_id="test-project",
             job_type="message",
             status=status,
+            admission_state=status_to_admission(status),
             instance_id=instance_id,
             created_at=now_iso,
             started_at=(
@@ -375,12 +387,24 @@ def test_cascade_pause_3level_hierarchy(lifecycle_service, engine, write_guard):
     assert instances[p_id].status == InstanceStatus.PAUSED.value
     assert instances[c_id].status == InstanceStatus.PAUSED.value
 
-    # All three jobs PAUSED
+    # Phase 4 (Job as Queue Proxy): pause is an Instance concern, NOT
+    # a queue concern. The job stays in PROCESSING status with
+    # admission_state='active' (its lock is held throughout pause).
+    # The pause-cascade helper no longer writes the job_queue_items
+    # row (Plan §8.1) — see ``daemon/services/instance_lifecycle.py``
+    # ``_pause_cascade_db_sync``. The ``claim_pending_task`` SQL guard
+    # on ``instance.status == PAUSED`` is what keeps the worker from
+    # claiming work for a paused instance.
     for iid in [gp_id, p_id, c_id]:
         jobs = _read_jobs(engine, iid)
         assert len(jobs) == 1
-        assert jobs[0].status == JobStatus.PAUSED.value, (
-            f"job for {iid[:8]} expected PAUSED, got {jobs[0].status}"
+        assert jobs[0].status == JobStatus.PROCESSING.value, (
+            f"job for {iid[:8]} expected PROCESSING (pause is "
+            f"instance-only in Phase 4), got {jobs[0].status}"
+        )
+        assert jobs[0].admission_state == AdmissionState.ACTIVE.value, (
+            f"job for {iid[:8]} admission_state expected ACTIVE, "
+            f"got {jobs[0].admission_state}"
         )
 
     # All three tasks PAUSED
@@ -398,8 +422,12 @@ def test_cascade_pause_3level_hierarchy(lifecycle_service, engine, write_guard):
 def test_cascade_resume_3level_hierarchy(lifecycle_service, engine, write_guard):
     """3-level hierarchy: grandparent → parent → child (all PAUSED).
 
-    Resume grandparent → ALL instances (PAUSED→RUNNING), jobs (PAUSED→PROCESSING),
-    tasks (PAUSED→CANCELLED).
+    Resume grandparent → ALL instances (PAUSED→RUNNING), jobs (PROCESSING
+    — unchanged in Phase 4), tasks (PAUSED→CANCELLED).
+
+    Phase 4 (Job as Queue Proxy): the resume cascade no longer writes
+    job_queue_items. Jobs stay in PROCESSING status with
+    admission_state='active' throughout pause/resume — see Plan §8.1.
     """
     # Build hierarchy: all PAUSED
     gp_id = _seed_instance(
@@ -419,10 +447,10 @@ def test_cascade_resume_3level_hierarchy(lifecycle_service, engine, write_guard)
     _seed_hierarchy(engine, parent_id=gp_id, child_id=p_id)
     _seed_hierarchy(engine, parent_id=p_id, child_id=c_id)
 
-    # Jobs all PAUSED
-    _seed_job(engine, instance_id=gp_id, status=JobStatus.PAUSED.value)
-    _seed_job(engine, instance_id=p_id, status=JobStatus.PAUSED.value)
-    _seed_job(engine, instance_id=c_id, status=JobStatus.PAUSED.value)
+    # Phase 4: jobs stay PROCESSING (pause no longer touches the job row).
+    _seed_job(engine, instance_id=gp_id, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=p_id, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=c_id, status=JobStatus.PROCESSING.value)
 
     # Tasks all PAUSED
     _seed_task(engine, instance_id=gp_id, status=TaskStatus.PAUSED.value)
@@ -451,12 +479,17 @@ def test_cascade_resume_3level_hierarchy(lifecycle_service, engine, write_guard)
     assert instances[p_id].paused_at is None
     assert instances[c_id].paused_at is None
 
-    # All three jobs PROCESSING
+    # Phase 4: jobs stay PROCESSING (resume no longer touches the job row).
     for iid in [gp_id, p_id, c_id]:
         jobs = _read_jobs(engine, iid)
         assert len(jobs) == 1
         assert jobs[0].status == JobStatus.PROCESSING.value, (
-            f"job for {iid[:8]} expected PROCESSING, got {jobs[0].status}"
+            f"job for {iid[:8]} expected PROCESSING (resume is "
+            f"instance-only in Phase 4), got {jobs[0].status}"
+        )
+        assert jobs[0].admission_state == AdmissionState.ACTIVE.value, (
+            f"job for {iid[:8]} admission_state expected ACTIVE, "
+            f"got {jobs[0].admission_state}"
         )
 
     # All three tasks CANCELLED (resume cascade cancels paused tasks —
@@ -516,7 +549,11 @@ def test_partial_tree_pause_only_subtree(lifecycle_service, engine, write_guard)
     assert instances[child1_id].status == InstanceStatus.PAUSED.value
     jobs = _read_jobs(engine, child1_id)
     assert len(jobs) == 1
-    assert jobs[0].status == JobStatus.PAUSED.value
+    # Phase 4: jobs stay PROCESSING regardless of pause.
+    assert jobs[0].status == JobStatus.PROCESSING.value, (
+        f"child1 job expected PROCESSING (Phase 4 pause is instance-only), "
+        f"got {jobs[0].status}"
+    )
     tasks = _read_tasks(engine, child1_id)
     assert len(tasks) == 1
     assert tasks[0].status == TaskStatus.PAUSED.value
@@ -547,6 +584,9 @@ def test_partial_tree_resume_only_subtree(lifecycle_service, engine, write_guard
     """From partial pause (child1 PAUSED, parent+child2 RUNNING), resume child1.
 
     Verifies child1's subtree resumes; parent stays RUNNING.
+
+    Phase 4 (Job as Queue Proxy): pause no longer touches the job
+    row, so the child's job stays PROCESSING through pause/resume.
     """
     parent_id = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
     child1_id = _seed_instance(
@@ -561,8 +601,9 @@ def test_partial_tree_resume_only_subtree(lifecycle_service, engine, write_guard
     _seed_hierarchy(engine, parent_id=parent_id, child_id=child1_id)
     _seed_hierarchy(engine, parent_id=parent_id, child_id=child2_id)
 
+    # Phase 4: jobs stay PROCESSING throughout pause/resume.
     _seed_job(engine, instance_id=parent_id, status=JobStatus.PROCESSING.value)
-    _seed_job(engine, instance_id=child1_id, status=JobStatus.PAUSED.value)
+    _seed_job(engine, instance_id=child1_id, status=JobStatus.PROCESSING.value)
     _seed_job(engine, instance_id=child2_id, status=JobStatus.PROCESSING.value)
 
     _seed_task(engine, instance_id=parent_id, status=TaskStatus.RUNNING.value)
@@ -580,12 +621,14 @@ def test_partial_tree_resume_only_subtree(lifecycle_service, engine, write_guard
 
     assert result.updated_ids == [child1_id]
 
-    # child1 RUNNING, job PROCESSING, task CANCELLED
+    # child1 RUNNING, job PROCESSING (Phase 4: pause/resume doesn't
+    # touch job row), task CANCELLED.
     inst = _read_instance(engine, child1_id)
     assert inst.status == InstanceStatus.RUNNING.value
     jobs = _read_jobs(engine, child1_id)
     assert len(jobs) == 1
     assert jobs[0].status == JobStatus.PROCESSING.value
+    assert jobs[0].admission_state == AdmissionState.ACTIVE.value
     tasks = _read_tasks(engine, child1_id)
     assert len(tasks) == 1
     assert tasks[0].status == TaskStatus.CANCELLED.value
@@ -643,10 +686,11 @@ def test_cascade_terminate_from_paused(lifecycle_service, engine, write_guard):
     _seed_hierarchy(engine, parent_id=gp_id, child_id=p_id)
     _seed_hierarchy(engine, parent_id=p_id, child_id=c_id)
 
-    # Jobs all PAUSED
-    _seed_job(engine, instance_id=gp_id, status=JobStatus.PAUSED.value)
-    _seed_job(engine, instance_id=p_id, status=JobStatus.PAUSED.value)
-    _seed_job(engine, instance_id=c_id, status=JobStatus.PAUSED.value)
+    # Phase 4: jobs stay PROCESSING (pause is instance-only), but the
+    # terminate cascade still picks them up via admission_state filter.
+    _seed_job(engine, instance_id=gp_id, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=p_id, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=c_id, status=JobStatus.PROCESSING.value)
 
     # Tasks all PAUSED
     _seed_task(engine, instance_id=gp_id, status=TaskStatus.PAUSED.value)
@@ -693,13 +737,16 @@ def test_cascade_terminate_from_paused(lifecycle_service, engine, write_guard):
             f"{instances[iid].status}"
         )
 
-    # All jobs CANCELLED (including the PAUSED ones — Phase 4 fix:
-    # the non-processing UPDATE WHERE clause now includes 'paused')
+    # All jobs CANCELLED (Phase 4 admission_state='active' guard)
     for iid in [gp_id, p_id, c_id]:
         jobs = _read_jobs(engine, iid)
         assert len(jobs) == 1
         assert jobs[0].status == JobStatus.CANCELLED.value, (
             f"job for {iid[:8]} expected CANCELLED, got {jobs[0].status}"
+        )
+        assert jobs[0].admission_state == AdmissionState.DONE.value, (
+            f"job for {iid[:8]} admission_state expected DONE, "
+            f"got {jobs[0].admission_state}"
         )
 
     # All tasks DELETED
@@ -755,7 +802,7 @@ def test_cascade_mixed_states_idempotent_pause(
     _seed_hierarchy(engine, parent_id=parent_id, child_id=child2_id)
 
     _seed_job(engine, instance_id=parent_id, status=JobStatus.PROCESSING.value)
-    _seed_job(engine, instance_id=child1_id, status=JobStatus.PAUSED.value)
+    _seed_job(engine, instance_id=child1_id, status=JobStatus.PROCESSING.value)
     _seed_job(engine, instance_id=child2_id, status=JobStatus.PROCESSING.value)
 
     _seed_task(engine, instance_id=parent_id, status=TaskStatus.RUNNING.value)
@@ -787,19 +834,27 @@ def test_cascade_mixed_states_idempotent_pause(
     assert instances[child1_id].status == InstanceStatus.PAUSED.value
     jobs = _read_jobs(engine, child1_id)
     assert len(jobs) == 1
-    assert jobs[0].status == JobStatus.PAUSED.value  # unchanged
+    # Phase 4: jobs stay PROCESSING (pause is instance-only).
+    assert jobs[0].status == JobStatus.PROCESSING.value, (
+        "child1 job expected PROCESSING (Phase 4 pause is "
+        "instance-only), got " + jobs[0].status
+    )
 
     # parent PAUSED
     assert instances[parent_id].status == InstanceStatus.PAUSED.value
     jobs = _read_jobs(engine, parent_id)
     assert len(jobs) == 1
-    assert jobs[0].status == JobStatus.PAUSED.value
+    assert jobs[0].status == JobStatus.PROCESSING.value, (
+        "parent job expected PROCESSING (Phase 4), got " + jobs[0].status
+    )
 
     # child2 PAUSED
     assert instances[child2_id].status == InstanceStatus.PAUSED.value
     jobs = _read_jobs(engine, child2_id)
     assert len(jobs) == 1
-    assert jobs[0].status == JobStatus.PAUSED.value
+    assert jobs[0].status == JobStatus.PROCESSING.value, (
+        "child2 job expected PROCESSING (Phase 4), got " + jobs[0].status
+    )
 
 
 # ─── 7. Partial-tree bus watchers: parent RUNNING, child1 PAUSED, child2 RUNNING ─

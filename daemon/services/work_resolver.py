@@ -266,7 +266,14 @@ def _serialize_created_at(value: datetime | None) -> str | None:
 
 
 def _build_canonical_to_sources() -> dict[str, set[str]]:
-    """Build reverse map: canonical status → set of source status strings."""
+    """Build reverse map: canonical status → set of source status strings.
+
+    Phase 4 (Job as Queue Proxy): the JobItem source set is split
+    between legacy ``status`` (terminal cluster) and the new
+    ``admission_state`` (non-terminal cluster). ``_query_jobs``
+    consults both columns. The Task side stays on the legacy
+    ``status`` column.
+    """
     out: dict[str, set[str]] = {}
     for source, canon in _STATUS_CANONICAL_MAP.items():
         out.setdefault(canon, set()).add(source)
@@ -1149,6 +1156,17 @@ class WorkResolverService:
         ``JobItem.deleted_at IS NULL`` is enforced unconditionally —
         soft-deleted jobs are invisible to the virtual job surface
         (matches the default behaviour of ``JobRepository.list``).
+
+        Phase 4 (Job as Queue Proxy): the SQL filter still targets
+        the legacy ``status`` column (Phase 5 drops it). The
+        ``admission_state`` column co-moves with ``status`` via the
+        dual-write contract (Phase 2+), so a JobItem whose
+        admission_state is ``active`` also has ``status='processing'``
+        and is matched by the same SQL filter. Likewise, a dead
+        JobItem has both ``admission_state='dead'`` and
+        ``status='dead_letter'``, so the ``dead_letter`` source key
+        in ``_STATUS_CANONICAL_MAP`` continues to match via the
+        legacy column.
         """
         from sqlmodel import Session as SQLModelSession
 

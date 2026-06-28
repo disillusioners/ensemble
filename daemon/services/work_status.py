@@ -67,9 +67,22 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     "completed": "completed",
     "failed": "failed",
     "cancelled": "cancelled",
-    # JobItem-side source values (Task already covers ``paused``; the
-    # entries below are the JobItem-only source values).
+    # Phase 4 (Job as Queue Proxy): ``processing`` is the legacy
+    # JobItem-side in-flight spelling (kept here as a SOURCE KEY so
+    # the resolver's reverse map ``_CANONICAL_TO_SOURCES`` can find
+    # it via SQL — ``_query_jobs`` splits terminal vs non-terminal
+    # status filters and routes non-terminal to ``admission_state``
+    # while still honoring the legacy ``status='processing'``
+    # mirror). Task uses ``running`` so this is a JobItem-only
+    # source. The dual-write contract in Phase 2 keeps
+    # ``status='processing'`` and ``admission_state='active'``
+    # co-moved, so a single source key covers both reads.
     "processing": "processing",
+    # ``dead_letter`` stays as a canonical terminal value for
+    # backward compatibility with callers that still read the
+    # legacy vocabulary. The JobItem ``admission_state='dead'``
+    # spelling maps to ``dead_letter`` below — both source keys
+    # collapse onto the same canonical terminal.
     "dead_letter": "dead_letter",
     # Instance-side source values (Phase 1, Job as Queue Proxy).
     # ``Instance.status`` is the execution authority for JobItem rows
@@ -89,6 +102,13 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     "queued": "processing",
     "error": "failed",
     "terminated": "cancelled",
+    # Phase 4 admission-state source value — the JobItem column
+    # spelling of the dead admission state. The legacy ``dead_letter``
+    # source key above preserves backward compatibility with callers
+    # that still write ``status='dead_letter'`` in transition code
+    # (it co-moves with ``admission_state='dead'`` via the dual-write
+    # contract introduced in Phase 2).
+    "dead": "dead_letter",
 }
 
 

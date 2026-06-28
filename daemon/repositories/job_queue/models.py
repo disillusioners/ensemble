@@ -68,6 +68,30 @@ class AdmissionState(str, enum.Enum):
         return value in cls._value2member_map_
 
 
+class Decision(str, enum.Enum):
+    """Required decision for terminal admission transitions (Phase 4).
+
+    The single terminal-write boundary ``JobQueueService._finalize_terminal``
+    takes a REQUIRED ``Decision`` value so a new finalize path that forgets
+    retry/DLQ handling fails at instantiation, not in production. The enum
+    is closed and non-defaulted — there is no neutral member.
+
+    Each value maps onto a single admission transition::
+
+        NO_RETRY     active → done     (success, fail-no-retry, cancel)
+        RETRY        active → queued   (retry_count+1, next_retry_at set)
+        DEAD_LETTER  active → dead     (move_to_dlq)
+
+    Phase 4 §3.2 (Plan §6.1 — C1 audit inventory): every terminal-write
+    caller funnels through ``_finalize_terminal`` with one of these values.
+    The structural guarantee converts the §8.2 retry-without-instance audit
+    from a checklist into a grep.
+    """
+    NO_RETRY = "no_retry"
+    RETRY = "retry"
+    DEAD_LETTER = "dead_letter"
+
+
 # Mapping from JobStatus values (string) to AdmissionState values.
 # Defined at module level so service-layer raw SQL UPDATEs can import
 # it without circular-dependency risk (the helper depends only on the

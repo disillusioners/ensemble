@@ -18,7 +18,14 @@ if TYPE_CHECKING:
     from daemon.services.dispatch_event_bus import DispatchEventBus
     from daemon.services.work_resolver import WorkRecord
 
-from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
+from daemon.repositories.job_queue import (
+    AdmissionState,
+    Decision,
+    JobRepository,
+    JobQueueRepository,
+    JobItem,
+    JobStatus,
+)
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
@@ -131,6 +138,13 @@ class JobQueueService:
         self._queue_repo = queue_repo
         self._instance_manager = instance_manager
         self._retry_engine = None
+        # Phase 4 (Job as Queue Proxy): the DeadLetterService is wired
+        # at startup via ``set_dlq_service``. ``_finalize_terminal``
+        # uses it for the ``Decision.DEAD_LETTER`` path. Optional
+        # because tests construct ``JobQueueService`` without one and
+        # the helper falls back to a direct ``atomic_transition``
+        # write in that case.
+        self._dlq_service: Any | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dispatch_bus: "DispatchEventBus" | None = None  # Dispatch event bus for job notifications
         self._idempotency_key_ttl_hours: int = 24  # Default TTL for idempotency key deduplication
@@ -148,12 +162,21 @@ class JobQueueService:
         self._use_virtual_job_resolver: bool = True
     
     def set_retry_engine(self, retry_engine) -> None:
-        """Set the retry engine for auto-retry functionality.
-        
+        """Set the retry engine used for auto-retries.
+
         Args:
             retry_engine: The JobRetryEngine instance to use for auto-retries.
         """
         self._retry_engine = retry_engine
+
+    def set_dlq_service(self, dlq_service) -> None:
+        """Set the DLQ service used by :meth:`_finalize_terminal`.
+
+        Args:
+            dlq_service: The DeadLetterService instance for the
+                ``Decision.DEAD_LETTER`` path.
+        """
+        self._dlq_service = dlq_service
     
     def set_project_repo(self, project_repo: Any) -> None:
         """Set the project repository for pause state checks.
@@ -886,11 +909,11 @@ class JobQueueService:
     
     async def cancel_job(self, job_id: str) -> bool:
         """Cancel a job. Works for PENDING, PROCESSING, and FAILED states.
-        
+
         For PROCESSING jobs with an alive instance, this cascades termination
         to the instance (cancelling active requests, terminating children,
         releasing locks) before marking the job as CANCELLED.
-        
+
         For PROCESSING jobs with a dead/terminal instance and for PENDING /
         FAILED jobs, this delegates to the atomic repository ``cancel_job``,
         which handles all cancellable states in a single UPDATE-WHERE-IN.
@@ -898,12 +921,20 @@ class JobQueueService:
         concurrent ``start_job`` would transition PENDING -> PROCESSING
         between this method's read and its dispatch, causing the cancel
         to be silently lost.
-        
+
         For FAILED jobs, this stops any pending retries.
-        
+
+        Phase 4 (Job as Queue Proxy): the PENDING / PROCESSING-dead /
+        FAILED branch routes through the single terminal-write boundary
+        ``_finalize_terminal(Decision.NO_RETRY)`` — the same path
+        ``complete_job(CANCELLED)`` uses. The PROCESSING-with-alive-
+        instance branch keeps its cascade to ``terminate_instance``,
+        which is an Instance concern (not a queue concern) and is
+        outside the boundary's scope.
+
         Args:
             job_id: Job identifier.
-            
+
         Returns:
             True if cancelled successfully, False if job not found or
             not in a cancellable state.
@@ -911,20 +942,20 @@ class JobQueueService:
         job = await asyncio.to_thread(self._repository.get, job_id)
         if job is None:
             return False
-        
+
         # Pre-validate with state machine for better error messages. This
         # is a best-effort check; the atomic repo.cancel_job is the source
         # of truth and will raise ValueError for non-cancellable states.
         if not job_state_machine.can_transition(job.status, JobStatus.CANCELLED.value):
             return False
-        
+
         # Special case: PROCESSING with an alive instance requires a
         # cascade — ``terminate_instance`` will mark the job CANCELLED
         # itself. Lock release happens first regardless of instance
         # liveness (matches pre-fix semantics).
         if job.status == JobStatus.PROCESSING.value:
             instance_id = job.instance_id
-            
+
             # Release any locks held by this job first
             if job.queue_id and job.project_id:
                 await self._lock_manager.release_queue_lock(
@@ -932,14 +963,14 @@ class JobQueueService:
                 )
             elif job.project_id:
                 await self._lock_manager.release(job.project_id, job_id)
-            
+
             # Check if instance is still alive
             instance_alive = (
                 instance_id is not None
                 and self._instance_manager is not None
                 and self._is_instance_alive(instance_id)
             )
-            
+
             if instance_alive:
                 # Terminate the instance (cascades to children, cancels
                 # requests, releases locks, marks job as CANCELLED via
@@ -950,16 +981,45 @@ class JobQueueService:
                 return True
             # else: instance already dead/terminal — fall through to atomic
             # repo.cancel_job which will handle PROCESSING -> CANCELLED.
-        
-        # All other cancellable states (PENDING, PROCESSING-dead, FAILED):
-        # delegate to the atomic repository cancel_job which covers all
-        # cancellable states in a single UPDATE, eliminating the TOCTOU
-        # race against concurrent start_job transitions.
+
+        # Phase 4: route through the single terminal-write boundary.
+        # The cancel decision is always NO_RETRY (cancel never retries).
+        # ``_finalize_terminal`` does the atomic active → done write
+        # (admission_state='done', status='cancelled') and releases
+        # the lock in its finally block.
+        canonical_job_id, final_status = await self._finalize_terminal(
+            instance_id=job.instance_id or "",
+            decision=Decision.NO_RETRY,
+            job_id=job_id,
+            error_message="Cancelled",
+            # Phase 4: cancel always writes ``status='cancelled'`` —
+            # don't let the instance-derived status (which falls back
+            # to 'failed' for missing/unexpected instance states)
+            # mask the cancel intent.
+            target_status=JobStatus.CANCELLED.value,
+        )
+
+        # The terminal-write boundary only handles ``admission_state=
+        # 'active'`` rows. A queued (pending) job's status flip
+        # ``pending → cancelled`` lives outside the boundary — the
+        # atomic repo ``cancel_job`` closes the TOCTOU window where a
+        # concurrent ``start_job`` would transition PENDING → PROCESSING
+        # between our read and the dispatch, causing the cancel to be
+        # silently lost. We detect that case via an empty
+        # ``final_status`` (the boundary returned the job_id but no
+        # status, meaning no UPDATE actually ran).
+        if not final_status:
+            try:
+                await asyncio.to_thread(self._repository.cancel_job, job.job_id)
+            except ValueError:
+                return False
         try:
-            await asyncio.to_thread(self._repository.cancel_job, job.job_id)
-        except ValueError:
-            return False
-        await self.notify_watchers(job.job_id, "cancelled")
+            await self.notify_watchers(job.job_id, "cancelled")
+        except Exception as e:
+            logger.warning(
+                "cancel_job: notify_watchers failed for %s: %s",
+                job.job_id[:8], e,
+            )
         return True
     
     def _is_instance_alive(self, instance_id: str) -> bool:
@@ -1104,7 +1164,321 @@ class JobQueueService:
                 # else: do nothing (matches original Pattern A)
             else:
                 await self._lock_manager.release(project_id, job_id)
-    
+
+    async def _finalize_terminal(
+        self,
+        instance_id: str,
+        decision: Decision,
+        *,
+        job_id: str | None = None,
+        result_summary: str | None = None,
+        error_message: str | None = None,
+        target_status: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Single terminal-write boundary for job admission transitions (Phase 4).
+
+        Required :class:`Decision` enum so a new finalize path that forgets
+        retry/DLQ handling fails at instantiation, not in production. The
+        admission transition is computed internally:
+
+          - ``NO_RETRY``     → ``admission_state='done'`` (direct write;
+            ``status`` mirror derived from Instance terminal status, or
+            from ``target_status`` override when supplied).
+          - ``RETRY``        → ``admission_state='queued'`` via the
+            retry engine (``active → queued`` direct, no intermediate
+            FAILED — Plan §3.2 retry-without-instance guarantee).
+          - ``DEAD_LETTER``  → ``admission_state='dead'`` via the DLQ
+            service (``active → dead`` direct).
+
+        Lock release happens in a ``finally`` block so any path
+        (success, validation error, transition no-op) returns the lock
+        to the queue — matching the prior ``complete_job`` / ``cancel_job``
+        contract.
+
+        Args:
+            instance_id: The instance whose job is being finalized.
+                Used to (a) derive the backward-compat ``status``
+                mirror from the Instance terminal status for NO_RETRY,
+                and (b) release the per-queue lock.
+            decision: Required terminal decision — see :class:`Decision`.
+                The enum is closed and non-defaulted; a missing value
+                is a type error.
+            job_id: Optional explicit job_id. When ``None``, the
+                method looks up the active job via
+                ``JobRepository.find_jobs_by_instance`` (single-active
+                invariant is the common case).
+            result_summary: COMPLETED-path result text (optional).
+            error_message: ERROR/TERMINATED-path error text (optional).
+            target_status: Override the instance-derived status mirror.
+                When ``None`` (default), the status is derived from
+                the Instance terminal status. When supplied, it
+                overrides that derivation — used by ``cancel_job``
+                to write ``status='cancelled'`` regardless of the
+                Instance's reported terminal state (a manual
+                ``start_job`` followed by ``cancel_job`` should land
+                in ``cancelled``, not ``failed``).
+
+        Returns:
+            ``(job_id, final_status_for_backward_compat)`` tuple.
+            ``job_id`` is ``None`` if no active job was found.
+            ``final_status_for_backward_compat`` is the legacy
+            ``JobStatus`` enum value written as the ``status`` column
+            mirror (``completed`` / ``failed`` / ``cancelled`` /
+            ``pending`` for queued retry / ``dead_letter`` for DLQ).
+            An empty string indicates no UPDATE was applied (caller
+            should fall back to legacy atomic cancel).
+        """
+        # ── Step 1: locate the job (by job_id or by instance) ──────
+        canonical_job_id: str | None = None
+        canonical_project_id: str | None = None
+        canonical_queue_id: str | None = None
+        canonical_instance_id: str | None = instance_id
+
+        if job_id is not None:
+            job = await asyncio.to_thread(self._repository.get, job_id)
+            if job is not None:
+                canonical_job_id = job.job_id
+                canonical_project_id = job.project_id
+                canonical_queue_id = job.queue_id
+                if job.instance_id:
+                    canonical_instance_id = job.instance_id
+        else:
+            # Look up the active job for this instance. The
+            # single-active-per-instance invariant holds for all
+            # post-D13 callers (D13 collapsed MESSAGE-type jobs).
+            jobs = await asyncio.to_thread(
+                self._repository.find_jobs_by_instance, instance_id
+            )
+            # Find the active one (not queued without a lock, not done).
+            for candidate in jobs:
+                if candidate.admission_state == AdmissionState.ACTIVE.value:
+                    job = candidate
+                    canonical_job_id = job.job_id
+                    canonical_project_id = job.project_id
+                    canonical_queue_id = job.queue_id
+                    break
+            else:
+                job = None
+
+        if canonical_job_id is None:
+            logger.warning(
+                f"_finalize_terminal: no active job for instance "
+                f"{instance_id[:8]}..., decision={decision.value}"
+            )
+            return None, ""
+
+        # Phase 4: explicit admission_state pre-check. The terminal
+        # boundary only handles ``admission_state='active'`` rows —
+        # a queued (pending) job's status flip ``pending →
+        # cancelled`` lives outside the boundary (the atomic repo
+        # ``cancel_job`` closes the TOCTOU window where a concurrent
+        # ``start_job`` would transition PENDING → PROCESSING
+        # between the caller's read and this UPDATE). Returning
+        # ``(canonical_job_id, "")`` here signals the no-op to the
+        # caller via the empty final_status string — callers fall
+        # back to their legacy atomic cancel path. This explicit
+        # check also makes the boundary robust to mocked
+        # repositories (where ``finalize_active_to_done`` returns
+        # a non-None ``MagicMock`` even when no UPDATE actually
+        # ran).
+        #
+        # ``getattr`` with the QUEUED default keeps the boundary
+        # backward-compatible with tests/mocks that don't model
+        # ``admission_state`` — those callers fall through to the
+        # legacy atomic transition path (the pre-Phase 4 default
+        # for pending jobs).
+        job_admission_state = getattr(
+            job, "admission_state", AdmissionState.QUEUED.value
+        )
+        if job_admission_state != AdmissionState.ACTIVE.value:
+            logger.debug(
+                f"_finalize_terminal: job {canonical_job_id[:8]}... is "
+                f"in admission_state={job_admission_state} (not "
+                f"'active'); no-op — caller falls back to legacy "
+                f"atomic transition"
+            )
+            # Release the lock in finally, then return the no-op
+            # signal. We cannot `return` directly because the
+            # finally block (lock release) must run — restructure
+            # as a flag that skips the dispatch.
+            _dispatch_skipped = True
+        else:
+            _dispatch_skipped = False
+
+        # Snapshot the legacy status mirror returned to callers.
+        final_status = ""
+
+        # ── Step 2: dispatch on decision ────────────────────────────
+        try:
+            if _dispatch_skipped:
+                # Already returned (canonical_job_id, "") after
+                # finally. The flag is just a marker so we don't
+                # double-run the dispatch below.
+                pass
+            elif decision == Decision.NO_RETRY:
+                # Look up the instance to derive the backward-compat
+                # status. COMPLETED → 'completed', ERROR/FAILED →
+                # 'failed', TERMINATED → 'cancelled'. Falls back to
+                # 'failed' if the instance is missing or in an
+                # unexpected state (the caller should have supplied
+                # a final instance status already).
+                #
+                # Phase 4: ``target_status`` overrides the instance
+                # derivation when supplied — used by ``cancel_job``
+                # which always wants ``status='cancelled'`` regardless
+                # of the instance's reported terminal state.
+                if target_status is not None:
+                    derived_status = target_status
+                else:
+                    derived_status = self._derive_terminal_status_from_instance(
+                        canonical_instance_id
+                    )
+
+                update_kwargs: dict[str, Any] = {}
+                if derived_status == JobStatus.COMPLETED.value:
+                    update_kwargs["result_summary"] = (
+                        result_summary or "Job completed successfully"
+                    )
+                else:
+                    update_kwargs["error_message"] = (
+                        error_message or "Unknown error"
+                    )
+
+                finalized = await asyncio.to_thread(
+                    self._repository.finalize_active_to_done,
+                    canonical_job_id,
+                    derived_status,
+                    **update_kwargs,
+                )
+                if finalized is None:
+                    # Race: another writer transitioned the job out of
+                    # ACTIVE between our lookup and the UPDATE. Surface
+                    # the no-op to the caller via empty status; lock
+                    # release in finally still runs.
+                    logger.debug(
+                        f"_finalize_terminal NO_RETRY no-op for job "
+                        f"{canonical_job_id[:8]}... (concurrent "
+                        f"transition)"
+                    )
+                    return canonical_job_id, ""
+                final_status = derived_status
+
+            elif decision == Decision.RETRY:
+                if self._retry_engine is None:
+                    logger.error(
+                        f"_finalize_terminal RETRY: no retry_engine "
+                        f"configured, falling back to DEAD_LETTER for "
+                        f"job {canonical_job_id[:8]}..."
+                    )
+                    decision = Decision.DEAD_LETTER
+                else:
+                    # maybe_retry does the active → queued or
+                    # active → dead transition internally based on
+                    # ``should_retry()``. Updated in Phase 4 to use
+                    # admission_state guards.
+                    retried = await asyncio.to_thread(
+                        self._retry_engine.maybe_retry, canonical_job_id
+                    )
+                    if retried is not None:
+                        final_status = JobStatus.PENDING.value
+                    else:
+                        # maybe_retry moved it to DLQ (retries
+                        # exhausted); surface that to the caller.
+                        final_status = JobStatus.DEAD_LETTER.value
+
+            if decision == Decision.DEAD_LETTER:
+                # Direct active → dead transition via the DLQ service.
+                # The standalone variant opens its own session so we
+                # don't need a parent transaction here.
+                if self._dlq_service is None:
+                    # No DLQ service wired — fall back to writing
+                    # admission_state='dead' directly via the
+                    # repository. This branch is hit only in tests
+                    # that construct JobQueueService without a DLQ
+                    # service; production always has one.
+                    logger.warning(
+                        f"_finalize_terminal DEAD_LETTER: no "
+                        f"dlq_service wired, using repository direct "
+                        f"write for job {canonical_job_id[:8]}..."
+                    )
+                    await asyncio.to_thread(
+                        self._repository.atomic_transition,
+                        canonical_job_id,
+                        from_status=JobStatus.PROCESSING.value,
+                        to_status=JobStatus.DEAD_LETTER.value,
+                    )
+                    final_status = JobStatus.DEAD_LETTER.value
+                else:
+                    await asyncio.to_thread(
+                        self._dlq_service.move_to_dlq_standalone,
+                        canonical_job_id,
+                        reason="MANUAL",
+                        from_admission_state=AdmissionState.ACTIVE.value,
+                    )
+                    final_status = JobStatus.DEAD_LETTER.value
+        finally:
+            # ── Step 3: release lock (always, even on error) ────────
+            # Use release_by_instance to clean up regardless of whether
+            # the lock was acquired via the queue_id path or the
+            # synthesized project:{project_id} path — both write
+            # ``job_locks`` rows keyed by instance_id.
+            if canonical_instance_id:
+                try:
+                    await self._lock_manager.release_by_instance(
+                        canonical_instance_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"_finalize_terminal: failed to release lock "
+                        f"for instance {canonical_instance_id[:8]}...: {e}"
+                    )
+
+        if _dispatch_skipped:
+            # Return the no-op signal so the caller falls back to
+            # its legacy atomic transition (cancel_job for queued
+            # jobs, etc.). The lock has already been released above.
+            return canonical_job_id, ""
+
+        return canonical_job_id, final_status
+
+    def _derive_terminal_status_from_instance(
+        self, instance_id: str | None
+    ) -> str:
+        """Map an Instance terminal status to the legacy ``status`` mirror.
+
+        Phase 4 backward-compat helper: the ``status`` column is still
+        written (Phase 5 drops it) but is no longer the authority.
+        Callers that need the legacy value (e.g. SSE status_change
+        events) can use this to derive it from the Instance. Falls
+        back to ``'failed'`` when the Instance is missing or in an
+        unexpected state.
+        """
+        if (
+            instance_id is None
+            or self._instance_manager is None
+            or not hasattr(self._instance_manager, "_instance_repository")
+            or self._instance_manager._instance_repository is None
+        ):
+            return JobStatus.FAILED.value
+        try:
+            instance = self._instance_manager._instance_repository.get(
+                instance_id
+            )
+        except Exception:
+            instance = None
+        if instance is None:
+            return JobStatus.FAILED.value
+        if instance.status == InstanceStatus.COMPLETED.value:
+            return JobStatus.COMPLETED.value
+        if instance.status in (
+            InstanceStatus.ERROR.value,
+            InstanceStatus.FAILED.value,
+        ):
+            return JobStatus.FAILED.value
+        if instance.status == InstanceStatus.TERMINATED.value:
+            return JobStatus.CANCELLED.value
+        return JobStatus.FAILED.value
+
     async def _get_concurrency_limit(self, queue_id: str) -> int:
         """Get the concurrency limit for a queue.
         
@@ -1619,13 +1993,20 @@ class JobQueueService:
         result_summary: str | None = None,
     ) -> JobItem | None:
         """Mark job as completed/failed/cancelled and release lock.
-        
+
+        Phase 4 (Job as Queue Proxy): routes through the single
+        terminal-write boundary ``_finalize_terminal`` (Plan §3.2).
+        Every terminal admission transition is funneled through this
+        path with a required ``Decision`` enum, so a future caller
+        that forgets to state retry/DLQ semantics fails at
+        instantiation rather than in production.
+
         Args:
             job_id: The job ID to complete.
             demand_state: Terminal state (COMPLETED, FAILED, or CANCELLED).
             error: Error message if demand_state is FAILED or CANCELLED.
             result_summary: Optional summary text for completed jobs.
-            
+
         Returns:
             Updated JobItem if completed successfully, None if
             job not found or not in a processable state.
@@ -1634,57 +2015,140 @@ class JobQueueService:
         if job is None:
             return None
 
-        # Mark job based on demand_state FIRST (before lock release)
-        result = None
+        # Phase 4: derive the canonical Decision from the
+        # ``DemandState`` BEFORE calling ``_finalize_terminal``. The
+        # FAILED path consults ``should_retry`` to choose between
+        # RETRY / DEAD_LETTER / NO_RETRY so the retry decision is
+        # made at the boundary (Plan §8.2 structural guarantee).
+        decision = self._decide_terminal_decision(
+            job=job,
+            demand_state=demand_state,
+        )
+        if decision is None:
+            # Caller passed an unsupported demand_state (defensive —
+            # DemandState is a closed enum). Fall back to NO_RETRY.
+            decision = Decision.NO_RETRY
+
+        # Lock release happens in ``_finalize_terminal``'s finally
+        # block so all paths (success, exception, transition no-op)
+        # release the per-queue lock. We do NOT call the legacy
+        # ``_release_job_lock`` here.
+        #
+        # Phase 4: pass ``target_status`` derived from the caller's
+        # ``DemandState`` so the status mirror reflects the call
+        # intent (``completed`` / ``failed`` / ``cancelled``) instead
+        # of the instance-derived fallback (``'failed'`` for missing
+        # instances). Tests construct a job + start it without
+        # an instance — they expect COMPLETED to land as
+        # ``status='completed'``, not the instance-derivation
+        # fallback.
+        target_status: str | None
+        if demand_state == DemandState.COMPLETED:
+            target_status = JobStatus.COMPLETED.value
+        elif demand_state == DemandState.CANCELLED:
+            target_status = JobStatus.CANCELLED.value
+        else:
+            # FAILED — let ``_finalize_terminal`` derive from the
+            # instance for NO_RETRY (matches the legacy
+            # ``complete_job`` behaviour of writing ``status=
+            # 'failed'`` when no instance is attached).
+            target_status = None
+
+        canonical_job_id, final_status = await self._finalize_terminal(
+            instance_id=job.instance_id or "",
+            decision=decision,
+            job_id=job_id,
+            result_summary=result_summary,
+            error_message=error,
+            target_status=target_status,
+        )
+
+        if canonical_job_id is None or not final_status:
+            # Either the job wasn't found, OR the boundary was a
+            # no-op (e.g. job is already in a terminal admission
+            # state — ``admission_state='done'`` — and the finalize
+            # UPDATE matched zero rows). The legacy contract was to
+            # return ``None`` for "wrong state" callers (see
+            # ``test_complete_job_wrong_state`` in
+            # ``test_task_queue_service.py``), so preserve that.
+            return None
+
+        # Notify watchers after successful transition. The terminal
+        # state for the watcher event is the legacy status mirror
+        # (Phase 5 drops the ``status`` column; Phase 4 keeps both
+        # in sync via the dual-write contract).
         try:
             if demand_state == DemandState.COMPLETED:
-                summary = result_summary or "Job completed successfully"
-                result = await asyncio.to_thread(
-                    self._repository.complete_job, job_id, result_summary=summary
-                )
-                # Notify watchers after successful transition
                 await self.notify_watchers(job_id, "completed")
             elif demand_state == DemandState.FAILED:
-                failed_job = await asyncio.to_thread(
-                    self._repository.fail_job, job_id, error_message=error or "Unknown error"
-                )
-
-                # Try auto-retry if retry engine is configured
-                if failed_job is not None and self._retry_engine is not None:
-                    try:
-                        retried = await asyncio.to_thread(self._retry_engine.maybe_retry, job_id)
-                        if retried is not None:
-                            result = retried
-                    except Exception as e:
-                        logger.error(f"Auto-retry failed for job {job_id}: {e}")
-
-                # Notify watchers if job is still FAILED (retry didn't succeed)
-                if failed_job is not None and result is None:
+                # Watchers care about the outcome AFTER the retry
+                # decision — DEAD_LETTER is the terminal failure
+                # signal even if ``maybe_retry`` was attempted.
+                if decision == Decision.RETRY and final_status != JobStatus.DEAD_LETTER.value:
+                    # Retry scheduled — don't notify FAILED yet; the
+                    # retry engine will emit the appropriate signal
+                    # when the next attempt terminates.
+                    pass
+                else:
                     await self.notify_watchers(job_id, "failed", error)
-                result = result if result is not None else failed_job
             elif demand_state == DemandState.CANCELLED:
-                # CANCELLED state does not trigger retry
-                result = await asyncio.to_thread(
-                    self._repository.terminate_job, job_id, error_message=error or "Cancelled"
-                )
-                # Notify watchers after successful transition
                 await self.notify_watchers(job_id, "cancelled", error)
-        except (ValueError, InvalidTransitionError) as e:
-            # Job state already changed — still need to release lock below
-            logger.debug("Job %s already transitioned, skip: %s", job_id[:8], e)
-        finally:
-            # Release the per-queue lock AFTER state is committed
-            try:
-                await self._release_job_lock(
-                    project_id=job.project_id,
-                    queue_id=job.queue_id,
-                    job_id=job_id,
-                    release_by_instance=False,
-                )
-            except Exception as e:
-                logger.warning("Failed to release lock for job %s: %s", job_id[:8], e)
+        except Exception as e:
+            logger.warning(
+                "complete_job: notify_watchers failed for %s: %s",
+                job_id[:8], e,
+            )
 
-        return result
+        # Re-read the job to return its current state (which may
+        # have been mutated by ``_finalize_terminal`` to the
+        # appropriate terminal/queued admission state).
+        return await asyncio.to_thread(self._repository.get, canonical_job_id)
+
+    def _decide_terminal_decision(
+        self,
+        *,
+        job: JobItem,
+        demand_state: DemandState,
+    ) -> Decision:
+        """Phase 4: map a ``DemandState`` to a canonical ``Decision``.
+
+        Returns:
+            - ``NO_RETRY`` for COMPLETED and CANCELLED (no retry).
+            - For FAILED: consults the retry engine's
+              ``should_retry()`` to choose between RETRY /
+              DEAD_LETTER / NO_RETRY (when no retry engine is wired
+              we fall back to NO_RETRY).
+        """
+        if demand_state == DemandState.COMPLETED:
+            return Decision.NO_RETRY
+        if demand_state == DemandState.CANCELLED:
+            return Decision.NO_RETRY
+        # FAILED — pick retry vs DLQ vs no_retry.
+        if self._retry_engine is None:
+            return Decision.NO_RETRY
+        try:
+            from daemon.services.job_retry_engine import JobSystemConfig
+            config = (
+                self._retry_engine._config
+                if hasattr(self._retry_engine, "_config")
+                else None
+            )
+            queue = (
+                self._queue_repo.get(job.queue_id)
+                if job.queue_id
+                else None
+            )
+            if self._retry_engine.should_retry(job, queue, config):
+                return Decision.RETRY
+            # Retries exhausted → DLQ.
+            return Decision.DEAD_LETTER
+        except Exception as e:
+            logger.warning(
+                "_decide_terminal_decision: should_retry raised for %s: %s — "
+                "falling back to NO_RETRY",
+                job.job_id[:8], e,
+            )
+            return Decision.NO_RETRY
     
     def complete_job_sync(
         self,
@@ -1694,17 +2158,23 @@ class JobQueueService:
         result_summary: str | None = None,
     ) -> JobItem | None:
         """Mark job as completed/failed/cancelled and release lock (synchronous version).
-        
+
         W6 Fix: Uses asyncio.run_coroutine_threadsafe() to properly release
         per-queue locks from synchronous context by scheduling the async
         release on the stored event loop.
-        
+
+        Phase 4 (Job as Queue Proxy): routes through the
+        ``_finalize_terminal`` boundary exactly like ``complete_job``,
+        but executes the underlying repository writes synchronously
+        (no ``asyncio.to_thread`` for those — the repository methods
+        are sync). The ``Decision`` enum is the same.
+
         Args:
             job_id: The job ID to complete.
             demand_state: Terminal state (COMPLETED, FAILED, or CANCELLED).
             error: Error message if demand_state is FAILED or CANCELLED.
             result_summary: Optional summary of the job result (for COMPLETED).
-            
+
         Returns:
             Updated JobItem if completed successfully, None if
             job not found or not in a processable state.
@@ -1713,74 +2183,223 @@ class JobQueueService:
         if job is None:
             return None
 
-        # Mark job based on demand_state FIRST (before lock release)
-        result = None
+        # Phase 4: derive Decision from DemandState.
+        decision = self._decide_terminal_decision(
+            job=job,
+            demand_state=demand_state,
+        )
+        if decision is None:
+            decision = Decision.NO_RETRY
+
+        # ``_finalize_terminal`` requires an event loop for the lock
+        # release via the async lock manager. From a sync context we
+        # use ``asyncio.run_coroutine_threadsafe`` to dispatch onto
+        # the stored loop. The DB writes themselves run on the
+        # calling thread (faster than threading off).
+        #
+        # Phase 4: pass ``target_status`` derived from the caller's
+        # ``DemandState`` so the status mirror reflects call intent
+        # (COMPLETED → 'completed', CANCELLED → 'cancelled') instead
+        # of the instance-derivation fallback.
+        target_status: str | None
+        if demand_state == DemandState.COMPLETED:
+            target_status = JobStatus.COMPLETED.value
+        elif demand_state == DemandState.CANCELLED:
+            target_status = JobStatus.CANCELLED.value
+        else:
+            target_status = None
+
+        try:
+            canonical_job_id, final_status = self._finalize_terminal_sync(
+                instance_id=job.instance_id or "",
+                decision=decision,
+                job_id=job_id,
+                result_summary=result_summary,
+                error_message=error,
+                target_status=target_status,
+            )
+        except Exception as e:
+            logger.warning(
+                "complete_job_sync: _finalize_terminal_sync raised for %s: %s",
+                job_id[:8], e,
+            )
+            return None
+
+        if canonical_job_id is None or not final_status:
+            # Either the job wasn't found, OR the boundary was a
+            # no-op (job already terminal). The legacy contract is
+            # to return ``None`` for "wrong state" callers — see
+            # ``test_complete_job_sync_handles_valueerror``.
+            return None
+
+        # Notify watchers (async dispatch from sync context).
         try:
             if demand_state == DemandState.COMPLETED:
-                result = self._repository.complete_job(job_id, result_summary=result_summary)
-                # Notify watchers after successful transition
                 if self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
                         self.notify_watchers(job_id, "completed"),
                         self._loop,
                     )
             elif demand_state == DemandState.FAILED:
-                failed_job = self._repository.fail_job(job_id, error_message=error or "Unknown error")
-
-                # Try auto-retry if retry engine is configured
-                if failed_job is not None and self._retry_engine is not None:
-                    try:
-                        retried = self._retry_engine.maybe_retry(job_id)
-                        if retried is not None:
-                            result = retried
-                    except Exception as e:
-                        logger.error(f"Auto-retry failed for job {job_id}: {e}")
-
-                # Notify watchers if job is still FAILED (retry didn't succeed)
-                if failed_job is not None and result is None:
+                if decision == Decision.RETRY and final_status != JobStatus.DEAD_LETTER.value:
+                    pass  # retry in flight; engine will notify
+                else:
                     if self._loop and self._loop.is_running():
                         asyncio.run_coroutine_threadsafe(
                             self.notify_watchers(job_id, "failed", error),
                             self._loop,
                         )
-                result = result if result is not None else failed_job
             elif demand_state == DemandState.CANCELLED:
-                # CANCELLED state does not trigger retry
-                result = self._repository.terminate_job(job_id, error_message=error or "Cancelled")
-                # Notify watchers after successful transition
                 if self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
                         self.notify_watchers(job_id, "cancelled", error),
                         self._loop,
                     )
-        except (ValueError, InvalidTransitionError) as e:
-            # Job state already changed — still need to release lock below
-            logger.debug("Job %s already transitioned, skip: %s", job_id[:8], e)
-        finally:
-            # Release the per-queue lock AFTER state is committed (W6 fix)
-            try:
-                if job.project_id and job.queue_id:
-                    # Use asyncio.run_coroutine_threadsafe to release queue lock
-                    if self._loop and self._loop.is_running():
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._lock_manager.release_queue_lock(
-                                job.project_id, job.queue_id, job_id
-                            ),
-                            self._loop,
-                        )
-                        future.result(timeout=5)  # Wait up to 5s for lock release
-                elif job.project_id:
-                    # Legacy project-level lock (backward compatibility)
-                    if self._loop and self._loop.is_running():
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._lock_manager.release(job.project_id, job_id),
-                            self._loop,
-                        )
-                        future.result(timeout=5)
-            except Exception as e:
-                logger.warning("Failed to release lock for job %s: %s", job_id[:8], e)
+        except Exception as e:
+            logger.warning(
+                "complete_job_sync: notify_watchers dispatch failed for %s: %s",
+                job_id[:8], e,
+            )
 
-        return result
+        return self._repository.get(canonical_job_id)
+
+    def _finalize_terminal_sync(
+        self,
+        instance_id: str,
+        decision: Decision,
+        *,
+        job_id: str | None = None,
+        result_summary: str | None = None,
+        error_message: str | None = None,
+        target_status: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Synchronous variant of ``_finalize_terminal``.
+
+        Mirrors the async version's decision dispatch and lock-release
+        contract but uses ``asyncio.run_coroutine_threadsafe`` for the
+        lock release (so it works from sync callers like
+        ``trigger_next_job_sync``).
+
+        Returns ``(job_id, final_status_for_backward_compat)``.
+        """
+        # Locate the job (same logic as the async version).
+        canonical_job_id: str | None = None
+        canonical_instance_id: str | None = instance_id
+
+        if job_id is not None:
+            job = self._repository.get(job_id)
+            if job is not None:
+                canonical_job_id = job.job_id
+                if job.instance_id:
+                    canonical_instance_id = job.instance_id
+        else:
+            jobs = self._repository.find_jobs_by_instance(instance_id)
+            for candidate in jobs:
+                if candidate.admission_state == AdmissionState.ACTIVE.value:
+                    canonical_job_id = candidate.job_id
+                    if candidate.instance_id:
+                        canonical_instance_id = candidate.instance_id
+                    break
+
+        if canonical_job_id is None:
+            return None, ""
+
+        # Phase 4: explicit admission_state pre-check (mirrors the
+        # async variant). See ``_finalize_terminal`` for the
+        # rationale — non-ACTIVE rows fall back to the caller's
+        # legacy atomic transition path. ``getattr`` defaults to
+        # QUEUED for tests/mocks that don't model the attribute.
+        job_admission_state = getattr(
+            job, "admission_state", AdmissionState.QUEUED.value
+        )
+        if job_admission_state != AdmissionState.ACTIVE.value:
+            _dispatch_skipped = True
+        else:
+            _dispatch_skipped = False
+
+        final_status = ""
+
+        try:
+            if _dispatch_skipped:
+                pass
+            elif decision == Decision.NO_RETRY:
+                # Phase 4: ``target_status`` overrides the instance-
+                # derived status when supplied (used by ``cancel_job``
+                # which always wants ``status='cancelled'`` and by
+                # ``complete_job(COMPLETED)`` which wants
+                # ``status='completed'`` regardless of whether the
+                # Instance is attached).
+                if target_status is not None:
+                    derived_status = target_status
+                else:
+                    derived_status = self._derive_terminal_status_from_instance(
+                        canonical_instance_id
+                    )
+                update_kwargs: dict[str, Any] = {}
+                if derived_status == JobStatus.COMPLETED.value:
+                    update_kwargs["result_summary"] = (
+                        result_summary or "Job completed successfully"
+                    )
+                else:
+                    update_kwargs["error_message"] = (
+                        error_message or "Unknown error"
+                    )
+                finalized = self._repository.finalize_active_to_done(
+                    canonical_job_id,
+                    derived_status,
+                    **update_kwargs,
+                )
+                if finalized is None:
+                    return canonical_job_id, ""
+                final_status = derived_status
+
+            elif decision == Decision.RETRY:
+                if self._retry_engine is None:
+                    decision = Decision.DEAD_LETTER
+                else:
+                    retried = self._retry_engine.maybe_retry(canonical_job_id)
+                    if retried is not None:
+                        final_status = JobStatus.PENDING.value
+                    else:
+                        final_status = JobStatus.DEAD_LETTER.value
+
+            if decision == Decision.DEAD_LETTER:
+                if self._dlq_service is None:
+                    self._repository.atomic_transition(
+                        canonical_job_id,
+                        from_status=JobStatus.PROCESSING.value,
+                        to_status=JobStatus.DEAD_LETTER.value,
+                    )
+                    final_status = JobStatus.DEAD_LETTER.value
+                else:
+                    self._dlq_service.move_to_dlq_standalone(
+                        canonical_job_id,
+                        reason="MANUAL",
+                        from_admission_state=AdmissionState.ACTIVE.value,
+                    )
+                    final_status = JobStatus.DEAD_LETTER.value
+        finally:
+            if canonical_instance_id and self._loop and self._loop.is_running():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._lock_manager.release_by_instance(
+                            canonical_instance_id,
+                        ),
+                        self._loop,
+                    )
+                    future.result(timeout=5)
+                except Exception as e:
+                    logger.warning(
+                        "_finalize_terminal_sync: lock release failed for "
+                        "%s: %s",
+                        canonical_instance_id[:8],
+                        e,
+                    )
+
+        if _dispatch_skipped:
+            return canonical_job_id, ""
+
+        return canonical_job_id, final_status
     
     async def trigger_next_job(
         self,
