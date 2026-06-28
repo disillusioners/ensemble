@@ -6,7 +6,7 @@ and lock manager for job queue operations.
 
 import pytest
 
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobStatus
 from daemon.services.job_queue_service import DemandState
 
 
@@ -21,7 +21,7 @@ class TestJobQueueServiceEnqueue:
         result = await job_queue_service.enqueue(**sample_job_data_no_project_service)
         
         # Jobs are now always PENDING - JobProcessor handles starting
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
         assert result.instance_id is None
         assert result.started_at is None
 
@@ -33,7 +33,7 @@ class TestJobQueueServiceEnqueue:
         result = await job_queue_service.enqueue(**sample_job_data_service)
         
         # Jobs are now always PENDING - JobProcessor handles starting
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
         assert result.instance_id is None
 
     @pytest.mark.asyncio
@@ -43,11 +43,11 @@ class TestJobQueueServiceEnqueue:
         """Test that jobs wait when project lock is held."""
         # First job is created as PENDING
         first = await job_queue_service.enqueue(**sample_job_data_service)
-        assert first.status == JobStatus.PENDING.value
+        assert first.admission_state == AdmissionState.QUEUED.value
         
         # Second job should also be PENDING
         second = await job_queue_service.enqueue(**sample_job_data_service)
-        assert second.status == JobStatus.PENDING.value
+        assert second.admission_state == AdmissionState.QUEUED.value
         assert second.instance_id is None
 
     @pytest.mark.asyncio
@@ -84,8 +84,8 @@ class TestJobQueueServiceEnqueue:
         )
         
         # Jobs are now always PENDING
-        assert job1.status == JobStatus.PENDING.value
-        assert job2.status == JobStatus.PENDING.value
+        assert job1.admission_state == AdmissionState.QUEUED.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
 
     @pytest.mark.asyncio
     async def test_enqueue_generates_unique_job_ids(
@@ -129,32 +129,32 @@ class TestJobQueueServiceCancelJob:
         
         # Enqueue second job (gets queued)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job2.status == JobStatus.PENDING.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
         
         # Cancel the queued job
         result = await job_queue_service.cancel_job(job2.job_id)
         
         assert result is True
         cancelled = await job_queue_service.get_job(job2.job_id)
-        assert cancelled.status == JobStatus.CANCELLED.value
+        assert cancelled.admission_state == AdmissionState.DONE.value
 
     @pytest.mark.asyncio
     async def test_cancel_processing_job(self, job_queue_service, sample_job_data_service):
         """Test cancelling a processing job releases its lock."""
         # Enqueue job (starts as PENDING)
         job = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         
         # Manually start the job to transition to PROCESSING
         started_job = await job_queue_service.start_job(job.job_id)
-        assert started_job.status == JobStatus.PROCESSING.value
+        assert started_job.admission_state == AdmissionState.ACTIVE.value
         
         # Cancel the processing job
         result = await job_queue_service.cancel_job(job.job_id)
         
         assert result is True
         cancelled = await job_queue_service.get_job(job.job_id)
-        assert cancelled.status == JobStatus.CANCELLED.value
+        assert cancelled.admission_state == AdmissionState.DONE.value
         
         # Lock should be released
         assert await job_queue_service._lock_manager.is_locked("test-project") is False
@@ -250,7 +250,7 @@ class TestJobQueueServiceStartJob:
         
         # Create a second job that will be pending
         job2 = await job_queue_service.enqueue(**{**sample_job_data_service, "message": "pending job"})
-        assert job2.status == JobStatus.PENDING.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
         
         # Complete first job
         await job_queue_service.complete_job(job1.job_id)
@@ -259,7 +259,7 @@ class TestJobQueueServiceStartJob:
         started2 = await job_queue_service.start_job(job2.job_id)
         
         assert started2 is not None
-        assert started2.status == JobStatus.PROCESSING.value
+        assert started2.admission_state == AdmissionState.ACTIVE.value
         assert started2.instance_id is not None
         
     @pytest.mark.asyncio
@@ -277,7 +277,7 @@ class TestJobQueueServiceCompleteJob:
         """Test completing a job successfully."""
         # Enqueue job (starts as PENDING)
         job = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         
         # Start job (JobProcessor normally does this)
         started = await job_queue_service.start_job(job.job_id)
@@ -286,7 +286,7 @@ class TestJobQueueServiceCompleteJob:
         result = await job_queue_service.complete_job(job.job_id)
         
         assert result is not None
-        assert result.status == JobStatus.COMPLETED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.completed_at is not None
 
     @pytest.mark.asyncio
@@ -304,7 +304,7 @@ class TestJobQueueServiceCompleteJob:
         )
         
         assert result is not None
-        assert result.status == JobStatus.FAILED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.error_message == "Something went wrong"
 
     @pytest.mark.asyncio
@@ -318,7 +318,7 @@ class TestJobQueueServiceCompleteJob:
         
         # Enqueue first job (starts as PENDING, lock not acquired)
         job1 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job1.status == JobStatus.PENDING.value
+        assert job1.admission_state == AdmissionState.QUEUED.value
         
         # Start job1 (this acquires the lock)
         started1 = await job_queue_service.start_job(job1.job_id)
@@ -326,7 +326,7 @@ class TestJobQueueServiceCompleteJob:
         
         # Enqueue second job (still PENDING)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job2.status == JobStatus.PENDING.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
         
         # Complete first job (releases lock)
         await job_queue_service.complete_job(job1.job_id)
@@ -357,7 +357,7 @@ class TestJobQueueServiceTriggerNextJob:
         
         # Second job is queued (pending)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job2.status == JobStatus.PENDING.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
         
         # Complete first job (releases lock)
         await job_queue_service.complete_job(job1.job_id)
@@ -367,7 +367,7 @@ class TestJobQueueServiceTriggerNextJob:
         
         # Should find and start job2
         assert result is not None
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
         assert result.job_id == job2.job_id
 
     @pytest.mark.asyncio
@@ -486,7 +486,7 @@ class TestJobQueueServiceWithLockManager:
         
         # Enqueue job (PENDING, lock not acquired yet)
         job = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         
         # Lock should NOT be held until job starts
         assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is False
@@ -512,20 +512,20 @@ class TestJobQueueServiceWithLockManager:
         
         # Enqueue first job (PENDING)
         job1 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job1.status == JobStatus.PENDING.value
+        assert job1.admission_state == AdmissionState.QUEUED.value
         
         # Start job1
         started1 = await job_queue_service.start_job(job1.job_id)
-        assert started1.status == JobStatus.PROCESSING.value
+        assert started1.admission_state == AdmissionState.ACTIVE.value
         
         # Enqueue more jobs - all should be pending
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
         job3 = await job_queue_service.enqueue(**sample_job_data_service)
         job4 = await job_queue_service.enqueue(**sample_job_data_service)
         
-        assert job2.status == JobStatus.PENDING.value
-        assert job3.status == JobStatus.PENDING.value
-        assert job4.status == JobStatus.PENDING.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
+        assert job3.admission_state == AdmissionState.QUEUED.value
+        assert job4.admission_state == AdmissionState.QUEUED.value
         
         # Only one lock should be held (for job1)
         assert await job_queue_service._lock_manager.is_queue_locked("test-project", queue.queue_id) is True
@@ -584,7 +584,7 @@ class TestJobQueueServiceEmptyProject:
         # No lock should be held (project_id=None)
         assert await job_queue_service._lock_manager.get_waiter_count("") == 0
         # Job should be PENDING (not PROCESSING)
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
 
     @pytest.mark.asyncio
     async def test_multiple_no_project_jobs_all_pending(
@@ -596,9 +596,9 @@ class TestJobQueueServiceEmptyProject:
         job3 = await job_queue_service.enqueue(**sample_job_data_service_no_project)
         
         # All jobs should be PENDING (JobProcessor handles starting)
-        assert job1.status == JobStatus.PENDING.value
-        assert job2.status == JobStatus.PENDING.value
-        assert job3.status == JobStatus.PENDING.value
+        assert job1.admission_state == AdmissionState.QUEUED.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
+        assert job3.admission_state == AdmissionState.QUEUED.value
 
 
 class TestJobQueueServiceFullWorkflow:
@@ -611,12 +611,12 @@ class TestJobQueueServiceFullWorkflow:
         """Test complete workflow: enqueue -> process -> complete."""
         # Enqueue (PENDING)
         job = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         assert job.instance_id is None
         
         # Start job (JobProcessor normally does this)
         started = await job_queue_service.start_job(job.job_id)
-        assert started.status == JobStatus.PROCESSING.value
+        assert started.admission_state == AdmissionState.ACTIVE.value
         assert started.instance_id is not None
         
         # Process (simulated)
@@ -625,7 +625,7 @@ class TestJobQueueServiceFullWorkflow:
         
         # Complete
         completed = await job_queue_service.complete_job(job.job_id)
-        assert completed.status == JobStatus.COMPLETED.value
+        assert completed.admission_state == AdmissionState.DONE.value
         assert completed.completed_at is not None
         
         # Lock should be released
@@ -644,7 +644,7 @@ class TestJobQueueServiceFullWorkflow:
         
         # Enqueue second job (queued PENDING)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job2.status == JobStatus.PENDING.value
+        assert job2.admission_state == AdmissionState.QUEUED.value
         
         # Complete first job
         await job_queue_service.complete_job(job1.job_id)
@@ -653,7 +653,7 @@ class TestJobQueueServiceFullWorkflow:
         triggered = await job_queue_service.trigger_next_job("test-project")
         assert triggered is not None
         assert triggered.job_id == job2.job_id
-        assert triggered.status == JobStatus.PROCESSING.value
+        assert triggered.admission_state == AdmissionState.ACTIVE.value
         
         # Complete job2
         await job_queue_service.complete_job(job2.job_id)
@@ -709,7 +709,7 @@ class TestJobQueueServiceFullWorkflow:
             error="Simulated failure"
         )
         
-        assert failed.status == JobStatus.FAILED.value
+        assert failed.admission_state == AdmissionState.DONE.value
         assert failed.error_message == "Simulated failure"
         
         # Lock should be released
@@ -767,7 +767,7 @@ class TestCompleteJobWithResultSummary:
             job.job_id, DemandState.COMPLETED, result_summary="Custom summary here"
         )
         assert completed is not None
-        assert completed.status == "completed"
+        assert completed.admission_state == "done"
         assert completed.result_summary == "Custom summary here"
     
     @pytest.mark.asyncio
@@ -799,7 +799,7 @@ class TestCompleteJobWithResultSummary:
             job.job_id, DemandState.FAILED, error="Sync error"
         )
         assert completed is not None
-        assert completed.status == "failed"
+        assert completed.admission_state == "done"
         assert completed.error_message == "Sync error"
     
     @pytest.mark.asyncio
@@ -831,7 +831,7 @@ class TestTriggerNextJobSync:
         job1 = await job_queue_service.enqueue(**sample_job_data_service)
         started1 = await job_queue_service.start_job(job1.job_id)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job2.status == "pending"
+        assert job2.admission_state == "queued"
         
         # Complete job1
         job_queue_service.complete_job_sync(job1.job_id, DemandState.COMPLETED)
@@ -840,7 +840,7 @@ class TestTriggerNextJobSync:
         next_job = job_queue_service.trigger_next_job_sync("test-project")
         assert next_job is not None
         assert next_job.job_id == job2.job_id
-        assert next_job.status == "processing"
+        assert next_job.admission_state == "active"
     
     @pytest.mark.asyncio
     async def test_returns_none_when_no_pending(self, job_queue_service, sample_job_data_service):
@@ -880,7 +880,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
         assert result.project_id == TEST_SYSTEM_PROJECT_ID
         # System queue is assigned (pre-provisioned in fixture)
         assert result.queue_id is not None
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
 
     @pytest.mark.asyncio
     async def test_enqueue_with_project_no_queue_id(
@@ -951,7 +951,7 @@ class TestJobQueueServiceQueueAwareEnqueue:
 
         # Job should still be created but with queue_id=None
         assert result.queue_id is None
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
 
     @pytest.mark.asyncio
     async def test_enqueue_queue_from_wrong_project(
@@ -1017,12 +1017,12 @@ class TestJobQueueServiceQueueAwareEnqueue:
         # Start first job - should succeed
         started1 = await job_queue_service.start_job(job1.job_id)
         assert started1 is not None
-        assert started1.status == JobStatus.PROCESSING.value
+        assert started1.admission_state == AdmissionState.ACTIVE.value
 
         # Start second job - should also succeed (queue allows 2 concurrent)
         started2 = await job_queue_service.start_job(job2.job_id)
         assert started2 is not None
-        assert started2.status == JobStatus.PROCESSING.value
+        assert started2.admission_state == AdmissionState.ACTIVE.value
 
         # Both locks should be held
         count = await job_queue_service._lock_manager.get_queue_lock_count(
@@ -1088,14 +1088,14 @@ class TestNextJobTriggeredAfterCompletion:
         job1 = await job_queue_service.enqueue(**sample_job_data_service)
         started1 = await job_queue_service.start_job(job1.job_id)
         job2 = await job_queue_service.enqueue(**sample_job_data_service)
-        assert job2.status == "pending"
+        assert job2.admission_state == "queued"
 
         await job_queue_service.complete_job(job1.job_id)
         next_job = await job_queue_service.trigger_next_job("test-project")
 
         assert next_job is not None
         assert next_job.job_id == job2.job_id
-        assert next_job.status == "processing"
+        assert next_job.admission_state == "active"
 
 
 # =============================================================================
@@ -1247,7 +1247,7 @@ class TestStartJobLockReleaseOnFailure:
         started = await job_queue_service.start_job(job.job_id)
 
         assert started is not None
-        assert started.status == JobStatus.PROCESSING.value
+        assert started.admission_state == AdmissionState.ACTIVE.value
         # Lock MUST still be held — JobProcessor uses it to serialize work
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id
@@ -1390,7 +1390,7 @@ class TestCompleteJobStatusFirstOrdering:
 
         # Job is FAILED
         result = await job_queue_service.get_job(job.job_id)
-        assert result.status == JobStatus.FAILED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.error_message == "boom"
         # Lock is released
         assert await job_queue_service._lock_manager.is_queue_locked(
@@ -1412,7 +1412,7 @@ class TestCompleteJobStatusFirstOrdering:
 
         # Job is FAILED
         result = await job_queue_service.get_job(job.job_id)
-        assert result.status == JobStatus.FAILED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.error_message == "boom"
         # Lock is released
         assert await job_queue_service._lock_manager.is_queue_locked(

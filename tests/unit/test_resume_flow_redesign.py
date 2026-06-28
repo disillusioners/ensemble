@@ -69,7 +69,7 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
-from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus, set_dependency_bus
@@ -80,6 +80,23 @@ from daemon.services.job_feedback_observer import (
     _ProcessingJobContext,
 )
 from daemon.write_pause_guard import WritePauseGuard
+
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures & helpers ─────────────────────────────────────────────────────
@@ -162,6 +179,8 @@ def _seed_job(
             project_id="test-project",
             job_type="message",
             status=status,
+
+            admission_state=status_to_admission(status),
             instance_id=instance_id,
             created_at=now_iso,
             started_at=(
@@ -346,7 +365,7 @@ def test_resume_skips_non_paused_jobs(lifecycle_service, engine, write_guard):
 
     # Count PROCESSING: should be 2 (pre-existing + the flipped PAUSED)
     processing_count = sum(
-        1 for j in jobs if j.status == JobStatus.PROCESSING.value
+        1 for j in jobs if j.admission_state == AdmissionState.ACTIVE.value
     )
     assert processing_count == 2, (
         f"expected 2 PROCESSING jobs, got {processing_count}"
@@ -469,7 +488,7 @@ def test_resume_three_tables_single_transaction(
     assert inst.status == InstanceStatus.RUNNING.value
 
     jobs = _read_jobs(engine, iid)
-    assert all(j.status == JobStatus.PROCESSING.value for j in jobs)
+    assert all(j.admission_state == AdmissionState.ACTIVE.value for j in jobs)
 
     tasks = _read_tasks(engine, iid)
     # Phase 4: PAUSED tasks transition to CANCELLED, not PENDING.

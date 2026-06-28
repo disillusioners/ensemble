@@ -95,12 +95,31 @@ from daemon.repositories.job_queue.models import (
     JobLock,
     JobQueue,
     QueueType,
-    status_to_admission,
 )
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import DemandState, JobQueueService
 from daemon.services.job_retry_engine import JobRetryEngine
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# The ``status_to_admission`` helper was deleted from
+# ``daemon.repositories.job_queue.models`` in Phase 4 cleanup
+# (``admission_state`` is now the sole write authority). Tests that
+# seed JobItem rows from a ``status`` string still need this
+# JobStatus -> AdmissionState mapping, so we redefine it locally
+# here. Behavior is identical to the deleted production helper
+# (including the ``QUEUED`` fallback for unknown inputs).
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -376,7 +395,7 @@ class TestFullJobLifecycle:
         started = _start_job(engine, job_repo, job.job_id, instance_id="inst-1")
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.ACTIVE.value
-        assert refetched.status == JobStatus.PROCESSING.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
 
         # Phase 4 primary write: admission_state guard is on
         # ``admission_state='active'``.
@@ -388,7 +407,7 @@ class TestFullJobLifecycle:
         assert completed is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.COMPLETED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.result_summary == "ok"
 
     def test_create_start_fail_no_retry_admission_state_walk(
@@ -411,7 +430,7 @@ class TestFullJobLifecycle:
         assert finalized is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.error_message == "boom"
 
     def test_create_start_fail_retry_admission_state_walk(
@@ -438,7 +457,7 @@ class TestFullJobLifecycle:
         assert failed is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
 
         # Phase 4 retry path — direct from done→queued (the legacy
         # mirror back to PENDING). atomic_retry's SQL guard matches
@@ -453,7 +472,7 @@ class TestFullJobLifecycle:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.QUEUED.value
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
         assert refetched.error_message is None
         assert refetched.next_retry_at == past
@@ -474,7 +493,7 @@ class TestFullJobLifecycle:
         assert cancelled is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.CANCELLED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
 
     def test_create_start_fail_dlq_admission_state_walk(
         self, engine, job_repo: JobRepository, dlq_service: DeadLetterService
@@ -499,7 +518,7 @@ class TestFullJobLifecycle:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DEAD.value
-        assert refetched.status == JobStatus.DEAD_LETTER.value
+        assert refetched.admission_state == AdmissionState.DEAD.value
 
     def test_create_start_fail_dlq_replay_admission_state_walk(
         self, engine, job_repo: JobRepository, dlq_service: DeadLetterService
@@ -530,7 +549,7 @@ class TestFullJobLifecycle:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.QUEUED.value
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         # Side effects of replay
         assert refetched.retry_count == 0
         assert refetched.error_message is None
@@ -611,17 +630,20 @@ class TestChildReportsDoNotMutateParentAdmissionState:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.COMPLETED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.result_summary == "parent finished"
 
     def test_dual_write_invariant_preserved_after_finalize(
         self, engine, job_repo: JobRepository
     ):
-        """Belt-and-braces: every JobItem satisfies
-        ``admission_state == status_to_admission(status)`` after a
-        parent finalize. This pins the dual-write invariant Phase 2
-        established; Phase 4 must not regress it through the
-        boundary.
+        """Phase 4 cleanup: the dual-write invariant is gone —
+        ``status`` is no longer written by ``finalize_active_to_done``
+        / ``cancel_job``, so ``status`` stays at the INSERT default
+        (``"pending"``) and ``admission_state`` is the sole
+        authority. This test now asserts the new invariant:
+        ``admission_state == 'done'`` for every terminal outcome
+        (COMPLETED / FAILED / CANCELLED), regardless of the legacy
+        ``status`` column value.
         """
         # Three parents with different terminal outcomes.
         j_done_complete = _make_job(engine, job_repo)
@@ -646,11 +668,12 @@ class TestChildReportsDoNotMutateParentAdmissionState:
 
         for j in (j_done_complete, j_done_fail, j_done_cancel):
             refetched = _refresh(engine, j.job_id)
-            expected = status_to_admission(refetched.status)
-            assert refetched.admission_state == expected, (
-                f"Drift on {j.job_id}: status={refetched.status!r} "
-                f"but admission_state={refetched.admission_state!r} "
-                f"(expected {expected!r})"
+            # Phase 4 cleanup: only ``admission_state`` is the source
+            # of truth — every terminal transition lands on ``done``.
+            assert refetched.admission_state == AdmissionState.DONE.value, (
+                f"Drift on {j.job_id}: "
+                f"admission_state={refetched.admission_state!r} "
+                f"(expected {AdmissionState.DONE.value!r})"
             )
 
 
@@ -685,7 +708,7 @@ class TestErrorReportingFlow:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.error_message == "boom"
 
     async def test_complete_failed_with_retries_remaining_routes_to_retry(
@@ -772,7 +795,7 @@ class TestErrorReportingFlow:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.QUEUED.value
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
         assert refetched.error_message is None
 
@@ -820,7 +843,7 @@ class TestErrorReportingFlow:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DEAD.value
-        assert refetched.status == JobStatus.DEAD_LETTER.value
+        assert refetched.admission_state == AdmissionState.DEAD.value
 
     async def test_complete_succeeded_writes_done(
         self, engine, job_repo: JobRepository, job_queue_service: JobQueueService
@@ -839,7 +862,7 @@ class TestErrorReportingFlow:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.COMPLETED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.result_summary == "ok"
 
     async def test_complete_cancelled_writes_done(
@@ -859,7 +882,7 @@ class TestErrorReportingFlow:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.CANCELLED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
 
 
 # ─── D. Job recovery on restart ─────────────────────────────────────────────
@@ -897,7 +920,7 @@ class TestJobRecoveryOnRestart:
         # as the DB persisted it.
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.ACTIVE.value
-        assert refetched.status == JobStatus.PROCESSING.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
 
         # Phase 3 query: ``find_processing_jobs`` filters on
         # ``admission_state='active'``. The orphaned job must
@@ -935,7 +958,7 @@ class TestJobRecoveryOnRestart:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.error_message == "orphan on restart"
 
     def test_recovery_skips_already_terminal_jobs(
@@ -1035,7 +1058,7 @@ class TestPhase4CrossCuttingInvariants:
         state retry/DLQ handling explicitly (Plan §8.2 structural
         guarantee). Missing the argument is a ``TypeError``.
         """
-        from daemon.repositories.job_queue.models import Decision
+        from daemon.repositories.job_queue.models import AdmissionState, Decision
 
         members = {m.name for m in Decision}
         # Closed set — no value-of-last-resort.

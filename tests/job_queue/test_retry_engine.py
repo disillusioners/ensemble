@@ -15,12 +15,31 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session as SQLModelSession
 
 from daemon.config import JobSystemConfig
-from daemon.repositories.job_queue import JobItem, JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_retry_engine import JobRetryEngine
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. This test file imports
+# the helper inline at line 115 (a deferred import to avoid
+# load-time side effects). Redefine it at module scope so the
+# deferred import is unnecessary and the call sites can keep using
+# the same name.
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # =============================================================================
@@ -112,8 +131,6 @@ def create_job_in_session(engine, **kwargs) -> JobItem:
     Returns:
         The created JobItem
     """
-    from daemon.repositories.job_queue.models import status_to_admission
-
     defaults = {
         "agent_id": "test-agent",
         "agent_dir": "/agents/test-agent",
@@ -268,6 +285,7 @@ class TestShouldRetry:
             engine,
             job_id="job-123",
             status=JobStatus.FAILED.value,
+            failed_at="2026-06-28T00:00:00+00:00",
             retry_count=1,
             max_retries=3,
         )
@@ -453,7 +471,7 @@ class TestMaybeRetry:
         result = retry_engine.maybe_retry("job-123")
         
         assert result is not None
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
         assert result.retry_count == 2  # Incremented
         assert result.next_retry_at is not None
         assert result.error_message is None  # Cleared
@@ -518,6 +536,7 @@ class TestMaybeRetry:
             engine,
             job_id="job-specific-id",
             status=JobStatus.FAILED.value,
+            failed_at="2026-06-28T00:00:00+00:00",
             retry_count=0,
             max_retries=3,
         )
@@ -721,13 +740,13 @@ class TestRetryEngineIntegration:
         
         # Verify job is failed
         job = job_repo.get("job-cycle")
-        assert job.status == JobStatus.FAILED.value
+        assert job.admission_state == AdmissionState.DONE.value
         assert job.retry_count == 0
         
         # Step 2: First retry
         result1 = retry_engine.maybe_retry("job-cycle")
         assert result1 is not None
-        assert result1.status == JobStatus.PENDING.value
+        assert result1.admission_state == AdmissionState.QUEUED.value
         assert result1.retry_count == 1
         
         # Simulate failure by directly updating the job in the database
@@ -749,7 +768,7 @@ class TestRetryEngineIntegration:
         # Step 3: Second retry
         result2 = retry_engine.maybe_retry("job-cycle")
         assert result2 is not None
-        assert result2.status == JobStatus.PENDING.value
+        assert result2.admission_state == AdmissionState.QUEUED.value
         assert result2.retry_count == 2
 
         # Simulate failure again (exhaust retries). Phase 4: also
@@ -785,6 +804,7 @@ class TestRetryEngineIntegration:
             engine,
             job_id="job-config-test",
             status=JobStatus.FAILED.value,
+            failed_at="2026-06-28T00:00:00+00:00",
             retry_count=0,
             max_retries=None,  # Should use config default of 5
         )

@@ -61,9 +61,11 @@ from daemon.repositories.job_queue import (
     JobQueueRepository,
     JobStatus,
     QueueType,
+    AdmissionState,
+    AdmissionState,
+    AdmissionState,
 )
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
-from daemon.repositories.job_queue.models import status_to_admission
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_queue_service import JobQueueService
@@ -71,6 +73,26 @@ from daemon.services.work_status import (
     _STATUS_CANONICAL_MAP,
     canonicalize_status,
 )
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# The ``status_to_admission`` helper was deleted from
+# ``daemon.repositories.job_queue.models`` in Phase 4 cleanup
+# (``admission_state`` is now the sole write authority). Tests that
+# seed JobItem rows from a ``status`` string still need this
+# JobStatus -> AdmissionState mapping, so we redefine it locally
+# here. Behavior is identical to the deleted production helper
+# (including the ``QUEUED`` fallback for unknown inputs).
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -239,11 +261,14 @@ class _StubRetryEngine:
     Phase 4's canonical retry path (Plan §3.2) goes
     ``active → queued`` directly via ``_finalize_terminal(RETRY)``.
     The production ``JobRetryEngine.maybe_retry`` still gates on
-    ``status == 'failed'`` (the dual-write mirror for legacy callers),
-    so the boundary test for RETRY uses this stub that performs the
-    canonical ``atomic_transition('processing' → 'pending')`` — which
-    dual-writes ``admission_state='queued'`` via
-    ``status_to_admission``.
+    ``status == 'failed'`` (the dual-write mirror for legacy callers)
+    and on the ``admission_state='active'`` column. Phase 4 cleanup
+    stops writing the legacy ``status`` column, so the
+    ``atomic_transition('processing' → 'pending')`` path no longer
+    matches its ``WHERE status='processing'`` guard — the stub issues
+    the canonical ``active → queued`` transition directly via a raw
+    guarded UPDATE keyed on ``admission_state='active'``, mirroring
+    the production retry contract.
 
     Returns the updated JobItem (matches the
     ``JobRetryEngine.maybe_retry`` return contract).
@@ -253,11 +278,20 @@ class _StubRetryEngine:
         self._job_repo = job_repo
 
     def maybe_retry(self, job_id: str) -> JobItem | None:
-        return self._job_repo.atomic_transition(
-            job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PENDING.value,
-        )
+        from sqlmodel import Session as SQLModelSession, update as sqlmodel_update
+        with SQLModelSession(self._job_repo.engine) as session:
+            stmt = (
+                sqlmodel_update(JobItem)
+                .where(JobItem.job_id == job_id)
+                .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
+                .values(admission_state=AdmissionState.QUEUED.value)
+            )
+            result = session.exec(stmt)
+            session.commit()
+            if result.rowcount == 0:
+                return None
+            job = session.get(JobItem, job_id)
+            return job
 
 
 # ─── A. Terminal finalization with each Decision ────────────────────────────
@@ -301,7 +335,7 @@ class TestDecisionDispatch:
         # admission_state is the primary write target.
         assert refetched.admission_state == AdmissionState.DONE.value
         # status mirror lands in the SAME UPDATE.
-        assert refetched.status == JobStatus.COMPLETED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.result_summary == "phase4 COMPLETED"
         assert refetched.completed_at is not None
 
@@ -330,7 +364,7 @@ class TestDecisionDispatch:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.error_message == "phase4 NO_RETRY failure"
 
     @pytest.mark.asyncio
@@ -364,7 +398,7 @@ class TestDecisionDispatch:
         # admission_state='queued' (status_to_admission('pending'))
         assert refetched.admission_state == AdmissionState.QUEUED.value
         # status mirror in the same UPDATE.
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
 
     @pytest.mark.asyncio
     async def test_retry_engine_returns_none_yields_dead_letter(
@@ -423,18 +457,24 @@ class TestDecisionDispatch:
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DEAD.value
-        assert refetched.status == JobStatus.DEAD_LETTER.value
+        assert refetched.admission_state == AdmissionState.DEAD.value
 
     @pytest.mark.asyncio
     async def test_no_retry_cancelled_writes_done_and_cancelled(
         self, engine, job_repo, job_queue_service: JobQueueService
     ):
         """``Decision.NO_RETRY`` with CANCELLED intent writes
-        ``admission_state='done', status='cancelled'``.
+        ``admission_state='done'``. Phase 4 cleanup: the legacy
+        ``status`` column is no longer written — only
+        ``admission_state`` is asserted here. The CANCELLED intent
+        is captured via the returned ``final_status`` value (still
+        ``JobStatus.CANCELLED.value``) and via the ``cancelled_at``
+        timestamp set by ``finalize_active_to_done``.
 
-        ``target_status='cancelled'`` is supplied so the status mirror
-        reflects the cancel intent (per the boundary's Phase 4 contract
-        documented at lines 1215-1219 of ``job_queue_service.py``).
+        ``target_status='cancelled'`` is supplied so the boundary
+        returns ``final_status='cancelled'`` to the caller (per the
+        boundary's Phase 4 contract documented at lines 1215-1219 of
+        ``job_queue_service.py``).
         """
         job = _make_job(engine, job_repo)
         _start_job(engine, job_repo, job.job_id, instance_id="inst-cancel")
@@ -451,8 +491,12 @@ class TestDecisionDispatch:
         assert final_status == JobStatus.CANCELLED.value
 
         refetched = _refresh(engine, job.job_id)
+        # Phase 4 cleanup: only ``admission_state`` is the source of
+        # truth. ``status`` is frozen at the INSERT default
+        # (``"pending"``) and no longer reflects the terminal
+        # transition.
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.status == JobStatus.CANCELLED.value
+        assert refetched.cancelled_at is not None
         # The boundary writes cancelled_at for TERMINATED-style paths.
         assert refetched.cancelled_at is not None
 
@@ -741,14 +785,12 @@ class TestAdmissionStatePrimaryWrite:
         assert final_status == expected_status
 
         refetched = _refresh(engine, job.job_id)
-        # admission_state is the source of truth.
+        # Phase 4 cleanup: ``admission_state`` is the sole write
+        # authority; the legacy ``status`` column is frozen at the
+        # INSERT default (``"pending"``) and no longer mirrors the
+        # terminal transition. The dual-write contract is gone, so
+        # only ``admission_state`` is asserted here.
         assert refetched.admission_state == expected_admission
-        # status mirror matches.
-        assert refetched.status == expected_status
-        # The dual-write invariant: admission_state is derived from
-        # status via the helper. If this fails the dual-write contract
-        # is broken — the two columns drifted.
-        assert refetched.admission_state == status_to_admission(refetched.status)
 
     @pytest.mark.asyncio
     async def test_status_to_admission_invariant_for_every_status(
@@ -763,18 +805,18 @@ class TestAdmissionStatePrimaryWrite:
         """
         job = _make_job(engine, job_repo)
 
-        # 1. Fresh → PENDING + QUEUED.
+        # 1. Fresh → QUEUED. Phase 4 cleanup: only ``admission_state``
+        # is asserted; ``status`` is frozen at the INSERT default and
+        # no longer mirrors the dual-write contract.
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PENDING.value
-        assert refetched.admission_state == status_to_admission(refetched.status)
+        assert refetched.admission_state == AdmissionState.QUEUED.value
 
-        # 2. Start → PROCESSING + ACTIVE.
+        # 2. Start → ACTIVE.
         _start_job(engine, job_repo, job.job_id, instance_id="inst-sweep")
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PROCESSING.value
-        assert refetched.admission_state == status_to_admission(refetched.status)
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
 
-        # 3. NO_RETRY + COMPLETED → COMPLETED + DONE.
+        # 3. NO_RETRY + COMPLETED → DONE.
         await job_queue_service._finalize_terminal(
             instance_id="inst-sweep",
             decision=Decision.NO_RETRY,
@@ -782,8 +824,7 @@ class TestAdmissionStatePrimaryWrite:
             target_status=JobStatus.COMPLETED.value,
         )
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.COMPLETED.value
-        assert refetched.admission_state == status_to_admission(refetched.status)
+        assert refetched.admission_state == AdmissionState.DONE.value
 
     def test_status_to_admission_helper_is_stable(self):
         """The ``status_to_admission`` helper is the single source of
@@ -825,28 +866,19 @@ class TestDeadLetterCanonicalization:
         """``_STATUS_CANONICAL_MAP`` explicitly maps ``dead`` →
         ``dead_letter``.
 
-        The legacy ``dead_letter`` source key stays in the map for
-        backward compatibility (callers that still write the legacy
-        spelling); the new ``dead`` source key is added by Phase 4 to
-        collapse the new admission_state spelling onto the same
-        canonical terminal.
+        Phase 4 cleanup: the legacy ``"dead_letter"`` source key was
+        removed from ``_STATUS_CANONICAL_MAP`` (the legacy
+        ``JobItem.status`` column is no longer written). The new
+        ``"dead"`` source key is the canonical mapping for the
+        ``admission_state='dead'`` spelling — it collapses onto the
+        same canonical terminal ``"dead_letter"``.
         """
         assert "dead" in _STATUS_CANONICAL_MAP
         assert _STATUS_CANONICAL_MAP["dead"] == "dead_letter"
-        # Both spellings collapse to the same canonical terminal.
-        assert _STATUS_CANONICAL_MAP["dead_letter"] == "dead_letter"
-        assert _STATUS_CANONICAL_MAP["dead"] == _STATUS_CANONICAL_MAP["dead_letter"]
-
-    def test_canonicalize_status_dead_returns_dead_letter(self):
-        """``canonicalize_status('dead')`` returns ``'dead_letter'``.
-
-        The resolver / virtual-job surfaces consume the canonical
-        vocabulary; passing the new admission-state spelling through
-        ``canonicalize_status`` must yield the same terminal label
-        the legacy vocabulary produces.
-        """
-        assert canonicalize_status("dead") == "dead_letter"
-        # Backward-compat: the legacy spelling also resolves to itself.
+        # The legacy ``"dead_letter"`` source key was removed in
+        # Phase 4 cleanup, but ``canonicalize_status("dead_letter")``
+        # still resolves to ``"dead_letter"`` via the map's
+        # ``.get(status, status)`` fallback.
         assert canonicalize_status("dead_letter") == "dead_letter"
 
     def test_canonicalize_status_is_terminal_for_dead(self):
@@ -899,13 +931,13 @@ class TestDeadLetterCanonicalization:
         )
 
         refetched = _refresh(engine, job.job_id)
-        # Raw column values.
+        # Raw column values. Phase 4 cleanup: only ``admission_state``
+        # is asserted; ``status`` is frozen at its INSERT default and
+        # no longer mirrors the transition.
         assert refetched.admission_state == AdmissionState.DEAD.value
-        assert refetched.status == JobStatus.DEAD_LETTER.value
 
         # Both columns canonicalise to the same terminal label.
         assert canonicalize_status(refetched.admission_state) == "dead_letter"
-        assert canonicalize_status(refetched.status) == "dead_letter"
 
 
 # ─── Sanity smoke ────────────────────────────────────────────────────────────

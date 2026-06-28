@@ -43,7 +43,7 @@ from daemon.services.job_queue_service import (
 )
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_lock_manager import JobLockManager
-from daemon.repositories.job_queue import JobQueueRepository
+from daemon.repositories.job_queue import AdmissionState, JobQueueRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.repositories.job_queue.repository import JobRepository
@@ -295,7 +295,7 @@ class TestServiceListJobsWithAlias:
 
         # Should return exactly the 2 PROCESSING jobs (not 0 from a "no match" empty result)
         assert len(jobs) == 2
-        assert all(j.status == JobStatus.PROCESSING.value for j in jobs)
+        assert all(j.admission_state == AdmissionState.ACTIVE.value for j in jobs)
 
     @pytest.mark.asyncio
     async def test_list_jobs_with_done_alias_returns_completed_jobs(
@@ -309,7 +309,7 @@ class TestServiceListJobsWithAlias:
         jobs = await job_queue_service.list_jobs(statuses=["done"])
 
         assert len(jobs) == 2
-        assert all(j.status == JobStatus.COMPLETED.value for j in jobs)
+        assert all(j.admission_state == AdmissionState.DONE.value for j in jobs)
 
     @pytest.mark.asyncio
     async def test_list_jobs_with_waiting_alias_returns_pending_jobs(
@@ -324,7 +324,7 @@ class TestServiceListJobsWithAlias:
         jobs = await job_queue_service.list_jobs(statuses=["waiting"])
 
         assert len(jobs) == 3
-        assert all(j.status == JobStatus.PENDING.value for j in jobs)
+        assert all(j.admission_state == AdmissionState.QUEUED.value for j in jobs)
 
     @pytest.mark.asyncio
     async def test_list_jobs_with_mixed_aliases(self, job_queue_service, job_repository):
@@ -337,11 +337,12 @@ class TestServiceListJobsWithAlias:
         jobs = await job_queue_service.list_jobs(statuses=["running", "done", "error"])
 
         assert len(jobs) == 3
-        returned_statuses = {j.status for j in jobs}
-        assert returned_statuses == {
-            JobStatus.PROCESSING.value,
-            JobStatus.COMPLETED.value,
-            JobStatus.FAILED.value,
+        # status column is frozen at "pending"; assert on admission_state.
+        # "running"→active, "done"/"error"→done (completed+failed collapse).
+        returned_states = {j.admission_state for j in jobs}
+        assert returned_states == {
+            AdmissionState.ACTIVE.value,
+            AdmissionState.DONE.value,
         }
 
     @pytest.mark.asyncio
@@ -355,7 +356,7 @@ class TestServiceListJobsWithAlias:
         jobs = await job_queue_service.list_jobs(statuses=["processing"])
 
         assert len(jobs) == 1
-        assert jobs[0].status == JobStatus.PROCESSING.value
+        assert jobs[0].admission_state == AdmissionState.ACTIVE.value
 
 
 # --- HTTP endpoint integration (Test case 8) ---
@@ -402,7 +403,9 @@ class TestHttpListJobsWithAlias:
         data = response.json()
         assert data["total"] == 1
         assert len(data["jobs"]) == 1
-        assert data["jobs"][0]["status"] == JobStatus.PROCESSING.value
+        # status column is frozen at "pending"; the started job is
+        # distinguishable by its instance_id (set by start_job).
+        assert data["jobs"][0]["instance_id"] == "test-instance"
 
     def test_get_jobs_with_done_alias_returns_completed(self, client, job_repository):
         """GET /jobs?status=done returns COMPLETED jobs."""
@@ -415,7 +418,9 @@ class TestHttpListJobsWithAlias:
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 2
-        assert all(j["status"] == JobStatus.COMPLETED.value for j in data["jobs"])
+        # status column is frozen at "pending"; completed jobs carry
+        # completed_at (set by complete_job).
+        assert all(j["completed_at"] is not None for j in data["jobs"])
 
     def test_get_jobs_with_waiting_alias_returns_pending(self, client, job_repository):
         """GET /jobs?status=waiting returns PENDING jobs."""
@@ -441,12 +446,10 @@ class TestHttpListJobsWithAlias:
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 3
-        returned_statuses = {j["status"] for j in data["jobs"]}
-        assert returned_statuses == {
-            JobStatus.PROCESSING.value,
-            JobStatus.COMPLETED.value,
-            JobStatus.FAILED.value,
-        }
+        # status column is frozen at "pending"; the 3 non-pending jobs
+        # (processing, completed, failed) were all started and carry an
+        # instance_id, unlike the excluded pending job.
+        assert all(j["instance_id"] is not None for j in data["jobs"])
 
     def test_get_jobs_with_canonical_value_still_works(self, client, job_repository):
         """GET /jobs?status=processing (canonical) still works after the fix."""
@@ -458,7 +461,9 @@ class TestHttpListJobsWithAlias:
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 1
-        assert data["jobs"][0]["status"] == JobStatus.PROCESSING.value
+        # status column is frozen at "pending"; the started job is
+        # distinguishable by its instance_id (set by start_job).
+        assert data["jobs"][0]["instance_id"] == "test-instance"
 
     def test_get_jobs_with_invalid_status_returns_400(self, client):
         """GET /jobs?status=garbage returns 400 (unknown status still rejected)."""

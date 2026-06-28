@@ -232,35 +232,41 @@ class JobQueueRepository:
     # JOB STATISTICS
     # --------------------------------------------------------
 
-    def count_jobs_by_status(self, queue_id: str) -> dict[str, int]:
-        """Count jobs in a queue grouped by status.
-        
+    def count_jobs_by_admission(self, queue_id: str) -> dict[str, int]:
+        """Count jobs in a queue grouped by admission_state.
+
         Args:
             queue_id: Queue identifier.
             
         Returns:
-            Dictionary mapping status to count, e.g. {"pending": 5, "processing": 1}.
+            Dictionary mapping admission_state to count, e.g.
+            {"queued": 5, "active": 1, "done": 3}.
         """
+        from .models import AdmissionState
+
         with SQLModelSession(self.engine) as db_session:
             stmt = (
-                select(JobItem.status, func.count(JobItem.job_id))
+                select(JobItem.admission_state, func.count(JobItem.job_id))
                 .where(JobItem.queue_id == queue_id)
-                .group_by(JobItem.status)
+                .group_by(JobItem.admission_state)
             )
             results = db_session.exec(stmt).all()
             
-            # Initialize with all statuses for consistency
-            counts = {status.value: 0 for status in JobStatus}
-            for status, count in results:
-                counts[status] = count
+            # Initialize with all admission states for consistency
+            counts = {state.value: 0 for state in AdmissionState}
+            for admission_state, count in results:
+                counts[admission_state] = count
             
             return counts
+
+    # Backward-compat alias for the renamed method.
+    count_jobs_by_status = count_jobs_by_admission
 
     def reassign_pending_jobs_atomic(
         self,
         from_queue_id: str,
         to_queue_id: str,
-        target_statuses: list[str | None] = None,
+        target_admission_states: list[str | None] = None,
     ) -> int:
         """Atomically reassign jobs from one queue to another.
         
@@ -269,20 +275,23 @@ class JobQueueRepository:
         Args:
             from_queue_id: Source queue ID.
             to_queue_id: Destination queue ID.
-            target_statuses: List of statuses to reassign (default: ["pending"]).
+            target_admission_states: List of admission states to reassign
+                (default: ["queued"]).
             
         Returns:
             Number of jobs reassigned.
         """
-        if target_statuses is None:
-            target_statuses = [JobStatus.PENDING.value]
+        from .models import AdmissionState
+
+        if target_admission_states is None:
+            target_admission_states = [AdmissionState.QUEUED.value]
         
         with SQLModelSession(self.engine) as db_session:
             # Use SQLAlchemy Core update() for atomic execution
             stmt = (
                 update(JobItem)
                 .where(JobItem.queue_id == from_queue_id)
-                .where(JobItem.status.in_(target_statuses))
+                .where(JobItem.admission_state.in_(target_admission_states))
                 .values(queue_id=to_queue_id)
             )
             result = db_session.execute(stmt)

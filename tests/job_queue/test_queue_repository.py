@@ -6,7 +6,7 @@ This module tests the SQLModel-based repository for job queue CRUD operations.
 import pytest
 
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
-from daemon.repositories.job_queue.models import JobQueue, JobItem, JobStatus, QueueType
+from daemon.repositories.job_queue.models import AdmissionState, JobQueue, JobItem, JobStatus, QueueType
 
 
 class TestQueueRepositoryCreate:
@@ -332,13 +332,12 @@ class TestQueueRepositoryCountJobsByStatus:
             queue_name="empty-count-test",
         )
 
-        counts = queue_repository.count_jobs_by_status(queue.queue_id)
+        counts = queue_repository.count_jobs_by_admission(queue.queue_id)
 
-        assert counts[JobStatus.PENDING.value] == 0
-        assert counts[JobStatus.PROCESSING.value] == 0
-        assert counts[JobStatus.COMPLETED.value] == 0
-        assert counts[JobStatus.FAILED.value] == 0
-        assert counts[JobStatus.CANCELLED.value] == 0
+        assert counts[AdmissionState.QUEUED.value] == 0
+        assert counts[AdmissionState.ACTIVE.value] == 0
+        assert counts[AdmissionState.DONE.value] == 0
+        assert counts[AdmissionState.DEAD.value] == 0
 
     def test_count_jobs_mixed_statuses(self, queue_repository, repository):
         """Test counting jobs with mixed statuses returns correct counts."""
@@ -406,13 +405,13 @@ class TestQueueRepositoryCountJobsByStatus:
         # Cancel job6
         repository.cancel_job(job6.job_id)  # CANCELLED
 
-        counts = queue_repository.count_jobs_by_status(queue.queue_id)
+        counts = queue_repository.count_jobs_by_admission(queue.queue_id)
 
-        assert counts[JobStatus.PENDING.value] == 2
-        assert counts[JobStatus.PROCESSING.value] == 0
-        assert counts[JobStatus.COMPLETED.value] == 2
-        assert counts[JobStatus.FAILED.value] == 1
-        assert counts[JobStatus.CANCELLED.value] == 1
+        # completed(2) + failed(1) + cancelled(1) all collapse to "done"
+        assert counts[AdmissionState.QUEUED.value] == 2
+        assert counts[AdmissionState.ACTIVE.value] == 0
+        assert counts[AdmissionState.DONE.value] == 4
+        assert counts[AdmissionState.DEAD.value] == 0
 
     def test_count_jobs_only_for_this_queue(self, queue_repository, repository):
         """Test count doesn't include jobs from other queues."""
@@ -450,9 +449,9 @@ class TestQueueRepositoryCountJobsByStatus:
             queue_id=queue2.queue_id,
         )
 
-        counts = queue_repository.count_jobs_by_status(queue1.queue_id)
+        counts = queue_repository.count_jobs_by_admission(queue1.queue_id)
 
-        assert counts[JobStatus.PENDING.value] == 2
+        assert counts[AdmissionState.QUEUED.value] == 2
 
 
 class TestQueueRepositoryReassignPendingJobsAtomic:

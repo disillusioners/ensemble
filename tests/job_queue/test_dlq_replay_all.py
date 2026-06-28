@@ -23,6 +23,23 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -99,6 +116,8 @@ def create_dlq_items_for_project(engine, dlq_repository, project_id, count, reas
             project_id=project_id,
             queue_id=f"queue-{project_id}",
             status=JobStatus.DEAD_LETTER.value,
+
+            admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             retry_count=3,
             error_message=f"Error for job {i}",
         )
@@ -174,7 +193,7 @@ class TestReplayAllSuccess:
         for dlq_item in dlq_items:
             job = dlq_service._job_repo.get(dlq_item.job_id)
             assert job is not None
-            assert job.status == "pending"
+            assert job.admission_state == "queued"
             assert job.retry_count == 0  # Reset
 
 
@@ -352,7 +371,7 @@ class TestReplayAllProjectIsolation:
         # Verify project-b jobs still in DEAD_LETTER
         for dlq_item in project_b_items:
             job = dlq_service._job_repo.get(dlq_item.job_id)
-            assert job.status == "dead_letter"
+            assert job.admission_state == "dead"
 
 
 # =============================================================================
@@ -420,6 +439,8 @@ class TestReplayAllResponseStructure:
                 project_id=project_id,
                 queue_id="queue-other",
                 status=JobStatus.DEAD_LETTER.value,
+
+                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             )
             
             with Session(engine) as session:
@@ -482,6 +503,8 @@ class TestReplayAllResponseStructure:
                 project_id=project_id,
                 queue_id="default-queue",
                 status=JobStatus.DEAD_LETTER.value,
+
+                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             )
             
             with Session(engine) as session:
@@ -521,6 +544,8 @@ class TestReplayAllResponseStructure:
                 project_id=project_id,
                 queue_id="default-queue",
                 status=JobStatus.DEAD_LETTER.value,
+
+                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             )
             
             with Session(engine) as session:

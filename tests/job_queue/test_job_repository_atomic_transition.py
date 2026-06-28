@@ -16,7 +16,7 @@ import threading
 
 import pytest
 
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobRepository
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.services.job_state_machine import InvalidTransitionError
 
@@ -40,7 +40,7 @@ class TestAtomicTransitionHappyPath:
         )
 
         assert updated is not None
-        assert updated.status == JobStatus.PROCESSING.value
+        assert updated.admission_state == AdmissionState.ACTIVE.value
         assert updated.started_at == now_iso
         assert updated.instance_id == "inst-A"
 
@@ -60,7 +60,7 @@ class TestAtomicTransitionHappyPath:
         )
 
         assert updated is not None
-        assert updated.status == JobStatus.COMPLETED.value
+        assert updated.admission_state == AdmissionState.DONE.value
         assert updated.completed_at == "2026-06-19T12:00:00+00:00"
         assert updated.result_summary == "all good"
 
@@ -78,7 +78,7 @@ class TestAtomicTransitionHappyPath:
         )
 
         assert updated is not None
-        assert updated.status == JobStatus.FAILED.value
+        assert updated.admission_state == AdmissionState.DONE.value
         assert updated.error_message == "boom"
         assert updated.completed_at == "2026-06-19T12:00:00+00:00"
 
@@ -94,7 +94,7 @@ class TestAtomicTransitionHappyPath:
         )
 
         assert updated is not None
-        assert updated.status == JobStatus.CANCELLED.value
+        assert updated.admission_state == AdmissionState.DONE.value
         assert updated.cancelled_at == "2026-06-19T12:00:00+00:00"
 
 
@@ -120,9 +120,9 @@ class TestAtomicTransitionStatusGuard:
                 to_status=JobStatus.PROCESSING.value,
             )
 
-        # The error must report the row's *actual* current status, not the
-        # expected one — callers depend on this for diagnostics.
-        assert exc_info.value.from_status == JobStatus.PROCESSING.value
+        # The error must report the row's *actual* current admission_state
+        # (not the frozen status) — callers depend on this for diagnostics.
+        assert exc_info.value.from_status == AdmissionState.ACTIVE.value
         assert exc_info.value.to_status == JobStatus.PROCESSING.value
 
     def test_missing_job_returns_none(self, repository):
@@ -159,7 +159,7 @@ class TestAtomicTransitionStatusGuard:
             result_summary="writer-1",
         )
         assert completed is not None
-        assert completed.status == JobStatus.COMPLETED.value
+        assert completed.admission_state == AdmissionState.DONE.value
         assert completed.result_summary == "writer-1"
 
         # Second writer — still believes the job is in PROCESSING —
@@ -175,7 +175,7 @@ class TestAtomicTransitionStatusGuard:
                 result_summary="writer-2-late",
             )
 
-        assert exc_info.value.from_status == JobStatus.COMPLETED.value
+        assert exc_info.value.from_status == AdmissionState.DONE.value
         assert exc_info.value.to_status == JobStatus.COMPLETED.value
 
         # Critical: the first writer's payload is preserved. The second
@@ -183,7 +183,7 @@ class TestAtomicTransitionStatusGuard:
         # completed_at / result_summary.
         final = repository.get(job.job_id)
         assert final is not None
-        assert final.status == JobStatus.COMPLETED.value
+        assert final.admission_state == AdmissionState.DONE.value
         assert final.result_summary == "writer-1"
         assert final.completed_at == "2026-06-19T12:00:00+00:00"
 
@@ -221,7 +221,7 @@ class TestAtomicTransitionStatusGuard:
 
         final = repository.get(job.job_id)
         assert final is not None
-        assert final.status == JobStatus.COMPLETED.value
+        assert final.admission_state == AdmissionState.DONE.value
         assert final.result_summary == "happy"
         # The late writer's error_message must NOT have leaked in.
         assert final.error_message is None
@@ -368,7 +368,7 @@ class TestAtomicTransitionConcurrent:
         # And the row must reflect the winning writer — no clobbering.
         final = repository.get(job.job_id)
         assert final is not None
-        assert final.status == JobStatus.COMPLETED.value
+        assert final.admission_state == AdmissionState.DONE.value
         assert final.result_summary in {"writer-00", "writer-01"}
 
 
@@ -399,7 +399,7 @@ class TestStartJobAtomic:
         started = repository.start_job(job.job_id, "instance-X")
 
         assert started is not None
-        assert started.status == JobStatus.PROCESSING.value
+        assert started.admission_state == AdmissionState.ACTIVE.value
         assert started.instance_id == "instance-X"
         assert started.started_at is not None
 
@@ -421,8 +421,8 @@ class TestStartJobAtomic:
 
         msg = str(exc_info.value)
         assert "Cannot start job" in msg
-        assert "processing" in msg
-        assert "PENDING" in msg
+        assert "active" in msg
+        assert "queued" in msg
 
     def test_start_completed_job_raises_value_error(
         self, repository, sample_job_data
@@ -438,7 +438,7 @@ class TestStartJobAtomic:
 
         msg = str(exc_info.value)
         assert "Cannot start job" in msg
-        assert "completed" in msg
+        assert "done" in msg
 
     def test_start_missing_job_returns_none(self, repository):
         """Transitioning a non-existent job returns None (does NOT raise).
@@ -535,6 +535,6 @@ class TestStartJobAtomic:
         # started_at populated exactly once (no clobbering).
         final = repository.get(job.job_id)
         assert final is not None
-        assert final.status == JobStatus.PROCESSING.value
+        assert final.admission_state == AdmissionState.ACTIVE.value
         assert final.instance_id in {"inst-A", "inst-B"}
         assert final.started_at is not None

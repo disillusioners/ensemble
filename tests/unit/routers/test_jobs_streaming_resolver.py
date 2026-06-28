@@ -43,6 +43,23 @@ from daemon.services.job_queue_service import JobQueueService
 from daemon.services.work_resolver import WorkResolverService
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -252,6 +269,8 @@ def _seed_completed_job(
             project_id="test-project",
             priority=5,
             status=JobStatus.COMPLETED.value,
+
+            admission_state=status_to_admission(JobStatus.COMPLETED.value),
             result_summary="done",
             error_message=None,
             instance_id=None,

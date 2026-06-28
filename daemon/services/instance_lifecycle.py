@@ -21,7 +21,7 @@ from ..repositories.dependency_bus.models import (
     DependencyWatcherState,
 )
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
-from ..repositories.job_queue.models import AdmissionState, JobStatus, status_to_admission
+from ..repositories.job_queue.models import AdmissionState, JobStatus
 from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
@@ -1777,7 +1777,7 @@ class InstanceLifecycleService:
             # non-processing) is collapsed into one statement.
             jobs = list(
                 session.exec(
-                    select(JobItem.job_id, JobItem.status, JobItem.project_id)
+                    select(JobItem.job_id, JobItem.admission_state, JobItem.project_id)
                     .where(JobItem.instance_id == instance_id)
                     .where(JobItem.admission_state.in_([
                         AdmissionState.QUEUED.value,
@@ -1820,11 +1820,12 @@ class InstanceLifecycleService:
                     text(
                         "UPDATE job_queue_items "
                         "SET admission_state = :done_admission, "
-                        "    status = :cancelled_status, "
-                        # Phase 2 dual-write: status→admission_state
-                        # co-move (CANCELLED → DONE). Same transaction
-                        # boundary as the status UPDATE so the two
-                        # columns stay consistent across the cascade.
+                        # Phase 4 cleanup: ``status`` is no longer
+                        # written (admission_state is the sole
+                        # authority). ``Instance.status`` carries the
+                        # terminal-spelling (COMPLETED / ERROR /
+                        # TERMINATED) and is surfaced to callers via
+                        # the resolver's canonical mapping.
                         "    cancelled_at = :cancelled_at, "
                         "    completed_at = :completed_at, "
                         "    error_message = :err, "
@@ -1837,7 +1838,6 @@ class InstanceLifecycleService:
                     {
                         "iid": instance_id,
                         "done_admission": AdmissionState.DONE.value,
-                        "cancelled_status": JobStatus.CANCELLED.value,
                         "queued_admission": AdmissionState.QUEUED.value,
                         "active_admission": AdmissionState.ACTIVE.value,
                         "cancelled_at": cancelled_at,

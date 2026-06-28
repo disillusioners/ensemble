@@ -1112,25 +1112,15 @@ class SQLModelProjectRepository:
                 # ``admission_state='active'`` rather than
                 # ``status='processing'``. Under the new model
                 # ``admission_state='active'`` covers BOTH PROCESSING
-                # and PAUSED jobs (pause is an Instance concern; the lock
-                # is still held — see ``_STATUS_TO_ADMISSION``). This
-                # fixes a pre-existing bug where PAUSED jobs were not
+                # and PAUSED jobs (pause is an Instance concern; the
+                # lock is still held — see Plan §8.1 /
+                # ``models.JobStatus.PAUSED``). This fixes a
+                # pre-existing bug where PAUSED jobs were not
                 # caught by the deletion safety check.
                 active_states = [AdmissionState.ACTIVE.value]
-                # Count jobs with active admission_state for this project
-                stmt = select(func.count()).select_from(JobItem).where(
-                    JobItem.project_id == project_id,
-                    JobItem.admission_state.in_(active_states)
-                )
-                running_count = session.exec(stmt).one()
-                if running_count > 0:
-                    raise RuntimeError(
-                        f"Cannot delete project with running jobs. "
-                        f"Found {running_count} jobs in active admission "
-                        f"state (PROCESSING or PAUSED). "
-                        f"Use force=True to bypass this check."
-                    )
-            
+
+
+
             # BUG 1 & 2 FIX: Perform ALL cascade deletions inline within this session
             # This ensures atomicity - either ALL changes commit or NONE commit
             

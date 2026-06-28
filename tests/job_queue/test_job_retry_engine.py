@@ -24,6 +24,22 @@ from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_retry_engine import JobRetryEngine
 
 
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefine it at module
+# scope so the deferred import at line 101 is unnecessary.
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 @pytest.fixture
 def engine():
     """Create in-memory SQLite engine for testing."""
@@ -98,7 +114,6 @@ def create_job(engine, **kwargs) -> JobItem:
     those paths and must maintain the invariant itself so the new
     ``admission_state``-based queries see the correct state.
     """
-    from daemon.repositories.job_queue.models import status_to_admission
     if "status" in kwargs and "admission_state" not in kwargs:
         kwargs["admission_state"] = status_to_admission(kwargs["status"])
     job = JobItem(**kwargs)
@@ -307,6 +322,7 @@ class TestShouldRetry:
             source="api",
             project_id="project-abc",
             status="failed",
+            failed_at=datetime.utcnow().isoformat(),
             retry_count=1,
             max_retries=3,
         )
@@ -394,6 +410,8 @@ class TestShouldRetry:
             source="api",
             project_id="project-abc",
             status="failed",
+
+            admission_state=status_to_admission("failed"),
             retry_count=0,
         )
         
@@ -425,7 +443,7 @@ class TestMaybeRetry:
         result = retry_engine.maybe_retry("job-123")
         
         assert result is not None
-        assert result.status == "pending"
+        assert result.admission_state == "queued"
         assert result.retry_count == 2  # Incremented
         assert result.next_retry_at is not None
         assert result.error_message is None  # Cleared
@@ -486,7 +504,7 @@ class TestMaybeRetry:
         # Job should remain in FAILED state after rollback
         job = job_repo.get("job-123")
         assert job is not None
-        assert job.status == "failed"
+        assert job.admission_state == "done"
         assert job.retry_count == 3
         assert job.error_message == "Connection timeout"
 
@@ -596,7 +614,7 @@ class TestMaybeRetryAtomicConcurrency:
             f"Lost increment detected: expected retry_count=2, got "
             f"{final.retry_count}"
         )
-        assert final.status == "pending"
+        assert final.admission_state == "queued"
         assert final.failed_at is None
         assert final.error_message is None
         assert final.next_retry_at is not None
@@ -636,7 +654,7 @@ class TestMaybeRetryAtomicConcurrency:
         # Row must be unchanged: still FAILED, retry_count not bumped.
         final = job_repo.get("job-exhausted")
         assert final is not None
-        assert final.status == "failed"
+        assert final.admission_state == "done"
         assert final.retry_count == 3
 
     def test_atomic_retry_skips_when_status_not_failed(self, job_repo, engine):
@@ -655,6 +673,8 @@ class TestMaybeRetryAtomicConcurrency:
             source="api",
             project_id="project-abc",
             status="cancelled",  # Not FAILED
+            admission_state="done",
+            failed_at=None,
             retry_count=1,
             max_retries=10,
         )
@@ -670,7 +690,7 @@ class TestMaybeRetryAtomicConcurrency:
         assert outcome is None
         final = job_repo.get("job-cancelled-mid-flight")
         assert final is not None
-        assert final.status == "cancelled"
+        assert final.admission_state == "done"
         assert final.retry_count == 1  # Unchanged
 
     def test_maybe_retry_skips_concurrently_cancelled_job(self, retry_engine, job_repo, engine):
@@ -697,12 +717,14 @@ class TestMaybeRetryAtomicConcurrency:
             failed_at=datetime.utcnow().isoformat(),
         )
 
-        # Concurrent cancellation — flip status to CANCELLED before
-        # maybe_retry runs.
+        # Concurrent cancellation — flip to CANCELLED before
+        # maybe_retry runs. Clear ``failed_at`` so the job is no
+        # longer retryable (cancelled ≠ failed in the new model).
         with Session(engine) as session:
             row = session.get(JobItem, "job-mid-cancel")
             row.status = "cancelled"
             row.cancelled_at = datetime.utcnow().isoformat()
+            row.failed_at = None
             session.commit()
 
         result = retry_engine.maybe_retry("job-mid-cancel")
@@ -710,7 +732,7 @@ class TestMaybeRetryAtomicConcurrency:
         assert result is None
         final = job_repo.get("job-mid-cancel")
         assert final is not None
-        assert final.status == "cancelled"
+        assert final.admission_state == "done"
         assert final.retry_count == 1  # Not incremented
         assert final.error_message == "Connection timeout"  # Not cleared
 
@@ -734,11 +756,12 @@ class TestMaybeRetryAtomicConcurrency:
             failed_at=datetime.utcnow().isoformat(),
         )
 
-        # Concurrent path moves the job to DLQ (status='dead_letter')
+        # Concurrent path moves the job to DLQ (admission_state='dead')
         # before maybe_retry runs.
         with Session(engine) as session:
             row = session.get(JobItem, "job-already-dlq")
             row.status = "dead_letter"
+            row.admission_state = "dead"
             session.commit()
 
         result = retry_engine.maybe_retry("job-already-dlq")
@@ -746,7 +769,7 @@ class TestMaybeRetryAtomicConcurrency:
         assert result is None
         final = job_repo.get("job-already-dlq")
         assert final is not None
-        assert final.status == "dead_letter"
+        assert final.admission_state == "dead"
         assert final.retry_count == 2  # Not incremented
 
 

@@ -15,10 +15,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daemon.services.job_queue_service import JobQueueService
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
 
 # Test system project ID (must match conftest.py in job_queue)
 TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
+
+# Phase 4 cleanup: ``status`` is frozen at the INSERT default (``pending``)
+# and ``admission_state`` is the sole authority. Mock jobs must expose the
+# ``admission_state`` that corresponds to the legacy ``status`` value they
+# were constructed with, so service-level assertions on ``admission_state``
+# see the right bucket.
+_STATUS_TO_ADMISSION = {
+    JobStatus.PENDING.value: AdmissionState.QUEUED.value,
+    JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
+    JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
+    JobStatus.COMPLETED.value: AdmissionState.DONE.value,
+    JobStatus.FAILED.value: AdmissionState.DONE.value,
+    JobStatus.CANCELLED.value: AdmissionState.DONE.value,
+    JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+}
 
 
 def make_mock_job(
@@ -47,6 +62,7 @@ def make_mock_job(
     job.agent_id = agent_id
     job.project_id = project_id
     job.status = status
+    job.admission_state = _STATUS_TO_ADMISSION.get(status, AdmissionState.QUEUED.value)
     job.message = "test message"
     job.source = "api"
     job.priority = 5
@@ -281,7 +297,7 @@ class TestIdempotentEnqueue:
         
         # Verify existing job was returned
         assert result.job_id == "existing-job-1"
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
         
         # Verify no new job was created
         mock_repository.create.assert_not_called()
@@ -318,7 +334,7 @@ class TestIdempotentEnqueue:
         
         # Verify existing job was returned
         assert result.job_id == "existing-job-2"
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
         
         # Verify no new job was created
         mock_repository.create.assert_not_called()
@@ -399,7 +415,7 @@ class TestIdempotentEnqueue:
         
         # Verify existing job was returned (FAILED is non-terminal in implementation)
         assert result.job_id == "failed-job-1"
-        assert result.status == JobStatus.FAILED.value
+        assert result.admission_state == AdmissionState.DONE.value
         
         # Verify no new job was created
         mock_repository.create.assert_not_called()

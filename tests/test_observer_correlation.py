@@ -40,7 +40,7 @@ from sqlmodel import Session, SQLModel
 from daemon.repositories.event.models import Event
 from daemon.repositories.instance.models import Instance, InstanceHierarchy
 from daemon.repositories.message_queue.models import MessageQueue
-from daemon.repositories.job_queue.models import JobItem
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.instance.models import InstanceStatus
 # CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
@@ -751,7 +751,7 @@ class TestC1RegisterDuringCallback:
             mocks["sync_mock"].assert_called_once()
 
             # The job remains in PROCESSING (not transitioned).
-            assert job.status == JobStatus.PROCESSING.value
+            assert job.admission_state == AdmissionState.ACTIVE.value
 
             # Watcher was NOT notified of a terminal state.
             notify_calls = mocks[
@@ -869,7 +869,7 @@ class TestC2ConcurrentFinalize:
             )
 
             # The job ends in the correct terminal state.
-            assert job.status == JobStatus.COMPLETED.value
+            assert job.admission_state == AdmissionState.DONE.value
 
             # ``_finalize_job_db_sync`` was called from BOTH paths. The
             # InvalidTransitionError raised inside the sync helper on the

@@ -67,10 +67,32 @@ from daemon.repositories.job_queue.models import (
     JobQueue,
     JobStatus,
     QueueType,
-    status_to_admission,
+    AdmissionState,
+    AdmissionState,
+    AdmissionState,
 )
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.services.dead_letter_service import DeadLetterService
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# The ``status_to_admission`` helper was deleted from
+# ``daemon.repositories.job_queue.models`` in Phase 4 cleanup
+# (``admission_state`` is now the sole write authority). Tests that
+# seed JobItem rows from a ``status`` string still need this
+# JobStatus -> AdmissionState mapping, so we redefine it locally
+# here. Behavior is identical to the deleted production helper
+# (including the ``QUEUED`` fallback for unknown inputs).
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -227,7 +249,7 @@ class TestDualWriteOnCreation:
         """
         job = _make_job(engine, job_repo)
 
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         assert job.admission_state == AdmissionState.QUEUED.value
 
     def test_create_persists_both_columns(self, engine, job_repo):
@@ -237,7 +259,7 @@ class TestDualWriteOnCreation:
         job = _make_job(engine, job_repo)
         refetched = _refresh(engine, job.job_id)
 
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
 
     def test_create_with_idempotency_key_dual_writes(
@@ -258,7 +280,7 @@ class TestDualWriteOnCreation:
 
         assert created is True
         assert job is not None
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         assert job.admission_state == AdmissionState.QUEUED.value
 
     def test_idempotency_key_loser_sees_winner_state(
@@ -290,7 +312,7 @@ class TestDualWriteOnCreation:
         # Loser observes the winner's job_id.
         assert second.job_id == first.job_id
         # And the winner's columns are still consistent.
-        assert second.status == JobStatus.PENDING.value
+        assert second.admission_state == AdmissionState.QUEUED.value
         assert second.admission_state == AdmissionState.QUEUED.value
 
 
@@ -322,7 +344,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert started is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PROCESSING.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
         assert refetched.admission_state == AdmissionState.ACTIVE.value
         assert refetched.instance_id == "inst-1"
 
@@ -334,7 +356,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert completed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.COMPLETED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.result_summary == "ok"
 
@@ -349,7 +371,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert failed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.error_message == "boom"
 
@@ -364,7 +386,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert cancelled is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.CANCELLED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
 
     def test_cancel_job_from_processing_dual_writes_done(
@@ -379,7 +401,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert cancelled is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.CANCELLED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
 
     def test_move_to_dlq_dual_writes_dead(
@@ -399,7 +421,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert dlq_item is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.DEAD_LETTER.value
+        assert refetched.admission_state == AdmissionState.DEAD.value
         assert refetched.admission_state == AdmissionState.DEAD.value
 
     def test_replay_from_dlq_dual_writes_queued(
@@ -422,7 +444,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert replayed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         # Retry counters / error fields reset in the same UPDATE.
         assert refetched.retry_count == 0
@@ -453,7 +475,7 @@ class TestDualWriteOnLifecycleTransitions:
         assert retried is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
         assert refetched.error_message is None
@@ -552,7 +574,7 @@ class TestPauseResumeDualWrite:
         assert paused is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PAUSED.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
         # Pause keeps the admission state active — the lock is still
         # held by the instance, so the queue-side view is "still in
         # flight".
@@ -578,7 +600,7 @@ class TestPauseResumeDualWrite:
         assert resumed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PROCESSING.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
         assert refetched.admission_state == AdmissionState.ACTIVE.value
 
     def test_pause_resume_round_trip_preserves_active(
@@ -635,26 +657,27 @@ class TestEdgeCases:
         )
         # Default instance_id is None — the queue-stage branch.
         assert job.instance_id is None
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         assert job.admission_state == AdmissionState.QUEUED.value
 
     def test_dual_write_is_bus_independent(self, engine, job_repo):
-        """Documentation test: the dual-write happens at the
-        repository / SQL layer, strictly upstream of the
-        ``dependency_bus`` singleton.
+        """Phase 4 cleanup: the dual-write invariant is gone — the
+        legacy ``status`` column is no longer written by
+        ``start_job`` / ``complete_job`` / ``fail_job`` / etc.
+        The ``status`` column stays frozen at the INSERT default
+        (``"pending"``) and ``admission_state`` is the sole
+        authority. The bus-independence invariant now reads:
+        every row in the table satisfies ``admission_state``
+        transitions independent of bus presence — the
+        ``admission_state`` is set by repository / SQL layer
+        statements strictly upstream of the ``dependency_bus``
+        singleton, so a missing bus cannot desynchronise
+        ``admission_state``.
 
-        The ``bus is None`` guard branches in
-        ``job_feedback_observer`` (``if bus is None:`` at lines 387,
-        1544, 1690, 2371), ``child_reports`` (lines 170, 244, 811),
-        ``error_reporting`` (line 510), ``dependency_bus`` itself
-        (lines 287, 290), and ``instance_lifecycle`` (line 62) are
-        all DOWNSTREAM of the dual-write. They guard completion
-        cascades, not JobItem INSERT/UPDATE statements, so a missing
-        bus cannot desynchronise ``status`` from ``admission_state``.
-
-        This test pins the invariant on the steady state: every row
-        in the table satisfies ``admission_state ==
-        status_to_admission(status)`` regardless of bus presence.
+        The legacy ``status_to_admission(status)`` invariant is
+        replaced by the canonical admission bucket check:
+        ``admission_state`` lands on the expected bucket for
+        every transition path (PENDING / ACTIVE / DONE).
         """
         jobs = [
             _make_job(engine, job_repo),
@@ -667,16 +690,17 @@ class TestEdgeCases:
         job_repo.complete_job(jobs[1].job_id, result_summary="ok")
         # Leave jobs[2] as PENDING.
 
-        for j in jobs:
+        expected_states = (
+            AdmissionState.ACTIVE.value,   # jobs[0]: PENDING → ACTIVE
+            AdmissionState.DONE.value,     # jobs[1]: PENDING → ACTIVE → DONE
+            AdmissionState.QUEUED.value,   # jobs[2]: stays PENDING
+        )
+        for j, expected in zip(jobs, expected_states):
             refetched = _refresh(engine, j.job_id)
-            assert (
-                refetched.admission_state
-                == status_to_admission(refetched.status)
-            ), (
+            assert refetched.admission_state == expected, (
                 f"Drift on job {refetched.job_id}: "
-                f"status={refetched.status!r} but "
                 f"admission_state={refetched.admission_state!r} "
-                f"(expected {status_to_admission(refetched.status)!r})."
+                f"(expected {expected!r})."
             )
 
 

@@ -8,7 +8,7 @@ from daemon.services.job_queue_mgmt_service import (
     JobQueueMgmtService,
     RESERVED_QUEUE_NAMES,
 )
-from daemon.repositories.job_queue.models import JobQueue, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobQueue, JobStatus
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +526,7 @@ class TestDeleteCustomQueue:
         queue = make_queue(queue_id="q-001", project_id="proj-1", is_system=False)
         system_fifo = make_queue(queue_name="system_fifo_queue", is_system=True)
         mock_queue_repo.get.return_value = queue
-        mock_queue_repo.count_jobs_by_status.return_value = {"pending": 0, "processing": 0}
+        mock_queue_repo.count_jobs_by_admission.return_value = {"queued": 0, "active": 0, "done": 0, "dead": 0}
         mock_queue_repo.get_by_name.return_value = system_fifo
         mock_queue_repo.reassign_pending_jobs_atomic.return_value = 0
 
@@ -546,14 +546,14 @@ class TestDeleteCustomQueue:
         system_fifo.is_system = True
         mock_queue_repo.get.side_effect = [queue, system_fifo]
         mock_queue_repo.get_by_name.return_value = system_fifo
-        mock_queue_repo.count_jobs_by_status.return_value = {"pending": 3, "processing": 0}
+        mock_queue_repo.count_jobs_by_admission.return_value = {"queued": 3, "active": 0, "done": 0, "dead": 0}
         mock_queue_repo.reassign_pending_jobs_atomic.return_value = 3
 
         result = await service.delete_queue("proj-1", "q-001")
 
         assert result["reassigned_jobs"] == 3
         mock_queue_repo.reassign_pending_jobs_atomic.assert_called_once_with(
-            "q-001", "sys-fifo", [JobStatus.PENDING.value]
+            "q-001", "sys-fifo", [AdmissionState.QUEUED.value]
         )
 
     @pytest.mark.asyncio
@@ -570,7 +570,7 @@ class TestDeleteCustomQueue:
         """Returns 409 error when queue has PROCESSING jobs."""
         queue = make_queue(queue_id="q-001", project_id="proj-1", is_system=False)
         mock_queue_repo.get.return_value = queue
-        mock_queue_repo.count_jobs_by_status.return_value = {"pending": 0, "processing": 1}
+        mock_queue_repo.count_jobs_by_admission.return_value = {"queued": 0, "active": 1, "done": 0, "dead": 0}
 
         with pytest.raises(ValueError, match="processing jobs"):
             await service.delete_queue("proj-1", "q-001")

@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.work_status import is_terminal as _is_terminal_canonical
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobStatus
 from .schemas import (
     JobResponse,
     JobNotFoundResponse,
@@ -112,14 +112,17 @@ async def delete_job(
 
     # Phase 1 (Job as Queue Proxy): terminal check uses the
     # instance-authoritative status surfaced by the resolver (see
-    # ``work_resolver._job_to_record``). Fall back to the JobItem
-    # mirror when the resolver isn't wired (legacy / partial-wiring
+    # ``work_resolver._job_to_record``). Fall back to the
+    # JobItem mirror when the resolver isn't wired (legacy / partial-wiring
     # test doubles) so the endpoint stays correct in those paths.
+    # Phase 4: ``admission_state`` is the sole authority — the
+    # ``status`` column is frozen at INSERT default and no longer
+    # reflects lifecycle state.
     canonical_status = await _resolve_job_status(service, job_id)
     is_terminal = (
         _is_terminal_canonical(canonical_status)
         if canonical_status is not None
-        else job.status in TERMINAL_STATUSES
+        else job.admission_state in {AdmissionState.DONE.value, AdmissionState.DEAD.value}
     )
 
     # Handle based on status
@@ -148,7 +151,7 @@ async def delete_job(
                 status_code=400,
                 detail={
                     "error": "Failed to cancel job",
-                    "message": f"Could not cancel job in state: {job.status}",
+                    "message": f"Could not cancel job in admission_state: {job.admission_state}",
                 }
             )
         updated_job = await service.get_job(job_id)
@@ -211,11 +214,13 @@ async def cancel_job_endpoint(
     # instance-authoritative status surfaced by the resolver. Fall
     # back to the JobItem mirror when the resolver isn't wired so
     # the legacy path stays correct.
+    # Phase 4: ``admission_state`` is the sole authority — the
+    # ``status`` column is frozen at INSERT default.
     canonical_status = await _resolve_job_status(service, job_id)
     is_terminal = (
         _is_terminal_canonical(canonical_status)
         if canonical_status is not None
-        else job.status in TERMINAL_STATUSES
+        else job.admission_state in {AdmissionState.DONE.value, AdmissionState.DEAD.value}
     )
 
     # Check if job is in a cancellable state
@@ -225,7 +230,7 @@ async def cancel_job_endpoint(
         # stops writing the mirror, this field falls back to the
         # canonical vocabulary ("completed" / "failed" / …) which
         # matches the mirror 1:1 for the terminal set.
-        user_status = canonical_status or job.status
+        user_status = canonical_status or job.admission_state
         raise HTTPException(
             status_code=400,
             detail={
@@ -243,7 +248,7 @@ async def cancel_job_endpoint(
             status_code=400,
             detail={
                 "error": "Failed to cancel job",
-                "message": f"Could not cancel job in state: {job.status}",
+                "message": f"Could not cancel job in admission_state: {job.admission_state}",
             }
         )
 
@@ -304,16 +309,17 @@ async def restore_job_endpoint(
     # Phase 1 (Job as Queue Proxy): terminal check uses the
     # instance-authoritative status surfaced by the resolver. Fall
     # back to the JobItem mirror when the resolver isn't wired.
+    # Phase 4: ``admission_state`` is the sole authority.
     canonical_status = await _resolve_job_status(service, job_id)
     is_terminal = (
         _is_terminal_canonical(canonical_status)
         if canonical_status is not None
-        else job.status in TERMINAL_STATUSES
+        else job.admission_state in {AdmissionState.DONE.value, AdmissionState.DEAD.value}
     )
 
     # Check if job is in a terminal state (restore not allowed for terminal jobs)
     if is_terminal:
-        user_status = canonical_status or job.status
+        user_status = canonical_status or job.admission_state
         raise HTTPException(
             status_code=400,
             detail={

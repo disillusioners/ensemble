@@ -50,8 +50,19 @@ def _truncate_tables(engine):
     """
     def _truncate():
         from sqlmodel import Session, text
+        from sqlalchemy import inspect
+        # Only truncate tables that actually exist in the engine. Some
+        # models (e.g. ``opencode_sessions``) get registered into
+        # ``SQLModel.metadata`` AFTER the session-scoped ``engine``
+        # fixture ran ``create_all`` — they are imported lazily inside
+        # test bodies. Iterating ``metadata.tables`` blindly would issue
+        # ``DELETE FROM`` against non-existent tables and raise
+        # ``OperationalError: no such table`` at teardown.
+        existing_tables = set(inspect(engine).get_table_names())
         with Session(engine) as session:
             for table in SQLModel.metadata.tables:
+                if table not in existing_tables:
+                    continue
                 session.exec(text(f'DELETE FROM "{table}"'))
             session.commit()
 

@@ -58,6 +58,23 @@ from daemon.repositories.job_queue.models import JobItem, JobLock, JobStatus
 from daemon.repositories.message_queue.models import MessageQueue, MessageStatus
 import pytest
 
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
 pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests H10-L14 lifecycle w/ CM")
 
 # CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
@@ -164,6 +181,8 @@ def seed_job(
                 source="api",
                 job_type=job_type,
                 status=status,
+
+                admission_state=status_to_admission(status),
                 instance_id=instance_id,
                 project_id=project_id,
                 created_at=now_iso,

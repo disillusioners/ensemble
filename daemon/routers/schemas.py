@@ -55,6 +55,7 @@ class JobResponse(BaseModel):
     
     job_id: str = Field(..., description="Unique job identifier")
     status: str = Field(..., description="Job status (pending, processing, completed, failed, cancelled, dead_letter)")
+    admission_state: str = Field(default="queued", description="Admission state (queued, active, done, dead)")
     priority: int = Field(..., description="Job priority (1-10)")
     agent_id: str = Field(..., description="Agent ID (e.g., 'developer')")
     agent_dir: str = Field(..., description="Path to the agent directory")

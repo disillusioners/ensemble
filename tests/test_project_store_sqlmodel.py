@@ -387,7 +387,7 @@ class TestUpdateStatus:
         
         updated = store.update_status(project.project_id, "paused")
         
-        assert updated.status == "paused"
+        assert updated.admission_state == "active"
 
     def test_update_status_all_statuses(self, store):
         """Test all valid statuses."""

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, List
 
 from daemon.repositories.job_queue import DeadLetterItem, JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
-from daemon.repositories.job_queue.models import status_to_admission
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -125,22 +125,19 @@ class DeadLetterService:
             raise DLQItemNotFoundError(job_id)
         
         # Verify job is in the eligible state (now safe under lock).
-        # Phase 4 (Job as Queue Proxy): the eligibility check matches
-        # the SQL guard below — for ``from_admission_state='active'``
-        # (Phase 4 canonical, Plan §3.1), the check is on the
-        # admission_state column; for the legacy default
-        # ``from_admission_state='failed'``, the check falls back to
-        # ``status='failed'`` (the dual-write mirror per
-        # ``status_to_admission``). Both checks are performed under
-        # the row lock so a concurrent writer that flipped the state
-        # between the caller's read and our UPDATE cannot slip past
-        # us.
+        # Phase 4 cleanup: the eligibility check is keyed on
+        # ``admission_state`` alone. The previous
+        # ``status='failed'`` fallback is removed because the legacy
+        # ``status`` column is no longer written — every JobItem
+        # row's ``status`` is frozen at the INSERT default
+        # (``"pending"``) so the check would reject every new
+        # eligible row. The companion SQL guard below enforces the
+        # matching ``admission_state`` predicate at COMMIT.
         if from_admission_state == AdmissionState.ACTIVE.value:
             if job.admission_state != AdmissionState.ACTIVE.value:
                 raise JobNotInFailedStateError(job_id, job.status)
         else:
-            # Legacy / dual-write mirror path (``'failed'`` source).
-            if job.status != "failed":
+            if job.admission_state != AdmissionState.DONE.value:
                 raise JobNotInFailedStateError(job_id, job.status)
         
         # Ensure project_id is normalized (defense-in-depth)
@@ -175,32 +172,32 @@ class DeadLetterService:
             # non-eligible job. Mirrors the gold-template pattern in
             # JobRepository.atomic_transition.
             #
-            # Phase 4 (Job as Queue Proxy): the SQL guard mirrors
-            # the Python eligibility check above — for
-            # ``from_admission_state='active'`` (Phase 4 canonical),
-            # we gate on the admission_state column (Plan §3.1
-            # authority); for the legacy default
-            # ``from_admission_state='failed'``, we fall back to the
-            # legacy ``status='failed'`` predicate (the dual-write
-            # mirror per ``status_to_admission``). Both predicates
-            # identify the same eligible row under the Phase 2+ dual-
-            # write contract.
-            if from_admission_state == "active":
+            # Phase 4 cleanup: the SQL guard is keyed on
+            # ``admission_state`` alone (the queue-proxy authority per
+            # Plan §3.1). The previous ``status='failed'`` co-guard
+            # is removed because the legacy ``status`` column is no
+            # longer written — every JobItem row's ``status`` is
+            # frozen at the INSERT default (``"pending"``), so the
+            # predicate would never match. For the legacy default
+            # ``from_admission_state='failed'``, we map it onto
+            # ``admission_state='done'`` (the canonical bucket for
+            # FAILED-source rows under Plan §8.1). Both call sites
+            # (``move_to_dlq`` and ``move_to_dlq_standalone``) use
+            # the same guard so the same eligible row is matched
+            # under the same predicate.
+            if from_admission_state == AdmissionState.ACTIVE.value:
                 guard_clause = JobItem.admission_state == from_admission_state
             else:
-                guard_clause = JobItem.status == "failed"
+                guard_clause = JobItem.admission_state == AdmissionState.DONE.value
             update_result = session.exec(
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
                 .where(guard_clause)
-                # Phase 2 dual-write: DEAD_LETTER → admission_state =
-                # DEAD. Co-moved with status in the SAME guarded UPDATE
-                # so the two columns stay consistent at the queue/DLQ
-                # boundary. ``status_to_admission`` is the single
-                # source of truth.
+                # Phase 4 cleanup: ``status`` is no longer written
+                # (admission_state is the sole authority). The
+                # ``admission_state='dead'`` value is set directly.
                 .values(
-                    status="dead_letter",
-                    admission_state=status_to_admission("dead_letter"),
+                    admission_state=AdmissionState.DEAD.value,
                 )
             )
 
@@ -263,13 +260,19 @@ class DeadLetterService:
                 raise DLQItemNotFoundError(job_id)
             
             # Validate job is in the eligible state (now safe under lock).
-            # Phase 4: prefer the admission_state check; fall back to the
-            # legacy status check when caller pinned FAILED.
+            # Phase 4 cleanup: prefer the admission_state check; the
+            # legacy ``status != "failed"`` fallback is removed
+            # because the ``status`` column is no longer written
+            # — every JobItem row's ``status`` is frozen at the
+            # INSERT default (``"pending"``) so the check would
+            # reject every new eligible row. ``admission_state`` is
+            # the sole authority; the companion SQL guard in the
+            # UPDATE below enforces the matching predicate.
             if from_admission_state == AdmissionState.ACTIVE.value:
                 if job.admission_state != AdmissionState.ACTIVE.value:
                     raise JobNotInFailedStateError(job_id, job.status)
             else:
-                if job.status != "failed":
+                if job.admission_state != AdmissionState.DONE.value:
                     raise JobNotInFailedStateError(job_id, job.status)
             
             # Ensure project_id is normalized (defense-in-depth)
@@ -309,28 +312,24 @@ class DeadLetterService:
                 # per Plan §3.1). For backward compatibility with
                 # legacy callers that pre-date Phase 4 (default
                 # ``from_admission_state='failed'``), the guard
-                # falls back to the legacy ``status='failed'``
-                # predicate — the dual-write mapping
-                # ``status_to_admission('failed')='done'`` keeps the
-                # two columns in lockstep under Phase 2+, so either
-                # predicate matches the same row.
-                if from_admission_state == "active":
+                # falls back to the canonical
+                # ``admission_state='done'`` predicate. The legacy
+                # ``status='failed'`` co-guard was removed in Phase 4
+                # cleanup because the ``status`` column is no longer
+                # written.
+                if from_admission_state == AdmissionState.ACTIVE.value:
                     guard_clause = JobItem.admission_state == from_admission_state
                 else:
-                    # Legacy / dual-write mirror — gate on the
-                    # status column for ``from_admission_state=
-                    # 'failed'`` (the legacy SQL guard the M3
-                    # status-guard tests assert).
-                    guard_clause = JobItem.status == "failed"
+                    guard_clause = JobItem.admission_state == AdmissionState.DONE.value
                 update_result = session.exec(
                     sqlmodel_update(JobItem)
                     .where(JobItem.job_id == job_id)
                     .where(guard_clause)
-                    # Phase 2 dual-write: DEAD_LETTER → admission_state
-                    # = DEAD in the same guarded UPDATE.
+                    # Phase 4 cleanup: ``status`` is no longer written
+                    # (admission_state is the sole authority). The
+                    # ``admission_state='dead'`` value is set directly.
                     .values(
-                        status="dead_letter",
-                        admission_state=status_to_admission("dead_letter"),
+                        admission_state=AdmissionState.DEAD.value,
                     )
                 )
                 
@@ -407,31 +406,39 @@ class DeadLetterService:
             if job is None:
                 raise DLQItemNotFoundError(dlq_id)
             
-            # Verify job is in dead_letter state
-            if job.status != "dead_letter":
+            # Verify job is in dead admission_state (Phase 4 cleanup:
+            # the legacy ``status == "dead_letter"`` check no longer
+            # matches new rows because the ``status`` column is no
+            # longer written). The DLQ transition writes
+            # ``admission_state='dead'`` directly, so the admission
+            # column is the authoritative gate.
+            if job.admission_state != AdmissionState.DEAD.value:
                 from daemon.services.job_state_machine import InvalidTransitionError
                 raise InvalidTransitionError(
                     job_id=job_id,
                     from_status=job.status,
                     to_status="pending",
                 )
-            
-            # Atomic UPDATE with status guard (defense-in-depth). All
-            # retry/clear fields are reset in the SAME guarded UPDATE —
-            # no ORM-level read-modify-write window for a concurrent
-            # atomic_retry to slip into. Mirrors the gold-template
-            # pattern in JobRepository.atomic_transition.
+
+            # Atomic UPDATE with admission_state guard (defense-in-
+            # depth). All retry/clear fields are reset in the SAME
+            # guarded UPDATE — no ORM-level read-modify-write
+            # window for a concurrent atomic_retry to slip into.
+            # Mirrors the gold-template pattern in
+            # JobRepository.atomic_transition.
             update_result = session.exec(
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
-                .where(JobItem.status == "dead_letter")
-                # Phase 2 dual-write: PENDING → admission_state =
-                # QUEUED. All retry/clear fields are reset in the SAME
-                # guarded UPDATE — including admission_state, which
-                # was previously DEAD on this row.
+                .where(JobItem.admission_state == AdmissionState.DEAD.value)
+                # Phase 4 cleanup: ``status`` is no longer written
+                # (admission_state is the sole authority). PENDING →
+                # admission_state = 'queued' is set directly. The
+                # legacy ``status`` column stays at its INSERT default
+                # (the job was DEAD_LETTER before replay — its
+                # ``status`` column already carries that legacy
+                # spelling from the original DLQ transition).
                 .values(
-                    status="pending",
-                    admission_state=status_to_admission("pending"),
+                    admission_state=AdmissionState.QUEUED.value,
                     retry_count=0,
                     failed_at=None,
                     error_message=None,

@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.repositories.job_queue.models import JobQueue, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobQueue, JobStatus
 
 
 # Reserved system queue names that cannot be created or deleted
@@ -418,22 +418,22 @@ class JobQueueMgmtService:
         if system_fifo is None:
             raise ValueError("System FIFO queue not found")
         
-        # Reassign PENDING jobs first (atomic operation only affects PENDING jobs)
+        # Reassign QUEUED jobs first (atomic operation only affects QUEUED jobs)
         reassigned_count = await asyncio.to_thread(
             self._queue_repo.reassign_pending_jobs_atomic,
             queue_id,
             system_fifo.queue_id,
-            [JobStatus.PENDING.value],
+            [AdmissionState.QUEUED.value],
         )
         
-        # Check for PROCESSING jobs AFTER reassignment
-        # This prevents TOCTOU: jobs transitioning PENDING→PROCESSING during
+        # Check for ACTIVE jobs AFTER reassignment
+        # This prevents TOCTOU: jobs transitioning QUEUED→ACTIVE during
         # reassignment are caught here and block deletion
         counts = await asyncio.to_thread(
-            self._queue_repo.count_jobs_by_status,
+            self._queue_repo.count_jobs_by_admission,
             queue_id,
         )
-        if counts.get(JobStatus.PROCESSING.value, 0) > 0:
+        if counts.get(AdmissionState.ACTIVE.value, 0) > 0:
             raise ValueError("Queue has processing jobs")
         
         # Delete the queue

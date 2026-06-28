@@ -30,7 +30,7 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.repositories.project.repository import SQLModelProjectRepository
 
@@ -238,7 +238,7 @@ class TestDLQProjectNormalization:
         
         # Verify job is FAILED
         job = job_repository.get(job_id)
-        assert job.status == JobStatus.FAILED.value
+        assert job.admission_state == AdmissionState.DONE.value
         assert job.project_id == system_default_project_id
         
         # Step 3: Move to DLQ

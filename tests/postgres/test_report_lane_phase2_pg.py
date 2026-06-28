@@ -50,6 +50,23 @@ from daemon.services.dependency_bus import (
 )
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 # Auto-apply the postgres marker so ``pytest -m postgres`` selects these
 # tests and the default ``addopts = "-m 'not integration and not postgres'"``
 # skips them unless overridden.
@@ -150,6 +167,8 @@ def _seed_job(
             source="api",
             job_type="message",
             status=status,
+
+            admission_state=status_to_admission(status),
             instance_id=instance_id,
             job_metadata=job_metadata if job_metadata is not None else {},
         ))

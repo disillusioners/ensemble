@@ -23,6 +23,23 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -120,6 +137,8 @@ def create_dead_letter_job(engine, job_repo, dlq_repo, job_id, dlq_id, status=Jo
         project_id="project-abc",
         queue_id="queue-xyz",
         status=status.value,
+
+        admission_state=status_to_admission(status.value),
         retry_count=3,
         error_message="Connection timeout after 3 retries",
         failed_at=now,
@@ -182,7 +201,12 @@ class TestRetryDeadLetterJob:
         assert response.status_code == 200
         data = response.json()
         assert data["job_id"] == job_id
-        assert data["status"] == "pending"
+        # The response ``status`` field reflects the frozen legacy
+        # ``status`` column (INSERT value "dead_letter" — Phase 4
+        # froze the column; replay only writes ``admission_state``).
+        # The authoritative check is ``admission_state == "queued"``
+        # below.
+        assert data["status"] == "dead_letter"
         assert "replay" in data["message"].lower()
         
         # Verify DLQ entry was cleaned up
@@ -192,7 +216,7 @@ class TestRetryDeadLetterJob:
         # Verify job was updated to PENDING
         updated_job = dlq_service._job_repo.get(job_id)
         assert updated_job is not None
-        assert updated_job.status == "pending"
+        assert updated_job.admission_state == "queued"
         assert updated_job.retry_count == 0  # Reset to 0
 
     def test_retry_dead_letter_job_preserves_dlq_info_in_response(
@@ -245,6 +269,8 @@ class TestRetryFailedJob:
             source="api",
             project_id="project-abc",
             status=JobStatus.FAILED.value,
+
+            admission_state=status_to_admission(JobStatus.FAILED.value),
             retry_count=1,
             error_message="Some error",
         )
@@ -267,6 +293,8 @@ class TestRetryFailedJob:
             source="api",
             project_id="project-abc",
             status=JobStatus.PENDING.value,
+
+            admission_state=status_to_admission(JobStatus.PENDING.value),
             retry_count=0,
         )
         mock_job_queue_service.retry_job = AsyncMock(return_value=new_job)
@@ -326,6 +354,8 @@ class TestRetryInvalidStates:
             source="api",
             project_id="project-abc",
             status=JobStatus.COMPLETED.value,
+
+            admission_state=status_to_admission(JobStatus.COMPLETED.value),
         )
         
         with Session(engine) as session:
@@ -359,6 +389,8 @@ class TestRetryInvalidStates:
             source="api",
             project_id="project-abc",
             status=JobStatus.PROCESSING.value,
+
+            admission_state=status_to_admission(JobStatus.PROCESSING.value),
         )
         
         with Session(engine) as session:
@@ -392,6 +424,8 @@ class TestRetryInvalidStates:
             source="api",
             project_id="project-abc",
             status=JobStatus.PENDING.value,
+
+            admission_state=status_to_admission(JobStatus.PENDING.value),
         )
         
         with Session(engine) as session:
@@ -433,6 +467,8 @@ class TestRetryDeadLetterWithoutDLQEntry:
             source="api",
             project_id="project-abc",
             status=JobStatus.DEAD_LETTER.value,
+
+            admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             retry_count=0,
             error_message="Some error",
         )

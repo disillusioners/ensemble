@@ -6,7 +6,7 @@ This module tests the SQLModel-based repository for job queue CRUD operations.
 import pytest
 import time
 
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobRepository
 from daemon.repositories.job_queue.models import JobStatus, JobItem
 from daemon.services.job_state_machine import InvalidTransitionError
 
@@ -24,7 +24,7 @@ class TestRepositoryCreate:
         assert job.source == sample_job_data["source"]
         assert job.project_id == sample_job_data["project_id"]
         assert job.priority == sample_job_data["priority"]
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         assert job.job_metadata == sample_job_data["job_metadata"]
 
     def test_create_job_without_project(self, repository, sample_job_data_no_project):
@@ -33,7 +33,7 @@ class TestRepositoryCreate:
         
         assert job.job_id is not None
         assert job.project_id is None
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
 
     def test_create_job_default_values(self, repository):
         """Test creating job with minimal parameters."""
@@ -46,7 +46,7 @@ class TestRepositoryCreate:
         assert job.job_id is not None
         assert job.source == "api"  # Default value
         assert job.priority == 5  # Default value
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         assert job.job_metadata == {}  # Default empty dict
 
     def test_create_job_generates_timestamps(self, repository, sample_job_data):
@@ -192,7 +192,7 @@ class TestRepositoryList:
         pending = repository.list_pending_by_project("test-project")
         
         assert len(pending) == 2
-        assert all(j.status == JobStatus.PENDING.value for j in pending)
+        assert all(j.admission_state == AdmissionState.QUEUED.value for j in pending)
 
     def test_list_pending_ordered_by_priority(self, repository):
         """Test that pending jobs are ordered by priority descending."""
@@ -326,7 +326,7 @@ class TestRepositoryUpdate:
         assert updated.priority == 8
         assert updated.message == "new-message"
         # Status must NOT have been touched by the update.
-        assert updated.status == JobStatus.PENDING.value
+        assert updated.admission_state == AdmissionState.QUEUED.value
 
 
 class TestRepositoryJobLifecycle:
@@ -339,7 +339,7 @@ class TestRepositoryJobLifecycle:
         started = repository.start_job(job.job_id, "instance-1")
         
         assert started is not None
-        assert started.status == JobStatus.PROCESSING.value
+        assert started.admission_state == AdmissionState.ACTIVE.value
         assert started.instance_id == "instance-1"
         assert started.started_at is not None
 
@@ -352,7 +352,7 @@ class TestRepositoryJobLifecycle:
             repository.start_job(job.job_id, "instance-2")
         
         assert "Cannot start job" in str(exc_info.value)
-        assert "processing" in str(exc_info.value)
+        assert "active" in str(exc_info.value)
 
     def test_start_completed_job_raises(self, repository, sample_job_data):
         """Test starting a completed job raises ValueError."""
@@ -364,7 +364,7 @@ class TestRepositoryJobLifecycle:
             repository.start_job(job.job_id, "instance-2")
         
         assert "Cannot start job" in str(exc_info.value)
-        assert "completed" in str(exc_info.value)
+        assert "done" in str(exc_info.value)
 
     def test_complete_processing_job(self, repository, sample_job_data):
         """Test completing a processing job."""
@@ -377,7 +377,7 @@ class TestRepositoryJobLifecycle:
         )
         
         assert completed is not None
-        assert completed.status == JobStatus.COMPLETED.value
+        assert completed.admission_state == AdmissionState.DONE.value
         assert completed.completed_at is not None
         assert completed.result_summary == "Job completed successfully"
 
@@ -388,7 +388,7 @@ class TestRepositoryJobLifecycle:
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.complete_job(job.job_id)
         
-        assert exc_info.value.from_status == "pending"
+        assert exc_info.value.from_status == "queued"
         assert exc_info.value.to_status == "completed"
 
     def test_fail_processing_job(self, repository, sample_job_data):
@@ -402,7 +402,7 @@ class TestRepositoryJobLifecycle:
         )
         
         assert failed is not None
-        assert failed.status == JobStatus.FAILED.value
+        assert failed.admission_state == AdmissionState.DONE.value
         assert failed.completed_at is not None
         assert failed.error_message == "Something went wrong"
 
@@ -413,7 +413,7 @@ class TestRepositoryJobLifecycle:
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.fail_job(job.job_id, "Error")
         
-        assert exc_info.value.from_status == "pending"
+        assert exc_info.value.from_status == "queued"
         assert exc_info.value.to_status == "failed"
 
     def test_cancel_pending_job(self, repository, sample_job_data):
@@ -423,7 +423,7 @@ class TestRepositoryJobLifecycle:
         cancelled = repository.cancel_job(job.job_id)
         
         assert cancelled is not None
-        assert cancelled.status == JobStatus.CANCELLED.value
+        assert cancelled.admission_state == AdmissionState.DONE.value
         assert cancelled.cancelled_at is not None
 
     def test_cancel_processing_job(self, repository, sample_job_data):
@@ -434,7 +434,7 @@ class TestRepositoryJobLifecycle:
         cancelled = repository.cancel_job(job.job_id)
         
         assert cancelled is not None
-        assert cancelled.status == JobStatus.CANCELLED.value
+        assert cancelled.admission_state == AdmissionState.DONE.value
         assert cancelled.cancelled_at is not None
 
 
@@ -614,19 +614,19 @@ class TestRepositoryConcurrency:
         job = repository.create(**sample_job_data)
         
         # Verify initial state
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         
         # Start job
         started = repository.start_job(job.job_id, "instance-1")
-        assert started.status == JobStatus.PROCESSING.value
+        assert started.admission_state == AdmissionState.ACTIVE.value
         
         # Complete job
         completed = repository.complete_job(job.job_id, "Done")
-        assert completed.status == JobStatus.COMPLETED.value
+        assert completed.admission_state == AdmissionState.DONE.value
         
         # Verify final state persists
         final = repository.get(job.job_id)
-        assert final.status == JobStatus.COMPLETED.value
+        assert final.admission_state == AdmissionState.DONE.value
         assert final.completed_at is not None
 
 
@@ -842,12 +842,12 @@ class TestRepositoryStartJobAtomic:
         """Test start_job_atomic successfully starts a PENDING job."""
         job = repository.create(**sample_job_data)
         
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         
         started = repository.start_job_atomic(job.job_id, "test-instance")
         
         assert started is not None
-        assert started.status == JobStatus.PROCESSING.value
+        assert started.admission_state == AdmissionState.ACTIVE.value
         assert started.instance_id == "test-instance"
         assert started.started_at is not None
 
@@ -860,29 +860,29 @@ class TestRepositoryStartJobAtomic:
         # Try to start again - should fail with InvalidTransitionError
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.start_job_atomic(job.job_id, "instance-2")
-        
-        assert exc_info.value.from_status == "processing"
+
+        assert exc_info.value.from_status == "active"
         assert exc_info.value.to_status == "processing"
 
     def test_start_job_atomic_concurrent_safety(self, repository, sample_job_data):
         """Test start_job_atomic ensures only one concurrent start succeeds."""
         job = repository.create(**sample_job_data)
         
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         
         # First call should succeed
         first_started = repository.start_job_atomic(job.job_id, "instance-1")
         assert first_started is not None
-        assert first_started.status == JobStatus.PROCESSING.value
+        assert first_started.admission_state == AdmissionState.ACTIVE.value
         assert first_started.instance_id == "instance-1"
         
         # Second call should raise InvalidTransitionError (job no longer pending)
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.start_job_atomic(job.job_id, "instance-2")
-        
-        assert exc_info.value.from_status == "processing"
+
+        assert exc_info.value.from_status == "active"
         assert exc_info.value.to_status == "processing"
-        
+
         # Verify only one job was started
         retrieved = repository.get(job.job_id)
         assert retrieved.instance_id == "instance-1"
@@ -931,7 +931,7 @@ class TestRepositoryGetByInstanceRecent:
         result = repository.get_by_instance("inst-mix")
 
         assert result.job_id == new_job.job_id
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
 
     def test_get_by_instance_excludes_soft_deleted(self, repository, sample_job_data):
         """Soft-deleted jobs must NOT be returned (deleted_at IS NULL filter)."""
@@ -1039,7 +1039,7 @@ class TestRepositoryGetActiveByInstance:
 
         assert result is not None
         assert result.job_id == pending_job.job_id
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
 
     def test_get_active_returns_processing_job(self, repository, sample_job_data):
         """A PROCESSING job is returned by get_active_by_instance."""
@@ -1050,7 +1050,7 @@ class TestRepositoryGetActiveByInstance:
 
         assert result is not None
         assert result.job_id == job.job_id
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
 
     def test_get_active_returns_only_active_across_mixed_statuses(
         self, repository, sample_job_data
@@ -1093,7 +1093,7 @@ class TestRepositoryGetActiveByInstance:
         assert result.job_id == pending.job_id, (
             f"Expected newest active={pending.job_id}, got {result.job_id}"
         )
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
 
     def test_get_active_returns_none_when_no_active_exists(
         self, repository, sample_job_data
@@ -1158,7 +1158,7 @@ class TestRepositoryGetActiveByInstance:
 
         assert result is not None
         assert result.job_id == fresh.job_id
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
 
 
 class TestRepositoryHardDeleteByProject:

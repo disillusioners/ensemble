@@ -12,9 +12,51 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
-from .models import AdmissionState, JobItem, JobQueue, JobStatus, QueueType, status_to_admission
+from .models import AdmissionState, JobItem, JobQueue, JobStatus, QueueType
 
 logger = logging.getLogger(__name__)
+
+
+# ── JobStatus → AdmissionState read-path translation ────────────────────
+# Phase 4 cleanup: the legacy ``status`` column is frozen at its INSERT
+# default and no longer reflects lifecycle state. All read paths
+# (listing, counting, guarding) filter on ``admission_state`` instead.
+# This map translates legacy ``statuses`` parameters (still accepted by
+# ``list()`` / ``list_by_queue()`` for backward compatibility) into the
+# admission_state values that replace them.
+_JOB_STATUS_TO_ADMISSION: dict[str, str] = {
+    JobStatus.PENDING.value: AdmissionState.QUEUED.value,
+    JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
+    JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
+    JobStatus.COMPLETED.value: AdmissionState.DONE.value,
+    JobStatus.FAILED.value: AdmissionState.DONE.value,
+    JobStatus.CANCELLED.value: AdmissionState.DONE.value,
+    JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+}
+
+
+def _statuses_to_admission(statuses: list[str | None]) -> list[str]:
+    """Translate legacy ``statuses`` filter values to ``admission_state`` values.
+
+    Multiple JobStatus values collapse onto fewer AdmissionState values
+    (e.g. completed/failed/cancelled → done). The result is de-duplicated.
+
+    Args:
+        statuses: List of ``JobStatus`` value strings (may contain None).
+
+    Returns:
+        De-duplicated list of ``AdmissionState`` value strings.
+    """
+    result: list[str] = []
+    seen: set[str] = set()
+    for s in statuses:
+        if s is None:
+            continue
+        mapped = _JOB_STATUS_TO_ADMISSION.get(s)
+        if mapped and mapped not in seen:
+            seen.add(mapped)
+            result.append(mapped)
+    return result
 
 
 def _is_postgres(session: SQLModelSession) -> bool:
@@ -106,12 +148,11 @@ class JobRepository:
                 project_id=project_id,
                 priority=priority,
                 status=JobStatus.PENDING.value,
-                # Phase 2 dual-write: admission_state moves with status.
-                # PENDING → QUEUED via status_to_admission. Explicit
-                # here even though the field default matches — keeps
-                # the create() INSERT symmetric with the update paths
-                # that call status_to_admission().
-                admission_state=status_to_admission(JobStatus.PENDING.value),
+                # Phase 4 cleanup (admission_state is the sole authority):
+                # admission_state is set directly to QUEUED. The legacy
+                # ``status`` column is only written at INSERT (defaults
+                # to PENDING); no UPDATE writes ``status`` anymore.
+                admission_state=AdmissionState.QUEUED.value,
                 job_metadata=job_metadata or {},
                 queue_id=queue_id,
                 idempotency_key=idempotency_key,
@@ -200,10 +241,10 @@ class JobRepository:
                 "project_id": project_id,
                 "priority": priority,
                 "status": JobStatus.PENDING.value,
-                # Phase 2 dual-write: admission_state co-moves with
-                # status. Set explicitly so the raw INSERT values
-                # mirror the ORM create() above.
-                "admission_state": status_to_admission(JobStatus.PENDING.value),
+                # Phase 4 cleanup: admission_state is the sole
+                # authority. Set explicitly to QUEUED so the raw
+                # INSERT values mirror the ORM create() above.
+                "admission_state": AdmissionState.QUEUED.value,
                 "metadata": job_metadata or {},  # DB column name, not job_metadata
                 "queue_id": queue_id,
                 "idempotency_key": idempotency_key,
@@ -446,7 +487,11 @@ class JobRepository:
             if not include_deleted:
                 count_stmt = count_stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
-                count_stmt = count_stmt.where(JobItem.status.in_(statuses))
+                admission_set = _statuses_to_admission(statuses)
+                if admission_set:
+                    count_stmt = count_stmt.where(
+                        JobItem.admission_state.in_(admission_set)
+                    )
             if project_id:
                 count_stmt = count_stmt.where(JobItem.project_id == project_id)
             if queue_id:
@@ -458,7 +503,9 @@ class JobRepository:
             if not include_deleted:
                 stmt = stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
-                stmt = stmt.where(JobItem.status.in_(statuses))
+                admission_set = _statuses_to_admission(statuses)
+                if admission_set:
+                    stmt = stmt.where(JobItem.admission_state.in_(admission_set))
             if project_id:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if queue_id:
@@ -619,7 +666,13 @@ class JobRepository:
             count_stmt = count_stmt.where(JobItem.queue_id == queue_id)
             count_stmt = count_stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
-                count_stmt = count_stmt.where(JobItem.status.in_(statuses))
+                # Phase 4 cleanup: translate legacy status filter to
+                # admission_state (status column is frozen at INSERT default).
+                admission_set = _statuses_to_admission(statuses)
+                if admission_set:
+                    count_stmt = count_stmt.where(
+                        JobItem.admission_state.in_(admission_set)
+                    )
             if admission_states:
                 count_stmt = count_stmt.where(JobItem.admission_state.in_(admission_states))
             total = db_session.exec(count_stmt).one()
@@ -628,7 +681,9 @@ class JobRepository:
             stmt = select(JobItem).where(JobItem.queue_id == queue_id)
             stmt = stmt.where(JobItem.deleted_at.is_(None))
             if statuses:
-                stmt = stmt.where(JobItem.status.in_(statuses))
+                admission_set = _statuses_to_admission(statuses)
+                if admission_set:
+                    stmt = stmt.where(JobItem.admission_state.in_(admission_set))
             if admission_states:
                 stmt = stmt.where(JobItem.admission_state.in_(admission_states))
 
@@ -714,32 +769,74 @@ class JobRepository:
         # named ``status`` (they shouldn't — ``to_status`` is the canonical
         # way to change status).
         #
-        # Phase 2 dual-write: ``admission_state`` is derived from
-        # ``to_status`` via :func:`status_to_admission` and added to the
-        # SAME UPDATE so the two columns move in lockstep. Because
-        # ``admission_state`` is set before ``**extra_updates``, any
-        # caller that passes ``admission_state=`` explicitly would
-        # override the mapping — that path is intentionally unsupported
-        # (the helper is the single source of truth) but documented
-        # here so a future caller knows.
+        # Phase 4 cleanup (admission_state is the sole authority): the
+        # ``status`` column is no longer written here. ``admission_state``
+        # is set directly to the 4-value AdmissionState that matches
+        # ``to_status`` via a local mapping. The legacy ``status``
+        # column still exists (Phase 5 drops it) but stays frozen at
+        # the INSERT default for new rows; the ``from_status`` guard
+        # below continues to consult it for backward-compat reasons
+        # (Phase 3 follow-up moved the canonical guards onto
+        # ``admission_state``; this guard is retained only because the
+        # pre-Phase-4 callers still pass a JobStatus string).
+        #
+        # Inlined ``JobStatus -> AdmissionState`` mapping. Callers
+        # pass ``to_status`` as a ``JobStatus.value`` (``"processing"``,
+        # ``"completed"``, ``"failed"``, ``"cancelled"``, ``"dead_letter"``)
+        # so the mapping only needs entries for the values that
+        # actually flow through this method. ``PENDING`` is not a
+        # valid ``to_status`` here (the state machine doesn't define
+        # a transition into PENDING through ``atomic_transition`` —
+        # retries use ``atomic_retry`` instead).
+        _STATUS_TO_ADMISSION = {
+            JobStatus.PENDING.value: AdmissionState.QUEUED.value,
+            JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
+            JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
+            JobStatus.COMPLETED.value: AdmissionState.DONE.value,
+            JobStatus.FAILED.value: AdmissionState.DONE.value,
+            JobStatus.CANCELLED.value: AdmissionState.DONE.value,
+            JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+        }
         set_values: dict[str, Any] = {
-            "status": to_status,
-            "admission_state": status_to_admission(to_status),
+            "admission_state": _STATUS_TO_ADMISSION.get(
+                to_status, AdmissionState.QUEUED.value
+            ),
             **extra_updates,
         }
 
+        # Phase 4 cleanup: the SQL guard is now keyed on
+        # ``admission_state`` (the queue-proxy authority per
+        # Plan §3.1) instead of the legacy ``status`` column. The
+        # ``status`` column is no longer written, so reads against
+        # it only ever see the INSERT default — the
+        # ``WHERE status=:from_status`` guard would always fail for
+        # new rows. ``admission_state`` co-moved with ``status`` via
+        # the Phase 2 dual-write contract; mapping the legacy
+        # ``from_status`` value (e.g. ``"processing"``) to its
+        # ``AdmissionState`` equivalent (e.g. ``"active"``) is the
+        # same mapping the SET clause uses above. ``from_status``
+        # ``None`` is preserved as a no-match (matches the
+        # pre-Phase-4 ``status IS NULL`` behavior — always false
+        # for persisted rows).
+        from_admission = (
+            None if from_status is None
+            else _STATUS_TO_ADMISSION.get(from_status, from_status)
+        )
+
         with SQLModelSession(self.engine) as session:
-            # Atomic UPDATE with status guard. PostgreSQL EvalPlanQual
-            # re-evaluates ``status = :from_status`` after the row lock
-            # is acquired; SQLite's single-statement UPDATE is atomic at
-            # the database level. Either way, two concurrent writers
-            # cannot both observe the predicate as true.
+            # Atomic UPDATE with admission_state guard. PostgreSQL
+            # EvalPlanQual re-evaluates the predicate after the row
+            # lock is acquired; SQLite's single-statement UPDATE is
+            # atomic at the database level. Either way, two
+            # concurrent writers cannot both observe the predicate
+            # as true.
             stmt = (
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
-                .where(JobItem.status == from_status)
-                .values(**set_values)
             )
+            if from_admission is not None:
+                stmt = stmt.where(JobItem.admission_state == from_admission)
+            stmt = stmt.values(**set_values)
             result = session.exec(stmt)
             session.commit()
 
@@ -755,7 +852,7 @@ class JobRepository:
                     return None
                 raise InvalidTransitionError(
                     job_id=job_id,
-                    from_status=existing.status,
+                    from_status=existing.admission_state,
                     to_status=to_status,
                 )
 
@@ -858,28 +955,25 @@ class JobRepository:
             # commits, the row's status is ``'pending'`` and the
             # second writer's UPDATE matches zero rows.
             #
-            # Phase 4 (Job as Queue Proxy): the guard now lives on
-            # the ``admission_state`` column (the queue-proxy
-            # authority per Plan §3.1), but ALSO gates on
-            # ``status='failed'`` so a row in another DONE cluster
-            # (CANCELLED, COMPLETED) — which would also match
-            # ``admission_state='done'`` under the dual-write mapping
-            # — is correctly excluded. This dual-key guard preserves
-            # the legacy race-safety invariant (the test
-            # ``test_atomic_retry_skips_when_status_not_failed`` in
-            # ``test_job_retry_engine.py`` asserts it).
+            # Phase 4 cleanup: the guard now lives on
+            # ``admission_state`` (the queue-proxy authority per
+            # Plan §3.1). The ``failed_at IS NOT NULL`` predicate
+            # restores the pre-Phase-4 ``status='failed'`` semantics:
+            # ``admission_state='done'`` covers completed, cancelled,
+            # AND failed jobs, but only failed jobs carry the
+            # ``failed_at`` timestamp and are retryable.
             stmt = (
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
                 .where(JobItem.admission_state == from_admission_state)
-                .where(JobItem.status == JobStatus.FAILED.value)
+                .where(JobItem.failed_at.isnot(None))
                 .where(JobItem.retry_count < max_retries)
                 .values(
-                    status=JobStatus.PENDING.value,
-                    # Phase 2 dual-write: FAILED → PENDING via the
-                    # status mapping, admission_state co-moves with
-                    # status to QUEUED in the same guarded UPDATE.
-                    admission_state=status_to_admission(JobStatus.PENDING.value),
+                    # Phase 4 cleanup: ``status`` is no longer
+                    # written (admission_state is the sole
+                    # authority). admission_state moves to QUEUED
+                    # directly.
+                    admission_state=AdmissionState.QUEUED.value,
                     retry_count=JobItem.retry_count + 1,
                     next_retry_at=next_retry_at,
                     failed_at=None,
@@ -933,19 +1027,18 @@ class JobRepository:
         result_summary: str | None = None,
         error_message: str | None = None,
     ) -> JobItem | None:
-        """Phase 4 (Job as Queue Proxy): transition ``active → done``.
+        """Phase 4 cleanup (Job as Queue Proxy): transition ``active → done``.
 
         This is the low-level building block behind the single
         terminal-write boundary ``JobQueueService._finalize_terminal``
-        (Plan §3.2 / §6.1). Phase 4 makes ``admission_state`` the
-        primary write authority; ``status`` is written as a derived
-        mirror for backward compatibility (Phase 5 drops the column).
+        (Plan §3.2 / §6.1). Phase 4 cleanup makes ``admission_state``
+        the sole write authority; the legacy ``status`` column is no
+        longer written (Phase 5 drops the column outright).
 
         Single guarded UPDATE::
 
             UPDATE job_queue_items
             SET admission_state = 'done',
-                status          = :derived_status,     -- mirror
                 completed_at    = :now,
                 result_summary  = :result_summary,    -- COMPLETED path
                 error_message   = :error_message,     -- ERROR/TERMINATED path
@@ -959,18 +1052,14 @@ class JobRepository:
         (e.g. concurrent CANCELLED via ``_terminate_instance_db_sync``)
         sees rowcount=0 and we no-op. Mirrors the gold-template
         ``atomic_transition`` pattern, but the canonical column is now
-        ``admission_state``.
+        ``admission_state`` and ``status`` is no longer co-moved.
 
         Args:
             job_id: The job to finalize.
-            derived_status: Backward-compat ``status`` mirror — derived
-                from the Instance terminal status by the caller
+            derived_status: Caller's terminal-spelling indicator
                 (COMPLETED → 'completed', ERROR/FAILED → 'failed',
-                TERMINATED → 'cancelled'). The caller must NOT pass a
-                status that contradicts ``admission_state='done'``;
-                the SQL guard will still accept it because the guard
-                is on the admission column, but semantic integrity is
-                the caller's responsibility.
+                TERMINATED → 'cancelled'). Retained for logging /
+                observability but no longer written to the DB.
             result_summary: Filled for COMPLETED; ``None`` is acceptable
                 for ERROR/TERMINATED (the caller can pass ``None`` to
                 keep the prior value, or pass an explicit string to
@@ -989,9 +1078,15 @@ class JobRepository:
         # caller wants to set. ``cancelled_at`` is set for TERMINATED
         # so consumers reading the legacy column can still derive the
         # cancellation timestamp.
+        #
+        # Phase 4 cleanup: ``status`` is no longer written here
+        # (admission_state is the sole authority). The
+        # ``derived_status`` parameter is retained for the caller's
+        # logging / observability (it tells us WHICH terminal path
+        # fired — COMPLETED, FAILED, CANCELLED) but no longer
+        # participates in the SQL write.
         set_values: dict[str, Any] = {
             "admission_state": AdmissionState.DONE.value,
-            "status": derived_status,
             "completed_at": now,
         }
         if derived_status == JobStatus.CANCELLED.value:
@@ -1006,8 +1101,6 @@ class JobRepository:
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
                 # Phase 4: admission_state is the authoritative guard.
-                # ``status`` is still written for backward compat but
-                # is no longer the gate.
                 .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
                 .values(**set_values)
             )
@@ -1088,17 +1181,19 @@ class JobRepository:
                 "start_job_atomic / complete_job / fail_job / "
                 "cancel_job / terminate_job)"
             )
-        # Phase 2: ``admission_state`` co-moves with ``status``. Direct
-        # ORM writes to ``admission_state`` would bypass the
-        # ``status_to_admission`` invariant and create a row where the
-        # two columns disagree. Reject the same way ``status`` is
-        # rejected — every transition must go through ``atomic_transition``
-        # (or one of its wrappers) so the dual-write stays consistent.
+        # Phase 4 cleanup: ``admission_state`` is the sole authority.
+        # Direct ORM writes to ``admission_state`` would bypass the
+        # central transition path (``atomic_transition`` and its
+        # wrappers — ``start_job``, ``start_job_atomic_with_lock``,
+        # ``finalize_active_to_done``, ``atomic_retry``, ``cancel_job``)
+        # and create a row that violates the queued/active/done/dead
+        # invariant. Reject the same way ``status`` is rejected.
         if "admission_state" in updates:
             raise ValueError(
-                "Use atomic_transition for admission_state changes "
-                "(see JobRepository.atomic_transition — it computes "
-                "admission_state via status_to_admission)"
+                "Use atomic_transition (or its wrappers — "
+                "start_job / start_job_atomic_with_lock / "
+                "finalize_active_to_done / atomic_retry / cancel_job) "
+                "for admission_state changes"
             )
 
         with SQLModelSession(self.engine) as db_session:
@@ -1155,13 +1250,10 @@ class JobRepository:
         """
         now_iso = datetime.now(timezone.utc).isoformat()
         set_values: dict[str, Any] = {
-            "status": JobStatus.PROCESSING.value,
-            # Phase 2 dual-write: PENDING → PROCESSING maps to
-            # admission_state = ACTIVE in the same guarded UPDATE.
-            # ``start_job`` writes its own UPDATE rather than routing
-            # through ``atomic_transition`` (different SQL guard
-            # semantics) so the dual-write must be inlined here.
-            "admission_state": status_to_admission(JobStatus.PROCESSING.value),
+            # Phase 4 cleanup: ``status`` is no longer written
+            # (admission_state is the sole authority). PENDING →
+            # ACTIVE maps directly to admission_state.
+            "admission_state": AdmissionState.ACTIVE.value,
             "started_at": now_iso,
             "instance_id": instance_id,
         }
@@ -1176,7 +1268,7 @@ class JobRepository:
             stmt = (
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
-                .where(JobItem.status == JobStatus.PENDING.value)
+                .where(JobItem.admission_state == AdmissionState.QUEUED.value)
                 .values(**set_values)
             )
             result = session.exec(stmt)
@@ -1193,7 +1285,8 @@ class JobRepository:
                 if existing is None:
                     return None
                 raise ValueError(
-                    f"Cannot start job in '{existing.status}' state, must be PENDING"
+                    f"Cannot start job in admission_state "
+                    f"'{existing.admission_state}', must be 'queued'"
                 )
 
             # Re-read the row to return a fully-populated JobItem
@@ -1357,13 +1450,13 @@ class JobRepository:
             #
             # Raw ``text()`` SQL (not ``sqlmodel_update``) so we share
             # the same transaction handle and can read ``rowcount``
-            # directly. ``status_to_admission`` keeps the dual-write
-            # consistent with the rest of the repository.
+            # directly. Phase 4 cleanup: ``status`` is no longer
+            # written (admission_state is the sole authority) — only
+            # ``admission_state = 'active'`` is set here.
             update_stmt = text(
                 """
                 UPDATE job_queue_items
-                SET status = :to_status,
-                    admission_state = :admission_state,
+                SET admission_state = :admission_state,
                     started_at = :started_at,
                     instance_id = :instance_id
                 WHERE job_id = :job_id
@@ -1374,8 +1467,7 @@ class JobRepository:
             update_result = conn.execute(
                 update_stmt,
                 {
-                    "to_status": JobStatus.PROCESSING.value,
-                    "admission_state": status_to_admission(JobStatus.PROCESSING.value),
+                    "admission_state": AdmissionState.ACTIVE.value,
                     "started_at": now_iso,
                     "instance_id": instance_id,
                     "job_id": job_id,
@@ -1442,7 +1534,15 @@ class JobRepository:
         job_id: str,
         error_message: str,
     ) -> JobItem | None:
-        """Fail a job (PROCESSING -> FAILED)."""
+        """Fail a job (PROCESSING -> FAILED).
+
+        Phase 4 cleanup: also writes ``failed_at`` so the retry
+        engine can distinguish a ``done``-admission row that came
+        through the FAILED path (retryable) from one that came
+        through COMPLETED / CANCELLED (terminal, not retryable).
+        The dual-write ``status='failed'`` mirror that previously
+        carried this information is gone.
+        """
         now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
@@ -1450,6 +1550,7 @@ class JobRepository:
             to_status=JobStatus.FAILED.value,
             completed_at=now,
             error_message=error_message,
+            failed_at=now,
         )
 
     def cancel_job(self, job_id: str) -> JobItem | None:
@@ -1506,32 +1607,27 @@ class JobRepository:
         # and raise ``ValueError`` even though the state machine marks
         # the transition as legal. PAUSED is non-terminal, so it belongs
         # in this set alongside PENDING / PROCESSING / FAILED.
-        cancellable_states = (
-            JobStatus.PENDING.value,
-            JobStatus.PROCESSING.value,
-            JobStatus.FAILED.value,
-            JobStatus.PAUSED.value,
+        cancellable_admission = (
+            AdmissionState.QUEUED.value,
+            AdmissionState.ACTIVE.value,
         )
 
         with SQLModelSession(self.engine) as session:
-            # Atomic UPDATE with status-IN guard. Single statement covers
-            # PENDING/PROCESSING/FAILED so a concurrent start_job that
-            # flips PENDING -> PROCESSING between our read and write is
-            # still matched by the guard (PROCESSING is in the cancellable
-            # set) and the cancel is preserved.
+            # Atomic UPDATE with admission_state-IN guard. Single
+            # statement covers queued/active (PENDING, PROCESSING,
+            # FAILED-awaiting-retry, PAUSED) so a concurrent start_job
+            # that flips QUEUED -> ACTIVE between our read and write is
+            # still matched by the guard and the cancel is preserved.
             stmt = (
                 sqlmodel_update(JobItem)
                 .where(JobItem.job_id == job_id)
-                .where(JobItem.status.in_(cancellable_states))
+                .where(JobItem.admission_state.in_(cancellable_admission))
                 .values(
-                    status=JobStatus.CANCELLED.value,
-                    # Phase 2 dual-write: CANCELLED → admission_state
-                    # = DONE in the same atomic UPDATE-WHERE-IN.
-                    # ``cancel_job`` uses a raw guarded UPDATE rather
-                    # than ``atomic_transition`` (status guard is
-                    # ``IN (...)`` not ``= ...``) so the dual-write
-                    # must be inlined.
-                    admission_state=status_to_admission(JobStatus.CANCELLED.value),
+                    # Phase 4 cleanup: ``status`` is no longer
+                    # written (admission_state is the sole
+                    # authority). CANCELLED → admission_state =
+                    # DONE directly.
+                    admission_state=AdmissionState.DONE.value,
                     cancelled_at=now,
                 )
             )
@@ -1549,8 +1645,8 @@ class JobRepository:
                 if existing is None:
                     return None
                 raise ValueError(
-                    f"Cannot cancel job in '{existing.status}' state, "
-                    f"must be PENDING, PROCESSING, or FAILED"
+                    f"Cannot cancel job in admission_state "
+                    f"'{existing.admission_state}', must be 'queued' or 'active'"
                 )
 
             # Re-read the row to return a fully-populated JobItem.
@@ -1651,7 +1747,7 @@ class JobRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = sql_delete(JobItem).where(
-                JobItem.status == JobStatus.COMPLETED.value
+                JobItem.admission_state == AdmissionState.DONE.value
             )
             result = db_session.exec(stmt)
             db_session.commit()

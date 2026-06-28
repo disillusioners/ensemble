@@ -82,10 +82,32 @@ from daemon.repositories.job_queue.models import (
     JobQueue,
     JobStatus,
     QueueType,
-    status_to_admission,
+    AdmissionState,
+    AdmissionState,
+    AdmissionState,
 )
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# The ``status_to_admission`` helper was deleted from
+# ``daemon.repositories.job_queue.models`` in Phase 4 cleanup
+# (``admission_state`` is now the sole write authority). Tests that
+# seed JobItem rows from a ``status`` string still need this
+# JobStatus -> AdmissionState mapping, so we redefine it locally
+# here. Behavior is identical to the deleted production helper
+# (including the ``QUEUED`` fallback for unknown inputs).
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -1170,7 +1192,7 @@ class TestD_FindJobsByInstance:
         )
         # Verify state.
         refreshed = _refresh(engine, job.job_id)
-        assert refreshed.status == JobStatus.PENDING.value
+        assert refreshed.admission_state == AdmissionState.QUEUED.value
         assert refreshed.admission_state == AdmissionState.QUEUED.value
 
         jobs = job_repo.find_jobs_by_instance(inst)

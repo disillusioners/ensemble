@@ -19,7 +19,7 @@ Scenarios verified:
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobRepository, JobStatus
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.instance.models import InstanceStatus
@@ -312,7 +312,7 @@ class TestAtomicTransitionIntegration:
             )
 
         assert exc_info.value.job_id == job.job_id
-        assert exc_info.value.from_status == JobStatus.COMPLETED.value  # Already completed
+        assert exc_info.value.from_status == AdmissionState.DONE.value  # Already done
 
     def test_atomic_transition_raises_when_job_already_failed(self, repository, sample_job_data):
         """atomic_transition raises InvalidTransitionError when job already failed."""
@@ -327,7 +327,7 @@ class TestAtomicTransitionIntegration:
                 to_status=JobStatus.FAILED.value,
             )
 
-        assert exc_info.value.from_status == JobStatus.FAILED.value
+        assert exc_info.value.from_status == AdmissionState.DONE.value
 
     def test_atomic_transition_raises_when_job_cancelled(self, repository, sample_job_data):
         """atomic_transition raises InvalidTransitionError when job already cancelled."""
@@ -342,7 +342,7 @@ class TestAtomicTransitionIntegration:
                 to_status=JobStatus.CANCELLED.value,
             )
 
-        assert exc_info.value.from_status == JobStatus.CANCELLED.value
+        assert exc_info.value.from_status == AdmissionState.DONE.value
 
     def test_concurrent_transitions_only_one_succeeds(self, repository, sample_job_data):
         """Only one concurrent transition should succeed.
@@ -359,7 +359,7 @@ class TestAtomicTransitionIntegration:
             to_status=JobStatus.COMPLETED.value,
         )
         assert result1 is not None
-        assert result1.status == JobStatus.COMPLETED.value
+        assert result1.admission_state == AdmissionState.DONE.value
 
         # Second transition fails (job already completed)
         with pytest.raises(InvalidTransitionError):
@@ -371,7 +371,7 @@ class TestAtomicTransitionIntegration:
 
         # Verify final state is COMPLETED
         final_job = repository.get(job.job_id)
-        assert final_job.status == JobStatus.COMPLETED.value
+        assert final_job.admission_state == AdmissionState.DONE.value
 
 
 class TestObserverObserverBehavior:

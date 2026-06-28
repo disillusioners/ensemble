@@ -6,7 +6,7 @@ of the job queue repository.
 
 import pytest
 
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobRepository
 from daemon.repositories.job_queue.models import JobStatus
 
 
@@ -205,7 +205,7 @@ class TestSchedulerSafety:
         job = repository.create(**sample_job_data)
         
         # Verify job is PENDING
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         
         # Soft delete the pending job
         repository.soft_delete(job.job_id)
@@ -259,7 +259,7 @@ class TestSchedulerSafety:
         started_job = repository.start_job(job.job_id, "test-instance")
         
         # Verify job is now PROCESSING (use the returned object)
-        assert started_job.status == JobStatus.PROCESSING.value
+        assert started_job.admission_state == AdmissionState.ACTIVE.value
         
         repository.soft_delete(started_job.job_id)
         

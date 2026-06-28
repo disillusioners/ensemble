@@ -63,10 +63,27 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
+
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures & helpers ───────────────────────────────────────────────────────
@@ -148,6 +165,8 @@ def _seed_job(
             project_id="test-project",
             job_type="message",
             status=status,
+
+            admission_state=status_to_admission(status),
             instance_id=instance_id,
             created_at=now_iso,
             started_at=now_iso if status == JobStatus.PROCESSING.value else None,
@@ -404,7 +423,7 @@ def test_pause_three_tables_single_transaction(
     assert inst.status == InstanceStatus.PAUSED.value
 
     jobs = _read_jobs(engine, iid)
-    assert all(j.status == JobStatus.PAUSED.value for j in jobs)
+    assert all(j.admission_state == AdmissionState.ACTIVE.value for j in jobs)
 
     tasks = _read_tasks(engine, iid)
     assert all(t.status == TaskStatus.PAUSED.value for t in tasks)

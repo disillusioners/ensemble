@@ -13,8 +13,22 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
-from daemon.repositories.job_queue.models import JobStatus, JobItem
+from daemon.repositories.job_queue.models import JobStatus, JobItem, AdmissionState
 from daemon.services.job_queue_service import DemandState
+
+# Phase 4 cleanup: ``status`` is frozen at the INSERT default (``pending``)
+# and ``admission_state`` is the sole authority. Map the legacy ``status``
+# value onto its ``AdmissionState`` bucket so mock jobs expose the
+# ``admission_state`` that service-level assertions read.
+_STATUS_TO_ADMISSION = {
+    JobStatus.PENDING.value: AdmissionState.QUEUED.value,
+    JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
+    JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
+    JobStatus.COMPLETED.value: AdmissionState.DONE.value,
+    JobStatus.FAILED.value: AdmissionState.DONE.value,
+    JobStatus.CANCELLED.value: AdmissionState.DONE.value,
+    JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+}
 
 
 def make_mock_job(
@@ -31,6 +45,7 @@ def make_mock_job(
     job.instance_id = instance_id
     job.project_id = project_id
     job.status = status
+    job.admission_state = _STATUS_TO_ADMISSION.get(status, AdmissionState.ACTIVE.value)
     job.agent_id = agent_id
     job.message = message
     job.result_summary = None
@@ -225,7 +240,7 @@ class TestTerminateInstanceJobCompletion:
         # Step 2: Get job
         job = mock_service.get_job_by_instance_sync(instance_id)
         assert job is not None
-        assert job.status == "processing"
+        assert job.admission_state == "active"
         
         # Step 3: Mark cancelled (no retry)
         mock_service.complete_job_sync(
@@ -254,7 +269,7 @@ class TestTerminateInstanceJobCompletion:
         released = mock_service.release_locks_by_instance_sync(instance_id)
         job = mock_service.get_job_by_instance_sync(instance_id)
         
-        if job is not None and job.status == "processing":
+        if job is not None and job.admission_state == "active":
             mock_service.complete_job_sync(job.job_id, DemandState.CANCELLED, error="Instance terminated")
         
         # complete_job_sync should NOT be called
@@ -273,7 +288,7 @@ class TestTerminateInstanceJobCompletion:
         job = mock_service.get_job_by_instance_sync(instance_id)
         
         # Only marks cancelled if status is "processing"
-        if job is not None and job.status == "processing":
+        if job is not None and job.admission_state == "active":
             mock_service.complete_job_sync(job.job_id, DemandState.CANCELLED, error="Instance terminated")
         
         # Should not be called because job is already completed

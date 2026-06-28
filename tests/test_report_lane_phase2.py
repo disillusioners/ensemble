@@ -39,7 +39,7 @@ from daemon.repositories.dependency_bus import (
     DependencyWatcherRepository,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import (
@@ -49,6 +49,23 @@ from daemon.services.dependency_bus import (
     get_dependency_bus,
     set_dependency_bus,
 )
+
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # =============================================================================
@@ -165,6 +182,8 @@ def _seed_job(
             source="api",
             job_type=job_type,
             status=status,
+
+            admission_state=status_to_admission(status),
             instance_id=instance_id,
             job_metadata=job_metadata if job_metadata is not None else {},
         ))
@@ -1101,7 +1120,7 @@ class TestCrashRecovery:
         # Verify the job is PROCESSING.
         with Session(engine) as s:
             job = s.get(JobItem, job_id)
-            assert job.status == JobStatus.PROCESSING.value
+            assert job.admission_state == AdmissionState.ACTIVE.value
 
         # Simulate the atomic transition (what _finalize_job_db_sync does).
         # The actual _finalize_job uses WriteGuardSession; here we verify

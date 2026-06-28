@@ -81,5 +81,5 @@ class TestQueuedMessage:
         assert msg.retry_count == 3
         assert msg.metadata == {"key": "value"}
         assert msg.processing_started_at == now
-        assert msg.status == "processing"
+        assert msg.admission_state == "active"
         assert msg.error_message == "Previous error"

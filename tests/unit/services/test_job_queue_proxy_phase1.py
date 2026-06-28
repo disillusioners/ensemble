@@ -45,6 +45,23 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.services.work_resolver import WorkRecord, WorkResolverService
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 class _NoTaskRepo:
     """Minimal stand-in for ``TaskRepository`` that returns ``None``
     from ``get_by_work_id``.
@@ -213,6 +230,8 @@ def _seed_job(
             project_id=project_id,
             priority=5,
             status=status,
+
+            admission_state=status_to_admission(status),
             result_summary=result_summary,
             error_message=error_message,
             instance_id=instance_id,
@@ -587,7 +606,7 @@ class TestLegacyFallback:
 
         Belt-and-braces: the dead_letter special-case must work
         independently of the instance_id-presence branch. The
-        ``if job.status == 'dead_letter': status = 'dead_letter'``
+        ``if job.admission_state == 'dead': status = 'dead_letter'``
         guard fires before the instance_id branch, so a queue-stage
         dead-letter row reports ``dead_letter`` without trying to
         look up an Instance.

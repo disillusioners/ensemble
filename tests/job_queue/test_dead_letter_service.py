@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session as SQLModelSession
 
-from daemon.repositories.job_queue import JobRepository, DeadLetterRepository, JobQueueRepository
+from daemon.repositories.job_queue import AdmissionState, JobRepository, DeadLetterRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus, DeadLetterItem
 from daemon.services.dead_letter_service import (
     DeadLetterService,
@@ -161,7 +161,7 @@ class TestMoveToDLQ:
         
         # Verify job is in dead_letter state (after commit)
         updated_job = job_repository.get(failed_job.job_id)
-        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        assert updated_job.admission_state == AdmissionState.DEAD.value
         
         # Verify DLQ item exists in database
         dlq_item_db = dlq_repository.get(dlq_item.dlq_id)
@@ -215,7 +215,7 @@ class TestMoveToDLQ:
         
         # Verify job is in dead_letter state
         updated_job = job_repository.get(failed_job.job_id)
-        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        assert updated_job.admission_state == AdmissionState.DEAD.value
         
         # Verify DLQ item exists with correct data
         dlq_item_db = dlq_repository.get_by_job_id(failed_job.job_id)
@@ -262,7 +262,7 @@ class TestMoveToDLQStandalone:
         
         # Verify job is in dead_letter state
         updated_job = job_repository.get(failed_job.job_id)
-        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        assert updated_job.admission_state == AdmissionState.DEAD.value
         
         # Verify DLQ item exists in database
         dlq_item_db = dlq_repository.get(dlq_item.dlq_id)
@@ -303,11 +303,11 @@ class TestMoveToDLQStandalone:
                 reason="MAX_RETRIES",
             )
         assert exc_info.value.job_id == job.job_id
-        assert exc_info.value.current_status == JobStatus.PROCESSING.value
+        assert exc_info.value.current_status == JobStatus.PENDING.value
         
         # Verify job is still in PROCESSING state (not modified)
         updated_job = job_repository.get(job.job_id)
-        assert updated_job.status == JobStatus.PROCESSING.value
+        assert updated_job.admission_state == AdmissionState.ACTIVE.value
 
     def test_move_to_dlq_standalone_atomicity(self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service):
         """Test atomicity: either both job transition AND DLQ creation happen, or neither."""
@@ -328,7 +328,7 @@ class TestMoveToDLQStandalone:
         
         # Verify job is in correct state
         updated_job = job_repository.get(job.job_id)
-        assert updated_job.status == JobStatus.DEAD_LETTER.value
+        assert updated_job.admission_state == AdmissionState.DEAD.value
         
         # Verify DLQ item exists
         dlq_item_db = dlq_repository.get_by_job_id(job.job_id)
@@ -364,14 +364,14 @@ class TestReplayFromDLQ:
         
         # Verify job is in dead_letter state
         job_before = job_repository.get(failed_job.job_id)
-        assert job_before.status == JobStatus.DEAD_LETTER.value
+        assert job_before.admission_state == AdmissionState.DEAD.value
         
         # Replay the job
         replayed_job = dead_letter_service.replay_from_dlq(dlq_id)
         
         # Verify job is now in PENDING state
         assert replayed_job is not None
-        assert replayed_job.status == JobStatus.PENDING.value
+        assert replayed_job.admission_state == AdmissionState.QUEUED.value
         assert replayed_job.job_id == failed_job.job_id
         assert replayed_job.retry_count == 0  # Reset
         assert replayed_job.failed_at is None  # Reset
@@ -382,7 +382,7 @@ class TestReplayFromDLQ:
         
         # Verify job in repository
         job_after = job_repository.get(failed_job.job_id)
-        assert job_after.status == JobStatus.PENDING.value
+        assert job_after.admission_state == AdmissionState.QUEUED.value
         assert job_after.retry_count == 0
 
     def test_replay_from_dlq_dlq_not_found(self, dead_letter_service):
@@ -413,7 +413,7 @@ class TestReplayFromDLQ:
         
         # Verify job state
         job_after = job_repository.get(job.job_id)
-        assert job_after.status == JobStatus.PENDING.value
+        assert job_after.admission_state == AdmissionState.QUEUED.value
         
         # Verify DLQ item deleted
         dlq_item_db = dlq_repository.get(dlq_id)
@@ -456,9 +456,12 @@ class TestReplayFromDLQ:
         )
         
         # Manually change job status back to FAILED (bypassing validation)
+        # Phase 4: must also flip admission_state off "dead" so the
+        # replay guard rejects the job (status is frozen/legacy).
         with SQLModelSession(engine) as session:
             job_item = session.get(JobItem, job.job_id)
             job_item.status = JobStatus.FAILED.value
+            job_item.admission_state = AdmissionState.DONE.value
             session.commit()
         
         # Replay should fail because job is not in dead_letter state
@@ -595,7 +598,7 @@ class TestDeleteDLQ:
         
         # Verify job is still in dead_letter state (delete doesn't affect job)
         job = job_repository.get(failed_job.job_id)
-        assert job.status == JobStatus.DEAD_LETTER.value
+        assert job.admission_state == AdmissionState.DEAD.value
 
     def test_delete_dlq_not_found(self, dead_letter_service):
         """Test deleting a non-existent DLQ item returns False."""
@@ -863,7 +866,7 @@ class TestMoveToDLQConcurrency:
         
         # Verify job is in dead_letter state
         updated_job = job_repository.get(failed_job.job_id)
-        assert updated_job.status == "dead_letter"
+        assert updated_job.admission_state == "dead"
         
         # Create a new failed job and verify the lock pattern works
         job2 = create_failed_job(engine, job_repository, queue_repository, "Second job")
@@ -876,7 +879,7 @@ class TestMoveToDLQConcurrency:
             session.commit()
         
         updated_job2 = job_repository.get(job2.job_id)
-        assert updated_job2.status == "dead_letter"
+        assert updated_job2.admission_state == "dead"
 
 
 class TestListDLQPagination:
@@ -960,8 +963,9 @@ class TestDeadLetterServiceIntegration:
         # Create and fail a job
         job = create_failed_job(engine, job_repository, queue_repository, "Lifecycle test job")
         
-        # Verify job is FAILED
-        assert job_repository.get(job.job_id).status == JobStatus.FAILED.value
+        # Verify job is FAILED (admission_state is the authority; status
+        # column is frozen at the INSERT default).
+        assert job_repository.get(job.job_id).admission_state == AdmissionState.DONE.value
         
         # Move to DLQ
         dlq_item = dead_letter_service.move_to_dlq_standalone(
@@ -970,14 +974,14 @@ class TestDeadLetterServiceIntegration:
         )
         
         # Verify job is in DLQ
-        assert job_repository.get(job.job_id).status == JobStatus.DEAD_LETTER.value
+        assert job_repository.get(job.job_id).admission_state == AdmissionState.DEAD.value
         assert dlq_repository.get_by_job_id(job.job_id) is not None
         
         # Replay from DLQ
         replayed_job = dead_letter_service.replay_from_dlq(dlq_item.dlq_id)
         
         # Verify job is back to PENDING
-        assert replayed_job.status == JobStatus.PENDING.value
+        assert replayed_job.admission_state == AdmissionState.QUEUED.value
         assert replayed_job.retry_count == 0
         assert dlq_repository.get_by_job_id(job.job_id) is None
         
@@ -1114,7 +1118,7 @@ class TestSQLStatusGuard:
         # comparison between the status column and a bound parameter.
         guarded = [
             s for s in update_stmts
-            if "status" in s.lower() and "where" in s.lower()
+            if "admission_state" in s.lower() and "where" in s.lower()
         ]
         assert guarded, (
             f"UPDATE on job_queue_items lacks status guard. "
@@ -1123,7 +1127,7 @@ class TestSQLStatusGuard:
 
         # Verify the executed operation actually transitioned the job
         updated = job_repository.get(job.job_id)
-        assert updated.status == JobStatus.DEAD_LETTER.value
+        assert updated.admission_state == AdmissionState.DEAD.value
 
     def test_replay_from_dlq_emits_sql_with_status_dead_letter_guard(
         self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service
@@ -1156,7 +1160,7 @@ class TestSQLStatusGuard:
         # ``status`` (the bound parameter guards the status transition).
         guarded = [
             s for s in update_stmts
-            if "status" in s.lower() and "where" in s.lower()
+            if "admission_state" in s.lower() and "where" in s.lower()
         ]
         assert guarded, (
             f"UPDATE on job_queue_items lacks status guard. "
@@ -1165,7 +1169,7 @@ class TestSQLStatusGuard:
 
         # Verify the executed operation actually transitioned the job
         replayed = job_repository.get(job.job_id)
-        assert replayed.status == JobStatus.PENDING.value
+        assert replayed.admission_state == AdmissionState.QUEUED.value
         assert replayed.retry_count == 0
         assert replayed.failed_at is None
         assert replayed.error_message is None
@@ -1208,7 +1212,7 @@ class TestSQLStatusGuard:
 
         guarded = [
             s for s in update_stmts
-            if "status" in s.lower() and "where" in s.lower()
+            if "admission_state" in s.lower() and "where" in s.lower()
         ]
         assert guarded, (
             f"Shared-session UPDATE on job_queue_items lacks status guard. "
@@ -1216,7 +1220,7 @@ class TestSQLStatusGuard:
         )
 
         updated = job_repository.get(job.job_id)
-        assert updated.status == JobStatus.DEAD_LETTER.value
+        assert updated.admission_state == AdmissionState.DEAD.value
 
     def test_move_to_dlq_standalone_no_dlq_item_on_guard_failure(
         self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service
@@ -1257,8 +1261,8 @@ class TestSQLStatusGuard:
                 job_id=job.job_id, reason="MAX_RETRIES"
             )
 
-        # Job status must be unchanged
-        assert job_repository.get(job.job_id).status == JobStatus.PROCESSING.value
+        # Job admission_state must be unchanged (active, not dead)
+        assert job_repository.get(job.job_id).admission_state == AdmissionState.ACTIVE.value
 
         # No DLQ row may exist for this job
         assert dlq_repository.get_by_job_id(job.job_id) is None
@@ -1282,9 +1286,12 @@ class TestSQLStatusGuard:
         # Manually flip the job back to FAILED via the repository's
         # raw path (bypassing the FOR UPDATE lock — the Python check
         # in replay_from_dlq is what catches this in practice).
+        # Phase 4: must also flip admission_state off "dead" so the
+        # replay guard rejects the job (status is frozen/legacy).
         with SQLModelSession(engine) as session:
             job_item = session.get(JobItem, job.job_id)
             job_item.status = JobStatus.FAILED.value
+            job_item.admission_state = AdmissionState.DONE.value
             session.commit()
 
         with pytest.raises(InvalidTransitionError):
@@ -1294,8 +1301,8 @@ class TestSQLStatusGuard:
         # deleted it).
         assert dlq_repository.get(dlq_item.dlq_id) is not None
 
-        # Job status must be unchanged.
-        assert job_repository.get(job.job_id).status == JobStatus.FAILED.value
+        # Job admission_state must be unchanged (done, not dead).
+        assert job_repository.get(job.job_id).admission_state == AdmissionState.DONE.value
 
 
 def _commit_after(engine, fn):

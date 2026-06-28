@@ -22,7 +22,7 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobStatus
 
 
 # =============================================================================
@@ -237,7 +237,7 @@ class TestDeleteJobEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["job_id"] == job_id
-        assert data["status"] == JobStatus.CANCELLED.value
+        assert data["admission_state"] == AdmissionState.DONE.value
         assert data["deleted_at"] is None  # Not soft-deleted
 
     def test_delete_processing_job_cancels(self, client, job_repository):
@@ -259,7 +259,7 @@ class TestDeleteJobEndpoint:
         data = response.json()
         assert data["job_id"] == job_id
         # Job should be cancelled (PROCESSING -> CANCELLED)
-        assert data["status"] == JobStatus.CANCELLED.value
+        assert data["admission_state"] == AdmissionState.DONE.value
         assert data["deleted_at"] is None  # Not soft-deleted
 
     def test_delete_already_deleted_job_returns_400(self, client, job_repository):
@@ -308,7 +308,7 @@ class TestCancelJobEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["job_id"] == job_id
-        assert data["status"] == JobStatus.CANCELLED.value
+        assert data["admission_state"] == AdmissionState.DONE.value
 
     def test_cancel_processing_job_succeeds(self, client, job_repository):
         """Test cancel on processing job succeeds and returns 200."""
@@ -328,7 +328,7 @@ class TestCancelJobEndpoint:
         assert response.status_code == 200
         data = response.json()
         assert data["job_id"] == job_id
-        assert data["status"] == JobStatus.CANCELLED.value
+        assert data["admission_state"] == AdmissionState.DONE.value
 
     def test_cancel_terminal_job_returns_400(self, client, job_repository):
         """Test cancel on terminal job returns 400."""
@@ -392,7 +392,7 @@ class TestRestoreJobEndpoint:
         data = response.json()
         assert data["job_id"] == job_id
         assert data["deleted_at"] is None
-        assert data["status"] == JobStatus.PENDING.value
+        assert data["admission_state"] == AdmissionState.QUEUED.value
 
     def test_restore_non_deleted_job_returns_400(self, client, job_repository):
         """Test restore on non-deleted job returns 400."""

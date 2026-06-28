@@ -11,7 +11,7 @@ from sqlalchemy import create_engine
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
 from daemon.services.job_state_machine import InvalidTransitionError
 
 
@@ -31,7 +31,7 @@ class TestAtomicTransition:
         )
         
         assert result is not None
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
         assert result.started_at == "2024-01-01T00:00:00"
         assert result.instance_id == "test-instance"
 
@@ -58,7 +58,7 @@ class TestAtomicTransition:
         )
         
         assert result is not None
-        assert result.status == JobStatus.COMPLETED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.completed_at == "2024-01-01T00:01:00"
         assert result.result_summary == "Success"
 
@@ -85,7 +85,7 @@ class TestAtomicTransition:
         )
         
         assert result is not None
-        assert result.status == JobStatus.FAILED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.completed_at == "2024-01-01T00:01:00"
         assert result.error_message == "Something went wrong"
 
@@ -101,7 +101,7 @@ class TestAtomicTransition:
         )
         
         assert result is not None
-        assert result.status == JobStatus.CANCELLED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.cancelled_at == "2024-01-01T00:00:30"
 
     def test_atomic_transition_processing_to_cancelled(self, repository, sample_job_data):
@@ -126,7 +126,7 @@ class TestAtomicTransition:
         )
         
         assert result is not None
-        assert result.status == JobStatus.CANCELLED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.cancelled_at == "2024-01-01T00:00:30"
 
     def test_atomic_transition_wrong_from_status_raises(self, repository, sample_job_data):
@@ -142,7 +142,7 @@ class TestAtomicTransition:
             )
         
         assert exc_info.value.job_id == job.job_id
-        assert exc_info.value.from_status == JobStatus.PENDING.value
+        assert exc_info.value.from_status == AdmissionState.QUEUED.value
         assert exc_info.value.to_status == JobStatus.COMPLETED.value
 
     def test_atomic_transition_nonexistent_job_returns_none(self, repository):
@@ -184,7 +184,7 @@ class TestStartJobAtomic:
         result = repository.start_job_atomic(job.job_id, "test-instance")
         
         assert result is not None
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
         assert result.instance_id == "test-instance"
         assert result.started_at is not None
 
@@ -219,7 +219,7 @@ class TestCompleteJob:
         result = repository.complete_job(job.job_id, "Task completed successfully")
         
         assert result is not None
-        assert result.status == JobStatus.COMPLETED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.result_summary == "Task completed successfully"
         assert result.completed_at is not None
 
@@ -231,7 +231,7 @@ class TestCompleteJob:
         result = repository.complete_job(job.job_id)
         
         assert result is not None
-        assert result.status == JobStatus.COMPLETED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.result_summary is None
 
     def test_complete_job_not_started_raises(self, repository, sample_job_data):
@@ -253,7 +253,7 @@ class TestFailJob:
         result = repository.fail_job(job.job_id, "Connection timeout")
         
         assert result is not None
-        assert result.status == JobStatus.FAILED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.error_message == "Connection timeout"
         assert result.completed_at is not None
 
@@ -275,7 +275,7 @@ class TestCancelJob:
         result = repository.cancel_job(job.job_id)
         
         assert result is not None
-        assert result.status == JobStatus.CANCELLED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.cancelled_at is not None
 
     def test_cancel_job_from_processing(self, repository, sample_job_data):
@@ -286,7 +286,7 @@ class TestCancelJob:
         result = repository.cancel_job(job.job_id)
         
         assert result is not None
-        assert result.status == JobStatus.CANCELLED.value
+        assert result.admission_state == AdmissionState.DONE.value
         assert result.cancelled_at is not None
 
     def test_cancel_job_nonexistent_returns_none(self, repository):
@@ -305,25 +305,24 @@ class TestCancelJob:
         
         assert "Cannot cancel job" in str(exc_info.value)
 
-    def test_cancel_job_failed_succeeds(self, repository, sample_job_data):
-        """Test cancel_job from FAILED state succeeds (FAILED is in cancellable set).
+    def test_cancel_job_failed_raises(self, repository, sample_job_data):
+        """Test cancel_job from a terminal FAILED state raises ValueError.
 
-        Per H1 fix: repository.cancel_job is now a single atomic UPDATE
-        WHERE status IN ('pending', 'processing', 'failed'). FAILED is
-        cancellable at the repository level (the service uses this to stop
-        pending retries). This replaces the prior read-then-dispatch
-        pattern, which could not handle FAILED via the repository and
-        required the service to call atomic_transition directly.
+        Under the admission-state model, fail_job sets admission_state='done'
+        (terminal). cancel_job's guard only allows admission_state IN
+        ('queued', 'active') — 'done' is terminal and cannot be cancelled.
+        A failed job awaiting retry is in admission_state='queued' (set by
+        atomic_retry), which remains cancellable; a terminal failed job is
+        'done' (not cancellable).
         """
         job = repository.create(**sample_job_data)
         repository.start_job_atomic(job.job_id, "test-instance")
         repository.fail_job(job.job_id, "Some error")
 
-        result = repository.cancel_job(job.job_id)
+        with pytest.raises(ValueError) as exc_info:
+            repository.cancel_job(job.job_id)
 
-        assert result is not None
-        assert result.status == JobStatus.CANCELLED.value
-        assert result.cancelled_at is not None
+        assert "Cannot cancel job" in str(exc_info.value)
 
 
 class TestAtomicTransitionPreservesData:
@@ -404,7 +403,7 @@ class TestCancelJobToctou:
         """Cancel issued while start_job transitions PENDING->PROCESSING is NOT lost."""
         repo = concurrent_repository
         job = repo.create(**sample_job_data)
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
 
         results: dict[str, object] = {}
         results_lock = threading.Lock()
@@ -446,7 +445,7 @@ class TestCancelJobToctou:
             f"cancel_job raised ValueError; results={results}"
         )
         assert isinstance(cancel_result, JobItem)
-        assert cancel_result.status == JobStatus.CANCELLED.value
+        assert cancel_result.admission_state == AdmissionState.DONE.value
         assert cancel_result.cancelled_at is not None
 
         # Final row state must be CANCELLED.
@@ -455,7 +454,7 @@ class TestCancelJobToctou:
             final = session.exec(
                 select(JobItem).where(JobItem.job_id == job.job_id)
             ).one()
-            assert final.status == JobStatus.CANCELLED.value, (
+            assert final.admission_state == AdmissionState.DONE.value, (
                 f"Final status is {final.status!r}, expected 'cancelled'; "
                 f"results={results}"
             )
@@ -494,11 +493,11 @@ class TestCancelJobToctou:
             final = session.exec(
                 select(JobItem).where(JobItem.job_id == job.job_id)
             ).one()
-            assert final.status == JobStatus.CANCELLED.value
+            assert final.admission_state == AdmissionState.DONE.value
 
         successful_cancels = [
             r for r in results
-            if isinstance(r, JobItem) and r.status == JobStatus.CANCELLED.value
+            if isinstance(r, JobItem) and r.admission_state == AdmissionState.DONE.value
         ]
         assert len(successful_cancels) == 1, (
             f"Expected exactly one successful cancel, got {len(successful_cancels)}; "

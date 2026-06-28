@@ -224,7 +224,7 @@ class MockTaskRepository:
         """Find cancelled tasks without retry scheduled."""
         return [
             t for t in self.tasks.values()
-            if t.status == "cancelled" and not t.retry_scheduled
+            if t.admission_state == "done" and not t.retry_scheduled
         ]
     
     def reset_stale_tasks(self, threshold_minutes):

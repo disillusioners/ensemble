@@ -24,6 +24,23 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository, set_dead_letter_repository
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 # =============================================================================
 # Fixtures
 # =============================================================================
@@ -310,7 +327,11 @@ class TestReplayDLQItem:
         )
         dlq_repository.enqueue(dlq_item)
         
-        # Create the job in DEAD_LETTER status
+        # Create the job in DEAD_LETTER admission state. The legacy
+        # ``status`` column is frozen at its INSERT default ("pending"),
+        # so only ``admission_state`` is set to "dead" — the DLQ replay
+        # guards on admission_state, and the response ``status`` field
+        # reflects the frozen column.
         job = JobItem(
             job_id="job-replay-test",
             agent_id="developer",
@@ -319,7 +340,7 @@ class TestReplayDLQItem:
             source="api",
             project_id="project-abc",
             queue_id="queue-xyz",
-            status="dead_letter",
+            admission_state=status_to_admission("dead_letter"),
             retry_count=3,
             error_message="Test error",
         )
@@ -342,7 +363,7 @@ class TestReplayDLQItem:
         # Verify job was updated
         updated_job = job_repository.get("job-replay-test")
         assert updated_job is not None
-        assert updated_job.status == "pending"
+        assert updated_job.admission_state == "queued"
         assert updated_job.retry_count == 0  # Reset
 
     def test_replay_dlq_item_not_found(self, client, dlq_service):
@@ -599,7 +620,7 @@ class TestDLQSchemas:
         )
         dlq_repository.enqueue(dlq_item)
         
-        # Create job
+        # Create job (admission_state is the authority; status frozen)
         job = JobItem(
             job_id="job-replay-struct",
             agent_id="developer",
@@ -607,7 +628,7 @@ class TestDLQSchemas:
             message="Test",
             source="api",
             project_id="project-abc",
-            status="dead_letter",
+            admission_state=status_to_admission("dead_letter"),
         )
         with Session(engine) as session:
             session.add(job)

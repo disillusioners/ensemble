@@ -92,42 +92,6 @@ class Decision(str, enum.Enum):
     DEAD_LETTER = "dead_letter"
 
 
-# Mapping from JobStatus values (string) to AdmissionState values.
-# Defined at module level so service-layer raw SQL UPDATEs can import
-# it without circular-dependency risk (the helper depends only on the
-# string values of JobStatus, not the enum itself).
-_STATUS_TO_ADMISSION: dict[str, str] = {
-    JobStatus.PENDING.value: AdmissionState.QUEUED.value,
-    JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
-    # Paused jobs stay ``active`` in admission — pause is an Instance
-    # concern (Instance.status == PAUSED) and the lock is still held.
-    # Plan §8.1 makes this explicit.
-    JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
-    JobStatus.COMPLETED.value: AdmissionState.DONE.value,
-    JobStatus.FAILED.value: AdmissionState.DONE.value,
-    JobStatus.CANCELLED.value: AdmissionState.DONE.value,
-    JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
-}
-
-
-def status_to_admission(status: str) -> str:
-    """Map a JobStatus value to its corresponding AdmissionState value.
-
-    Every existing ``status`` write site calls this helper so the
-    ``admission_state`` column moves in lockstep with ``status`` in
-    the SAME UPDATE statement (Phase 2 dual-write contract).
-
-    Args:
-        status: A ``JobStatus`` enum value string (e.g. ``"processing"``).
-
-    Returns:
-        The corresponding ``AdmissionState`` value string. Unknown
-        statuses default to ``QUEUED`` — the safest fall-through
-        (matches the column default and the model field default).
-    """
-    return _STATUS_TO_ADMISSION.get(status, AdmissionState.QUEUED.value)
-
-
 class QueueType(str, enum.Enum):
     """Queue type enum."""
     FIFO = "fifo"
@@ -217,13 +181,14 @@ class JobItem(SQLModel, table=True):
         Index("idx_job_queue_items_project_status_deleted", "project_id", "status", "deleted_at"),
         Index("idx_job_queue_items_status_type_instance", "status", "job_type", "instance_id"),
         # Phase 2 of feature/job-as-queue-proxy. The ``admission_state``
-        # column co-moves with ``status`` — every site that writes
-        # ``status`` also writes ``admission_state`` in the same UPDATE
-        # via :func:`status_to_admission`. Nothing reads this column yet;
-        # it becomes the queue-side status in Phase 4 and ``status`` is
-        # dropped in Phase 5. The index supports the future ``WHERE
-        # admission_state IN ('queued', 'active')`` predicates used by
-        # the work-resolver sweep.
+        # column co-moves with ``status`` (Phase 2 dual-write
+        # contract, retired in Phase 4 cleanup). Phase 4 cleanup:
+        # ``admission_state`` is the sole write authority; the
+        # ``status`` column is no longer written and is frozen at
+        # the INSERT default. ``status`` itself is dropped in
+        # Phase 5. The index supports the ``WHERE admission_state IN
+        # ('queued', 'active')`` predicates used by the work-resolver
+        # sweep and the gating / count queries.
         Index("idx_job_queue_admission_state", "admission_state"),
         # M6 fix: partial UNIQUE index on ``idempotency_key`` so that
         # ``create_or_get_by_idempotency_key`` can use
@@ -271,10 +236,12 @@ class JobItem(SQLModel, table=True):
     # Scheduling
     priority: int = Field(default=5, ge=1, le=10)  # 1=lowest, 10=highest
     status: str = Field(default=JobStatus.PENDING.value)
-    # Phase 2: admission_state co-moves with status (see
-    # :func:`status_to_admission`). Defaults to QUEUED so freshly-
-    # inserted rows are already in the correct admission bucket
-    # without needing a backfill on the INSERT path.
+    # Phase 4 cleanup: ``status`` is no longer written — the column
+    # exists for Phase 5 to drop, but stays frozen at the INSERT
+    # default (``PENDING``). ``admission_state`` is the sole
+    # authority. Defaults to QUEUED so freshly-inserted rows are
+    # already in the correct admission bucket without needing a
+    # backfill on the INSERT path.
     admission_state: str = Field(
         default=AdmissionState.QUEUED.value,
         # ``server_default`` keeps ``SQLModel.metadata.create_all()`` (used

@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
-from daemon.repositories.job_queue import JobRepository, JobQueueRepository
+from daemon.repositories.job_queue import AdmissionState, JobRepository, JobQueueRepository
 from daemon.repositories.job_queue.models import JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
@@ -169,7 +169,7 @@ async def test_retry_orphan_job_gets_system_project_id():
             
             # Verify the orphan job has project_id=None
             assert orphan_job.project_id is None
-            assert orphan_job.status == JobStatus.PENDING.value
+            assert orphan_job.admission_state == AdmissionState.QUEUED.value
             
             # Transition to PROCESSING then FAILED for retry
             # First start the job (moves to PROCESSING)
@@ -178,10 +178,31 @@ async def test_retry_orphan_job_gets_system_project_id():
             # Now fail it
             repository.fail_job(orphan_job.job_id, error_message="Test failure")
             
+            # Phase 4 cleanup: ``status`` is frozen at the INSERT default
+            # and only ``admission_state`` moves. ``fail_job`` now sets
+            # ``admission_state='done'`` (verified below) but no longer
+            # writes the legacy ``status`` column. ``service.retry_job``
+            # has not yet been migrated off the legacy
+            # ``status='failed'`` precondition, so establish that
+            # precondition directly — mirroring what the pre-Phase-4
+            # ``fail_job`` used to write — so the retry path proceeds to
+            # the enqueue() normalization logic this test exercises.
+            from sqlmodel import Session
+            from sqlalchemy import text as _sa_text
+            with Session(engine) as _session:
+                _session.execute(
+                    _sa_text(
+                        "UPDATE job_queue_items SET status = 'failed' "
+                        "WHERE job_id = :jid"
+                    ),
+                    {"jid": orphan_job.job_id},
+                )
+                _session.commit()
+            
             # Verify it's now FAILED
             failed_job = repository.get(orphan_job.job_id)
             assert failed_job is not None
-            assert failed_job.status == JobStatus.FAILED.value
+            assert failed_job.admission_state == AdmissionState.DONE.value
             assert failed_job.project_id is None  # Still None before retry
             
             # Now retry the orphan job (mock is still active)

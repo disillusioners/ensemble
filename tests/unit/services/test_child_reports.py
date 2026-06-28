@@ -52,6 +52,23 @@ from daemon.services.dependency_bus import DependencyBus, set_dependency_bus
 from daemon.write_pause_guard import WritePauseGuard
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Engine + service helpers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -248,6 +265,8 @@ def _seed_message_job_item(
             instance_id=instance_id,
             job_type="message",
             status=status,
+
+            admission_state=status_to_admission(status),
         )
         session.add(job)
         session.commit()

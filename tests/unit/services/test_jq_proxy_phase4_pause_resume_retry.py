@@ -57,7 +57,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel, select
 
 from daemon.config import JobSystemConfig
-from daemon.repositories.job_queue import JobItem, JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import (
     DeadLetterRepository,
 )
@@ -67,7 +67,6 @@ from daemon.repositories.job_queue.models import (
     JobQueue,
     JobStatus,
     QueueType,
-    status_to_admission,
 )
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.instance.models import (
@@ -82,6 +81,26 @@ from daemon.services.dead_letter_service import (
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.services.job_retry_engine import JobRetryEngine
 from daemon.write_pause_guard import WritePauseGuard
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# The ``status_to_admission`` helper was deleted from
+# ``daemon.repositories.job_queue.models`` in Phase 4 cleanup
+# (``admission_state`` is now the sole write authority). Tests that
+# seed JobItem rows from a ``status`` string still need this
+# JobStatus -> AdmissionState mapping, so we redefine it locally
+# here. Behavior is identical to the deleted production helper
+# (including the ``QUEUED`` fallback for unknown inputs).
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -498,7 +517,7 @@ class TestPauseResumeNoJobStatusWrites:
 
         # Sanity: before pause, the job is processing/active.
         pre = _refresh(engine, jid)
-        assert pre.status == JobStatus.PROCESSING.value
+        assert pre.admission_state == AdmissionState.ACTIVE.value
         assert pre.admission_state == AdmissionState.ACTIVE.value
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -517,7 +536,7 @@ class TestPauseResumeNoJobStatusWrites:
 
         # Phase 4: job status and admission_state UNCHANGED.
         post = _refresh(engine, jid)
-        assert post.status == JobStatus.PROCESSING.value, (
+        assert post.admission_state == AdmissionState.ACTIVE.value, (
             f"job status must stay 'processing' under Phase 4 pause "
             f"(Instance-only), got {post.status!r}"
         )
@@ -550,7 +569,7 @@ class TestPauseResumeNoJobStatusWrites:
 
         # Sanity: before resume, the job is still processing/active.
         pre = _refresh(engine, jid)
-        assert pre.status == JobStatus.PROCESSING.value
+        assert pre.admission_state == AdmissionState.ACTIVE.value
         assert pre.admission_state == AdmissionState.ACTIVE.value
 
         result = lifecycle_service._resume_cascade_db_sync(
@@ -569,7 +588,7 @@ class TestPauseResumeNoJobStatusWrites:
 
         # Phase 4: job status and admission_state UNCHANGED by resume.
         post = _refresh(engine, jid)
-        assert post.status == JobStatus.PROCESSING.value, (
+        assert post.admission_state == AdmissionState.ACTIVE.value, (
             f"job status must stay 'processing' under Phase 4 resume "
             f"(Instance-only), got {post.status!r}"
         )
@@ -603,7 +622,7 @@ class TestPauseResumeNoJobStatusWrites:
             paused_instances_data=[(iid, "developer")],
         )
         paused = _refresh(engine, jid)
-        assert paused.status == JobStatus.PROCESSING.value
+        assert paused.admission_state == AdmissionState.ACTIVE.value
         assert paused.admission_state == AdmissionState.ACTIVE.value
         assert _read_instance(engine, iid).status == InstanceStatus.PAUSED.value
 
@@ -616,7 +635,7 @@ class TestPauseResumeNoJobStatusWrites:
             is_root_resume=True,
         )
         resumed = _refresh(engine, jid)
-        assert resumed.status == JobStatus.PROCESSING.value
+        assert resumed.admission_state == AdmissionState.ACTIVE.value
         assert resumed.admission_state == AdmissionState.ACTIVE.value
         assert _read_instance(engine, iid).status == InstanceStatus.RUNNING.value
 
@@ -773,7 +792,7 @@ class TestMaybeRetryGuards:
 
         # Sanity: failed → admission_state='done'.
         pre = _refresh(engine, job.job_id)
-        assert pre.status == JobStatus.FAILED.value
+        assert pre.admission_state == AdmissionState.DONE.value
         assert pre.admission_state == AdmissionState.DONE.value
         assert pre.retry_count == 0
 
@@ -781,7 +800,7 @@ class TestMaybeRetryGuards:
         assert result is not None
 
         post = _refresh(engine, job.job_id)
-        assert post.status == JobStatus.PENDING.value
+        assert post.admission_state == AdmissionState.QUEUED.value
         assert post.admission_state == AdmissionState.QUEUED.value
         assert post.retry_count == 1
         assert post.error_message is None
@@ -866,7 +885,7 @@ class TestMaybeRetryGuards:
 
         # Sanity: processing/active.
         pre = _refresh(engine, job.job_id)
-        assert pre.status == JobStatus.PROCESSING.value
+        assert pre.admission_state == AdmissionState.ACTIVE.value
         assert pre.admission_state == AdmissionState.ACTIVE.value
 
         result = retry_engine.maybe_retry(job.job_id)
@@ -896,7 +915,7 @@ class TestMaybeRetryGuards:
         # Step 3: first retry succeeds (0 < 1).
         r1 = retry_engine.maybe_retry(job.job_id)
         assert r1 is not None
-        assert r1.status == JobStatus.PENDING.value
+        assert r1.admission_state == AdmissionState.QUEUED.value
         assert r1.retry_count == 1
 
         # Step 4: re-fail (mirror the dual-write so atomic_retry's SQL
@@ -904,7 +923,7 @@ class TestMaybeRetryGuards:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.fail_job(job.job_id, error_message="second failure")
         refail = _refresh(engine, job.job_id)
-        assert refail.status == JobStatus.FAILED.value
+        assert refail.admission_state == AdmissionState.DONE.value
         assert refail.admission_state == AdmissionState.DONE.value
         assert refail.retry_count == 1
 
@@ -921,7 +940,7 @@ class TestMaybeRetryGuards:
 
         # And the job row is now DEAD_LETTER / DEAD.
         post = _refresh(engine, job.job_id)
-        assert post.status == JobStatus.DEAD_LETTER.value
+        assert post.admission_state == AdmissionState.DEAD.value
         assert post.admission_state == AdmissionState.DEAD.value
 
 
@@ -965,7 +984,7 @@ class TestFromAdmissionStateParameter:
             next_retry_at=next_retry_at,
         )
         assert result is not None
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
         assert result.admission_state == AdmissionState.QUEUED.value
         assert result.retry_count == 1
 
@@ -1026,7 +1045,7 @@ class TestFromAdmissionStateParameter:
 
         # Row untouched.
         post = _refresh(engine, job.job_id)
-        assert post.status == JobStatus.FAILED.value
+        assert post.admission_state == AdmissionState.DONE.value
         assert post.admission_state == AdmissionState.DONE.value
         assert post.retry_count == 0
 
@@ -1071,7 +1090,7 @@ class TestFromAdmissionStateParameter:
 
         assert dlq_item is not None
         post = _refresh(engine, job.job_id)
-        assert post.status == JobStatus.DEAD_LETTER.value
+        assert post.admission_state == AdmissionState.DEAD.value
         assert post.admission_state == AdmissionState.DEAD.value
 
     def test_move_to_dlq_active_guard_rejects_legacy_failed_row(
@@ -1100,7 +1119,7 @@ class TestFromAdmissionStateParameter:
 
         # Row untouched.
         post = _refresh(engine, job.job_id)
-        assert post.status == JobStatus.FAILED.value
+        assert post.admission_state == AdmissionState.DONE.value
         assert post.admission_state == AdmissionState.DONE.value
 
     def test_maybe_retry_uses_default_done_for_failed_job(
@@ -1121,7 +1140,7 @@ class TestFromAdmissionStateParameter:
         result = retry_engine.maybe_retry(job.job_id)
         assert result is not None
         assert result.admission_state == AdmissionState.QUEUED.value
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
         assert result.retry_count == 1
 
 
@@ -1143,5 +1162,5 @@ class TestSmoke:
         job = _make_job(engine, job_repo)
         refetched = _refresh(engine, job.job_id)
         assert refetched.job_id == job.job_id
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value

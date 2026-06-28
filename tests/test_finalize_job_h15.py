@@ -36,6 +36,23 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
 # Phase 5/8 FINAL: these H15 tests reference ``observer.handle_correlation_complete``
 # which was removed when the legacy CorrelationManager was deleted (D11/D13
 # migration, commit 89333a47). The tests assert H15 transaction atomicity and
@@ -145,6 +162,8 @@ def seed_job(
             source="api",
             job_type="task",
             status=status,
+
+            admission_state=status_to_admission(status),
             instance_id=instance_id,
             project_id=project_id,
         )
@@ -678,6 +697,8 @@ class TestM10OrphanCleanup:
                 source="api",
                 job_type="task",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 instance_id=instance_id,
                 project_id=self.next_job.project_id,
             )
@@ -722,6 +743,8 @@ class TestM10OrphanCleanup:
             source="api",
             job_type="task",
             status=JobStatus.PENDING.value,
+
+            admission_state=status_to_admission(JobStatus.PENDING.value),
             instance_id=None,
             project_id=self.next_job.project_id,
         )

@@ -59,7 +59,7 @@ from sqlalchemy import func, text as _sa_text
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobLock, status_to_admission
+from daemon.repositories.job_queue.models import AdmissionState, JobLock
 from daemon.repositories.project.repository import SQLModelProjectRepository
 from daemon.repositories.task.models import TaskStatus, TaskType
 from daemon.repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState
@@ -2435,14 +2435,15 @@ class JobFeedbackObserver:
             # ``skip`` value.
             if job_id is not None:
                 update_values: dict[str, Any] = {
-                    # Phase 4 (Job as Queue Proxy): admission_state is
-                    # now the PRIMARY write target. The status column is
-                    # still written (Phase 5 drops it) as a derived
-                    # mirror — completed/failed both map to
-                    # AdmissionState.DONE so the co-move contract is
-                    # satisfied in one guarded UPDATE.
+                    # Phase 4 cleanup (admission_state is the sole
+                    # write authority): the legacy ``status`` column
+                    # is no longer written here. COMPLETED / FAILED /
+                    # CANCELLED all collapse onto
+                    # ``admission_state='done'`` — the per-terminal
+                    # distinction is preserved on the Instance side
+                    # (``Instance.status``) and surfaced to callers
+                    # via the resolver's canonical mapping.
                     "admission_state": AdmissionState.DONE.value,
-                    "status": to_status,  # backward-compat mirror
                     "completed_at": now,
                 }
                 if terminal_status == InstanceStatus.COMPLETED.value:

@@ -88,10 +88,32 @@ from daemon.repositories.job_queue.models import (
     JobQueue,
     JobStatus,
     QueueType,
-    status_to_admission,
+    AdmissionState,
+    AdmissionState,
+    AdmissionState,
 )
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.services.dead_letter_service import DeadLetterService
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# The ``status_to_admission`` helper was deleted from
+# ``daemon.repositories.job_queue.models`` in Phase 4 cleanup
+# (``admission_state`` is now the sole write authority). Tests that
+# seed JobItem rows from a ``status`` string still need this
+# JobStatus -> AdmissionState mapping, so we redefine it locally
+# here. Behavior is identical to the deleted production helper
+# (including the ``QUEUED`` fallback for unknown inputs).
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -230,7 +252,7 @@ class TestJobCreation:
         ``status='pending', admission_state='queued'``.
         """
         job = _make_job(engine, job_repo)
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
         assert job.admission_state == AdmissionState.QUEUED.value
 
     def test_create_appears_in_list_pending_by_project(
@@ -328,7 +350,7 @@ class TestJobStart:
         assert started is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PROCESSING.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
         assert refetched.admission_state == AdmissionState.ACTIVE.value
         assert refetched.instance_id == "inst-1"
 
@@ -409,7 +431,7 @@ class TestJobComplete:
         assert completed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.COMPLETED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.result_summary == "ok"
 
@@ -492,7 +514,7 @@ class TestJobFail:
         assert failed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.error_message == "boom"
 
@@ -539,7 +561,7 @@ class TestJobCancel:
         assert cancelled is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.CANCELLED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
 
     def test_cancel_from_processing_sets_done(
@@ -552,7 +574,7 @@ class TestJobCancel:
         assert cancelled is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.CANCELLED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
 
     def test_cancelled_job_not_counted_in_active(
@@ -616,7 +638,7 @@ class TestPauseResume:
         assert paused is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PAUSED.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
         assert refetched.admission_state == AdmissionState.ACTIVE.value
 
     def test_paused_job_still_counts_toward_active_project(
@@ -678,7 +700,7 @@ class TestPauseResume:
         assert resumed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PROCESSING.value
+        assert refetched.admission_state == AdmissionState.ACTIVE.value
         assert refetched.admission_state == AdmissionState.ACTIVE.value
 
     def test_pause_resume_round_trip_preserves_active_count(
@@ -737,7 +759,7 @@ class TestDLQFlow:
         assert dlq_item is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.DEAD_LETTER.value
+        assert refetched.admission_state == AdmissionState.DEAD.value
         assert refetched.admission_state == AdmissionState.DEAD.value
 
     def test_dlq_job_not_counted_in_active(
@@ -788,7 +810,7 @@ class TestDLQFlow:
         assert replayed is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         # Side effects of replay.
         assert refetched.retry_count == 0
@@ -852,7 +874,7 @@ class TestRetryFlow:
         assert retried is not None
 
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.PENDING.value
+        assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
         assert refetched.error_message is None
@@ -965,7 +987,7 @@ class TestRetryFlow:
 
         # Job is back to FAILED + admission_state='done'.
         refetched = _refresh(engine, job.job_id)
-        assert refetched.status == JobStatus.FAILED.value
+        assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
         # No retryable jobs.
         assert job_repo.find_retryable_jobs(project_id="proj-h") == []
@@ -1113,11 +1135,21 @@ class TestCrossCuttingInvariants:
     def test_dual_write_invariant_after_full_lifecycle_walk(
         self, engine, job_repo, dlq_service
     ):
-        """Belt-and-braces: every JobItem satisfies
-        ``admission_state == status_to_admission(status)`` after
-        walking through a mix of lifecycle transitions. This pins
-        the dual-write invariant Phase 2 established; Phase 3 must
-        not regress it.
+        """Belt-and-braces: every JobItem's ``admission_state``
+        lands on the expected admission bucket after walking through
+        a mix of lifecycle transitions. Phase 4 cleanup: the
+        dual-write invariant is gone — ``status`` is no longer
+        written, so the legacy ``admission_state ==
+        status_to_admission(status)`` check no longer holds. The
+        canonical invariant is now: ``admission_state`` matches the
+        expected bucket for each transition path.
+
+        Phase 3 walked this to confirm Phase 3 didn't regress
+        Phase 2's dual-write contract; Phase 4 keeps the spirit of
+        the test (a full-lifecycle walk is the strongest
+        end-to-end check on the transition machinery) but
+        drops the dual-write column read and asserts the
+        ``admission_state`` bucket directly.
         """
         # Job 1: pending.
         j1 = _make_job(engine, job_repo, project_id="proj-x")
@@ -1149,12 +1181,21 @@ class TestCrossCuttingInvariants:
         job_repo.start_job(j6.job_id, instance_id="inst-1")
         job_repo.cancel_job(j6.job_id)
 
-        for j in (j1, j2, j3, j4, j5, j6):
-            refetched = _refresh(engine, j.job_id)
-            expected = status_to_admission(refetched.status)
+        expected_admissions = {
+            j1.job_id: AdmissionState.QUEUED.value,
+            j2.job_id: AdmissionState.ACTIVE.value,
+            # PAUSED jobs keep ``active`` admission (pause is an
+            # Instance concern; the JobItem lock is still held).
+            j3.job_id: AdmissionState.ACTIVE.value,
+            j4.job_id: AdmissionState.DONE.value,
+            j5.job_id: AdmissionState.QUEUED.value,  # DLQ → replay → queued
+            j6.job_id: AdmissionState.DONE.value,
+        }
+        for j, expected in expected_admissions.items():
+            refetched = _refresh(engine, j)
             assert refetched.admission_state == expected, (
-                f"Drift on {j.job_id}: status={refetched.status!r} "
-                f"but admission_state={refetched.admission_state!r} "
+                f"Drift on {j}: "
+                f"admission_state={refetched.admission_state!r} "
                 f"(expected {expected!r})."
             )
 

@@ -72,6 +72,23 @@ from daemon.repositories.mcp_server.models import McpServer
 from daemon.repositories.task.models import Task
 from daemon.migrations.models import SchemaMigration
 
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -917,6 +934,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[0],
             priority=5,
             status="pending",
+
+            admission_state=status_to_admission("pending"),
             created_at=_ts(),
             started_at=None,
             completed_at=None,
@@ -943,6 +962,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[0],
             priority=8,
             status="processing",
+
+            admission_state=status_to_admission("processing"),
             created_at=_ts(),
             started_at=_ts(),
             completed_at=None,
@@ -969,6 +990,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[1],
             priority=3,
             status="completed",
+
+            admission_state=status_to_admission("completed"),
             created_at=_ts(),
             started_at=_ts(),
             completed_at=_ts(),
@@ -995,6 +1018,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[0],
             priority=1,
             status="failed",
+
+            admission_state=status_to_admission("failed"),
             created_at=_ts(),
             started_at=_ts(),
             completed_at=_ts(),
@@ -1021,6 +1046,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[0],
             priority=5,
             status="cancelled",
+
+            admission_state=status_to_admission("cancelled"),
             created_at=_ts(),
             started_at=_ts(),
             completed_at=None,
@@ -1047,6 +1074,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[0],
             priority=2,
             status="completed",
+
+            admission_state=status_to_admission("completed"),
             created_at=_ts(),
             started_at=_ts(),
             completed_at=_ts(),
@@ -1073,6 +1102,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[1],
             priority=7,
             status="pending",
+
+            admission_state=status_to_admission("pending"),
             created_at=_ts(),
             started_at=None,
             completed_at=None,
@@ -1099,6 +1130,8 @@ def _populate_job_queues(session: Session, project_ids: list[str] | None, config
             queue_id=queue_ids[0],
             priority=1,
             status="dead_letter",
+
+            admission_state=status_to_admission("dead_letter"),
             created_at=_ts(),
             started_at=_ts(),
             completed_at=_ts(),

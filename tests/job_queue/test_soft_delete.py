@@ -14,8 +14,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
-from daemon.repositories.job_queue import JobRepository, JobQueueRepository
-from daemon.repositories.job_queue.models import JobStatus, JobItem
+from daemon.repositories.job_queue import AdmissionState, JobRepository, JobQueueRepository
+from daemon.repositories.job_queue.models import JobStatus, JobItem, AdmissionState
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
@@ -196,7 +196,7 @@ class TestRepositoryRestore:
         assert result is not None
         assert result.deleted_at is None
         # Original status should be preserved
-        assert result.status == JobStatus.PENDING.value
+        assert result.admission_state == AdmissionState.QUEUED.value
 
     def test_restore_returns_none_for_nonexistent_job(self, repository):
         """Restore returns None for non-existent job."""
@@ -462,7 +462,7 @@ class TestDeleteJobEndpoint:
         
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == JobStatus.CANCELLED.value
+        assert data["admission_state"] == AdmissionState.DONE.value
         assert data["deleted_at"] is None  # Not soft-deleted
 
     def test_delete_processing_job_cancels_it(self, api_client, repository, sample_job_data_service):
@@ -480,7 +480,7 @@ class TestDeleteJobEndpoint:
         
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == JobStatus.CANCELLED.value
+        assert data["admission_state"] == AdmissionState.DONE.value
         assert data["deleted_at"] is None  # Not soft-deleted
 
     def test_delete_already_deleted_job_returns_400(self, api_client, repository, sample_job_data_service):

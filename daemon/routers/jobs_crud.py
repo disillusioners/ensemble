@@ -143,6 +143,7 @@ def _job_to_response(
     return JobResponse(
         job_id=job.job_id,
         status=status,
+        admission_state=job.admission_state,
         priority=job.priority,
         agent_id=job.agent_id,
         agent_dir=job.agent_dir,

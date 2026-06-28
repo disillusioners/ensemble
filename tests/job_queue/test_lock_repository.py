@@ -9,6 +9,22 @@ from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import JobLock
 
 
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefine it at module
+# scope so the deferred import at line 598 is unnecessary.
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 def _acquire_with_slot(repo, project_id, queue_id, job_id, slot,
                        instance_id=None):
     """Test helper: create and acquire a JobLock with an explicit ``lock_slot``.
@@ -595,7 +611,6 @@ class TestClearStaleJobLocks:
         row as active and leave its lock behind.
         """
         from sqlalchemy import text
-        from daemon.repositories.job_queue.models import status_to_admission
         with repository.engine.begin() as conn:
             conn.execute(
                 text(

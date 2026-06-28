@@ -60,7 +60,7 @@ from sqlmodel import col, select
 from sqlalchemy.exc import SQLAlchemyError
 
 from daemon.repositories.instance.models import Instance
-from daemon.repositories.job_queue.models import JobItem
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task
 
 from .work_status import _STATUS_CANONICAL_MAP, canonicalize_status
@@ -268,11 +268,19 @@ def _serialize_created_at(value: datetime | None) -> str | None:
 def _build_canonical_to_sources() -> dict[str, set[str]]:
     """Build reverse map: canonical status → set of source status strings.
 
-    Phase 4 (Job as Queue Proxy): the JobItem source set is split
-    between legacy ``status`` (terminal cluster) and the new
-    ``admission_state`` (non-terminal cluster). ``_query_jobs``
-    consults both columns. The Task side stays on the legacy
-    ``status`` column.
+    Phase 4 cleanup: the JobItem source set is no longer used by the
+    JobItem-side query (``_query_jobs`` consults ``admission_state``
+    directly via ``_JOB_CANONICAL_TO_ADMISSION`` below). The map is
+    still built for completeness and is used by ``_query_tasks`` to
+    translate canonical status filters into ``Task.status IN (...)``
+    predicates. Phase 4 cleanup removed the JobItem-only source keys
+    ``"processing"`` and ``"dead_letter"`` from
+    ``_STATUS_CANONICAL_MAP`` (the legacy ``JobItem.status`` column
+    is no longer written in Phase 4+), so a canonical filter for
+    ``"processing"`` now resolves to ``{"running"}`` (Task-only) and
+    ``"dead_letter"`` resolves to ``{"dead"}`` (JobItem
+    ``admission_state='dead'``, surfaced via the new
+    ``_JOB_CANONICAL_TO_ADMISSION`` map).
     """
     out: dict[str, set[str]] = {}
     for source, canon in _STATUS_CANONICAL_MAP.items():
@@ -281,6 +289,45 @@ def _build_canonical_to_sources() -> dict[str, set[str]]:
 
 
 _CANONICAL_TO_SOURCES: dict[str, set[str]] = _build_canonical_to_sources()
+
+
+# ── Canonical → JobItem admission_state map ──────────────────────────────
+# Phase 4 cleanup (Job as Queue Proxy): the JobItem query path
+# (``_query_jobs``) consults the canonical ``admission_state`` column
+# instead of the legacy ``status`` column. ``_CANONICAL_TO_SOURCES``
+# above is keyed on the legacy source-status spelling; this parallel
+# map is keyed on the canonical vocabulary and produces the set of
+# ``AdmissionState`` values to feed into ``WHERE
+# job_queue_items.admission_state IN (...)``.
+#
+# Mapping rationale (mirrors the dual-write invariant that Phase 2
+# established):
+#   ``pending``        → ``{'queued'}``   (PENDING    → QUEUED)
+#   ``processing``     → ``{'active'}``   (PROCESSING → ACTIVE)
+#   ``paused``         → ``{'active'}``   (PAUSED     → ACTIVE — pause
+#                                          is an Instance concern; the
+#                                          JobItem's lock is still held
+#                                          and admission_state stays
+#                                          ACTIVE per Plan §8.1)
+#   ``completed``      → ``{'done'}``    (COMPLETED  → DONE)
+#   ``failed``         → ``{'done'}``    (FAILED     → DONE)
+#   ``cancelled``      → ``{'done'}``    (CANCELLED  → DONE)
+#   ``dead_letter``    → ``{'dead'}``    (DEAD_LETTER → DEAD)
+#
+# This map is the JobItem-side analog of ``_CANONICAL_TO_SOURCES``: the
+# Task-side resolver path uses ``_CANONICAL_TO_SOURCES`` to build a
+# ``Task.status IN (...)`` filter (Task keeps its ``status`` column),
+# while the JobItem-side resolver path uses ``_JOB_CANONICAL_TO_ADMISSION``
+# to build a ``JobItem.admission_state IN (...)`` filter.
+_JOB_CANONICAL_TO_ADMISSION: Final[dict[str, set[str]]] = {
+    "pending": {AdmissionState.QUEUED.value},
+    "processing": {AdmissionState.ACTIVE.value},
+    "paused": {AdmissionState.ACTIVE.value},
+    "completed": {AdmissionState.DONE.value},
+    "failed": {AdmissionState.DONE.value},
+    "cancelled": {AdmissionState.DONE.value},
+    "dead_letter": {AdmissionState.DEAD.value},
+}
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -701,6 +748,16 @@ class WorkResolverService:
             descending (newest first). Empty list if nothing matches.
         """
         source_statuses: set[str] | None = None
+        # Phase 4 cleanup (Job as Queue Proxy): the JobItem-side
+        # query is now keyed on ``admission_state``, not the legacy
+        # ``status`` column. We precompute the parallel set of
+        # ``AdmissionState`` values from the same canonical status
+        # tokens the Task-side query uses, so a single
+        # ``status="processing"`` URL parameter produces both
+        # ``Task.status IN ('running')`` AND
+        # ``JobItem.admission_state IN ('active')`` — neither table
+        # sees the other table's column spelling.
+        job_admission_states: set[str] | None = None
         if status is not None:
             # Split comma-separated canonical statuses (matches the
             # legacy ``GET /api/jobs`` behaviour in
@@ -726,6 +783,24 @@ class WorkResolverService:
             for canonical in canonical_statuses:
                 unioned.update(_CANONICAL_TO_SOURCES.get(canonical, {canonical}))
             source_statuses = unioned
+            # JobItem-side: build the parallel admission_state set
+            # via ``_JOB_CANONICAL_TO_ADMISSION``. Unknown canonical
+            # values fall back to ``{canonical}`` — defensive rule
+            # matching the source-side fallback. If a future caller
+            # passes an admission_state value directly (e.g. ``"active"``)
+            # and that value is a valid ``AdmissionState``, it
+            # short-circuits via the membership check below to avoid
+            # the canonical reverse-lookup miss.
+            admission_states: set[str] = set()
+            for canonical in canonical_statuses:
+                mapped = _JOB_CANONICAL_TO_ADMISSION.get(canonical)
+                if mapped is not None:
+                    admission_states.update(mapped)
+                elif canonical in {s.value for s in AdmissionState}:
+                    admission_states.add(canonical)
+                else:
+                    admission_states.add(canonical)
+            job_admission_states = admission_states
 
         records: list[WorkRecord] = []
 
@@ -776,7 +851,7 @@ class WorkResolverService:
                 records.append(record)
 
         if query_jobs_table:
-            jobs = self._query_jobs(project_id, instance_id, source_statuses)
+            jobs = self._query_jobs(project_id, instance_id, job_admission_states)
             if jobs:
                 # Phase 1 (Job as Queue Proxy): batch-fetch Instance rows
                 # for all distinct ``job.instance_id`` values so
@@ -1149,7 +1224,7 @@ class WorkResolverService:
         self,
         project_id: str | None,
         instance_id: str | None,
-        source_statuses: set[str] | None,
+        admission_states: set[str] | None,
     ) -> list[JobItem]:
         """Run the JobItem SELECT for ``list_work`` and return the rows.
 
@@ -1157,16 +1232,17 @@ class WorkResolverService:
         soft-deleted jobs are invisible to the virtual job surface
         (matches the default behaviour of ``JobRepository.list``).
 
-        Phase 4 (Job as Queue Proxy): the SQL filter still targets
-        the legacy ``status`` column (Phase 5 drops it). The
-        ``admission_state`` column co-moves with ``status`` via the
-        dual-write contract (Phase 2+), so a JobItem whose
-        admission_state is ``active`` also has ``status='processing'``
-        and is matched by the same SQL filter. Likewise, a dead
-        JobItem has both ``admission_state='dead'`` and
-        ``status='dead_letter'``, so the ``dead_letter`` source key
-        in ``_STATUS_CANONICAL_MAP`` continues to match via the
-        legacy column.
+        Phase 4 cleanup (Job as Queue Proxy): the SQL filter targets
+        the canonical ``admission_state`` column instead of the
+        legacy ``status`` column. The legacy ``status`` column is no
+        longer written (Phase 5 drops it outright), so reads against
+        it would only ever see the INSERT default — i.e. the column
+        is effectively frozen. The resolver pre-translates each
+        canonical status filter (``"processing"`` / ``"dead_letter"``
+        / ...) into the corresponding ``AdmissionState`` value(s) via
+        ``_JOB_CANONICAL_TO_ADMISSION`` and feeds the result here as
+        ``admission_states``. The Task-side query path is unchanged
+        (Task keeps its ``status`` column).
         """
         from sqlmodel import Session as SQLModelSession
 
@@ -1176,8 +1252,8 @@ class WorkResolverService:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if instance_id is not None:
                 stmt = stmt.where(JobItem.instance_id == instance_id)
-            if source_statuses is not None:
-                stmt = stmt.where(JobItem.status.in_(source_statuses))
+            if admission_states is not None:
+                stmt = stmt.where(JobItem.admission_state.in_(admission_states))
             stmt = stmt.order_by(col(JobItem.created_at).desc())
             return list(session.exec(stmt))
 

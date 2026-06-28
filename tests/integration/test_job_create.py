@@ -243,7 +243,7 @@ class TestCreateJobWithNullProjectId:
         )
         
         # Verify other fields
-        assert job.status == "pending"
+        assert job.admission_state == "queued"
         assert job.agent_id == "developer"
         assert job.message == "Test job with null project_id"
         assert job.priority == 5

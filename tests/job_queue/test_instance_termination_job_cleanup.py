@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
 from daemon.services.job_queue_service import JobQueueService, DemandState, TERMINAL_STATUSES
 
 
@@ -45,6 +45,20 @@ class MockProject:
 class MockJob:
     """Mock job object for testing."""
 
+    # Phase 4 cleanup: ``status`` is frozen at the INSERT default
+    # (``pending``) and ``admission_state`` is the sole authority. Map
+    # the legacy ``status`` value onto its ``AdmissionState`` bucket so
+    # service-level assertions on ``admission_state`` see the right value.
+    _STATUS_TO_ADMISSION = {
+        JobStatus.PENDING.value: AdmissionState.QUEUED.value,
+        JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
+        JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
+        JobStatus.COMPLETED.value: AdmissionState.DONE.value,
+        JobStatus.FAILED.value: AdmissionState.DONE.value,
+        JobStatus.CANCELLED.value: AdmissionState.DONE.value,
+        JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+    }
+
     def __init__(
         self,
         job_id: str,
@@ -54,12 +68,16 @@ class MockJob:
         status: str = JobStatus.PENDING.value,
         instance_id: str | None = None,
         job_type: str = "task",
+        admission_state: str | None = None,
     ):
         self.job_id = job_id
         self.agent_id = agent_id
         self.project_id = project_id
         self.queue_id = queue_id
         self.status = status
+        self.admission_state = admission_state or self._STATUS_TO_ADMISSION.get(
+            status, AdmissionState.QUEUED.value
+        )
         self.instance_id = instance_id
         self.job_type = job_type
         self.message = "test message"
@@ -386,7 +404,7 @@ class TestStartJobInstanceStatusChecks:
 
         # Job should be started
         assert result is not None
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
 
     @pytest.mark.asyncio
     async def test_start_job_keeps_job_pending_for_idle_instance(
@@ -420,7 +438,7 @@ class TestStartJobInstanceStatusChecks:
         result = await job_queue_service.start_job(job_id)
 
         assert result is not None
-        assert result.status == JobStatus.PROCESSING.value
+        assert result.admission_state == AdmissionState.ACTIVE.value
 
     @pytest.mark.asyncio
     async def test_start_job_returns_none_for_missing_instance(

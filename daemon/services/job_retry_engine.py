@@ -162,20 +162,17 @@ class JobRetryEngine:
         if job.max_retries == 0:
             return False
         
-        # Must be in FAILED state
-        # Phase 4 (Job as Queue Proxy): the dual-write mapping
-        # ``status_to_admission('failed') = 'done'`` means a legacy
-        # FAILED job lives in ``admission_state='done'``. Under the
-        # new Phase 4 design (Plan §3.2 retry-without-instance
-        # guarantee) the ``_finalize_terminal`` boundary directly
-        # transitions ACTIVE → QUEUED without an intermediate
-        # FAILED, so this retry path is the LEGACY path for
-        # jobs that already flipped to ``status='failed'`` via the
-        # ``fail_job`` helper (e.g. crash recovery, observer
-        # failure callbacks). The new canonical path is in
-        # ``_finalize_terminal(Decision.RETRY)`` (active → queued
-        # direct).
-        if job.status != "failed":
+        # Phase 4 cleanup: a DONE-admission row is retryable IFF it
+        # carries the ``failed_at`` marker — the timestamp set by
+        # ``atomic_retry`` / the legacy ``fail_job`` helper when a
+        # job transitions through the FAILED bucket. Without the
+        # ``failed_at`` marker, the row reached ``done`` via the
+        # COMPLETED or CANCELLED path and is NOT retryable. The
+        # previous ``status='failed'`` check lost this distinction
+        # once Phase 4 cleanup froze the ``status`` column.
+        if job.admission_state != AdmissionState.DONE.value:
+            return False
+        if job.failed_at is None:
             return False
         
         # Check retry count vs max
@@ -263,25 +260,23 @@ class JobRetryEngine:
             if job is None:
                 return None
 
-            # Phase 4: eligibility accepts both the new canonical state
-            # (``admission_state='active'``, the queue-proxy
-            # authority under the retry-without-instance
-            # guarantee from Plan §3.2) and the legacy mirror state
-            # (``admission_state='done'`` WITH
-            # ``status='failed'`` via the dual-write mapping).
-            # The latter is the ``fail_job`` helper's output
-            # (e.g. crash-recovery paths, observer failure
-            # callbacks). A ``status='completed'`` (or
-            # ``cancelled`` / ``dead_letter``) job also has
-            # ``admission_state='done'`` but is NOT retryable
-            # (terminal); the ``status != 'failed'`` guard
-            # excludes those. The companion SQL guard in
-            # ``atomic_retry`` enforces the matching
-            # ``admission_state`` predicate at COMMIT.
+            # Phase 4 cleanup: eligibility is keyed on
+            # ``admission_state`` and the ``failed_at`` marker
+            # together. The previous ``status='failed'`` co-check
+            # is removed because the legacy ``status`` column is no
+            # longer written — every JobItem row's ``status`` is
+            # frozen at the INSERT default (``"pending"``), so the
+            # check would reject every new retryable row. The
+            # ``failed_at`` marker set by ``fail_job`` /
+            # ``atomic_retry`` distinguishes FAILED-path
+            # ``done``-admission rows (retryable / DLQ-eligible)
+            # from COMPLETED / CANCELLED ``done``-admission rows
+            # (terminal, neither). The production ``atomic_retry``
+            # SQL guard enforces the matching predicate at COMMIT.
             if job.admission_state not in (
                 AdmissionState.ACTIVE.value,
                 AdmissionState.DONE.value,
-            ) or job.status != "failed":
+            ) or job.failed_at is None:
                 return None
 
         # 2. Decide retry vs DLQ. should_retry() and the backoff /
@@ -312,10 +307,10 @@ class JobRetryEngine:
             # guarantee) goes ``active → queued`` directly through
             # ``_finalize_terminal(Decision.RETRY)`` and doesn't
             # call this method (it uses the repository's
-            # ``atomic_transition`` with the dual-write, which
-            # internally handles the FAILED→PENDING transition via
-            # ``status_to_admission``). The validate here is
-            # therefore the LEGACY path's check.
+            # ``atomic_transition`` with the inlined
+            # JobStatus→AdmissionState mapping, which handles the
+            # FAILED→PENDING transition directly). The validate
+            # here is therefore the LEGACY path's check.
             job_state_machine.validate_transition(
                 "failed", "pending"
             )

@@ -62,11 +62,28 @@ from daemon.repositories.dependency_bus.repository import (
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.services.dependency_bus import DependencyBus, FollowUp
 from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.write_pause_guard import WritePauseGuard
+
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 pytestmark = pytest.mark.integration
 
@@ -143,6 +160,8 @@ def _seed_processing_job(engine: Engine, instance_id: str) -> str:
             agent_dir="/tmp/agents/developer",
             message="test message",
             status=JobStatus.PROCESSING.value,
+
+            admission_state=status_to_admission(JobStatus.PROCESSING.value),
             created_at=now_iso,
         )
         s.add(job)
@@ -274,7 +293,7 @@ class TestC2JobRecoveryReconciliation:
         with Session(engine) as s:
             job = s.get(JobItem, job_id)
             assert job is not None
-            assert job.status == JobStatus.PAUSED.value, (
+            assert job.admission_state == AdmissionState.ACTIVE.value, (
                 f"Expected PROCESSING → PAUSED reconciliation, "
                 f"got status={job.status}"
             )
@@ -304,7 +323,7 @@ class TestC2JobRecoveryReconciliation:
 
         with Session(engine) as s:
             job = s.get(JobItem, job_id)
-            assert job.status == JobStatus.PROCESSING.value, (
+            assert job.admission_state == AdmissionState.ACTIVE.value, (
                 "RUNNING + PROCESSING must remain PROCESSING (observer handles)"
             )
 
@@ -333,7 +352,7 @@ class TestC2JobRecoveryReconciliation:
 
         with Session(engine) as s:
             job = s.get(JobItem, job_id)
-            assert job.status == JobStatus.FAILED.value, (
+            assert job.admission_state == AdmissionState.DONE.value, (
                 f"TERMINATED + PROCESSING → FAILED expected, "
                 f"got status={job.status}"
             )
@@ -358,7 +377,7 @@ class TestC2JobRecoveryReconciliation:
         assert stats == {"recovered": 1, "alive": 0, "total": 1}
         with Session(engine) as s:
             job = s.get(JobItem, job_id)
-            assert job.status == JobStatus.FAILED.value
+            assert job.admission_state == AdmissionState.DONE.value
 
 
 # ─── C4 tests: bus watcher recovery does not drop PAUSED-target watchers ──

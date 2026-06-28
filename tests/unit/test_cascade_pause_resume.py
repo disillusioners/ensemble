@@ -66,11 +66,33 @@ from daemon.repositories.job_queue.models import (
     AdmissionState,
     JobItem,
     JobStatus,
-    status_to_admission,
+    AdmissionState,
+    AdmissionState,
+    AdmissionState,
 )
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# The ``status_to_admission`` helper was deleted from
+# ``daemon.repositories.job_queue.models`` in Phase 4 cleanup
+# (``admission_state`` is now the sole write authority). Tests that
+# seed JobItem rows from a ``status`` string still need this
+# JobStatus -> AdmissionState mapping, so we redefine it locally
+# here. Behavior is identical to the deleted production helper
+# (including the ``QUEUED`` fallback for unknown inputs).
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
 
 
 # ─── Fixtures & helpers ───────────────────────────────────────────────────────
@@ -737,13 +759,12 @@ def test_cascade_terminate_from_paused(lifecycle_service, engine, write_guard):
             f"{instances[iid].status}"
         )
 
-    # All jobs CANCELLED (Phase 4 admission_state='active' guard)
+    # All jobs transitioned to admission_state='done' (Phase 4 cleanup:
+    # the legacy ``status`` column is no longer written by the cascade,
+    # so we assert on ``admission_state`` instead of ``status``).
     for iid in [gp_id, p_id, c_id]:
         jobs = _read_jobs(engine, iid)
         assert len(jobs) == 1
-        assert jobs[0].status == JobStatus.CANCELLED.value, (
-            f"job for {iid[:8]} expected CANCELLED, got {jobs[0].status}"
-        )
         assert jobs[0].admission_state == AdmissionState.DONE.value, (
             f"job for {iid[:8]} admission_state expected DONE, "
             f"got {jobs[0].admission_state}"

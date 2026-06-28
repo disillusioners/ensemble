@@ -73,6 +73,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
 pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-threading integration")
 
 from sqlalchemy import create_engine, event
@@ -85,7 +102,7 @@ import pytest
 pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM lock/finalize threading")
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import JobItem, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobStatus
 # CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
 # Tests in this module are skipped via ``pytestmark`` above.
 from daemon.services.job_feedback_observer import JobFeedbackObserver
@@ -139,6 +156,8 @@ def seed_job(
             source="api",
             job_type="task",
             status=status,
+
+            admission_state=status_to_admission(status),
             instance_id=instance_id,
             project_id=project_id,
         )
@@ -590,7 +609,7 @@ async def test_post_commit_rearm_prevents_orphan(engine: Engine):
     # COMPLETED and child B is orphaned.
     re_read = re_read_job(engine, job_id)
     assert re_read is not None, f"Job row {job_id} disappeared from DB"
-    assert re_read.status == JobStatus.PROCESSING.value, (
+    assert re_read.admission_state == AdmissionState.ACTIVE.value, (
         f"Job should be re-armed to PROCESSING (late register detected via "
         f"generation counter), got {re_read.status}. The post-commit re-arm "
         f"is not working — child B is orphaned. "
@@ -619,7 +638,7 @@ async def test_post_commit_rearm_prevents_orphan(engine: Engine):
     # ── ASSERT 4: job is now COMPLETED (not orphaned) ──────────────────────
     re_read = re_read_job(engine, job_id)
     assert re_read is not None, f"Job row {job_id} disappeared from DB"
-    assert re_read.status == JobStatus.COMPLETED.value, (
+    assert re_read.admission_state == AdmissionState.DONE.value, (
         f"Job should be COMPLETED after child B resolves, got {re_read.status}. "
         f"The late child's callback did not complete the re-armed job."
     )
@@ -717,7 +736,7 @@ async def test_post_commit_rearm_can_be_disabled(engine: Engine):
     # ── ASSERT: job stays COMPLETED (re-arm disabled → orphan manifests) ───
     re_read = re_read_job(engine, job_id)
     assert re_read is not None, f"Job row {job_id} disappeared from DB"
-    assert re_read.status == JobStatus.COMPLETED.value, (
+    assert re_read.admission_state == AdmissionState.DONE.value, (
         f"Job should STAY COMPLETED when the post-commit re-arm is disabled "
         f"(simulating the bug), got {re_read.status}. This means the parent "
         f"test (test_post_commit_rearm_prevents_orphan) is a FALSE POSITIVE — "

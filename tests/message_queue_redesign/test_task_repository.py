@@ -11,6 +11,23 @@ from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 
 
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
+
 def _create_task_with_status(
     engine,
     task_type: str = TaskType.PROCESS_MESSAGE.value,
@@ -362,6 +379,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-J",
                 created_at=now,
@@ -427,6 +446,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-W",
                 created_at=now,
@@ -467,6 +488,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-X-no-row",
                 created_at=now,
@@ -521,6 +544,8 @@ class TestTaskClaiming:
                 message="cleanup",
                 source="system",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="cleanup",
                 instance_id="inst-K",
                 created_at=now,
@@ -566,6 +591,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-L",
                 created_at=now,
@@ -630,6 +657,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-UD-1",
                 # message_id in job_metadata must match the Task's
@@ -694,6 +723,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-MIS-1",
                 # Parent's user message_id is "m-parent".
@@ -762,6 +793,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-TERM-1",
                 # Parent's user message_id is "m-TERM-1".
@@ -829,6 +862,8 @@ class TestTaskClaiming:
                 message="hi",
                 source="api",
                 status=JobStatus.PROCESSING.value,
+
+                admission_state=status_to_admission(JobStatus.PROCESSING.value),
                 job_type="message",
                 instance_id="inst-EMPTY-1",
                 # Explicitly empty job_metadata — same as the

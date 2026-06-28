@@ -31,7 +31,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus
 
 
@@ -124,7 +124,7 @@ class TestCreateOrGetByIdempotencyKey:
         assert created is True
         assert job is not None
         assert job.idempotency_key == key
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value
 
     def test_second_insert_with_same_key_returns_existing(
         self, repository: JobRepository

@@ -2142,7 +2142,7 @@ class InstanceManager:
         """
         try:
             from sqlalchemy import update as sql_update
-            from .repositories.job_queue.models import JobItem, JobStatus
+            from .repositories.job_queue.models import AdmissionState, JobItem
 
             cancel_message = (
                 "Cancelled: MESSAGE JobItem type eliminated by "
@@ -2153,21 +2153,21 @@ class InstanceManager:
                     sql_update(JobItem.__table__)
                     .where(JobItem.job_type == "message")
                     .where(JobItem.deleted_at.is_(None))
-                    .where(JobItem.status.in_([
-                        JobStatus.PENDING.value,
-                        JobStatus.PROCESSING.value,
+                    .where(JobItem.admission_state.in_([
+                        AdmissionState.QUEUED.value,
+                        AdmissionState.ACTIVE.value,
                     ]))
                     .values(
-                        status=JobStatus.CANCELLED.value,
-                        # Phase 2 dual-write: CANCELLED → admission_state
-                        # = DONE. The bulk raw UPDATE must co-move both
-                        # columns — the helper is the single source of
-                        # truth so re-runs on already-cancelled rows
-                        # remain a no-op (the WHERE status guard
-                        # matches zero rows so admission_state is not
-                        # written). status_to_admission(CANCELLED) =
-                        # 'done'.
-                        admission_state=status_to_admission(JobStatus.CANCELLED.value),
+                        # Phase 4 cleanup: ``status`` is no longer
+                        # written (admission_state is the sole
+                        # authority). CANCELLED → admission_state =
+                        # DONE is set directly. The legacy ``status``
+                        # column stays at its INSERT default for new
+                        # rows; legacy rows that already carry
+                        # ``status='pending'/'processing'`` are matched
+                        # by the guard below and rewritten to
+                        # ``admission_state='done'``.
+                        admission_state=AdmissionState.DONE.value,
                         cancelled_at=datetime.now(timezone.utc).isoformat(),
                         error_message=cancel_message,
                     )

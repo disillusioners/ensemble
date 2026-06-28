@@ -22,7 +22,7 @@ See commit history (D13 architecture migration) for context.
 
 import pytest
 
-from daemon.repositories.job_queue import JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobRepository
 from daemon.repositories.job_queue.models import JobItem, JobStatus
 
 
@@ -42,7 +42,7 @@ class TestOrphanRecoveryGuard:
 
         # Verify it's PROCESSING
         retrieved = repository.get(job.job_id)
-        assert retrieved.status == JobStatus.PROCESSING.value
+        assert retrieved.admission_state == AdmissionState.ACTIVE.value
 
         # TASK jobs should remain in PROCESSING for orphan recovery
         assert job.job_type == "task"
@@ -65,4 +65,4 @@ class TestStatusEndpoint:
         """Test PENDING job returns 'pending' status."""
         job = repository.create(**sample_job_data)
 
-        assert job.status == JobStatus.PENDING.value
+        assert job.admission_state == AdmissionState.QUEUED.value

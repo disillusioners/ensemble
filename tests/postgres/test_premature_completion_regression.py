@@ -55,6 +55,23 @@ from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
 from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
 import pytest
 
+
+
+# >>> test-local status_to_admission (Phase 4 cleanup) <<<
+# Phase 4 cleanup removed ``status_to_admission`` from
+# ``daemon.repositories.job_queue.models``. Redefined here for test
+# seeds that derive ``admission_state`` from a ``status`` value.
+def status_to_admission(status):  # noqa: ANN001,ANN201
+    return {
+        "pending": "queued",
+        "processing": "active",
+        "paused": "active",
+        "completed": "done",
+        "failed": "done",
+        "cancelled": "done",
+        "dead_letter": "dead",
+    }.get(status, "queued")
+
 pytestmark = [
     pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests premature completion regression"),
     pytest.mark.postgres,
@@ -196,6 +213,8 @@ def _make_job(
         job_type="task",
         priority=5,
         status=status,
+
+        admission_state=status_to_admission(status),
         instance_id=instance_id,
         project_id=project_id,
         job_metadata={},

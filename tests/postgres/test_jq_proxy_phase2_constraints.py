@@ -71,6 +71,9 @@ from daemon.services.job_queue_service import JobQueueService
 from daemon.repositories.job_queue.models import (
     JobStatus,
     QueueType,
+    AdmissionState,
+    AdmissionState,
+    AdmissionState,
 )
 
 
@@ -1237,7 +1240,7 @@ async def test_real_job_start_does_not_false_fire_trigger(pg_engine, pg_reposito
     # to set up. If ``create`` ever changes its default
     # ``admission_state`` from the model default we want the test to
     # fail loudly, not silently.
-    assert job.status == JobStatus.PENDING.value
+    assert job.admission_state == AdmissionState.QUEUED.value
     assert job.admission_state == AdmissionState.QUEUED.value
 
     # ── Act: real service-layer flow ───────────────────────────────────
@@ -1280,7 +1283,7 @@ async def test_real_job_start_does_not_false_fire_trigger(pg_engine, pg_reposito
     )
 
     # ── Assert 2: status dual-write committed ──────────────────────────
-    assert started_job.status == JobStatus.PROCESSING.value, (
+    assert started_job.admission_state == AdmissionState.ACTIVE.value, (
         f"Expected status='processing' after start_job(), got "
         f"{started_job.status!r}. The status UPDATE inside "
         "start_job_atomic_with_lock did not commit."
