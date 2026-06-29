@@ -2088,6 +2088,21 @@ class InstanceManager:
             # is a no-op on fresh databases where ``create_all`` already
             # created the column from the model.
             "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS failed_at TEXT",
+            # Phase 7c: terminal_reason discriminator. Records HOW the
+            # job terminated when ``admission_state='done'`` (one of
+            # ``"completed"`` / ``"failed"`` / ``"cancelled"`` /
+            # ``"aborted"``); NULL for non-terminal rows. The Phase 5
+            # column drop collapsed the 7-state legacy ``status`` onto
+            # a 4-value ``admission_state``, which made cancelled /
+            # failed / completed indistinguishable from the queue
+            # side. ``terminal_reason`` restores the discrimination
+            # for the resolver read path (``work_resolver._job_to_record``).
+            # Nullable, no default — pre-7c rows backfill as NULL and the
+            # resolver falls back to the ``admission_state`` map for
+            # backward compatibility. ADD COLUMN IF NOT EXISTS is a
+            # no-op on fresh databases where ``create_all`` already
+            # created the column from the model.
+            "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS terminal_reason TEXT",
             # NOTE: the four backfill UPDATE statements that reference
             # the legacy ``status`` column were moved out of the main
             # ``statements`` list below — on PostgreSQL databases where
@@ -2097,6 +2112,12 @@ class InstanceManager:
             # so legacy schemas continue to backfill and post-Phase-5
             # schemas no-op silently. See ``legacy_status_backfill`` below.
             "CREATE INDEX IF NOT EXISTS idx_job_queue_admission_state ON job_queue_items(admission_state)",
+            # Phase 7c: sparse index on ``terminal_reason`` for the
+            # work-resolver's ``WHERE terminal_reason = ...`` predicates
+            # used to disambiguate ``admission_state='done'`` rows by cause.
+            # IF NOT EXISTS makes this idempotent on re-run and on fresh
+            # databases where ``create_all`` already created the index.
+            "CREATE INDEX IF NOT EXISTS idx_job_queue_terminal_reason ON job_queue_items(terminal_reason)",
             # ── Phase 2 invariant triggers (plan §8.7.1) ─────────────
             # First CONSTRAINT TRIGGER / DEFERRABLE usage in the
             # codebase (no precedent). Enforces the
@@ -2143,7 +2164,14 @@ class InstanceManager:
         legacy_status_backfill = [
             "UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' AND admission_state = 'queued'",
             "UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processing', 'paused') AND admission_state = 'queued'",
-            "UPDATE job_queue_items SET admission_state = 'done' WHERE status IN ('completed', 'failed', 'cancelled') AND admission_state = 'queued'",
+            # Phase 7c: populate ``terminal_reason`` alongside
+            # ``admission_state='done'`` so legacy rows that survive
+            # the column drop carry the discriminator the Phase 7c
+            # ``JobResponse`` resolver reads. The status→reason
+            # mapping mirrors ``_derive_terminal_reason``.
+            "UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WHERE status = 'completed' AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WHERE status = 'failed' AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'done', terminal_reason = status WHERE status = 'cancelled' AND admission_state = 'queued'",
             "UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter' AND admission_state = 'queued'",
         ]
         for stmt in legacy_status_backfill:
@@ -2341,6 +2369,13 @@ class InstanceManager:
                         # by the guard below and rewritten to
                         # ``admission_state='done'``.
                         admission_state=AdmissionState.DONE.value,
+                        # Phase 7c: this migration cancels MESSAGE
+                        # JobItems, so the discriminator is always
+                        # ``'cancelled'``. Mirrors the D13
+                        # ``cancel_message`` ``error_message`` so any
+                        # reader that looks at either field gets the
+                        # same semantic.
+                        terminal_reason="cancelled",
                         cancelled_at=datetime.now(timezone.utc).isoformat(),
                         error_message=cancel_message,
                     )

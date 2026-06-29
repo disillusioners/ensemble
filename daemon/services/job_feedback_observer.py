@@ -2445,6 +2445,20 @@ class JobFeedbackObserver:
                     "admission_state": AdmissionState.DONE.value,
                     "completed_at": now,
                 }
+                # Phase 7c: terminal_reason discriminator. Maps the
+                # observer's ``terminal_status`` (which already
+                # normalises COMPLETED → 'completed' / ERROR → 'failed'
+                # at the top of the method) onto the corresponding
+                # ``terminal_reason``. The resolver
+                # (``work_resolver._job_to_record``) prioritises
+                # ``terminal_reason`` over ``Instance.status`` for
+                # ``admission_state='done'`` rows — so writing it
+                # here is what callers will see. ``aborted`` is
+                # never written by this path (the observer fires on
+                # natural completion / error, not on instance
+                # terminate cascade; that path lives in
+                # ``instance_lifecycle._terminate_instance_db_sync``).
+                update_values["terminal_reason"] = to_status
                 if terminal_status == InstanceStatus.COMPLETED.value:
                     summary = result_summary or "Job completed (no agent response captured)"
                     update_values["result_summary"] = summary

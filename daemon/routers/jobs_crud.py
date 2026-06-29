@@ -192,6 +192,19 @@ def _job_to_response(
         retry_count=retry_count,
         moved_to_dlq_at=moved_to_dlq_at,
         deleted_at=job.deleted_at,
+        # Phase 7c: terminal_reason discriminator. Read directly
+        # from the JobItem — it's a queue-side field, not part of
+        # the resolver's work-record view-model. Pre-7c rows have
+        # ``None`` here (the column didn't exist); the resolver's
+        # ``done → completed`` lossy fallback handles those rows
+        # correctly. ``status`` above already carries the
+        # canonicalised value (``"cancelled"`` for an aborted job,
+        # etc.) — ``terminal_reason`` is the discriminator that
+        # distinguishes ``cancelled`` from ``completed`` at the
+        # source. ``getattr`` with ``None`` default keeps this
+        # backward-compatible with mocks / older test fixtures that
+        # construct ``JobItem`` rows without the column.
+        terminal_reason=getattr(job, "terminal_reason", None),
     )
 
 

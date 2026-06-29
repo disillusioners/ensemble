@@ -1820,11 +1820,27 @@ class InstanceLifecycleService:
                 # dropped from the JobItem model — the execution-side
                 # timing/error/result state now lives on the
                 # ``Instance`` (and is surfaced through the resolver).
-                # Only ``admission_state`` is updated here.
+                # Only ``admission_state`` and ``terminal_reason``
+                # (Phase 7c) are updated here.
+                #
+                # Phase 7c: ``terminal_reason='aborted'`` distinguishes
+                # an instance-terminate cascade from a user-initiated
+                # ``cancel_job`` (which writes ``'cancelled'``). Without
+                # this column the resolver would surface these rows as
+                # ``'cancelled'`` (via ``_ADMISSION_TO_LEGACY_STATUS``)
+                # because the lossy ``done → completed`` default would
+                # carry over — but a cancelled job that was killed by
+                # its parent's terminate cascade is semantically an
+                # abort, not a clean cancel. The resolver
+                # (``work_resolver._job_to_record``) prioritises
+                # ``terminal_reason`` over ``Instance.status`` for
+                # ``admission_state='done'`` rows, so writing
+                # ``'aborted'`` here is what callers will see.
                 session.execute(
                     text(
                         "UPDATE job_queue_items "
-                        "SET admission_state = :done_admission "
+                        "SET admission_state = :done_admission, "
+                        "    terminal_reason = :aborted_reason "
                         "WHERE instance_id = :iid "
                         "  AND admission_state IN ("
                         "    :queued_admission, :active_admission"
@@ -1833,6 +1849,7 @@ class InstanceLifecycleService:
                     {
                         "iid": instance_id,
                         "done_admission": AdmissionState.DONE.value,
+                        "aborted_reason": "aborted",
                         "queued_admission": AdmissionState.QUEUED.value,
                         "active_admission": AdmissionState.ACTIVE.value,
                     },

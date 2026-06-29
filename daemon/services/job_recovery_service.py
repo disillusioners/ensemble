@@ -225,6 +225,14 @@ class JobRecoveryService:
         # The recovery path never retries (the job's instance is
         # gone/terminal, so retrying would loop on the same dead
         # instance) — NO_RETRY is correct.
+        #
+        # Phase 7c: ``target_status='failed'`` is passed so the
+        # boundary writes ``terminal_reason='failed'`` (via the
+        # ``_derive_terminal_reason`` mapping on ``target_status``).
+        # Without the override the boundary would derive the status
+        # from a now-missing/terminal Instance, which can land on
+        # ``'cancelled'`` (TERMINATED Instance) — wrong, the
+        # recovery path is failing an orphan, not cancelling it.
         try:
             if self._job_queue_service is not None:
                 # Preferred path: use the boundary on JobQueueService.
@@ -233,6 +241,7 @@ class JobRecoveryService:
                     decision=Decision.NO_RETRY,
                     job_id=job.job_id,
                     error_message=error_message,
+                    target_status="failed",
                 )
                 if canonical_job_id is not None:
                     stats["recovered"] += 1

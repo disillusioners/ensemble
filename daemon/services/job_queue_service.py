@@ -1319,7 +1319,23 @@ class JobQueueService:
                         canonical_instance_id
                     )
 
-                update_kwargs: dict[str, Any] = {}
+                # Phase 7c: terminal_reason discriminator for
+                # ``admission_state='done'`` rows. Computed here from
+                # ``derived_status`` (the same source the legacy
+                # ``status`` mirror used to be derived from) so a
+                # completed-by-Instance-status is recorded as
+                # ``"completed"``, an error/failed-by-Instance-status
+                # as ``"failed"``, and a cancel path (always
+                # ``target_status='cancelled'``) as ``"cancelled"``.
+                # RETRY and DEAD_LETTER branches deliberately skip
+                # this — their target admission states are 'queued'
+                # and 'dead' respectively, not 'done', so
+                # terminal_reason stays unset (NULL).
+                terminal_reason = self._derive_terminal_reason(
+                    derived_status
+                )
+
+                update_kwargs: dict[str, Any] = {"terminal_reason": terminal_reason}
                 if derived_status == "completed":
                     update_kwargs["result_summary"] = (
                         result_summary or "Job completed successfully"
@@ -1462,6 +1478,36 @@ class JobQueueService:
             return "failed"
         if instance.status == InstanceStatus.TERMINATED.value:
             return "cancelled"
+        return "failed"
+
+    def _derive_terminal_reason(self, derived_status: str) -> str:
+        """Map a derived terminal status to the Phase 7c ``terminal_reason`` discriminator.
+
+        The mapping is the natural one-to-one correspondence between
+        the legacy ``status`` mirror and ``terminal_reason``:
+
+          * ``completed`` → ``"completed"``
+          * ``failed``    → ``"failed"``
+          * ``cancelled`` → ``"cancelled"``
+
+        Anything else falls back to ``"failed"`` (matches the
+        ``_derive_terminal_status_from_instance`` fallback) so a
+        future terminal spelling the discriminator hasn't been taught
+        about still writes a valid discriminator value.
+
+        Args:
+            derived_status: The terminal status string produced by
+                :meth:`_derive_terminal_status_from_instance` (or
+                supplied as ``target_status``).
+
+        Returns:
+            The corresponding ``terminal_reason`` discriminator value.
+        """
+        if derived_status == "completed":
+            return "completed"
+        if derived_status == "cancelled":
+            return "cancelled"
+        # "failed" or any future unknown terminal spelling.
         return "failed"
 
     async def _get_concurrency_limit(self, queue_id: str) -> int:
@@ -2320,7 +2366,17 @@ class JobQueueService:
                     derived_status = self._derive_terminal_status_from_instance(
                         canonical_instance_id
                     )
-                update_kwargs: dict[str, Any] = {}
+                # Phase 7c: terminal_reason discriminator mirrors the
+                # async twin — see ``_finalize_terminal`` for the full
+                # rationale. Computed from ``derived_status`` so a
+                # completed-by-Instance-status is recorded as
+                # ``"completed"``, an error/failed-by-Instance-status as
+                # ``"failed"``, and a cancel path (always
+                # ``target_status='cancelled'``) as ``"cancelled"``.
+                terminal_reason = self._derive_terminal_reason(
+                    derived_status
+                )
+                update_kwargs: dict[str, Any] = {"terminal_reason": terminal_reason}
                 if derived_status == "completed":
                     update_kwargs["result_summary"] = (
                         result_summary or "Job completed successfully"

@@ -78,7 +78,24 @@ class JobResponse(BaseModel):
     retry_count: int | None = Field(default=None, description="Number of retries attempted before moving to DLQ")
     moved_to_dlq_at: str | None = Field(default=None, description="Timestamp when job was moved to DLQ")
     deleted_at: str | None = Field(default=None, description="Timestamp when job was soft-deleted")
-    
+    # Phase 7c: terminal_reason discriminator. Records HOW the job
+    # terminated when ``admission_state='done'`` — one of
+    # ``"completed"`` / ``"failed"`` / ``"cancelled"`` / ``"aborted"``.
+    # ``None`` for non-terminal jobs and for pre-7c rows where the
+    # column was never populated (the resolver falls back to the lossy
+    # legacy ``done → completed`` mapping for those rows). The
+    # ``status`` field above carries the canonical work-surface
+    # status; ``terminal_reason`` is the queue-side discriminator that
+    # distinguishes ``cancelled`` from ``completed`` at the source.
+    terminal_reason: str | None = Field(
+        default=None,
+        description=(
+            "Phase 7c: how the job terminated (completed/failed/"
+            "cancelled/aborted). None for non-terminal jobs and pre-7c "
+            "rows."
+        ),
+    )
+
     model_config = {
         "json_schema_extra": {
             "example": {
@@ -94,6 +111,7 @@ class JobResponse(BaseModel):
                 "completed_at": "2025-03-15T10:05:00Z",
                 "result_summary": "Fixed login bug - added token refresh logic",
                 "error_message": None,
+                "terminal_reason": "completed",
                 "position": None,
                 "message": "Job completed successfully"
             }

@@ -1102,24 +1102,49 @@ class WorkResolverService:
         # jobs have ``admission_state='dead'``.
         if job.admission_state == AdmissionState.DEAD.value:
             status = "dead_letter"
+        elif job.admission_state == AdmissionState.DONE.value:
+            # Phase 7c: terminal_reason discriminator. ``done`` rows
+            # cover three legacy terminal states — completed / failed
+            # / cancelled — and a fourth instance-cascade value
+            # (``"aborted"``). The lossy ``_ADMISSION_TO_LEGACY_STATUS``
+            # map collapses all of them onto ``"completed"``. The
+            # ``Instance.status`` source (used below for non-DONE
+            # states) is unreliable for ``done`` rows because the
+            # instance may have completed naturally before a cancel
+            # signal arrived (``Instance.status='completed'`` but the
+            # job is semantically cancelled) or may have been
+            # terminated by the instance-cascade (``Instance.status``
+            # reflects the terminate action, not the cause). So for
+            # ``done`` rows we source status from ``terminal_reason``
+            # directly, with a backward-compat fallback to the lossy
+            # legacy map for pre-7c rows where ``terminal_reason IS NULL``.
+            terminal_reason = getattr(job, "terminal_reason", None)
+            if terminal_reason:
+                status = canonicalize_status(terminal_reason)
+            else:
+                # Pre-7c rows: ``terminal_reason`` is NULL. Fall back
+                # to the lossy legacy ``done → completed`` mapping
+                # so existing API consumers continue to see a valid
+                # status string (the original Phase 5 behaviour).
+                status = canonicalize_status(
+                    _ADMISSION_TO_LEGACY_STATUS.get(
+                        job.admission_state, "pending"
+                    )
+                )
         else:
-            # Phase 1: source execution status from the joined Instance
-            # when possible. ``_lookup_instance`` is defensive —
-            # returns ``None`` for a missing instance row (e.g.
-            # instance was deleted) or a transient DB error, in which
-            # case we fall back to the JobItem mirror column so the
-            # read still produces a valid status. The status-drift
-            # warning at L692-712 continues to fire on this fallback
-            # path because the JobItem mirror may disagree with the
-            # canonical status the resolver would otherwise report;
-            # per the plan (DoD item 5), the warning is deleted in
-            # Phase 4 when the mirror stops being written.
+            # Non-terminal admission states (``queued`` / ``active``):
+            # source execution status from the joined Instance when
+            # possible. ``_lookup_instance`` is defensive — returns
+            # ``None`` for a missing instance row (e.g. instance was
+            # deleted) or a transient DB error, in which case we fall
+            # back to the JobItem mirror column so the read still
+            # produces a valid status.
             #
             # Two cases funnel through the same fallback:
             #
             # * ``job.instance_id is None`` — job is still in the
-            #   queue, not yet dequeued to an instance. The JobItem
-            #   ``status`` mirror is the only signal we have; we must
+            #   queue, not yet dequeued to an instance. The
+            #   ``admission_state`` is the only signal we have; we
             #   canonicalize it instead of hardcoding ``"pending"``
             #   (the previous behaviour discarded the real status for
             #   already-terminal jobs that had not yet been dispatched
@@ -1129,7 +1154,7 @@ class WorkResolverService:
             #   detection loop).
             # * ``job.instance_id is not None`` but the Instance row
             #   is missing (orphan / deleted) — same fallback to the
-            #   JobItem mirror, canonicalized.
+            #   ``admission_state`` map, canonicalized.
             if job.instance_id is not None:
                 if instance is None:
                     instance = self._lookup_instance(job.instance_id)

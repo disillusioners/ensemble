@@ -97,6 +97,18 @@ _STATUS_CANONICAL_MAP: Final[dict[str, str]] = {
     # column is no longer written, so a reverse lookup on the legacy
     # spelling is no longer needed.
     "dead": "dead_letter",
+    # Phase 7c: ``terminal_reason`` discriminator source values. The
+    # discriminator records HOW a job terminated when
+    # ``admission_state='done'``. ``"aborted"`` collapses onto
+    # ``"cancelled"`` because the work-surface vocabulary has no
+    # distinct "aborted" state — an aborted job (killed by its
+    # parent's instance-terminate cascade) is semantically a
+    # cancellation from the work-record consumer's POV. ``completed``
+    # / ``failed`` / ``cancelled`` map to themselves (they're already
+    # in the canonical vocabulary). See
+    # ``work_resolver._job_to_record`` — these are the canonical
+    # targets for ``canonicalize_status(terminal_reason)``.
+    "aborted": "cancelled",
 }
 
 

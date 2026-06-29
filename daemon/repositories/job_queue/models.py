@@ -265,6 +265,13 @@ class JobItem(SQLModel, table=True):
             sqlite_where=text("idempotency_key IS NOT NULL AND deleted_at IS NULL"),
             postgresql_where=text("idempotency_key IS NOT NULL AND deleted_at IS NULL"),
         ),
+        # Phase 7c: ``terminal_reason`` discriminator. Supports
+        # ``WHERE terminal_reason = ...`` predicates used by the
+        # work-resolver read path when ``admission_state='done'``
+        # needs to be disambiguated by cause (cancelled vs completed
+        # vs aborted vs failed). Nullable so the index is sparse for
+        # non-terminal jobs. Matches the model field's ``index=True``.
+        Index("idx_job_queue_terminal_reason", "terminal_reason"),
     )
 
     # Primary identification
@@ -327,6 +334,23 @@ class JobItem(SQLModel, table=True):
     # Read by JobRetryEngine. The plan deferred full removal to a
     # future batch that migrates the retry engine off this marker.
     failed_at: str | None = Field(default=None)
+    # Phase 7c: terminal reason discriminator. Records HOW the job
+    # terminated when ``admission_state='done'``. One of:
+    # ``"completed"`` (natural finish), ``"failed"`` (terminal error
+    # not retried), ``"cancelled"`` (explicit cancel via
+    # ``cancel_job`` / route), or ``"aborted"`` (instance-terminated
+    # cascade). ``None`` for non-terminal jobs (``queued``, ``active``,
+    # ``dead``). The Phase 5 column drop collapsed the 7-state legacy
+    # ``status`` vocabulary onto a 4-value ``admission_state``, which
+    # made cancelled/failed/completed indistinguishable from the
+    # queue side. ``terminal_reason`` restores that discrimination for
+    # the resolver read path (``_job_to_record``) — the
+    # ``Instance.status`` carries the same info but ``terminal_reason``
+    # takes priority because it records the cause as observed by the
+    # terminal-write boundary, which may differ from a natural
+    # ``Instance.status='completed'`` (e.g. an instance that finished
+    # naturally before a cancel signal arrived).
+    terminal_reason: str | None = Field(default=None, index=True)
 
     # Optimistic locking version. SQLAlchemy's version_id_col makes every
     # ORM-flushed UPDATE / DELETE on this row append `AND version = :expected`
@@ -357,6 +381,12 @@ class JobItem(SQLModel, table=True):
         ``Instance`` via the resolver (see WorkResolver) — not
         from this row. Callers that need execution state must
         resolve the work record explicitly.
+
+        Phase 7c: ``terminal_reason`` is included so consumers that
+        read raw ``JobItem`` rows (instead of going through
+        ``_job_to_record`` / ``_job_to_response``) can still
+        distinguish cancelled / aborted / failed from completed at
+        ``admission_state='done'``.
         """
         return {
             "job_id": self.job_id,
@@ -378,6 +408,7 @@ class JobItem(SQLModel, table=True):
             "job_type": self.job_type,
             "next_retry_at": self.next_retry_at,
             "failed_at": self.failed_at,
+            "terminal_reason": self.terminal_reason,
         }
 
 

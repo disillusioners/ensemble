@@ -225,8 +225,15 @@ class TestCancelProcessingJob:
         # on ``finalize_active_to_done`` so a regression that re-routes
         # active-cancel back through the atomic ``cancel_job`` surfaces
         # here first.
+        #
+        # Phase 7c: ``terminal_reason='cancelled'`` is also written
+        # so the resolver surfaces ``cancelled`` (not the lossy legacy
+        # ``done → completed``) for these rows. Pin both kwargs.
         mock_repository.finalize_active_to_done.assert_called_once_with(
-            "job-dead", "cancelled", error_message="Cancelled"
+            "job-dead",
+            "cancelled",
+            terminal_reason="cancelled",
+            error_message="Cancelled",
         )
 
     @pytest.mark.asyncio
@@ -274,8 +281,14 @@ class TestCancelProcessingJob:
         # boundary handles the active → done transition; the
         # ``terminate_instance`` cascade only runs when the instance
         # is alive (which this test deliberately excludes).
+        #
+        # Phase 7c: terminal_reason='cancelled' kwarg also pinned
+        # so a regression that drops the discriminator surfaces here.
         mock_repository.finalize_active_to_done.assert_called_once_with(
-            "job-terminal", "cancelled", error_message="Cancelled"
+            "job-terminal",
+            "cancelled",
+            terminal_reason="cancelled",
+            error_message="Cancelled",
         )
 
 
@@ -608,8 +621,14 @@ class TestCancelNoInstanceManager:
         # ``active → done`` transition. The atomic ``repository.cancel_job``
         # is NOT used for active jobs even when the instance manager
         # is absent — pin the new contract.
+        #
+        # Phase 7c: terminal_reason='cancelled' kwarg also pinned
+        # so a regression that drops the discriminator surfaces here.
         mock_repository.finalize_active_to_done.assert_called_once_with(
-            "job-no-manager", "cancelled", error_message="Cancelled"
+            "job-no-manager",
+            "cancelled",
+            terminal_reason="cancelled",
+            error_message="Cancelled",
         )
 
 

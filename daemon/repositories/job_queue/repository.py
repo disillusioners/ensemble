@@ -963,6 +963,12 @@ SET admission_state = 'queued',
                     # authority). admission_state moves to QUEUED
                     # directly.
                     admission_state=AdmissionState.QUEUED.value,
+                    # Phase 7c: clear ``terminal_reason`` so a
+                    # retried-failed job doesn't leak the previous
+                    # ``'failed'`` discriminator into its ``queued``
+                    # lifetime (which would surface via ``JobResponse``
+                    # until the next failure resets it).
+                    terminal_reason=None,
                     retry_count=JobItem.retry_count + 1,
                     next_retry_at=next_retry_at,
                     failed_at=None,
@@ -1014,6 +1020,7 @@ SET admission_state = 'queued',
         derived_status: str,
         result_summary: str | None = None,
         error_message: str | None = None,
+        terminal_reason: str | None = None,
     ) -> JobItem | None:
         """Phase 4 cleanup (Job as Queue Proxy): transition ``active → done``.
 
@@ -1027,10 +1034,7 @@ SET admission_state = 'queued',
 
             UPDATE job_queue_items
             SET admission_state = 'done',
-                completed_at    = :now,
-                result_summary  = :result_summary,    -- COMPLETED path
-                error_message   = :error_message,     -- ERROR/TERMINATED path
-                cancelled_at    = :cancelled_at       -- TERMINATED path
+                terminal_reason  = :terminal_reason
             WHERE job_id = :job_id
               AND admission_state = 'active'
             RETURNING *
@@ -1054,6 +1058,14 @@ SET admission_state = 'queued',
                 overwrite).
             error_message: Filled for ERROR/TERMINATED; same rules as
                 ``result_summary``.
+            terminal_reason: Phase 7c — records HOW the job terminated
+                (``"completed"`` / ``"failed"`` / ``"cancelled"`` /
+                ``"aborted"``). ``None`` means "no opinion" — the
+                column keeps its prior value. The caller
+                (``_finalize_terminal``) is responsible for deriving
+                the right value; this method does NOT infer one from
+                ``derived_status`` so a misuse can't write
+                ``"cancelled"`` for a natural completion.
 
         Returns:
             The updated ``JobItem`` after the UPDATE commits, or
@@ -1062,12 +1074,13 @@ SET admission_state = 'queued',
             (concurrent terminal transition).
         """
         now = datetime.now(timezone.utc).isoformat()
-        # Build SET clause dynamically — only ``admission_state`` is
-        # written here. The remaining terminal-side fields
-        # (``completed_at``, ``cancelled_at``, ``result_summary``,
-        # ``error_message``) live on the Instance; the JobItem mirror
-        # columns were dropped in Phase 5 so they cannot be targeted by
-        # this UPDATE.
+        # Build SET clause dynamically — only ``admission_state`` and
+        # (Phase 7c) ``terminal_reason`` are written here. The
+        # remaining terminal-side fields (``completed_at``,
+        # ``cancelled_at``, ``result_summary``, ``error_message``)
+        # live on the Instance; the JobItem mirror columns were
+        # dropped in Phase 5 so they cannot be targeted by this
+        # UPDATE.
         #
         # Phase 4 cleanup: ``status`` is no longer written here
         # (admission_state is the sole authority). The
@@ -1078,6 +1091,12 @@ SET admission_state = 'queued',
         set_values: dict[str, Any] = {
             "admission_state": AdmissionState.DONE.value,
         }
+        # Phase 7c: only set terminal_reason when the caller provided
+        # an explicit value. ``None`` means "don't touch the column"
+        # (backward-compat for callers that haven't been migrated yet
+        # — pre-7c rows keep their NULL).
+        if terminal_reason is not None:
+            set_values["terminal_reason"] = terminal_reason
 
         with SQLModelSession(self.engine) as session:
             stmt = (
@@ -1557,7 +1576,7 @@ SET admission_state = 'queued',
         statement:
 
             UPDATE job_queue_items
-            SET admission_state='done', cancelled_at=:now
+            SET admission_state='done', terminal_reason='cancelled'
             WHERE job_id=:job_id AND admission_state IN ('queued','active')
 
         On PostgreSQL, EvalPlanQual re-evaluates the admission_state-IN predicate
@@ -1571,6 +1590,11 @@ SET admission_state = 'queued',
         distinguish "job doesn't exist" (returns ``None``) from "job
         is in a non-cancellable terminal state" (raises ``ValueError``,
         preserving the original error contract).
+
+        Phase 7c: ``terminal_reason='cancelled'`` is written in the same
+        UPDATE so the resolver can surface ``cancelled`` (not the lossy
+        legacy ``completed`` default) for ``admission_state='done'``
+        rows that came through this path.
 
         Args:
             job_id: Job identifier.
@@ -1617,6 +1641,12 @@ SET admission_state = 'queued',
                     # the Instance side (Instance.status /
                     # Instance.terminated_at).
                     admission_state=AdmissionState.DONE.value,
+                    # Phase 7c: discriminator for ``done`` rows. The
+                    # resolver surfaces ``cancelled`` here rather than
+                    # ``completed`` (the lossy legacy default). See
+                    # ``work_resolver._job_to_record`` — terminal_reason
+                    # takes priority for ``admission_state='done'``.
+                    terminal_reason="cancelled",
                 )
             )
             result = session.exec(stmt)
