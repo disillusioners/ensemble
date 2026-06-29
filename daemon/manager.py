@@ -2079,6 +2079,15 @@ class InstanceManager:
             # updated, so re-running does not clobber rows already
             # written by the dual-write code path.
             "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS admission_state TEXT NOT NULL DEFAULT 'queued'",
+            # ``failed_at`` is retained as the live retry marker (Phase 5
+            # deviation; JobRetryEngine reads ``job.failed_at is None``).
+            # The Phase 5 drop helper intentionally does NOT drop it, but
+            # live PG databases created/migrated before the model re-added
+            # it would otherwise be missing the column and crash any SELECT
+            # that projects ``JobItem.failed_at``. ADD COLUMN IF NOT EXISTS
+            # is a no-op on fresh databases where ``create_all`` already
+            # created the column from the model.
+            "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS failed_at TEXT",
             # NOTE: the four backfill UPDATE statements that reference
             # the legacy ``status`` column were moved out of the main
             # ``statements`` list below — on PostgreSQL databases where
