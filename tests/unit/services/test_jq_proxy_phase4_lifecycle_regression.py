@@ -458,7 +458,7 @@ class TestFullJobLifecycle:
         _start_job(engine, job_repo, job.job_id, instance_id="inst-1")
 
         # Pre-fail via fail_job (Phase 2 dual-write mirror).
-        failed = job_repo.fail_job(job.job_id,
+        failed = job_repo.fail_job(job.job_id, error_message="")
         assert failed is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
@@ -513,7 +513,7 @@ class TestFullJobLifecycle:
 
         # Use ``fail_job`` first so the row matches the legacy
         # ``status='failed'`` eligibility branch (default arg).
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
 
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
@@ -539,7 +539,7 @@ class TestFullJobLifecycle:
         _start_job(engine, job_repo, job.job_id, instance_id="inst-1")
 
         # fail → DLQ
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -765,15 +765,14 @@ class TestErrorReportingFlow:
 
         # Pre-fail so the row matches the legacy
         # eligibility check.
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
 
         # Now should_retry returns True.
         post_fail_job = _refresh(engine, job.job_id)
         assert retry_engine.should_retry(
             post_fail_job, queue_repo.get(post_fail_job.queue_id), default_config
         ) is True, (
-            "should_retry must return True for
-            "retry_count < max_retries"
+            "should_retry must return True for retry_count < max_retries"
         )
 
         # Drive the lower-level retry path directly — this is the
@@ -935,7 +934,7 @@ class TestJobRecoveryOnRestart:
         # Simulate restart, then run the recovery boundary as
         # ``_fail_orphaned_job`` does (see
         # daemon/services/job_recovery_service.py:225).
-        canonical_job_id, final_status = asyncio.get_event_loop().run_until_complete(
+        canonical_job_id, final_status = asyncio.run(
             job_queue_service._finalize_terminal(
                 instance_id="orphan-inst",
                 decision=Decision.NO_RETRY,
@@ -944,7 +943,12 @@ class TestJobRecoveryOnRestart:
             )
         )
         assert canonical_job_id == job.job_id
-        assert final_status == AdmissionState.DONE.value
+        # ``final_status`` is the LEGACY JobStatus mirror (not the
+        # canonical admission_state). For an orphan whose Instance
+        # has no terminal status, the derivation defaults to
+        # ``JobStatus.FAILED``. The admission_state flip is
+        # asserted below on the refetched row.
+        assert final_status == JobStatus.FAILED.value
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
@@ -962,7 +966,7 @@ class TestJobRecoveryOnRestart:
         _start_job(engine, job_repo, job.job_id, instance_id="orphan-inst")
 
         # First finalize: real terminal transition.
-        canonical_job_id_1, final_status_1 = asyncio.get_event_loop().run_until_complete(
+        canonical_job_id_1, final_status_1 = asyncio.run(
             job_queue_service._finalize_terminal(
                 instance_id="orphan-inst",
                 decision=Decision.NO_RETRY,
@@ -971,13 +975,15 @@ class TestJobRecoveryOnRestart:
             )
         )
         assert canonical_job_id_1 == job.job_id
-        assert final_status_1 == AdmissionState.DONE.value
+        # Legacy JobStatus mirror — see test_recovery_boundary_*
+        # above for the orphan-derives-to-FAILED contract.
+        assert final_status_1 == JobStatus.FAILED.value
 
         # Second finalize (simulating a concurrent recovery writer
         # that flipped the row concurrently): the boundary sees
         # admission_state != 'active' and returns (job_id, "") —
         # the empty final_status signals a no-op.
-        canonical_job_id_2, final_status_2 = asyncio.get_event_loop().run_until_complete(
+        canonical_job_id_2, final_status_2 = asyncio.run(
             job_queue_service._finalize_terminal(
                 instance_id="orphan-inst",
                 decision=Decision.NO_RETRY,
@@ -1077,9 +1083,16 @@ class TestPhase4CrossCuttingInvariants:
         # admission_state='active' (Phase 2 dual-write mapping),
         # then calling finalize_active_to_done. Phase 4's
         # admission_state-keyed guard must accept the row.
+        # Phase 5 dropped the ``status`` column entirely, so the
+        # legacy "flip status to PAUSED while keeping
+        # admission_state='active'" exercise is no longer
+        # expressible. The Phase 4 contract — that
+        # ``finalize_active_to_done`` matches on
+        # ``admission_state='active'`` regardless of any other
+        # field — is exercised here by re-asserting the row's
+        # ``admission_state='active'`` and calling the boundary.
         with Session(engine) as s:
             row = s.exec(select(JobItem).where(JobItem.job_id == job.job_id)).one()
-            row.status = AdmissionState.ACTIVE.value
             row.admission_state = AdmissionState.ACTIVE.value
             s.add(row)
             s.commit()
@@ -1087,12 +1100,11 @@ class TestPhase4CrossCuttingInvariants:
         finalized = job_repo.finalize_active_to_done(
             job.job_id,
             derived_status=AdmissionState.DONE.value,
-
         )
         assert finalized is not None, (
             "finalize_active_to_done must match on "
-            "admission_state='active' (not
-            "the Phase 4 write-authority flip"
+            "admission_state='active' (not the legacy status "
+            "column) — Phase 4 write-authority flip"
         )
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
@@ -1123,7 +1135,7 @@ class TestPhase4CrossCuttingInvariants:
         # need
         # pre-fail then retry — and verify the from_admission_state
         # parameter is consulted.
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         retried = job_repo.atomic_retry(
             job_id=job.job_id,
             max_retries=3,
@@ -1146,7 +1158,7 @@ class TestPhase4CrossCuttingInvariants:
         job2 = _make_job(engine, job_repo)
         job_repo.update(job2.job_id, max_retries=3)
         _start_job(engine, job_repo, job2.job_id, instance_id="inst-2")
-        job_repo.fail_job(job2.job_id,
+        job_repo.fail_job(job2.job_id, error_message="")
 
         retried_again = job_repo.atomic_retry(
             job_id=job2.job_id,

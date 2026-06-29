@@ -466,7 +466,7 @@ class TestJobComplete:
         """
         job = _make_job(engine, job_repo, project_id="proj-c")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.complete_job(job.job_id,
+        job_repo.complete_job(job.job_id)
 
         count = job_repo.count_active_jobs_by_project("proj-c")
         assert count == 0
@@ -491,9 +491,9 @@ class TestJobComplete:
         )
 
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.complete_job(job.job_id,
+        job_repo.complete_job(job.job_id)
         job_repo.start_job(job2.job_id, instance_id="inst-2")
-        job_repo.complete_job(job2.job_id,
+        job_repo.complete_job(job2.job_id)
 
         assert job.job_id not in _job_ids(
             job_repo.list_pending_by_project("proj-c")
@@ -518,12 +518,13 @@ class TestJobFail:
         """``fail_job`` writes ``status='failed', admission_state='done'``."""
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        failed = job_repo.fail_job(job.job_id,
+        failed = job_repo.fail_job(job.job_id, error_message="")
         assert failed is not None
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
+
     def test_failed_job_not_counted_in_active(
         self, engine, job_repo: JobRepository
     ):
@@ -532,7 +533,7 @@ class TestJobFail:
         """
         job = _make_job(engine, job_repo, project_id="proj-d")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
 
         assert job_repo.count_active_jobs_by_project("proj-d") == 0
 
@@ -542,7 +543,7 @@ class TestJobFail:
         """Failed jobs must NOT appear in ``find_processing_jobs``."""
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
 
         assert job.job_id not in _job_ids(job_repo.find_processing_jobs())
 
@@ -757,7 +758,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
 
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
@@ -776,7 +777,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -791,7 +792,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -807,7 +808,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -831,7 +832,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -868,7 +869,7 @@ class TestRetryFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
 
         past = (
             datetime.now(timezone.utc) - timedelta(seconds=10)
@@ -891,7 +892,7 @@ class TestRetryFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         past = (
             datetime.now(timezone.utc) - timedelta(seconds=10)
         ).isoformat()
@@ -914,7 +915,7 @@ class TestRetryFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         past = (
             datetime.now(timezone.utc) - timedelta(seconds=10)
         ).isoformat()
@@ -948,7 +949,7 @@ class TestRetryFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         future = (
             datetime.now(timezone.utc) + timedelta(hours=1)
         ).isoformat()
@@ -974,7 +975,7 @@ class TestRetryFlow:
 
         # Round 1: start, fail, retry (succeeds, retry_count=1).
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         first = job_repo.atomic_retry(
             job_id=job.job_id, max_retries=1, next_retry_at=past
         )
@@ -982,7 +983,7 @@ class TestRetryFlow:
 
         # Round 2: start, fail, retry (refuses — retry_count == max_retries).
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
         second = job_repo.atomic_retry(
             job_id=job.job_id, max_retries=1, next_retry_at=past
         )
@@ -1084,7 +1085,7 @@ class TestCrossCuttingInvariants:
         ``clear_terminal_job_locks`` on a freshly-queued job and
         asserting the job's lock (if any) is preserved. The
         in-memory SQLite fixture has no ``job_locks`` rows for queued
-        jobs (locks are inserted atomically with start on PostgreSQL,
+        jobs (locks are inserted atomically with start on PostgreSQL
         triggered by the PG guard), so the practical assertion here
         is that the subquery SQL text matches the Phase 3 contract —
         ``admission_state IN ('queued','active')``.
@@ -1110,11 +1111,11 @@ class TestCrossCuttingInvariants:
         # Build a small scenario.
         completed_job = _make_job(engine, job_repo, project_id="proj-c3")
         job_repo.start_job(completed_job.job_id, instance_id="inst-1")
-        job_repo.complete_job(completed_job.job_id,
+        job_repo.complete_job(completed_job.job_id)
 
         dead_job = _make_job(engine, job_repo, project_id="proj-c3")
         job_repo.start_job(dead_job.job_id, instance_id="inst-1")
-        job_repo.fail_job(dead_job.job_id,
+        job_repo.fail_job(dead_job.job_id, error_message="")
         dlq_service.move_to_dlq_standalone(
             job_id=dead_job.job_id, reason="MAX_RETRIES"
         )
@@ -1170,11 +1171,11 @@ class TestCrossCuttingInvariants:
         # Job 4: pending → processing → completed.
         j4 = _make_job(engine, job_repo, project_id="proj-x")
         job_repo.start_job(j4.job_id, instance_id="inst-1")
-        job_repo.complete_job(j4.job_id,
+        job_repo.complete_job(j4.job_id)
         # Job 5: pending → processing → failed → DLQ → replayed (back to queued).
         j5 = _make_job(engine, job_repo, project_id="proj-x")
         job_repo.start_job(j5.job_id, instance_id="inst-1")
-        job_repo.fail_job(j5.job_id,
+        job_repo.fail_job(j5.job_id, error_message="")
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=j5.job_id, reason="MAX_RETRIES"
         )
@@ -1221,7 +1222,7 @@ class TestCrossCuttingInvariants:
         # done (completed).
         j_done = _make_job(engine, job_repo, project_id=proj)
         job_repo.start_job(j_done.job_id, instance_id="inst-done")
-        job_repo.complete_job(j_done.job_id,
+        job_repo.complete_job(j_done.job_id)
         # paused (still active in admission).
         j_paused = _make_job(engine, job_repo, project_id=proj)
         job_repo.start_job(j_paused.job_id, instance_id="inst-paused")

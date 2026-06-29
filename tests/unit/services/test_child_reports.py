@@ -191,7 +191,7 @@ def _seed_root_instance(
             agent_name="leader",
             agent_dir="/tmp/leader",
             parent_id=None,
-
+            status=status,
             version=1,
             instance_metadata={},
         )
@@ -442,16 +442,15 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
         message alone — the MESSAGE-job guard is gone).
         """
         service = _build_child_reports_service(engine)
-        root_id = _seed_root_instance(engine,
+        root_id = _seed_root_instance(engine)
         # Pending own-queue message — drives the own-queue pending_count > 0 path.
-        _seed_message(engine, instance_id=root_id,
+        _seed_message(engine, instance_id=root_id)
         # Residual MESSAGE JobItem — would have been an active MESSAGE worker
         # before D13. After Phase 5 guard removal, this row is invisible to
         # the completion gate.
         _seed_message_job_item(
             engine,
             instance_id=root_id,
-
         )
 
         result = service._process_child_completion_db_sync(
@@ -479,7 +478,9 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
                 )
             ).all()
             assert len(jobs) == 1
-            assert jobs[0].status == AdmissionState.ACTIVE.value
+            # Phase 5 cleanup: ``JobItem.status`` mirror column was
+            # dropped; the queue-side authority is ``admission_state``.
+            assert jobs[0].admission_state == AdmissionState.ACTIVE.value
 
     def test_stale_pending_message_job_does_not_block_waiting_children(
         self, engine: Engine
@@ -494,12 +495,11 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
         guard scanned for).
         """
         service = _build_child_reports_service(engine)
-        root_id = _seed_root_instance(engine,
-        _seed_message(engine, instance_id=root_id,
+        root_id = _seed_root_instance(engine)
+        _seed_message(engine, instance_id=root_id)
         _seed_message_job_item(
             engine,
             instance_id=root_id,
-
         )
 
         result = service._process_child_completion_db_sync(

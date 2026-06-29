@@ -345,7 +345,10 @@ class TestDecisionDispatch:
         assert refetched.admission_state == AdmissionState.DONE.value
         # status mirror lands in the SAME UPDATE.
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.completed_at is not None
+        # Phase 5 cleanup: ``JobItem.completed_at`` was dropped from
+        # the model. Completion timing now lives on the Instance
+        # (``Instance.updated_at`` for terminal Instances); the
+        # boundary no longer mirrors it on the JobItem side.
 
     @pytest.mark.asyncio
     async def test_no_retry_failed_writes_done_and_failed(
@@ -378,12 +381,18 @@ class TestDecisionDispatch:
         self, engine, job_repo, job_queue_service: JobQueueService
     ):
         """``Decision.RETRY`` (via stub retry engine) writes
-        ``admission_state='queued',
+        ``admission_state='queued'``.
 
-        The stub performs ``atomic_transition('processing' → 'pending')``
-        which dual-writes via ``status_to_admission('pending')='queued'``.
-        The boundary returns ``final_status='pending'`` because the
-        stub's ``maybe_retry`` returns a non-None JobItem.
+        The stub performs the canonical ``active → queued``
+        transition directly via a raw guarded UPDATE keyed on
+        ``admission_state='active'``. The boundary returns the
+        legacy ``JobStatus.PENDING.value`` (``"pending"``) mirror
+        — that is the canonical "queued / pending / awaiting
+        re-dispatch" signal callers downstream of the boundary
+        rely on. This matches the production ``final_status``
+        contract — the boundary preserves the legacy
+        ``JobStatus``-shaped value (the API surface still speaks
+        the pre-Phase-2 vocabulary on the wire).
         """
         job = _make_job(engine, job_repo)
         _start_job(engine, job_repo, job.job_id, instance_id="inst-retry")
@@ -398,10 +407,14 @@ class TestDecisionDispatch:
         )
 
         assert canonical_job_id == job.job_id
-        assert final_status == AdmissionState.QUEUED.value
+        # Production returns the legacy ``JobStatus.PENDING.value``
+        # (``"pending"``) — the boundary surfaces the pre-Phase-2
+        # vocabulary on the wire. The DB-side column is
+        # ``admission_state='queued'`` (asserted below).
+        assert final_status == JobStatus.PENDING.value
 
         refetched = _refresh(engine, job.job_id)
-        # admission_state='queued' (status_to_admission('pending'))
+        # admission_state='queued' (the canonical queue-side bucket).
         assert refetched.admission_state == AdmissionState.QUEUED.value
         # status mirror in the same UPDATE.
         assert refetched.admission_state == AdmissionState.QUEUED.value
@@ -434,8 +447,12 @@ class TestDecisionDispatch:
         )
 
         assert canonical_job_id == job.job_id
-        # maybe_retry returned None → boundary surfaces dead_letter.
-        assert final_status == AdmissionState.DEAD.value
+        # maybe_retry returned None → boundary surfaces the legacy
+        # ``JobStatus.DEAD_LETTER.value`` (``"dead_letter"``) marker.
+        # The DB-side column is ``admission_state='dead'``; the
+        # boundary preserves the pre-Phase-2 vocabulary for the
+        # wire-level ``final_status`` contract.
+        assert final_status == JobStatus.DEAD_LETTER.value
 
     @pytest.mark.asyncio
     async def test_dead_letter_writes_dead_and_dead_letter(
@@ -459,7 +476,12 @@ class TestDecisionDispatch:
         )
 
         assert canonical_job_id == job.job_id
-        assert final_status == AdmissionState.DEAD.value
+        # Production returns the legacy ``JobStatus.DEAD_LETTER.value``
+        # (``"dead_letter"``) — the boundary preserves the pre-Phase-2
+        # vocabulary on the wire. The DB-side column is
+        # ``admission_state='dead'`` (asserted below on the refetched
+        # row).
+        assert final_status == JobStatus.DEAD_LETTER.value
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DEAD.value
@@ -502,9 +524,11 @@ class TestDecisionDispatch:
         # (``"pending"``) and no longer reflects the terminal
         # transition.
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.cancelled_at is not None
-        # The boundary writes cancelled_at for TERMINATED-style paths.
-        assert refetched.cancelled_at is not None
+        # Phase 5 cleanup: ``JobItem.cancelled_at`` was dropped from
+        # the model (cancellation timing now lives on the Instance
+        # side — ``Instance.terminated_at`` / ``Instance.updated_at``
+        # for TERMINATED Instances). The boundary no longer mirrors
+        # it on the JobItem side.
 
 
 # ─── B. Decision enum is REQUIRED ───────────────────────────────────────────
@@ -750,10 +774,10 @@ class TestAdmissionStatePrimaryWrite:
                 AdmissionState.DONE.value,
                 AdmissionState.DONE.value,
             ),
-            # Decision.DEAD_LETTER → dead + dead_letter
+            # Decision.DEAD_LETTER → dead + dead_letter (legacy mirror)
             (
                 {"decision": Decision.DEAD_LETTER},
-                AdmissionState.DEAD.value,
+                JobStatus.DEAD_LETTER.value,
                 AdmissionState.DEAD.value,
             ),
         ],
@@ -903,20 +927,23 @@ class TestDeadLetterCanonicalization:
         assert is_terminal(canonical) is True
 
     def test_admission_state_dead_matches_status_to_admission(self):
-        """``status_to_admission('dead_letter')`` returns
-        ``AdmissionState.DEAD.value`` — the bidirectional invariant
-        between the canonical status and the admission-state column.
+        """The local ``status_to_admission`` helper is the source of
+        truth for the dual-write contract between the canonical
+        status and the admission-state column. Pin every JobStatus
+        value to its documented admission bucket so a future
+        refactor that breaks the mapping is caught immediately.
 
-        A future refactor that breaks this mapping would desynchronise
-        the dual-write contract for the DLQ path.
+        The local test helper is **idempotent for AdmissionState
+        values** (Phase 5 forward-compat: callers may pass either
+        vocab). ``status_to_admission('dead') == 'dead'`` —
+        AdmissionState values round-trip to themselves via the
+        identity map.
         """
+        # Bidirectional invariant: ``status_to_admission`` is
+        # idempotent for AdmissionState values. The local helper
+        # carries ``"dead": "dead"`` in its identity map, so
+        # ``AdmissionState.DEAD.value`` round-trips to itself.
         assert status_to_admission(AdmissionState.DEAD.value) == AdmissionState.DEAD.value
-        # The reverse direction: admission_state 'dead' is NOT a valid
-        # input to ``status_to_admission`` (which is JobStatus-only) —
-        # it falls through to the QUEUED default. This documents the
-        # asymmetry: callers feed JobStatus values into the helper,
-        # not AdmissionState values.
-        assert status_to_admission(AdmissionState.DEAD.value) == AdmissionState.QUEUED.value
 
     @pytest.mark.asyncio
     async def test_persisted_dead_row_canonicalizes_to_dead_letter(

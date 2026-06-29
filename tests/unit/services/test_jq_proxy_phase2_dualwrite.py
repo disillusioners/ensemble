@@ -375,7 +375,7 @@ class TestDualWriteOnLifecycleTransitions:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        failed = job_repo.fail_job(job.job_id)
+        failed = job_repo.fail_job(job.job_id, error_message="")
         assert failed is not None
 
         refetched = _refresh(engine, job.job_id)
@@ -419,7 +419,7 @@ class TestDualWriteOnLifecycleTransitions:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id)
+        job_repo.fail_job(job.job_id, error_message="")
 
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
@@ -441,7 +441,7 @@ class TestDualWriteOnLifecycleTransitions:
         job = _make_job(engine, job_repo)
         # Force the job to DEAD_LETTER.
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id)
+        job_repo.fail_job(job.job_id, error_message="")
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -467,7 +467,7 @@ class TestDualWriteOnLifecycleTransitions:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id,
+        job_repo.fail_job(job.job_id, error_message="")
 
         next_retry_at = datetime.now(timezone.utc).isoformat()
         retried = job_repo.atomic_retry(
@@ -528,18 +528,24 @@ class TestStatusToAdmissionMapping:
     def test_mapping_is_idempotent_for_admission_values(self):
         """Defensive: every AdmissionState value is a valid input to
         the helper (forward-compat: callers might pass a JobStatus
-        that already collapsed). All four current AdmissionStates map
-        either to themselves (idempotent for QUEUED/ACTIVE/DEAD) or
-        collapse to DONE (none of the AdmissionStates are input in
-        practice, but pinning prevents a future bug).
+        that already collapsed). All four AdmissionStates map to
+        themselves — the local helper preserves the Phase 5
+        "callers may pass either vocab" contract via the identity
+        map.
         """
-        # These calls are sanity checks — the helper is only meant to
-        # be called with JobStatus values, but the fallback dict
-        # should never raise.
+        # These calls are sanity checks — the helper is meant to
+        # be called with either JobStatus or AdmissionState values.
+        # Identity-map entries ensure the round-trip is preserved.
         assert status_to_admission(AdmissionState.QUEUED.value) == AdmissionState.QUEUED.value
-        assert status_to_admission(AdmissionState.ACTIVE.value) == AdmissionState.QUEUED.value
-        # DEAD is not in the JobStatus mapping; falls through to QUEUED.
-        assert status_to_admission(AdmissionState.DEAD.value) == AdmissionState.QUEUED.value
+        # ACTIVE is idempotent: the identity map carries
+        # ``"active": "active"`` so ``AdmissionState.ACTIVE.value``
+        # round-trips to itself.
+        assert status_to_admission(AdmissionState.ACTIVE.value) == AdmissionState.ACTIVE.value
+        # DEAD is idempotent too — the identity map entry
+        # ``"dead": "dead"`` keeps the local helper consistent with
+        # the deleted production helper that also accepted
+        # AdmissionState values via the fallback dict.
+        assert status_to_admission(AdmissionState.DEAD.value) == AdmissionState.DEAD.value
 
 
 # ─── D. Pause/Resume cascade admission_state transitions ─────────────────────
@@ -689,7 +695,7 @@ class TestEdgeCases:
         # Walk each job through a different transition path.
         job_repo.start_job(jobs[0].job_id, instance_id="inst-a")
         job_repo.start_job(jobs[1].job_id, instance_id="inst-b")
-        job_repo.complete_job(jobs[1].job_id,
+        job_repo.complete_job(jobs[1].job_id)
         # Leave jobs[2] as PENDING.
 
         expected_states = (

@@ -194,6 +194,7 @@ def _seed_instance(
             agent_dir=f"/tmp/agents/{agent_id}",
             agent_name=agent_id,
             project_id=project_id,
+            status=status,
 
             created_at=created,
             updated_at=updated,
@@ -383,7 +384,7 @@ class TestTimingColumnsFromInstance:
         _seed_instance(
             engine,
             instance_id="inst-terminal",
-
+            status=InstanceStatus.COMPLETED.value,
             updated_at=updated,
             last_activity_at=datetime(2026, 6, 1, 10, 30, 0, tzinfo=timezone.utc),
         )
@@ -407,51 +408,45 @@ class TestTimingColumnsFromInstance:
     def test_completed_at_falls_back_to_jobitem_mirror_for_non_terminal(
         self, engine, resolver
     ):
-        """When the Instance is non-terminal, ``completed_at`` falls
-        back to ``JobItem.completed_at`` (the JobItem mirror).
+        """When the Instance is non-terminal, ``completed_at`` is
+        ``None``.
 
-        The transitional contract per ``_instance_completed_at``: the
-        Instance ``updated_at`` is only used when the Instance is in
-        a terminal canonical state (``completed`` / ``failed`` /
-        ``cancelled`` / ``dead_letter``). For a non-terminal Instance
-        the resolver falls back to the JobItem mirror — the Instance
-        has no authoritative completion timestamp to surface, so the
-        legacy mirror is the best signal available during Phase 1's
-        transition period.
+        Phase 5 (Job as Queue Proxy) update: the previous
+        ``JobItem.completed_at`` mirror column was DROPPED from the
+        JobItem model (alongside ``status``, ``started_at``,
+        ``result_summary``, ``error_message``, ``cancelled_at``,
+        ``failed_at`). The Instance is the sole execution-timing
+        authority, and ``_instance_completed_at`` returns ``None``
+        for non-terminal Instances because no authoritative
+        completion timestamp exists yet.
 
-        If a caller has populated ``JobItem.completed_at`` (e.g.
-        an older code path that wrote the mirror before the
-        Instance-backed resolver arrived), the WorkRecord still
-        surfaces that value. The mirror column is being phased out
-        in Phase 4; until then it remains the source for non-terminal
-        JobItems.
+        This test pins the Phase 5 contract: a non-terminal
+        Instance surfaces ``completed_at=None`` regardless of the
+        Instance's ``updated_at`` value (which is "last write", not
+        "completion time"). The previous mirror-fallback behaviour
+        is gone with the column itself.
         """
         _seed_instance(
             engine,
             instance_id="inst-nonterm",
-
             updated_at="2026-06-01T11:00:00+00:00",
             last_activity_at=datetime(2026, 6, 1, 11, 0, 0, tzinfo=timezone.utc),
         )
-        # JobItem mirror populated (e.g. by an older writer). The
-        # non-terminal Instance falls back to the mirror.
+        # JobItem with default admission_state (no mirror columns seeded).
         jid = _seed_job(
             engine,
             instance_id="inst-nonterm",
-
-
-
         )
 
         record = resolver.resolve_work(jid)
 
         assert record is not None
         assert record.status == "processing"
-        # Non-terminal Instance + non-null mirror → the mirror is
-        # surfaced (transitional behaviour). The Instance's own
-        # ``updated_at`` is NOT used because the Instance hasn't
-        # reached a terminal state.
-        assert record.completed_at == "2026-06-01T11:00:00+00:00"
+        # Phase 5: JobItem.completed_at mirror is gone — only the
+        # Instance ``updated_at`` (for terminal instances) remains.
+        # A non-terminal Instance has no authoritative completion
+        # time, so ``completed_at`` is ``None``.
+        assert record.completed_at is None
 
     def test_completed_at_none_when_both_instance_and_mirror_missing(
         self, engine, resolver
@@ -506,23 +501,31 @@ class TestLegacyFallback:
     """
 
     def test_no_instance_canonicalises_job_status(self, engine, resolver):
-        """JobItem with ``instance_id=None`` and a non-pending status
-        surfaces that status canonicalised — NOT hardcoded 'pending'.
+        """JobItem with ``instance_id=None`` and a non-pending
+        admission state surfaces the canonical status — NOT
+        hardcoded 'pending'.
 
-        Regression for the Phase 1 status-hardcoding bug: the previous
-        implementation returned ``"pending"`` whenever ``instance_id``
-        was ``None``, which discarded the real queue state for jobs
-        that had not yet been dispatched (e.g. a JobItem seeded with
-        ``status='completed'`` and ``instance_id=None`` would return
-        ``'pending'`` and break the SSE terminal-status detection
+        Regression for the Phase 4 status-hardcoding bug: the
+        previous implementation returned ``"pending"`` whenever
+        ``instance_id`` was ``None``, which discarded the real
+        queue state for jobs that had not yet been dispatched
+        (e.g. a JobItem with ``admission_state='done'`` and
+        ``instance_id=None`` would return ``'pending'`` instead of
+        ``'completed'`` and break the SSE terminal-status detection
         loop).
+
+        Phase 5 update: the ``JobItem.status`` mirror is gone, so
+        the resolver sources status from ``admission_state`` via
+        ``_ADMISSION_STATE_TO_STATUS`` (e.g. ``'done'`` →
+        ``'completed'``). This test pins that contract by seeding
+        a QUEUED-stage JobItem with ``admission_state='done'``
+        and asserting the canonical ``'completed'`` comes back.
         """
-        # Queue-stage JobItem, no instance_id, mirror says 'completed'.
+        # Queue-stage JobItem, no instance_id, admission_state='done'.
         jid = _seed_job(
             engine,
             instance_id=None,
-
-
+            status=AdmissionState.DONE.value,
         )
 
         record = resolver.resolve_work(jid)
@@ -530,7 +533,7 @@ class TestLegacyFallback:
         assert record is not None
         assert record.instance_id is None
         # The canonical vocabulary is the same as the JobItem mirror
-        # for the non-dead-letter set; 'completed' stays 'completed'.
+        # for the non-dead-letter set; 'done' → 'completed' (status).
         assert record.status == "completed", (
             f"Expected canonical 'completed', got {record.status!r}. "
             f"The legacy fallback may have been regressed to hardcode "
@@ -562,8 +565,12 @@ class TestLegacyFallback:
         record = resolver.resolve_work(jid)
 
         assert record is not None
-        # ``failed`` canonicalises to ``failed`` (identity mapping).
-        assert record.status == "failed"
+        # Phase 5: ``JobItem.status`` mirror was dropped; the
+        # resolver sources status from ``admission_state`` via
+        # ``_ADMISSION_STATE_TO_STATUS``. The seeded JobItem has
+        # ``admission_state='queued'`` (default), which canonicalizes
+        # to ``'pending'`` after the (no-instance) fallback path.
+        assert record.status == "pending"
         assert record.error is None
         # ``instance_id`` stays the orphaned value — the WorkRecord
         # surfaces it as-is so callers can see the dangling reference.
@@ -573,25 +580,25 @@ class TestLegacyFallback:
         """``dead_letter`` is a JobItem-only canonical value: the
         resolver surfaces it regardless of what the Instance says.
 
-        Phase 1 special-case in ``_job_to_record``: if the JobItem
-        mirror is ``dead_letter``, return ``dead_letter`` directly —
-        do NOT consult the Instance. This is documented as a Phase 1
-        exception (Instance has no equivalent; Phase 2 introduces
-        ``admission_state='dead'``) and must not regress when the
-        Instance is in any other state.
+        Phase 5 (Job as Queue Proxy) update: ``JobItem.status`` is
+        gone — ``admission_state`` is the sole authority on the
+        JobItem side. The ``dead_letter`` special case in
+        ``_job_to_record`` short-circuits on
+        ``job.admission_state == 'dead'`` and returns the canonical
+        ``'dead_letter'`` directly, ignoring any Instance lookup.
+        This documents the cross-table invariant: the Instance
+        has no equivalent for ``'dead'`` (only ``JobItem`` does).
         """
-        # Instance in a non-dead-letter state — even so, the JobItem's
-        # ``dead_letter`` must win.
+        # Instance in a non-dead-letter state — even so, the
+        # JobItem's ``admission_state='dead'`` must win.
         _seed_instance(
             engine,
             instance_id="inst-dlq",
-
         )
         jid = _seed_job(
             engine,
             instance_id="inst-dlq",
-
-
+            status=AdmissionState.DEAD.value,
         )
 
         record = resolver.resolve_work(jid)
@@ -599,26 +606,26 @@ class TestLegacyFallback:
         assert record is not None
         assert record.status == "dead_letter", (
             "dead_letter was overridden by the Instance lookup — "
-            "Phase 1 special-case violated. The JobItem mirror is "
-            "the source of truth for this state until Phase 4."
+            "Phase 5 special-case violated. The JobItem "
+            "admission_state='dead' is the source of truth for this "
+            "canonical value until the resolver aligns the cross-"
+            "table vocabulary."
         )
 
     def test_dead_letter_with_no_instance(self, engine, resolver):
         """``dead_letter`` works on queue-stage rows too (no
         ``instance_id``).
 
-        Belt-and-braces: the dead_letter special-case must work
-        independently of the instance_id-presence branch. The
-        ``if job.admission_state == 'dead': status = 'dead_letter'``
-        guard fires before the instance_id branch, so a queue-stage
+        Belt-and-braces: the ``dead_letter`` special-case in
+        ``_job_to_record`` fires before the ``instance_id`` branch
+        when ``admission_state == 'dead'``, so a queue-stage
         dead-letter row reports ``dead_letter`` without trying to
         look up an Instance.
         """
         jid = _seed_job(
             engine,
             instance_id=None,
-
-
+            status=AdmissionState.DEAD.value,
         )
 
         record = resolver.resolve_work(jid)
@@ -696,11 +703,11 @@ class TestListWorkBatchEfficiency:
         n_jobs = 10
         for _ in range(n_jobs):
             inst_id = f"inst-batch-{uuid.uuid4().hex[:8]}"
-            _seed_instance(engine, instance_id=inst_id,
+            _seed_instance(engine, instance_id=inst_id)
             _seed_job(
                 engine,
                 instance_id=inst_id,
-
+                status=AdmissionState.QUEUED.value,
             )
 
         # Capture every query issued during list_work.
@@ -773,11 +780,11 @@ class TestListWorkBatchEfficiency:
                 # Seed N jobs each on its own instance.
                 for _ in range(n_jobs):
                     inst_id = f"inst-inv-{uuid.uuid4().hex[:8]}"
-                    _seed_instance(sub_engine, instance_id=inst_id,
+                    _seed_instance(sub_engine, instance_id=inst_id)
                     _seed_job(
                         sub_engine,
                         instance_id=inst_id,
-
+                        status=AdmissionState.QUEUED.value,
                     )
 
                 # Reset capture (the seed inserts issued SELECTs we
@@ -864,14 +871,13 @@ class TestJobWithDeletedInstance:
 
         Defensive contract: ``_lookup_instance`` swallows the
         SQLAlchemyError / missing-row case and returns None, then
-        ``_job_to_record`` uses the canonicalised JobItem mirror.
+        ``_job_to_record`` derives the canonical status from
+        ``admission_state`` via ``_ADMISSION_STATE_TO_STATUS`` (the
+        ``JobItem.status`` mirror was dropped in Phase 5).
         """
         jid = _seed_job(
             engine,
             instance_id="deleted-uuid-12345",
-
-
-
         )
 
         # Must not raise.
@@ -879,10 +885,18 @@ class TestJobWithDeletedInstance:
 
         assert record is not None
         assert record.instance_id == "deleted-uuid-12345"
-        # No Instance row → canonicalise the JobItem mirror.
-        assert record.status == "processing"
-        # Timing falls back to the JobItem mirror (no Instance to source from).
-        assert record.started_at == "2026-06-01T10:00:00+00:00"
+        # Phase 5: ``admission_state='queued'`` (default) maps to
+        # canonical ``'pending'`` (the seeded JobItem is a fresh
+        # queue-stage row). The previous "JobItem mirror falls
+        # back to ``'processing'``" expectation is gone — the
+        # mirror column was dropped.
+        assert record.status == "pending"
+        # Phase 5: ``JobItem.started_at`` mirror column was
+        # dropped. The Instance-side sources
+        # (``Instance.last_activity_at`` / ``Instance.created_at``)
+        # are unavailable for an orphan, so ``started_at`` is
+        # ``None``.
+        assert record.started_at is None
         assert record.completed_at is None
 
 
@@ -903,7 +917,7 @@ class TestJobWithCompletedInstance:
         _seed_instance(
             engine,
             instance_id="inst-completed",
-
+            status=InstanceStatus.COMPLETED.value,
             updated_at=completed_at,
             last_activity_at=datetime(2026, 6, 1, 10, 0, 0, tzinfo=timezone.utc),
         )
@@ -934,7 +948,7 @@ class TestJobWithErrorInstance:
         _seed_instance(
             engine,
             instance_id="inst-err",
-
+            status=InstanceStatus.ERROR.value,
         )
         jid = _seed_job(
             engine,
