@@ -2120,8 +2120,15 @@ class InstanceManager:
         # raises ``sqlalchemy.exc.ProgrammingError`` (``UndefinedColumn``).
         # We catch that specific failure and log at DEBUG so legacy
         # databases continue to backfill while post-Phase-5 databases
-        # silently skip the now-meaningless statements. Any other
-        # ProgrammingError is re-raised unchanged.
+        # silently skip the now-meaningless statements.
+        #
+        # Each statement gets its OWN transaction (a fresh
+        # ``with self._engine.begin() as conn:`` per loop iteration)
+        # because a failed UPDATE in PostgreSQL leaves the surrounding
+        # transaction in ``InFailedSqlTransaction`` state — subsequent
+        # statements in the same ``.begin()`` block would then raise
+        # ``InternalError`` regardless of which SQL they run. Per-statement
+        # transactions give each UPDATE its own commit-or-rollback scope.
         import sqlalchemy.exc
 
         legacy_status_backfill = [
@@ -2130,19 +2137,40 @@ class InstanceManager:
             "UPDATE job_queue_items SET admission_state = 'done' WHERE status IN ('completed', 'failed', 'cancelled') AND admission_state = 'queued'",
             "UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter' AND admission_state = 'queued'",
         ]
-        with self._engine.begin() as conn:
-            for stmt in legacy_status_backfill:
-                try:
+        for stmt in legacy_status_backfill:
+            try:
+                with self._engine.begin() as conn:
                     conn.execute(text(stmt))
-                except sqlalchemy.exc.ProgrammingError as status_err:
-                    err_msg = str(status_err).lower()
-                    if "does not exist" in err_msg or "undefinedcolumn" in err_msg:
-                        logger.debug(
-                            "Legacy `status` column already dropped; "
-                            "skipping backfill statement: %s",
-                            stmt[:80],
-                        )
-                        continue
+            except sqlalchemy.exc.ProgrammingError as status_err:
+                err_msg = str(status_err).lower()
+                if "does not exist" in err_msg or "undefinedcolumn" in err_msg:
+                    logger.debug(
+                        "Legacy `status` column already dropped; "
+                        "skipping backfill statement: %s",
+                        stmt[:80],
+                    )
+                else:
+                    raise
+            except sqlalchemy.exc.InternalError as status_err:
+                # ``InFailedSqlTransaction`` from psycopg arrives as
+                # ``InternalError`` (not ``ProgrammingError``) when a
+                # prior statement in this batch aborted the transaction.
+                # Treat the same as ``UndefinedColumn`` — the legacy
+                # ``status`` column is gone, so none of these UPDATEs can
+                # run on post-Phase-5 databases. Logged once at DEBUG.
+                err_msg = str(status_err).lower()
+                if (
+                    "does not exist" in err_msg
+                    or "undefinedcolumn" in err_msg
+                    or "infailedsqltransaction" in err_msg
+                    or "current transaction is aborted" in err_msg
+                ):
+                    logger.debug(
+                        "Legacy `status` column already dropped; "
+                        "skipping backfill statement: %s",
+                        stmt[:80],
+                    )
+                else:
                     raise
 
     def _ensure_postgres_drop_legacy_columns(self) -> None:
