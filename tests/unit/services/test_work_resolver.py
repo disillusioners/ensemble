@@ -36,6 +36,7 @@ from sqlmodel import Session, SQLModel
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.models import (
+    AdmissionState,
     JobItem,
     JobStatus,
 )
@@ -235,7 +236,7 @@ def _seed_job(
     job_id: str | None = None,
     agent_id: str = "developer",
     instance_id: str | None = None,
-    status: str = AdmissionState.QUEUED.value,
+    status: str = JobStatus.PENDING.value,
     result_summary: str | None = None,
     error_message: str | None = None,
     project_id: str | None = "test-project",
@@ -249,7 +250,29 @@ def _seed_job(
     dual-write contract introduced in Phase 2. PROCESSING/PAUSED →
     ACTIVE; PENDING → QUEUED; COMPLETED/FAILED/CANCELLED → DONE;
     DEAD_LETTER → DEAD.
+
+    Phase 5: accepts both ``JobStatus`` source values (legacy
+    PROCESSING/PAUSED/...) and ``AdmissionState`` target values
+    (``"queued"``, ``"active"``, ``"done"``, ``"dead"``). When the
+    input is already an ``AdmissionState`` value (one of the four
+    admission tokens) it is written verbatim — bypassing the
+    JobStatus→AdmissionState map which would otherwise fall back to
+    ``"queued"`` on unknown input. ``result_summary`` and
+    ``error_message`` are accepted for caller convenience but are
+    silently dropped because those columns were removed from the
+    JobItem model in Phase B (the resolver surfaces ``None`` for
+    these fields; see ``work_resolver._job_to_record``).
     """
+    admission_tokens = {
+        AdmissionState.QUEUED.value,
+        AdmissionState.ACTIVE.value,
+        AdmissionState.DONE.value,
+        AdmissionState.DEAD.value,
+    }
+    if status in admission_tokens:
+        admission = status
+    else:
+        admission = status_to_admission(status)
     jid = job_id or str(uuid.uuid4())
     created = created_at or datetime.now(timezone.utc).isoformat()
     with Session(engine) as s:
@@ -261,7 +284,7 @@ def _seed_job(
             source="api",
             project_id=project_id,
             priority=5,
-            admission_state=status_to_admission(status),
+            admission_state=admission,
             instance_id=instance_id,
             created_at=created,
             deleted_at=deleted_at,

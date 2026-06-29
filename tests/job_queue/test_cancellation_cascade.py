@@ -215,9 +215,19 @@ class TestCancelProcessingJob:
         # Verify: instance was NOT terminated (already dead)
         mock_instance_manager.terminate_instance.assert_not_called()
 
-        # Verify: atomic repository cancel_job was called (single UPDATE-WHERE-IN
-        # that includes PROCESSING in the cancellable set).
-        mock_repository.cancel_job.assert_called_once_with("job-dead")
+        # Phase 4 (Job-as-Queue-Proxy): cancel of an ACTIVE job now
+        # routes through the single terminal-write boundary
+        # ``JobQueueService._finalize_terminal`` (which calls
+        # ``JobRepository.finalize_active_to_done``), NOT the atomic
+        # ``repository.cancel_job``. ``cancel_job`` is only used as
+        # the fallback for queued rows (when the boundary returns
+        # ``(job_id, "")`` empty final_status). Pin the new contract
+        # on ``finalize_active_to_done`` so a regression that re-routes
+        # active-cancel back through the atomic ``cancel_job`` surfaces
+        # here first.
+        mock_repository.finalize_active_to_done.assert_called_once_with(
+            "job-dead", "cancelled", error_message="Cancelled"
+        )
 
     @pytest.mark.asyncio
     async def test_cancel_processing_job_with_terminal_instance(
@@ -259,22 +269,56 @@ class TestCancelProcessingJob:
         # Verify: instance was NOT terminated (already terminal)
         mock_instance_manager.terminate_instance.assert_not_called()
 
-        # Verify: atomic repository cancel_job was called (PROCESSING is in
-        # the cancellable set even when the instance is already terminal).
-        mock_repository.cancel_job.assert_called_once_with("job-terminal")
+        # Phase 4: cancel of an ACTIVE job with a terminal instance
+        # still routes through ``finalize_active_to_done`` — the
+        # boundary handles the active → done transition; the
+        # ``terminate_instance`` cascade only runs when the instance
+        # is alive (which this test deliberately excludes).
+        mock_repository.finalize_active_to_done.assert_called_once_with(
+            "job-terminal", "cancelled", error_message="Cancelled"
+        )
 
 
 class TestCancelAlreadyTerminalJob:
-    """Tests for cancelling already terminal jobs."""
+    """Tests for cancelling already terminal jobs.
+
+    Phase 5 (Job-as-Queue-Proxy): the 4-value admission vocabulary
+    collapses the legacy ``JobStatus`` terminal values
+    (``COMPLETED``/``CANCELLED``) into the single ``admission_state
+    == "done"`` bucket. The state machine treats ``done → done`` as an
+    implicit no-op (matches ``pause``/``resume`` semantics — see
+    :class:`daemon.services.job_state_machine.JobStateMachine`); so
+    ``cancel_job`` proceeds past the pre-validation gate and falls
+    through to ``repository.cancel_job``, which raises
+    ``ValueError`` for a row whose ``admission_state`` is no longer
+    in ``('queued', 'active')``. The service catches the ``ValueError``
+    and returns ``False``.
+    """
 
     @pytest.mark.asyncio
     async def test_cancel_completed_job(self, mock_repository, mock_lock_manager, mock_queue_repo, mock_instance_manager):
-        """COMPLETED job -> returns False."""
+        """COMPLETED job -> returns False.
+
+        Simulates the production ``repository.cancel_job`` raising
+        ``ValueError`` because the row's ``admission_state == "done"``
+        is no longer in the cancellable ``('queued', 'active')`` set.
+        Without the side_effect the test mock would succeed
+        (MagicMock returns truthy by default), and the service would
+        return ``True`` — which would mask a regression that broke
+        the ``ValueError`` propagation.
+        """
         from daemon.services.job_queue_service import JobQueueService
 
         # Setup: completed job
         completed_job = MockJobItem(job_id="job-completed", status="completed")
         mock_repository.get.return_value = completed_job
+        # ``admission_state == "done"`` (set by ``MockJobItem``) is
+        # outside the atomic cancel's cancellable set; the production
+        # repo raises ValueError, which the service maps to ``False``.
+        mock_repository.cancel_job.side_effect = ValueError(
+            "Cannot cancel job in admission_state 'done', "
+            "must be 'queued' or 'active'"
+        )
 
         # Create service
         service = JobQueueService(
@@ -319,12 +363,24 @@ class TestCancelAlreadyTerminalJob:
 
     @pytest.mark.asyncio
     async def test_cancel_cancelled_job(self, mock_repository, mock_lock_manager, mock_queue_repo, mock_instance_manager):
-        """CANCELLED job -> returns False."""
+        """CANCELLED job -> returns False.
+
+        Under the Phase 5 admission vocabulary, a legacy ``CANCELLED``
+        job collapses into ``admission_state == "done"`` alongside
+        ``COMPLETED`` / ``FAILED``. The cancel flow's atomic fallback
+        raises ``ValueError`` (same rationale as
+        ``test_cancel_completed_job``) which the service maps to
+        ``False``.
+        """
         from daemon.services.job_queue_service import JobQueueService
 
         # Setup: cancelled job
         cancelled_job = MockJobItem(job_id="job-cancelled", status="cancelled")
         mock_repository.get.return_value = cancelled_job
+        mock_repository.cancel_job.side_effect = ValueError(
+            "Cannot cancel job in admission_state 'done', "
+            "must be 'queued' or 'active'"
+        )
 
         # Create service
         service = JobQueueService(
@@ -544,9 +600,17 @@ class TestCancelNoInstanceManager:
         # Verify: cancellation succeeded (direct transition)
         assert result is True
 
-        # Verify: atomic repository cancel_job was called (PROCESSING is in
-        # the cancellable set; single UPDATE-WHERE-IN).
-        mock_repository.cancel_job.assert_called_once_with("job-no-manager")
+        # Phase 4 (Job-as-Queue-Proxy): with no instance manager the
+        # ``_is_instance_alive`` helper returns ``False`` (the
+        # ``_instance_repository`` attribute is missing), so the
+        # service falls through to ``_finalize_terminal``, which calls
+        # ``JobRepository.finalize_active_to_done`` for the
+        # ``active → done`` transition. The atomic ``repository.cancel_job``
+        # is NOT used for active jobs even when the instance manager
+        # is absent — pin the new contract.
+        mock_repository.finalize_active_to_done.assert_called_once_with(
+            "job-no-manager", "cancelled", error_message="Cancelled"
+        )
 
 
 class TestCancelRaceCondition:
@@ -588,11 +652,21 @@ class TestCancelRaceCondition:
         )
         mock_repository.get.return_value = processing_job
 
-        # Mock atomic cancel_job to raise ValueError — simulates a row that
-        # moved to a non-cancellable terminal state between the read and
-        # the UPDATE.
+        # Phase 4 (Job-as-Queue-Proxy): the cancel race-safety boundary
+        # moved from ``repository.cancel_job`` (a single atomic
+        # UPDATE-WHERE-IN) into ``_finalize_terminal`` /
+        # ``repository.finalize_active_to_done``. Simulate the race
+        # against the new boundary: ``finalize_active_to_done``
+        # returns ``None`` when the row's ``admission_state`` flipped
+        # out of ``active`` between the service's read and the
+        # UPDATE, and the service then falls back to the legacy
+        # atomic ``cancel_job`` which raises ``ValueError`` on a
+        # non-cancellable terminal row. The service catches the
+        # ValueError and returns ``False``.
+        mock_repository.finalize_active_to_done.return_value = None
         mock_repository.cancel_job.side_effect = ValueError(
-            "Cannot cancel job in 'completed' state, must be PENDING, PROCESSING, or FAILED"
+            "Cannot cancel job in admission_state 'completed', "
+            "must be 'queued' or 'active'"
         )
 
         # Mock instance dead

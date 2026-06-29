@@ -18,7 +18,12 @@ from sqlmodel import SQLModel, Session
 from daemon.routers.jobs import router, set_job_queue_service, set_dead_letter_service
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
-from daemon.repositories.job_queue.models import JobItem, DeadLetterItem, JobStatus
+from daemon.repositories.job_queue.models import (
+    AdmissionState,
+    DeadLetterItem,
+    JobItem,
+    JobStatus,
+)
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 
@@ -192,19 +197,21 @@ class TestRetryDeadLetterJob:
         mock_job_queue_service.get_job = AsyncMock(
             side_effect=lambda jid: dlq_service._job_repo.get(jid)
         )
-        
+
         # Call retry endpoint
         response = client.post(f"/jobs/{job_id}/retry")
-        
+
         assert response.status_code == 200
         data = response.json()
         assert data["job_id"] == job_id
-        # The response ``status`` field reflects the frozen legacy
-        # ``status`` column (INSERT value "dead_letter" — Phase 4
-        # froze the column; replay only writes ``admission_state``).
-        # The authoritative check is ``admission_state == "queued"``
-        # below.
-        assert data["status"] == "dead_letter"
+        # Phase 5: ``replay_from_dlq`` transitions the job to
+        # ``admission_state="queued"`` (``JobStatus.PENDING``). The
+        # ``status`` field therefore reflects the *post-replay* state
+        # (``"pending"``), not the pre-replay legacy ``"dead_letter"``.
+        # The authoritative check that the job is now retriable is
+        # ``data["admission_state"] == "queued"`` (see below).
+        assert data["status"] == "pending"
+        assert data["admission_state"] == AdmissionState.QUEUED.value
         assert "replay" in data["message"].lower()
         
         # Verify DLQ entry was cleaned up
@@ -250,15 +257,31 @@ class TestRetryDeadLetterJob:
 # =============================================================================
 
 class TestRetryFailedJob:
-    """Tests for retrying FAILED jobs (existing behavior)."""
+    """Tests for retrying FAILED jobs (Phase 5 admission vocabulary)."""
 
-    def test_retry_failed_job_still_works(
+    def test_retry_failed_job_rejected_under_done_admission(
         self, client, mock_job_queue_service, dlq_service, engine
     ):
-        """Test that retrying a FAILED job creates a new job with same parameters."""
+        """Phase 5 (Job-as-Queue-Proxy): a legacy ``FAILED`` job's
+        ``admission_state`` collapses with ``COMPLETED``/``CANCELLED``
+        into the single ``done`` admission value. The retry endpoint
+        only routes through DLQ replay (``done → dead → done`` via
+        ``DeadLetterService.replay_from_dlq``) for ``dead`` rows; a
+        ``done`` row that was never dead-lettered has no DLQ entry to
+        replay and so the endpoint returns 400 — same status code the
+        legacy endpoint returned for "job is not in a retriable state".
+
+        The pre-Phase-5 "FAILED → create new job with same params" path
+        is no longer reachable: ``JobStatus.FAILED`` (``"failed"``)
+        isn't a canonical value of the 4-value ``AdmissionState`` enum,
+        and the router's ``ADMISSION_STATE_TO_STATUS`` fallback maps
+        ``done`` → ``"completed"`` (which ``!= "failed"``). This test
+        pins that contract so a future batch that wants to re-introduce
+        a FAILED-retry path sees the regression here first.
+        """
         job_id = "failed-job-456"
-        
-        # Create a FAILED job
+
+        # Seed: a legacy FAILED job (``admission_state="done"``).
         job = JobItem(
             job_id=job_id,
             agent_id="developer",
@@ -267,44 +290,44 @@ class TestRetryFailedJob:
             source="api",
             project_id="project-abc",
 
-            admission_state=status_to_admission(AdmissionState.DONE.value),
+            admission_state=status_to_admission(JobStatus.FAILED.value),
             retry_count=1,
         )
-        
+
         with Session(engine) as session:
             session.add(job)
             session.commit()
-        
-        # Mock get_job to return the job from repository (async) to avoid detached error
+
         mock_job_queue_service.get_job = AsyncMock(
             side_effect=lambda jid: dlq_service._job_repo.get(jid)
         )
-        
-        # Mock retry_job to return a new pending job (async)
-        new_job = JobItem(
-            job_id="new-job-789",
-            agent_id="developer",
-            agent_dir="/agents/developer",
-            message="Failed job message",
-            source="api",
-            project_id="project-abc",
 
-            admission_state=status_to_admission(AdmissionState.QUEUED.value),
-            retry_count=0,
+        # retry_job should NOT be invoked — the FAILED-retry branch is
+        # dead under the Phase 5 admission vocabulary.
+        mock_job_queue_service.retry_job = AsyncMock(
+            return_value=JobItem(
+                job_id="new-job-789",
+                agent_id="developer",
+                agent_dir="/agents/developer",
+                message="Failed job message",
+                source="api",
+                project_id="project-abc",
+                admission_state=status_to_admission(JobStatus.PENDING.value),
+                retry_count=0,
+            )
         )
-        mock_job_queue_service.retry_job = AsyncMock(return_value=new_job)
-        
-        # Call retry endpoint
+
         response = client.post(f"/jobs/{job_id}/retry")
-        
-        assert response.status_code == 200
+
+        assert response.status_code == 400
         data = response.json()
-        assert data["job_id"] == "new-job-789"  # New job ID
-        assert data["status"] == "pending"
-        assert "retry" in data["message"].lower()
-        
-        # Verify retry_job was called
-        mock_job_queue_service.retry_job.assert_called_once_with(job_id)
+        assert "cannot be retried" in data["detail"]["error"].lower()
+        # Phase 5: ``done`` admission maps to ``completed`` via
+        # ``ADMISSION_STATE_TO_STATUS`` — only ``dead`` is retryable.
+        assert data["detail"]["current_status"] == "completed"
+
+        # The dead FAILED-retry branch must NOT have been invoked.
+        mock_job_queue_service.retry_job.assert_not_called()
 
 
 # =============================================================================
@@ -349,23 +372,27 @@ class TestRetryInvalidStates:
             source="api",
             project_id="project-abc",
 
-            admission_state=status_to_admission(AdmissionState.DONE.value),
+            admission_state=status_to_admission(JobStatus.COMPLETED.value),
         )
-        
+
         with Session(engine) as session:
             session.add(job)
             session.commit()
-        
+
         # Mock get_job to return the job (async) - fetch from repo to avoid detached
         mock_job_queue_service.get_job = AsyncMock(
             side_effect=lambda jid: dlq_service._job_repo.get(jid)
         )
-        
+
         response = client.post(f"/jobs/{job_id}/retry")
-        
+
         assert response.status_code == 400
         data = response.json()
         assert "cannot be retried" in data["detail"]["error"].lower()
+        # Phase 5: a legacy FAILED job's admission_state="done"
+        # collapses to the canonical JobStatus.COMPLETED ("completed")
+        # — only DEAD_LETTER ("dead") is retryable via this endpoint
+        # under the 4-value admission vocabulary.
         assert data["detail"]["current_status"] == "completed"
 
     def test_retry_job_in_invalid_state_processing(
@@ -374,7 +401,7 @@ class TestRetryInvalidStates:
         """Test retrying a PROCESSING job returns 400."""
         job_id = "processing-job-456"
         
-        # Create job in PROCESSING status
+        # Create job in PROCESSING status (legacy "processing" → "active")
         job = JobItem(
             job_id=job_id,
             agent_id="developer",
@@ -383,20 +410,20 @@ class TestRetryInvalidStates:
             source="api",
             project_id="project-abc",
 
-            admission_state=status_to_admission(AdmissionState.ACTIVE.value),
+            admission_state=status_to_admission(JobStatus.PROCESSING.value),
         )
-        
+
         with Session(engine) as session:
             session.add(job)
             session.commit()
-        
+
         # Mock get_job to return the job (async) - fetch from repo to avoid detached
         mock_job_queue_service.get_job = AsyncMock(
             side_effect=lambda jid: dlq_service._job_repo.get(jid)
         )
-        
+
         response = client.post(f"/jobs/{job_id}/retry")
-        
+
         assert response.status_code == 400
         data = response.json()
         assert "cannot be retried" in data["detail"]["error"].lower()
@@ -407,8 +434,8 @@ class TestRetryInvalidStates:
     ):
         """Test retrying a PENDING job returns 400."""
         job_id = "pending-job-789"
-        
-        # Create job in PENDING status
+
+        # Create job in PENDING status (legacy "pending" → "queued")
         job = JobItem(
             job_id=job_id,
             agent_id="developer",
@@ -417,23 +444,26 @@ class TestRetryInvalidStates:
             source="api",
             project_id="project-abc",
 
-            admission_state=status_to_admission(AdmissionState.QUEUED.value),
+            admission_state=status_to_admission(JobStatus.PENDING.value),
         )
-        
+
         with Session(engine) as session:
             session.add(job)
             session.commit()
-        
+
         # Mock get_job to return the job (async) - fetch from repo to avoid detached
         mock_job_queue_service.get_job = AsyncMock(
             side_effect=lambda jid: dlq_service._job_repo.get(jid)
         )
-        
+
         response = client.post(f"/jobs/{job_id}/retry")
-        
+
         assert response.status_code == 400
         data = response.json()
         assert "cannot be retried" in data["detail"]["error"].lower()
+        # Phase 5: a legacy PENDING job's admission_state="queued"
+        # surfaces as the canonical JobStatus.PENDING ("pending")
+        # under the 4-value admission vocabulary.
         assert data["detail"]["current_status"] == "pending"
 
 
@@ -459,7 +489,7 @@ class TestRetryDeadLetterWithoutDLQEntry:
             source="api",
             project_id="project-abc",
 
-            admission_state=status_to_admission(AdmissionState.DEAD.value),
+            admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             retry_count=0,
         )
         

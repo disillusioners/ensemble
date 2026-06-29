@@ -115,7 +115,14 @@ def create_mock_job(
     """Create a mock JobItem with the specified attributes."""
     mock_job = MagicMock(spec=JobItem)
     mock_job.job_id = job_id
-    mock_job.admission_state = status
+    # Phase 5 (Job-as-Queue-Proxy): translate the legacy
+    # ``status`` kwarg through the admission map so the ``MagicMock``
+    # surfaces the 4-value ``AdmissionState`` vocabulary the
+    # production code branches on. Without this, a caller passing
+    # ``status="failed"`` produces ``admission_state="failed"``
+    # (legacy string) and the observer's state-machine guard
+    # rejects every job.
+    mock_job.admission_state = _STATUS_TO_ADMISSION.get(status, status)
     mock_job.instance_id = instance_id
     return mock_job
 
@@ -505,6 +512,18 @@ class TestCancellationIntegration:
             job_id="race-job",
             status="completed",  # Already completed by observer
             instance_id="race-instance"
+        )
+        # Phase 5 (Job-as-Queue-Proxy): ``admission_state='done'``
+        # is outside the atomic cancel's cancellable set
+        # (``queued`` / ``active``); the production repo raises
+        # ``ValueError`` which the service maps to ``False``.
+        # Without this side_effect the test mock would return
+        # truthy by default and the service would return ``True``
+        # — masking a regression that broke the ValueError
+        # propagation.
+        mock_repo.cancel_job.side_effect = ValueError(
+            "Cannot cancel job in admission_state 'done', "
+            "must be 'queued' or 'active'"
         )
 
         mock_lock_manager = MagicMock()

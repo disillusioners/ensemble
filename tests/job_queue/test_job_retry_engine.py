@@ -435,10 +435,9 @@ class TestMaybeRetry:
             status="failed",
             retry_count=1,
             max_retries=3,
-            error_message="Connection timeout",
             failed_at=datetime.utcnow().isoformat(),
         )
-        
+
         result = retry_engine.maybe_retry("job-123")
 
         assert result is not None
@@ -461,12 +460,11 @@ class TestMaybeRetry:
             status="failed",
             retry_count=3,  # Exhausted
             max_retries=3,
-            error_message="Connection timeout",
             failed_at=datetime.utcnow().isoformat(),
         )
-        
+
         result = retry_engine.maybe_retry("job-123")
-        
+
         # Should return None (moved to DLQ)
         assert result is None
         
@@ -489,7 +487,6 @@ class TestMaybeRetry:
             status="failed",
             retry_count=3,  # Exhausted
             max_retries=3,
-            error_message="Connection timeout",
             failed_at=datetime.utcnow().isoformat(),
         )
 
@@ -569,7 +566,6 @@ class TestMaybeRetryAtomicConcurrency:
             status="failed",
             retry_count=1,
             max_retries=10,
-            error_message="Initial failure",
             failed_at=datetime.utcnow().isoformat(),
         )
 
@@ -634,7 +630,6 @@ class TestMaybeRetryAtomicConcurrency:
             status="failed",
             retry_count=3,
             max_retries=3,  # already at the cap
-            error_message="Final failure",
             failed_at=datetime.utcnow().isoformat(),
         )
 
@@ -709,17 +704,18 @@ class TestMaybeRetryAtomicConcurrency:
             status="failed",
             retry_count=1,
             max_retries=10,
-            error_message="Connection timeout",
             failed_at=datetime.utcnow().isoformat(),
         )
 
         # Concurrent cancellation — flip to CANCELLED before
         # maybe_retry runs. Clear ``failed_at`` so the job is no
         # longer retryable (cancelled ≠ failed in the new model).
+        # Phase 5: ``status`` and ``cancelled_at`` were dropped from
+        # the JobItem model — cancellation now lives on the Instance
+        # and the JobItem's queue-side state is ``admission_state``.
         with Session(engine) as session:
             row = session.get(JobItem, "job-mid-cancel")
-            row.status = "cancelled"
-            row.cancelled_at = datetime.utcnow().isoformat()
+            row.admission_state = "done"
             row.failed_at = None
             session.commit()
 
@@ -747,15 +743,14 @@ class TestMaybeRetryAtomicConcurrency:
             status="failed",
             retry_count=2,
             max_retries=3,
-            error_message="Stalled",
             failed_at=datetime.utcnow().isoformat(),
         )
 
         # Concurrent path moves the job to DLQ (admission_state='dead')
-        # before maybe_retry runs.
+        # before maybe_retry runs. Phase 5: ``status`` column was
+        # dropped — ``admission_state='dead'`` is the sole authority.
         with Session(engine) as session:
             row = session.get(JobItem, "job-already-dlq")
-            row.status = "dead_letter"
             row.admission_state = "dead"
             session.commit()
 

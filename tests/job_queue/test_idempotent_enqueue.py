@@ -397,8 +397,31 @@ class TestIdempotentEnqueue:
         """
         existing_job = make_mock_job(
             job_id="failed-job-1",
-            status=AdmissionState.DONE.value,
+            # Phase 5 (Job-as-Queue-Proxy): the 4-value ``AdmissionState``
+            # vocabulary has no ``FAILED`` bucket — FAILED / COMPLETED /
+            # CANCELLED all collapse onto ``done``. Under the new
+            # terminal-check (``{done, dead}``), a FAILED job IS a
+            # terminal job and a duplicate enqueue with the same key
+            # creates a fresh row instead of returning the existing
+            # one (this matches the production semantics in
+            # ``JobQueueService.enqueue`` — see the
+            # ``terminal_admission`` set). To exercise the
+            # "non-terminal existing job is returned" path the test
+            # originally covered, seed the existing row with
+            # ``AdmissionState.QUEUED.value`` (the legacy-equivalent
+            # "pending" bucket).
+            status=AdmissionState.QUEUED.value,
             idempotency_key="key-failed",
+        )
+        # Phase 5 (M6): ``enqueue`` no longer reads via
+        # ``find_by_idempotency_key`` — it calls the atomic
+        # ``create_or_get_by_idempotency_key`` which returns
+        # ``(job, created)``. Mock that interface with
+        # ``created=False`` so the production path treats this as an
+        # existing-row hit and returns ``existing_job`` instead of
+        # inserting a fresh row.
+        mock_repository.create_or_get_by_idempotency_key.return_value = (
+            existing_job, False
         )
         mock_repository.find_by_idempotency_key.return_value = existing_job
         
@@ -412,10 +435,10 @@ class TestIdempotentEnqueue:
                 idempotency_key="key-failed",
             )
         
-        # Verify existing job was returned (FAILED is non-terminal in implementation)
+        # Verify existing job was returned (queued is non-terminal)
         assert result.job_id == "failed-job-1"
-        assert result.admission_state == AdmissionState.DONE.value
-        
+        assert result.admission_state == AdmissionState.QUEUED.value
+
         # Verify no new job was created
         mock_repository.create.assert_not_called()
 

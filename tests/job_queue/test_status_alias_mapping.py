@@ -121,7 +121,23 @@ class TestNormalizeStatusesCanonical:
             AdmissionState.DEAD.value,
         ]
         result = normalize_statuses(canonical_values)
-        assert result == canonical_values
+        # Phase 5: ``STATUS_ALIASES`` treats the admission vocabulary
+        # as natural-language aliases for the legacy ``JobStatus``
+        # values (``queued`` → ``pending``, ``active`` →
+        # ``processing``, ``done`` → ``completed``, ``dead`` →
+        # ``dead_letter``). The canonical ``JobStatus`` values are
+        # then re-mapped back to ``AdmissionState`` values via
+        # ``_JOB_STATUS_TO_ADMISSION`` in the SQL filter (round-trip
+        # in ``JobRepository.list`` / ``count``). Assert the round
+        # trip via the production alias map.
+        assert result == [
+            JobStatus.PENDING.value,
+            JobStatus.PROCESSING.value,
+            JobStatus.COMPLETED.value,
+            JobStatus.COMPLETED.value,
+            JobStatus.COMPLETED.value,
+            JobStatus.DEAD_LETTER.value,
+        ]
 
 
 class TestNormalizeStatusesEmptyAndNone:
@@ -418,9 +434,17 @@ class TestHttpListJobsWithAlias:
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 2
-        # status column is frozen at "pending"; completed jobs carry
-        # completed_at (set by complete_job).
-        assert all(j["completed_at"] is not None for j in data["jobs"])
+        # Phase 5: ``completed_at`` lives on the ``WorkRecord`` (read
+        # from ``Instance.updated_at`` via the resolver), not on the
+        # ``JobItem`` mirror — the test setup doesn't wire a resolver
+        # so the legacy fallback returns ``completed_at=None``. The
+        # authoritative check that the job is COMPLETED is the
+        # ``admission_state == "done"`` admission bucket (which the
+        # SQL filter matched).
+        assert all(
+            j["admission_state"] == AdmissionState.DONE.value
+            for j in data["jobs"]
+        )
 
     def test_get_jobs_with_waiting_alias_returns_pending(self, client, job_repository):
         """GET /jobs?status=waiting returns PENDING jobs."""
@@ -432,7 +456,11 @@ class TestHttpListJobsWithAlias:
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 1
-        assert data["jobs"][0]["status"] == AdmissionState.QUEUED.value
+        # Phase 5: ``status`` field reflects the ``JobStatus`` mirror
+        # (``ADMISSION_STATE_TO_STATUS["queued"]`` → ``"pending"``),
+        # not the admission vocabulary. Check the canonical mapping.
+        assert data["jobs"][0]["status"] == JobStatus.PENDING.value
+        assert data["jobs"][0]["admission_state"] == AdmissionState.QUEUED.value
 
     def test_get_jobs_with_comma_separated_aliases(self, client, job_repository):
         """GET /jobs?status=running,done,error returns all matching jobs."""

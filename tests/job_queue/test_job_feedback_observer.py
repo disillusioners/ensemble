@@ -101,10 +101,16 @@ def create_mock_job(job_id: str = "test-job-id", status: str = "processing", ins
     """Create a mock JobItem with the specified attributes."""
     mock_job = MagicMock(spec=JobItem)
     mock_job.job_id = job_id
-    mock_job.admission_state = status
+    # Phase 4 (Job-as-Queue-Proxy): the legacy ``status`` parameter
+    # was replaced with the 4-value ``AdmissionState`` vocabulary
+    # on the JobItem surface. The caller passes a ``status`` keyword
+    # for backward compatibility (most existing call sites used
+    # ``status="processing"`` etc.) — translate it through the same
+    # ``_STATUS_TO_ADMISSION`` map used by the rest of the test
+    # suite so the ``MagicMock`` surfaces the right admission value
+    # to the production code's admission-aware branches.
+    mock_job.admission_state = _STATUS_TO_ADMISSION.get(status, status)
     mock_job.instance_id = instance_id
-    # Phase 4: admission_state is the sole authority. Derive it from
-    # the legacy status so service-level comparisons see the right value.
     return mock_job
 
 

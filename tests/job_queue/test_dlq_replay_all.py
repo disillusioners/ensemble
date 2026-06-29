@@ -18,7 +18,12 @@ from sqlmodel import SQLModel, Session
 
 from daemon.routers.dlq import router, set_dead_letter_service
 from daemon.services.dead_letter_service import DeadLetterService
-from daemon.repositories.job_queue.models import JobItem, DeadLetterItem, AdmissionState
+from daemon.repositories.job_queue.models import (
+    AdmissionState,
+    DeadLetterItem,
+    JobItem,
+    JobStatus,
+)
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 
@@ -106,7 +111,7 @@ def create_dlq_items_for_project(engine, dlq_repository, project_id, count, reas
         job_id = f"job-{project_id}-{i}"
         dlq_id = f"dlq-{project_id}-{i}"
         
-        # Create job in DEAD_LETTER status
+        # Create job in DEAD_LETTER status (legacy "dead_letter" → "dead")
         job = JobItem(
             job_id=job_id,
             agent_id="developer",
@@ -116,7 +121,7 @@ def create_dlq_items_for_project(engine, dlq_repository, project_id, count, reas
             project_id=project_id,
             queue_id=f"queue-{project_id}",
 
-            admission_state=status_to_admission(AdmissionState.DEAD.value),
+            admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             retry_count=3,
         )
         
@@ -437,7 +442,7 @@ class TestReplayAllResponseStructure:
                 project_id=project_id,
                 queue_id="queue-other",
 
-                admission_state=status_to_admission(AdmissionState.DEAD.value),
+                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             )
             
             with Session(engine) as session:
@@ -500,7 +505,7 @@ class TestReplayAllResponseStructure:
                 project_id=project_id,
                 queue_id="default-queue",
 
-                admission_state=status_to_admission(AdmissionState.DEAD.value),
+                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             )
             
             with Session(engine) as session:
@@ -540,7 +545,7 @@ class TestReplayAllResponseStructure:
                 project_id=project_id,
                 queue_id="default-queue",
 
-                admission_state=status_to_admission(AdmissionState.DEAD.value),
+                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
             )
             
             with Session(engine) as session:

@@ -500,8 +500,15 @@ class JobQueueService:
                 # lack the attribute; the canonical
                 # ``reconcile_terminal_watches`` path resolves the
                 # error via the WorkResolver instead.
+                # Map admission_state to representative legacy status
+                # string so the watcher filter (which checks against
+                # legacy ``watch_events`` like "completed",
+                # "dead_letter") matches.
+                legacy_status = ADMISSION_STATE_TO_STATUS.get(
+                    job.admission_state, job.admission_state
+                )
                 await self.notify_watchers(
-                    watch.job_id, job.admission_state, getattr(job, 'error_message', None)
+                    watch.job_id, legacy_status, getattr(job, 'error_message', None)
                 )
                 reconciled += 1
 

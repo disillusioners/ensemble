@@ -5,7 +5,7 @@ normalized to SYSTEM_DEFAULT_PROJECT_ID when enqueued or retried.
 """
 
 from unittest.mock import patch
-
+from datetime import datetime
 import pytest
 
 from sqlalchemy import create_engine
@@ -187,15 +187,26 @@ async def test_retry_orphan_job_gets_system_project_id():
             # precondition directly — mirroring what the pre-Phase-4
             # ``fail_job`` used to write — so the retry path proceeds to
             # the enqueue() normalization logic this test exercises.
+            #
+            # Phase 5 cleanup: the ``status`` column was dropped from
+            # the JobItem model in Phase B. The retry engine keys off
+            # ``admission_state='done'`` (with ``failed_at`` set as the
+            # FAILED-path retry marker), so seed that state directly
+            # instead of writing the now-removed ``status`` mirror.
             from sqlmodel import Session
             from sqlalchemy import text as _sa_text
             with Session(engine) as _session:
                 _session.execute(
                     _sa_text(
-                        "UPDATE job_queue_items SET status = 'failed' "
+                        "UPDATE job_queue_items "
+                        "SET admission_state = 'done', "
+                        "    failed_at = :failed_at "
                         "WHERE job_id = :jid"
                     ),
-                    {"jid": orphan_job.job_id},
+                    {
+                        "jid": orphan_job.job_id,
+                        "failed_at": datetime.utcnow().isoformat(),
+                    },
                 )
                 _session.commit()
             

@@ -40,7 +40,7 @@ from daemon.repositories.dependency_bus.repository import DependencyWatcherRepos
 from daemon.repositories.event.models import Event, EventKind  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
 from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageQueue,
     MessageStatus,

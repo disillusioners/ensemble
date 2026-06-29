@@ -1814,22 +1814,17 @@ class InstanceLifecycleService:
                 # already moved the job to ``done``/``dead`` sees
                 # rowcount=0 on the affected row and we no-op for
                 # that row (the guard predicate fails).
-                completed_at = now_iso
-                cancelled_at = now_iso
+                #
+                # Phase 5: ``cancelled_at``, ``completed_at``,
+                # ``error_message``, ``result_summary`` columns were
+                # dropped from the JobItem model — the execution-side
+                # timing/error/result state now lives on the
+                # ``Instance`` (and is surfaced through the resolver).
+                # Only ``admission_state`` is updated here.
                 session.execute(
                     text(
                         "UPDATE job_queue_items "
-                        "SET admission_state = :done_admission, "
-                        # Phase 4 cleanup: ``status`` is no longer
-                        # written (admission_state is the sole
-                        # authority). ``Instance.status`` carries the
-                        # terminal-spelling (COMPLETED / ERROR /
-                        # TERMINATED) and is surfaced to callers via
-                        # the resolver's canonical mapping.
-                        "    cancelled_at = :cancelled_at, "
-                        "    completed_at = :completed_at, "
-                        "    error_message = :err, "
-                        "    result_summary = NULL "
+                        "SET admission_state = :done_admission "
                         "WHERE instance_id = :iid "
                         "  AND admission_state IN ("
                         "    :queued_admission, :active_admission"
@@ -1840,9 +1835,6 @@ class InstanceLifecycleService:
                         "done_admission": AdmissionState.DONE.value,
                         "queued_admission": AdmissionState.QUEUED.value,
                         "active_admission": AdmissionState.ACTIVE.value,
-                        "cancelled_at": cancelled_at,
-                        "completed_at": completed_at,
-                        "err": "Instance terminated",
                     },
                 )
 

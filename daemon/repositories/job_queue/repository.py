@@ -887,12 +887,11 @@ class JobRepository:
         Single guarded UPDATE::
 
             UPDATE job_queue_items
-            SET admission_state = 'queued',
-                retry_count = retry_count + 1,   -- atomic SQL increment
-                next_retry_at = :next_retry_at,
-                failed_at = NULL,
-                error_message = NULL
-            WHERE job_id = :job_id
+SET admission_state = 'queued',
+                    retry_count = retry_count + 1,   -- atomic SQL increment
+                    next_retry_at = :next_retry_at,
+                    failed_at = NULL
+                WHERE job_id = :job_id
               AND admission_state = :from_admission_state
               AND retry_count < :max_retries
             RETURNING *
@@ -979,7 +978,6 @@ class JobRepository:
                     retry_count=JobItem.retry_count + 1,
                     next_retry_at=next_retry_at,
                     failed_at=None,
-                    error_message=None,
                 )
             )
             result = session.exec(stmt)

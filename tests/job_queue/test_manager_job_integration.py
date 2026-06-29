@@ -21,11 +21,25 @@ from daemon.services.job_queue_service import DemandState
 # value onto its ``AdmissionState`` bucket so mock jobs expose the
 # ``admission_state`` that service-level assertions read.
 _STATUS_TO_ADMISSION = {
+    # Legacy ``JobStatus`` vocabulary → 4-value ``AdmissionState``
+    # vocabulary (Phase 5 cleanup). The previous mapping only knew
+    # the admission-side keys ("queued", "active", ...) and
+    # ``get()`` returned ``AdmissionState.ACTIVE.value`` as the
+    # default — which meant a caller passing ``status="completed"``
+    # silently produced a mock with ``admission_state="active"``,
+    # making the "completed job is no-op" test trigger the active
+    # branch. Map both vocabularies so legacy callers translate
+    # correctly.
+    "pending": AdmissionState.QUEUED.value,
+    "processing": AdmissionState.ACTIVE.value,
+    "paused": AdmissionState.ACTIVE.value,
+    "completed": AdmissionState.DONE.value,
+    "failed": AdmissionState.DONE.value,
+    "cancelled": AdmissionState.DONE.value,
+    "dead_letter": AdmissionState.DEAD.value,
+    # Self-mappings for callers that already pass admission vocabulary.
     AdmissionState.QUEUED.value: AdmissionState.QUEUED.value,
     AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
-    AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
-    AdmissionState.DONE.value: AdmissionState.DONE.value,
-    AdmissionState.DONE.value: AdmissionState.DONE.value,
     AdmissionState.DONE.value: AdmissionState.DONE.value,
     AdmissionState.DEAD.value: AdmissionState.DEAD.value,
 }
@@ -44,7 +58,7 @@ def make_mock_job(
     job.job_id = job_id
     job.instance_id = instance_id
     job.project_id = project_id
-    job.admission_state = _STATUS_TO_ADMISSION.get(status, AdmissionState.ACTIVE.value)
+    job.admission_state = _STATUS_TO_ADMISSION.get(status, status)
     job.agent_id = agent_id
     job.message = message
     job.result_summary = None

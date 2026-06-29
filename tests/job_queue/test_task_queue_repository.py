@@ -126,13 +126,19 @@ class TestRepositoryList:
         """Test listing jobs filtered by status."""
         job1 = repository.create(**sample_job_data)
         job2 = repository.create(**sample_job_data)
-        
+
         # Start job1
         repository.start_job(job1.job_id, "instance-1")
-        
-        pending_jobs, total = repository.list(statuses=[AdmissionState.QUEUED.value])
-        processing_jobs, _ = repository.list(statuses=[AdmissionState.ACTIVE.value])
-        
+
+        # Phase 5 (Job-as-Queue-Proxy): the ``list(statuses=...)``
+        # filter goes through ``_statuses_to_admission`` which keys
+        # on the legacy ``JobStatus`` vocabulary. Pass
+        # ``JobStatus.PENDING.value`` (``"pending"``) so the helper
+        # maps to ``AdmissionState.QUEUED.value`` and the SQL filter
+        # matches the right admission bucket.
+        pending_jobs, total = repository.list(statuses=[JobStatus.PENDING.value])
+        processing_jobs, _ = repository.list(statuses=[JobStatus.PROCESSING.value])
+
         assert len(pending_jobs) == 1
         assert pending_jobs[0].job_id == job2.job_id
         assert len(processing_jobs) == 1
@@ -551,7 +557,7 @@ class TestRepositoryEdgeCases:
         
         # Filter by both status and project
         jobs, total = repository.list(
-            statuses=[AdmissionState.QUEUED.value],
+            statuses=[JobStatus.PENDING.value],
             project_id="test-project"
         )
         
@@ -788,14 +794,14 @@ class TestRepositoryListByQueue:
         
         # Filter by PENDING status
         pending_jobs, pending_total = repository.list_by_queue(
-            queue.queue_id, statuses=[AdmissionState.QUEUED.value]
+            queue.queue_id, statuses=[JobStatus.PENDING.value]
         )
         assert pending_total == 2
         assert len(pending_jobs) == 2
         
         # Filter by PROCESSING status
         processing_jobs, processing_total = repository.list_by_queue(
-            queue.queue_id, statuses=[AdmissionState.ACTIVE.value]
+            queue.queue_id, statuses=[JobStatus.PROCESSING.value]
         )
         assert processing_total == 1
         assert len(processing_jobs) == 1

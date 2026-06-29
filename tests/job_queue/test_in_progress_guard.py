@@ -99,7 +99,14 @@ def make_mock_job(
     """Create a MagicMock(spec=JobItem) with the given attributes."""
     mock_job = MagicMock(spec=JobItem)
     mock_job.job_id = job_id
-    mock_job.admission_state = status
+    # Phase 5 (Job-as-Queue-Proxy): translate the legacy
+    # ``status`` kwarg through ``_STATUS_TO_ADMISSION`` so the
+    # ``MagicMock`` surfaces the 4-value ``AdmissionState``
+    # vocabulary the production code branches on. Without this,
+    # a caller passing ``status="processing"`` produces a mock
+    # with ``admission_state="processing"`` (legacy string) and
+    # the observer's active-state guard rejects every job.
+    mock_job.admission_state = _STATUS_TO_ADMISSION.get(status, status)
     mock_job.instance_id = instance_id
     mock_job.agent_id = agent_id
     mock_job.result_summary = "Test job completed"

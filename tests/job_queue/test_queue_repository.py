@@ -794,12 +794,21 @@ class TestJobStatusValues:
     """Tests for JobStatus enum values."""
 
     def test_all_status_values(self):
-        """Test all job status values."""
-        assert AdmissionState.QUEUED.value == "pending"
-        assert AdmissionState.ACTIVE.value == "processing"
-        assert AdmissionState.DONE.value == "completed"
-        assert AdmissionState.DONE.value == "failed"
-        assert AdmissionState.DONE.value == "cancelled"
+        """Test all job status values.
+
+        Phase 5 (Job-as-Queue-Proxy): the 4-value ``AdmissionState``
+        vocabulary replaces the legacy ``JobStatus`` enum. ``QUEUED``
+        / ``ACTIVE`` / ``DONE`` / ``DEAD`` are the canonical strings
+        — the legacy ``JobStatus`` keys (``pending`` /
+        ``processing`` / ``completed`` / etc.) remain readable via
+        ``ADMISSION_STATE_TO_STATUS`` for backward compat, but the
+        ``AdmissionState`` enum members themselves carry the new
+        values directly.
+        """
+        assert AdmissionState.QUEUED.value == "queued"
+        assert AdmissionState.ACTIVE.value == "active"
+        assert AdmissionState.DONE.value == "done"
+        assert AdmissionState.DEAD.value == "dead"
 
     def test_is_valid_status(self):
         """Test status validation."""

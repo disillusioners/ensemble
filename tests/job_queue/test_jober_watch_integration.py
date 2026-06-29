@@ -13,6 +13,25 @@ from datetime import datetime
 from pathlib import Path
 
 from daemon.repositories.job_queue.watcher_models import JobWatcher
+
+
+# Phase 5 (Job-as-Queue-Proxy): translate the legacy ``status``
+# values the Jober tests use (``pending``, ``cancelled``,
+# ``completed``, ``failed``, ``dead_letter``, ``processing``)
+# into the 4-value ``AdmissionState`` vocabulary the production
+# code branches on. The ``mock_job_item`` fixtures below expose
+# this through a property-style setter so a test that writes
+# ``job.status = "completed"`` automatically flips
+# ``job.admission_state`` to ``"done"``.
+_LEGACY_STATUS_TO_ADMISSION = {
+    "pending": "queued",
+    "processing": "active",
+    "paused": "active",
+    "completed": "done",
+    "failed": "done",
+    "cancelled": "done",
+    "dead_letter": "dead",
+}
 from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
 from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, AdmissionState
 from daemon.repositories.job_queue.lock_repository import LockRepository
@@ -129,7 +148,23 @@ class TestJoberWatchIntegration:
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
-        job.admission_state = "active"
+        # Phase 5: keep status and admission_state in sync
+        # via a property-style setter so legacy test code that
+        # writes job.status = "completed" automatically flips
+        # job.admission_state to "done". Without this, the
+        # watcher's terminal-state guard sees the row as still
+        # active and registers a watch instead of returning the
+        # already-terminal reply.
+        def _set_legacy_status(legacy):
+            job.__dict__["status"] = legacy
+            job.admission_state = _LEGACY_STATUS_TO_ADMISSION.get(
+                legacy, legacy
+            )
+        type(job).status = property(
+            fget=lambda self: job.__dict__.get("status", "processing"),
+            fset=lambda self, value: _set_legacy_status(value),
+        )
+        job.status = "processing"  # default → active admission
         job.result_summary = "Test job completed successfully"
         job.error_message = None
         job.instance_id = "instance-123"
@@ -191,7 +226,20 @@ class TestJoberWatchIntegration:
     async def test_path3_complete(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
         """Path 3: complete_job() → COMPLETED notification."""
         watcher_repo.add_watch(mock_job_item.job_id, "watcher-instance-1")
-        mock_job_item.status = "completed"
+
+        # Phase 5 (Job-as-Queue-Proxy): keep the job in
+        # ``admission_state="active"`` so the production
+        # ``complete_job`` -> ``_finalize_terminal`` -> ``finalize_active_to_done``
+        # path has something to transition. The previous
+        # ``mock_job_item.status = "completed"`` only worked by
+        # accident — the MagicMock didn't translate the legacy
+        # status to admission vocabulary, so admission_state
+        # stayed ``"active"`` (the fixture default) and the
+        # transition fired. With Phase 5 the property setter on
+        # ``status`` keeps the two in sync; setting ``"completed"``
+        # now flips admission_state to ``"done"`` and the
+        # terminal-write boundary no-ops the row, so the
+        # notification never fires.
 
         # Mock repository calls
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
@@ -217,7 +265,14 @@ class TestJoberWatchIntegration:
     async def test_path4_terminate(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
         """Path 4: terminate_instance() → CANCELLED notification (simplified, no TERMINATED state)."""
         watcher_repo.add_watch(mock_job_item.job_id, "watcher-instance-1")
-        mock_job_item.status = "cancelled"
+
+        # Phase 5: keep ``admission_state`` on ``"active"`` so the
+        # production ``complete_job`` -> ``_finalize_terminal``
+        # ``active → done`` write boundary has a row to
+        # transition. Setting ``status="cancelled"`` here would
+        # flip admission_state to ``"done"`` via the
+        # ``status``-setter side effect and the boundary would
+        # no-op.
 
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
         job_queue_service._repository.terminate_job = MagicMock(return_value=mock_job_item)
@@ -915,7 +970,23 @@ class TestNotifyWatchersEdgeCases:
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
-        job.admission_state = "active"
+        # Phase 5: keep status and admission_state in sync
+        # via a property-style setter so legacy test code that
+        # writes job.status = "completed" automatically flips
+        # job.admission_state to "done". Without this, the
+        # watcher's terminal-state guard sees the row as still
+        # active and registers a watch instead of returning the
+        # already-terminal reply.
+        def _set_legacy_status(legacy):
+            job.__dict__["status"] = legacy
+            job.admission_state = _LEGACY_STATUS_TO_ADMISSION.get(
+                legacy, legacy
+            )
+        type(job).status = property(
+            fget=lambda self: job.__dict__.get("status", "processing"),
+            fset=lambda self, value: _set_legacy_status(value),
+        )
+        job.status = "processing"  # default → active admission
         job.result_summary = "Test job completed successfully"
         job.error_message = None
         job.instance_id = "instance-123"
@@ -1030,7 +1101,23 @@ class TestReconcileTerminalWatches:
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
-        job.admission_state = "active"
+        # Phase 5: keep status and admission_state in sync
+        # via a property-style setter so legacy test code that
+        # writes job.status = "completed" automatically flips
+        # job.admission_state to "done". Without this, the
+        # watcher's terminal-state guard sees the row as still
+        # active and registers a watch instead of returning the
+        # already-terminal reply.
+        def _set_legacy_status(legacy):
+            job.__dict__["status"] = legacy
+            job.admission_state = _LEGACY_STATUS_TO_ADMISSION.get(
+                legacy, legacy
+            )
+        type(job).status = property(
+            fget=lambda self: job.__dict__.get("status", "processing"),
+            fset=lambda self, value: _set_legacy_status(value),
+        )
+        job.status = "processing"  # default → active admission
         job.result_summary = "Test job completed successfully"
         job.error_message = None
         job.instance_id = "instance-123"
@@ -1072,7 +1159,14 @@ class TestReconcileTerminalWatches:
             watcher_repo.add_watch(job_id, "instance-456")
             job = MagicMock()
             job.job_id = job_id
-            job.admission_state = status
+            # Phase 5: translate the legacy ``status`` kwarg through
+            # ``_LEGACY_STATUS_TO_ADMISSION`` so ``admission_state``
+            # matches the 4-value admission vocabulary the
+            # production ``reconcile_terminal_watches`` filter uses
+            # (rows in ``admission_state IN ('done', 'dead')``).
+            job.admission_state = _LEGACY_STATUS_TO_ADMISSION.get(
+                status, status
+            )
             job.error_message = error
             job.agent_id = "developer"
             job.result_summary = "Test result"

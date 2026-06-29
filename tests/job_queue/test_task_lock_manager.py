@@ -1257,11 +1257,15 @@ class TestCleanupTerminalJobLocks:
             conn.execute(
                 text(
                     "UPDATE job_queue_items "
-                    "SET status=:status, admission_state=:admission_state "
+                    "SET admission_state=:admission_state "
                     "WHERE job_id=:id"
                 ),
                 {
-                    "status": "completed",
+                    # Phase 5 cleanup: ``status`` column was dropped
+                    # from the JobItem model. ``admission_state`` is
+                    # the sole write authority for queue gating; the
+                    # terminal state is ``done`` (COMPLETED /
+                    # CANCELLED / FAILED all collapse here).
                     "admission_state": status_to_admission("completed"),
                     "id": job.job_id,
                 },

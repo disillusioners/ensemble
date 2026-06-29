@@ -766,10 +766,21 @@ class TestTerminateInstanceJobCleanup:
     async def test_terminate_cancels_failed_jobs(
         self, lifecycle_service, mock_manager, mock_job_queue_service
     ):
-        """Test that terminate_instance() CANCELS FAILED jobs.
+        """Test that terminate_instance() skips FAILED (terminal) jobs.
 
-        FAILED jobs should now be included in find_jobs_by_instance() and
-        cancelled during termination cleanup.
+        Phase 5 (Job-as-Queue-Proxy): legacy ``FAILED`` collapses into
+        ``admission_state == "done"`` alongside ``COMPLETED`` /
+        ``CANCELLED``. The cleanup loop in
+        :meth:`InstanceLifecycleService.terminate_instance` (see
+        ``daemon/services/instance_lifecycle.py:935``) treats the
+        ``done`` / ``dead`` admission buckets as terminal and
+        ``continue``s past them — there's nothing to cancel because
+        the row already left the active queue. This test mirrors
+        :meth:`test_terminate_does_not_cancel_cancelled_jobs` (which
+        uses the same ``admission_state="done"`` setup); the legacy
+        "FAILED → cancel_job" semantics are no longer reachable now
+        that ``status`` is frozen at the INSERT default and
+        ``admission_state`` is the sole authority.
         """
         instance_id = "terminate-instance-failed"
 
@@ -781,7 +792,11 @@ class TestTerminateInstanceJobCleanup:
         meta.children = []
         mock_manager._instance_repository.get.return_value = meta
 
-        # Mock FAILED job (now included in find_jobs_by_instance)
+        # Mock FAILED job — under Phase 5 ``status="failed"`` →
+        # ``admission_state="done"`` (the ``MockJob._STATUS_TO_ADMISSION``
+        # map collapses ``failed`` into ``done`` alongside
+        # ``completed`` / ``cancelled``). The cleanup loop skips
+        # ``done`` rows as terminal.
         failed_job = MockJob(
             job_id="failed-job",
             project_id="project-1",
@@ -795,8 +810,9 @@ class TestTerminateInstanceJobCleanup:
 
         await lifecycle_service.terminate_instance(instance_id)
 
-        # cancel_job should be called for failed jobs (they are now included)
-        mock_job_queue_service.cancel_job.assert_called()
+        # FAILED jobs are now in the ``done`` admission bucket — the
+        # cleanup loop skips them; cancel_job is not invoked.
+        mock_job_queue_service.cancel_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_terminate_does_not_cancel_cancelled_jobs(

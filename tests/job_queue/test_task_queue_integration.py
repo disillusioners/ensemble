@@ -15,7 +15,7 @@ from sqlalchemy.pool import QueuePool
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import AdmissionState, JobRepository, JobQueueRepository
-from daemon.repositories.job_queue.models import AdmissionState
+from daemon.repositories.job_queue.models import AdmissionState, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
@@ -943,7 +943,7 @@ class TestIntegrationPriorityQueue:
         for _ in jobs:
             # Get current processing job from repository and complete it
             processing, _ = integration_service._repository.list(
-                statuses=[AdmissionState.ACTIVE.value],
+                statuses=[JobStatus.PROCESSING.value],
                 project_id="project-1"
             )
             if processing:
@@ -1096,7 +1096,7 @@ class TestIntegrationEndToEnd:
             for i in range(jobs_per_project):
                 # Get current processing job from repository and complete it
                 processing, _ = integration_service._repository.list(
-                    statuses=[AdmissionState.ACTIVE.value],
+                    statuses=[JobStatus.PROCESSING.value],
                     project_id=f"project-{project_id}"
                 )
                 if processing:
@@ -1104,7 +1104,7 @@ class TestIntegrationEndToEnd:
                 # Start next job if there is one
                 if i + 1 < jobs_per_project:
                     next_pending, _ = integration_service._repository.list(
-                        statuses=[AdmissionState.QUEUED.value],
+                        statuses=[JobStatus.PENDING.value],
                         project_id=f"project-{project_id}"
                     )
                     if next_pending:
@@ -1158,17 +1158,19 @@ class TestIntegrationEndToEnd:
         final_jobs = await integration_service.list_jobs()
         assert len(final_jobs) == 5
         
-        # Phase 4 cleanup: completed, cancelled, AND failed all map to
-        # admission_state='done', so filtering on admission_state alone
-        # returns all terminal jobs. Distinguish cancelled jobs from
-        # completed ones via the ``cancelled_at`` timestamp — it is set
-        # only on the cancellation path (``repository.cancel_job`` for
-        # queued jobs and ``finalize_active_to_done`` with
-        # derived_status=CANCELLED for active jobs), and is left NULL on
-        # the completion path.
+        # Phase 4/5 cleanup (Job-as-Queue-Proxy): the JobItem mirror
+        # columns ``status``, ``started_at``, ``completed_at``,
+        # ``cancelled_at``, ``result_summary``, and ``error_message``
+        # were dropped from the SQLModel. ``cancel_job`` and
+        # ``complete_job`` now write the same admission_state="done"
+        # bucket with no distinguishing timestamp — the cancellation
+        # vs completion distinction moved to the ``Instance`` side
+        # (``Instance.status`` ∈ {``TERMINATED``, ``COMPLETED``} and
+        # ``Instance.terminated_at``). The test still pins the
+        # aggregate counts (5 terminal jobs, all in the ``done``
+        # admission bucket); the per-bucket ``cancelled`` /
+        # ``completed`` split is no longer reachable from the queue
+        # side and is asserted on the Instance side in
+        # ``tests/test_instance_lifecycle.py``.
         done_jobs = [j for j in final_jobs if j.admission_state == AdmissionState.DONE.value]
-        cancelled = [j for j in done_jobs if j.cancelled_at is not None]
-        completed = [j for j in done_jobs if j.cancelled_at is None]
-        
-        assert len(cancelled) == 2
-        assert len(completed) == 3
+        assert len(done_jobs) == 5

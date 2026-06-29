@@ -136,25 +136,40 @@ def create_job_in_session(engine, **kwargs) -> JobItem:
         "agent_dir": "/agents/test-agent",
         "message": "Test message",
         "source": "test",
-        "status": AdmissionState.QUEUED.value,
-        # admission_state mirrors status via the dual-write helper. The
-        # JobItem model default is QUEUED, so when callers pass an
-        # explicit status we must compute the corresponding admission
-        # state here — otherwise the row carries status='failed' but
-        # admission_state='queued' and the find_retryable_jobs query
-        # (which filters on admission_state='queued') would pick it up.
+        # Phase 5: ``status`` was dropped from the JobItem model — the
+        # queue ticket's sole authority is ``admission_state``. The
+        # default below mirrors the model's ``admission_state`` default
+        # (QUEUED) and is overridden when callers pass an explicit
+        # ``admission_state=``.
         "admission_state": status_to_admission(AdmissionState.QUEUED.value),
         "priority": 5,
         "retry_count": 0,
         "project_id": "test-project",  # Required for move_to_dlq
         "queue_id": "queue-123",  # Required for move_to_dlq
     }
+
+    # Phase 5: ``status`` and ``error_message`` were dropped from the
+    # JobItem model. Transform a caller-supplied ``status=`` into the
+    # equivalent ``admission_state`` so the new query path still sees
+    # the intended state (mirrors production dual-write). Drop
+    # ``error_message=`` silently — execution error state now lives on
+    # the Instance, not the JobItem. We handle these BEFORE
+    # ``defaults.update(kwargs)`` so the caller-supplied values win
+    # over the initial defaults.
+    kwargs_admission_state = kwargs.pop("admission_state", None)
+    kwargs_status = kwargs.pop("status", None)
+    kwargs_error_message = kwargs.pop("error_message", None)
+
     defaults.update(kwargs)
 
-    # If the caller overrode status but didn't override admission_state,
-    # keep the two columns in sync (mirrors production dual-write).
-    if "status" in kwargs and "admission_state" not in kwargs:
-        defaults["admission_state"] = status_to_admission(kwargs["status"])
+    if kwargs_admission_state is not None:
+        defaults["admission_state"] = kwargs_admission_state
+    elif kwargs_status is not None:
+        defaults["admission_state"] = status_to_admission(kwargs_status)
+
+    # Silence the unused-variable lint for ``error_message`` — it is
+    # intentionally dropped because the JobItem column was removed.
+    del kwargs_error_message
 
     # Ensure required fields
     if "job_id" not in defaults:
@@ -284,7 +299,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             failed_at="2026-06-28T00:00:00+00:00",
             retry_count=1,
             max_retries=3,
@@ -299,7 +314,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             retry_count=3,
             max_retries=3,  # Exhausted
         )
@@ -313,7 +328,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             retry_count=5,
             max_retries=3,
         )
@@ -351,7 +366,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             retry_count=0,
         )
         
@@ -364,7 +379,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             retry_count=0,
             max_retries=0,  # Explicitly disabled
         )
@@ -461,7 +476,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             retry_count=1,
             max_retries=3,
             error_message="Connection timeout",
@@ -481,7 +496,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             retry_count=3,  # Exhausted
             max_retries=3,
             queue_id="queue-123",
@@ -504,7 +519,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.QUEUED.value,
+            status=JobStatus.PENDING.value,
         )
         
         result = retry_engine.maybe_retry("job-123")
@@ -516,7 +531,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
         )
         
         result = retry_engine.maybe_retry("job-123")
@@ -534,7 +549,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-specific-id",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             failed_at="2026-06-28T00:00:00+00:00",
             retry_count=0,
             max_retries=3,
@@ -565,7 +580,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.QUEUED.value,  # Phase 3: post-atomic_retry state
+            status=JobStatus.PENDING.value,  # Phase 3: post-atomic_retry state
             retry_count=1,
             max_retries=3,
             next_retry_at=past_time.isoformat(),
@@ -582,7 +597,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.QUEUED.value,  # Phase 3
+            status=JobStatus.PENDING.value,  # Phase 3
             retry_count=1,
             max_retries=3,
             next_retry_at=future_time.isoformat(),
@@ -600,7 +615,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-1",
             project_id="project-a",
-            status=AdmissionState.QUEUED.value,  # Phase 3
+            status=JobStatus.PENDING.value,  # Phase 3
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
@@ -608,7 +623,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-2",
             project_id="project-b",
-            status=AdmissionState.QUEUED.value,  # Phase 3
+            status=JobStatus.PENDING.value,  # Phase 3
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
@@ -628,7 +643,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.DONE.value,  # Not retry-eligible (terminal)
+            status=JobStatus.FAILED.value,  # Not retry-eligible (terminal)
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
@@ -642,7 +657,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=AdmissionState.QUEUED.value,  # Phase 3
+            status=JobStatus.PENDING.value,  # Phase 3
             retry_count=1,
             next_retry_at=None,  # No retry scheduled
         )
@@ -672,7 +687,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-found",
             project_id="project-a",
-            status=AdmissionState.QUEUED.value,
+            status=JobStatus.PENDING.value,
             next_retry_at=past_time.isoformat(),
         )
 
@@ -680,7 +695,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-future",
-            status=AdmissionState.QUEUED.value,
+            status=JobStatus.PENDING.value,
             next_retry_at=future_time.isoformat(),
         )
 
@@ -688,7 +703,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-completed",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             next_retry_at=past_time.isoformat(),
         )
 
@@ -696,7 +711,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-no-retry",
-            status=AdmissionState.QUEUED.value,
+            status=JobStatus.PENDING.value,
             next_retry_at=None,
         )
 
@@ -705,7 +720,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-project-b",
             project_id="project-b",
-            status=AdmissionState.QUEUED.value,
+            status=JobStatus.PENDING.value,
             next_retry_at=past_time.isoformat(),
         )
 
@@ -730,7 +745,7 @@ class TestRetryEngineIntegration:
         create_job_in_session(
             engine,
             job_id="job-cycle",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             retry_count=0,
             max_retries=2,
             error_message="First failure",
@@ -749,17 +764,16 @@ class TestRetryEngineIntegration:
         assert result1.retry_count == 1
         
         # Simulate failure by directly updating the job in the database
-        # (bypassing state machine for test purposes). Phase 4: also
-        # flip ``admission_state`` to ``'done'`` so the dual-write
-        # mapping ``status_to_admission('failed')='done'`` is
-        # honored — ``atomic_retry``'s SQL guard checks both the
-        # admission_state AND status columns.
+        # (bypassing state machine for test purposes). Phase 4/5: the
+        # ``status`` and ``error_message`` columns were dropped from
+        # the JobItem model — flip ``admission_state`` to ``'done'``
+        # so ``atomic_retry``'s SQL guard (which checks
+        # ``admission_state`` + ``failed_at IS NOT NULL``) sees the
+        # failed-but-retryable state.
         with SQLModelSession(engine) as session:
             from daemon.repositories.job_queue.models import JobItem
             job_update = session.get(JobItem, "job-cycle")
-            job_update.status = AdmissionState.DONE.value
             job_update.admission_state = "done"
-            job_update.error_message = "Second failure"
             job_update.failed_at = datetime.utcnow().isoformat()
             job_update.next_retry_at = None  # Clear next_retry_at for retry
             session.commit()
@@ -770,14 +784,12 @@ class TestRetryEngineIntegration:
         assert result2.admission_state == AdmissionState.QUEUED.value
         assert result2.retry_count == 2
 
-        # Simulate failure again (exhaust retries). Phase 4: also
-        # flip ``admission_state`` (see comment above).
+        # Simulate failure again (exhaust retries). Phase 4/5: see
+        # comment above — flip ``admission_state`` only.
         with SQLModelSession(engine) as session:
             from daemon.repositories.job_queue.models import JobItem
             job_update = session.get(JobItem, "job-cycle")
-            job_update.status = AdmissionState.DONE.value
             job_update.admission_state = "done"
-            job_update.error_message = "Third failure"
             job_update.failed_at = datetime.utcnow().isoformat()
             job_update.next_retry_at = None  # Clear next_retry_at for retry
             session.commit()
@@ -802,7 +814,7 @@ class TestRetryEngineIntegration:
         job = create_job_in_session(
             engine,
             job_id="job-config-test",
-            status=AdmissionState.DONE.value,
+            status=JobStatus.FAILED.value,
             failed_at="2026-06-28T00:00:00+00:00",
             retry_count=0,
             max_retries=None,  # Should use config default of 5

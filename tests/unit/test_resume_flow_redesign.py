@@ -69,7 +69,7 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
-from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository, JobStatus, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus, set_dependency_bus
@@ -182,14 +182,6 @@ def _seed_job(
             admission_state=status_to_admission(status),
             instance_id=instance_id,
             created_at=now_iso,
-                now_iso
-                if status
-                in (
-                    AdmissionState.ACTIVE.value,
-                    AdmissionState.ACTIVE.value,
-                )
-                else None
-            ),
         )
         s.add(job)
         s.commit()
@@ -307,7 +299,7 @@ def test_resume_transitions_job_to_processing(
     JobProcessor's queue sweep can re-discover it.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    jid = _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
+    jid = _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
 
     result = lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -320,8 +312,8 @@ def test_resume_transitions_job_to_processing(
     assert result.updated_ids == [iid]
     jobs = _read_jobs(engine, iid)
     assert len(jobs) == 1
-    assert jobs[0].status == AdmissionState.ACTIVE.value, (
-        f"expected job {jid} to be PROCESSING, got {jobs[0].status}"
+    assert jobs[0].admission_state == AdmissionState.ACTIVE.value, (
+        f"expected job {jid} to be PROCESSING, got {jobs[0].admission_state}"
     )
 
 
@@ -330,15 +322,17 @@ def test_resume_skips_non_paused_jobs(lifecycle_service, engine, write_guard):
 
     The ``WHERE status = 'paused'`` guard makes the UPDATE idempotent
     and racy-safe: a row that flipped to a terminal status in a
-    concurrent transition is left alone.
+concurrent transition is left alone.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    _seed_job(engine, instance_id=iid, status=AdmissionState.DONE.value)
-    _seed_job(engine, instance_id=iid, status=AdmissionState.DONE.value)
-    _seed_job(engine, instance_id=iid, status=AdmissionState.QUEUED.value)
-    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
-    # The PAUSED one is the only one that should transition.
-    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.COMPLETED.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.COMPLETED.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.PENDING.value)
+    # Two PAUSED jobs (PROCESSING maps to "active" admission_state
+    # under the dual-write contract; status_to_admission puts them in
+    # the "active" bucket that the cascade filters on).
+    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
 
     lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -349,8 +343,8 @@ def test_resume_skips_non_paused_jobs(lifecycle_service, engine, write_guard):
     )
 
     jobs = _read_jobs(engine, iid)
-    statuses = sorted(j.status for j in jobs)
-    # COMPLETED/FAILED/PENDING preserved; PAUSED → PROCESSING (now 2 PROCESSING)
+    statuses = sorted(j.admission_state for j in jobs)
+    # COMPLETED/FAILED/PENDING preserved; PAUSED → ACTIVE (now 2 ACTIVE)
     assert statuses == sorted([
         AdmissionState.DONE.value,
         AdmissionState.DONE.value,
@@ -358,7 +352,7 @@ def test_resume_skips_non_paused_jobs(lifecycle_service, engine, write_guard):
         AdmissionState.ACTIVE.value,  # pre-existing
         AdmissionState.ACTIVE.value,  # flipped from PAUSED
     ]), (
-        f"expected exactly one PAUSED → PROCESSING transition; got {statuses}"
+        f"expected exactly one PAUSED → ACTIVE transition; got {statuses}"
     )
 
     # Count PROCESSING: should be 2 (pre-existing + the flipped PAUSED)
@@ -394,7 +388,7 @@ def test_resume_transitions_task_to_pending(
     task_id = _seed_task(
         engine, instance_id=iid, status=TaskStatus.PAUSED.value
     )
-    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
 
     lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -468,7 +462,7 @@ def test_resume_three_tables_single_transaction(
     inverse of the pre-Phase 2 bug.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.PAUSED.value)
 
     result = lifecycle_service._resume_cascade_db_sync(
@@ -536,7 +530,7 @@ def test_resume_does_not_complete_paused_task(
     task_id = _seed_task(
         engine, instance_id=iid, status=TaskStatus.PAUSED.value
     )
-    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
 
     lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -831,7 +825,7 @@ def test_paused_to_cancelled_via_terminate_still_works(engine):
     from sqlmodel import update as sqlmodel_update
 
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
+    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.PAUSED.value)
 
     # Simulate terminate's status transition (this is the same

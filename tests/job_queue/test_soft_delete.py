@@ -121,14 +121,31 @@ class TestRepositorySoftDelete:
         job = repository.create(**sample_job_data)
         job_id = job.job_id
         
-        # Transition to DEAD_LETTER
+        # Transition to DEAD_LETTER. Phase 5 (Job-as-Queue-Proxy):
+        # the legacy ``done → dead_letter`` transition no longer
+        # exists on the admission vocabulary — ``dead`` is reachable
+        # only via ``DeadLetterService.move_to_dlq`` /
+        # ``move_to_dlq_standalone`` (the production paths that
+        # gate on ``admission_state='active'``). For this test we
+        # just need the row in ``admission_state='dead'`` so the
+        # ``soft_delete`` call covers that branch; seed the column
+        # directly via a Core UPDATE rather than calling the
+        # non-existent ``done → dead`` transition.
         repository.start_job_atomic(job_id, "test-instance")
         repository.fail_job(job_id, "test error")
-        repository.atomic_transition(
-            job_id,
-            from_status=AdmissionState.DONE.value,
-            to_status=AdmissionState.DEAD.value,
-        )
+        from sqlmodel import Session
+        from sqlalchemy import text as _sa_text
+        from datetime import datetime as _dt
+        with Session(repository.engine) as _session:
+            _session.execute(
+                _sa_text(
+                    "UPDATE job_queue_items "
+                    "SET admission_state = 'dead' "
+                    "WHERE job_id = :jid"
+                ),
+                {"jid": job_id},
+            )
+            _session.commit()
         
         # Soft delete
         result = repository.soft_delete(job_id)
