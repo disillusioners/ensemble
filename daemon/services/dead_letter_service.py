@@ -154,13 +154,9 @@ class DeadLetterService:
             project_id=job.project_id,
             queue_id=job.queue_id,
             priority=job.priority,
-            # Phase 5: ``job.error_message`` was dropped from the
-            # JobItem model in Phase B; use ``getattr`` to stay
-            # compatible with stale rows that may still carry the
-            # attribute in fixture data. ``failed_at`` was re-added
-            # to the model in Phase 5 Batch 2 (see JobItem.failed_at)
-            # so it can be read directly.
-            error_message=getattr(job, 'error_message', None) or "",
+            # Phase 7: error_message column dropped from JobItem; the DLQ
+            # entry has its own ``reason`` field for failure context.
+            error_message="",
             retry_count=job.retry_count,
             failed_at=job.failed_at or datetime.now(timezone.utc).isoformat(),
             reason=reason,
@@ -295,13 +291,9 @@ class DeadLetterService:
                 project_id=job.project_id,
                 queue_id=job.queue_id,
                 priority=job.priority,
-                # Phase 5: ``job.error_message`` was dropped from the
-                # JobItem model in Phase B; use ``getattr`` to stay
-                # compatible with stale rows that may still carry the
-                # attribute in fixture data. ``failed_at`` was re-added
-                # to the model in Phase 5 Batch 2 (see JobItem.failed_at)
-                # so it can be read directly.
-                error_message=getattr(job, 'error_message', None) or "",
+                # Phase 7: error_message column dropped from JobItem; the DLQ
+                # entry has its own ``reason`` field for failure context.
+                error_message="",
                 retry_count=job.retry_count,
                 failed_at=job.failed_at or datetime.now(timezone.utc).isoformat(),
                 reason=reason,
@@ -362,11 +354,10 @@ class DeadLetterService:
                 # Notify watchers after successful commit
                 if self._job_queue_service and self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        # Phase 5: ``job.error_message`` was dropped from
-                        # the JobItem model in Phase B; ``getattr``
-                        # shields the post-commit watcher notify from
-                        # AttributeError on legacy rows.
-                        self._job_queue_service.notify_watchers(job_id, "dead_letter", getattr(job, 'error_message', None)),
+                        # Phase 7: error_message column dropped from JobItem;
+                        # error text now lives on Instance/WorkRecord via
+                        # the resolver and is not part of the DLQ notify.
+                        self._job_queue_service.notify_watchers(job_id, "dead_letter", None),
                         self._loop,
                     )
 

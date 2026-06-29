@@ -152,16 +152,9 @@ class JobQueueService:
         self._project_repo: Any | None = None  # Project repository for pause state checks
         self._watcher_repo: Any | None = None  # Repository for job watchers
         self._work_resolver: Any | None = None  # WorkResolverService for work_id → WorkRecord
-        # Virtual job resolver flag (Phase 2 Batch 4a, 2026-06-27,
-        # feature/virtual-job-management-surface). Tools branch on this to
-        # route ``job_get`` / ``job_list`` / ``job_cancel`` / ``watch_job``
-        # through the WorkResolverService (``get_work`` / ``list_work`` /
-        # kind-aware cancel) or fall back to the legacy JobItem-only
-        # primitives (``get_job`` / ``list_jobs`` / ``cancel_job``).
-        # Default ``True`` so the new surface is exercised in dev/test from
-        # day one; ``set_config`` writes the real value at startup.
-        self._use_virtual_job_resolver: bool = True
-    
+        # Phase 7: every read path goes through WorkResolverService
+        # unconditionally.
+
     def set_retry_engine(self, retry_engine) -> None:
         """Set the retry engine used for auto-retries.
 
@@ -219,13 +212,6 @@ class JobQueueService:
         """
         if hasattr(config, 'idempotency_key_ttl_hours'):
             self._idempotency_key_ttl_hours = config.idempotency_key_ttl_hours
-        # Phase 2 (Batch 4a) — capture the ``use_virtual_job_resolver`` kill
-        # switch so tools can branch cleanly. Default-on (matching the
-        # JobSystemConfig default) but defensively checked via ``hasattr``
-        # so older test doubles that pass a partial config object don't
-        # blow up on the attribute lookup.
-        if hasattr(config, 'use_virtual_job_resolver'):
-            self._use_virtual_job_resolver = config.use_virtual_job_resolver
     
     def set_watcher_repo(self, watcher_repo: Any) -> None:
         """Set the watcher repository for job event notifications.
@@ -249,29 +235,8 @@ class JobQueueService:
         """
         self._work_resolver = work_resolver
 
-    @property
-    def use_virtual_job_resolver(self) -> bool:
-        """Return the kill-switch for the virtual-job read API.
-
-        Phase 2 (Batch 4a, 2026-06-27) of
-        ``feature/virtual-job-management-surface``. Tools in
-        ``daemon/tools/job_queue.py`` branch on this to decide whether to
-        route through ``self.get_work`` / ``self._work_resolver.list_work``
-        (kind-agnostic) or fall back to the legacy JobItem-only
-        primitives (``get_job`` / ``list_jobs`` / ``cancel_job``).
-
-        Mirrors the ``JobSystemConfig.use_virtual_job_resolver`` flag
-        (env ``ENSEMBLE_JOB_SYSTEM_USE_VIRTUAL_JOB_RESOLVER``), which
-        ``daemon/api.py`` wires through :meth:`set_config` at startup.
-        Defaults to ``True`` so the new surface is exercised in dev/test
-        from day one.
-
-        Returns:
-            The flag value as captured by the last :meth:`set_config`
-            call. ``True`` if no config has been wired yet (matches the
-            ``JobSystemConfig`` default and the constructor default).
-        """
-        return getattr(self, "_use_virtual_job_resolver", True)
+    # Phase 7: every read path goes through WorkResolverService
+        # unconditionally.
 
     async def notify_watchers(
         self,
@@ -379,16 +344,8 @@ class JobQueueService:
                     if progress:
                         notification_parts.append(f"  Progress:\n{progress}")
                 else:
-                    # Phase 5: ``job.result_summary`` was dropped from
-                    # the JobItem model in Phase B. Guard the read
-                    # with ``getattr`` so the watcher notification
-                    # never crashes on legacy rows that may still
-                    # carry the attribute in fixture data; the live
-                    # path here uses ``error`` (from the resolver) as
-                    # the authoritative failure detail.
-                    result_summary = getattr(job, 'result_summary', None)
-                    if result_summary:
-                        notification_parts.append(f"  Result:\n{result_summary}")
+                    # Phase 7: result_summary column dropped; terminal result
+                    # detail is sourced from Instance/WorkRecord via the resolver.
                     if error:
                         notification_parts.append(f"  Error: {error}")
 
@@ -507,9 +464,9 @@ class JobQueueService:
                 legacy_status = ADMISSION_STATE_TO_STATUS.get(
                     job.admission_state, job.admission_state
                 )
-                await self.notify_watchers(
-                    watch.job_id, legacy_status, getattr(job, 'error_message', None)
-                )
+                # Phase 7: error_message column dropped; error text lives on
+                # Instance/WorkRecord via the resolver.
+                await self.notify_watchers(watch.job_id, legacy_status, None)
                 reconciled += 1
 
         return reconciled

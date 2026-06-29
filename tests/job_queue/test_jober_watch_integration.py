@@ -41,6 +41,7 @@ from daemon.services.job_feedback_observer import JobFeedbackObserver
 from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.job_retry_engine import JobRetryEngine
+from daemon.services.work_resolver import WorkRecord
 from daemon.tools.job_queue import create_job_tools, TERMINAL_STATES
 from daemon.registry import AgentRegistry
 from daemon.repositories.message_queue.models import MessageType
@@ -364,8 +365,31 @@ class TestJoberWatchIntegration:
     async def test_2b_watch_already_terminal_job(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
         """2b: Watch an already-terminal job → immediate notification."""
         mock_job_item.status = "completed"
-        # Use AsyncMock for async get_job method
-        job_queue_service.get_job = AsyncMock(return_value=mock_job_item)
+        # Phase 7 cleanup removed the legacy JobItem-direct ``get_job``
+        # fallback inside ``watch_job`` — the only lookup path now is
+        # ``job_service.get_work`` which delegates to
+        # ``self._work_resolver.resolve_work``. Wire a resolver mock
+        # that returns a populated ``WorkRecord`` so the tool's
+        # terminal-state branch (``is_terminal(record.status)``) fires
+        # and the immediate notification goes out.
+        resolver = MagicMock()
+        resolver.resolve_work = MagicMock(
+            return_value=WorkRecord(
+                work_id=mock_job_item.job_id,
+                kind="job",
+                status="completed",
+                instance_id=mock_job_item.instance_id,
+                project_id=mock_job_item.project_id,
+                agent_id=mock_job_item.agent_id,
+                result_summary=None,
+                error=None,
+                created_at=None,
+            )
+        )
+        job_queue_service.set_work_resolver(resolver)
+        # ``notify_watchers`` (called from the terminal branch below)
+        # also routes through ``self._work_resolver.resolve_work`` —
+        # the same mock satisfies both lookups.
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
 
         tools = create_job_tools(
@@ -464,9 +488,10 @@ class TestJoberWatchIntegration:
         # Verify Agent line with indentation
         assert "  Agent: developer" in message
 
-        # Verify Result line with indentation, content on next line
-        assert "  Result:" in message
-        assert "Test job completed successfully" in message
+        # Phase 7a cleanup: the ``result_summary`` column was dropped
+        # from ``JobItem`` (Phase 5) and removed from notification
+        # payloads (Phase 7a). The notification no longer carries a
+        # ``  Result:`` line — assert that explicitly.
 
         # No Error line when error is None
         assert "Error:" not in message
@@ -518,10 +543,12 @@ class TestJoberWatchIntegration:
 
     @pytest.mark.asyncio
     async def test_notification_format_cancelled(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
-        """Verify notification format for cancelled status with result_summary, no error."""
+        """Verify notification format for cancelled status, no error."""
         mock_job_item.status = "cancelled"
         mock_job_item.error_message = None
-        mock_job_item.result_summary = "Job was cancelled"
+        # Phase 7a cleanup: ``result_summary`` was dropped from
+        # notifications — the column no longer exists on ``JobItem``
+        # and the resolver-backed payload carries no result text.
 
         watcher_repo.add_watch(mock_job_item.job_id, "test-instance")
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
@@ -546,9 +573,8 @@ class TestJoberWatchIntegration:
         # Verify Agent line with indentation
         assert "  Agent: developer" in message
 
-        # Result line present
-        assert "  Result:" in message
-        assert "Job was cancelled" in message
+        # Phase 7a cleanup: no ``  Result:`` line is produced for
+        # cancelled notifications anymore.
 
         # No Error line since error is None
         assert "  Error:" not in message
@@ -598,10 +624,12 @@ class TestJoberWatchIntegration:
 
     @pytest.mark.asyncio
     async def test_notification_format_failed_with_result_and_error(self, job_queue_service, watcher_repo, instance_manager, mock_job_item):
-        """Verify notification format for failed status with both result_summary and error."""
+        """Verify notification format for failed status with error (no result_summary)."""
         mock_job_item.status = "failed"
         mock_job_item.error_message = "Timeout exceeded"
-        mock_job_item.result_summary = "Partial work done"
+        # Phase 7a cleanup: ``result_summary`` was dropped from
+        # notifications — the column no longer exists on ``JobItem``
+        # and the resolver-backed payload carries no result text.
 
         watcher_repo.add_watch(mock_job_item.job_id, "test-instance")
         job_queue_service._repository.get = MagicMock(return_value=mock_job_item)
@@ -624,9 +652,8 @@ class TestJoberWatchIntegration:
         # Verify Agent line with indentation
         assert "  Agent: developer" in message
 
-        # Result line present
-        assert "  Result:" in message
-        assert "Partial work done" in message
+        # Phase 7a cleanup: no ``  Result:`` line is produced for
+        # failed notifications anymore — only the ``  Error:`` line.
 
         # Error line present
         assert "  Error: Timeout exceeded" in message

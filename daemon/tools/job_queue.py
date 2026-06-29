@@ -260,40 +260,6 @@ Example:
 }
 
 
-class _LegacyJobItemRecord:
-    """Minimal ``WorkRecord``-shaped view over a :class:`JobItem`.
-
-    Phase 1 (Job as Queue Proxy): the watch tools
-    (``watch_job`` / ``watch_jobs``) prefer a resolver-produced
-    :class:`WorkRecord` for terminal-state detection. When the
-    resolver is not wired (legacy test doubles, pre-init state,
-    partial wiring) ``JobQueueService.get_work`` returns ``None``;
-    rather than degrading the terminal-check to a "job not found"
-    error, the watch tools fall back to a direct ``get_job`` lookup
-    and project the JobItem mirror columns onto this lightweight
-    shim. The two attributes the watch path reads — ``status`` and
-    ``error`` — are already in the canonical vocabulary (the JobItem
-    ``status`` column uses the same labels as the WorkRecord
-    ``status`` column for the 6 non-dead-letter mirrors, and
-    ``dead_letter`` is JobItem-only so the resolver would surface
-    the same value).
-    """
-
-    __slots__ = ("status", "error")
-
-    def __init__(self, job_item: Any) -> None:
-        # Phase 5: derive canonical status from admission_state via the
-        # compat map (JobStatus column is dropped; ADMISSION_STATE_TO_STATUS
-        # remains as the legacy→canonical bridge).
-        self.status: str = ADMISSION_STATE_TO_STATUS.get(
-            job_item.admission_state, "pending"
-        )
-        # Phase 5: JobItem.error_message column dropped. The error text now
-        # lives on the Instance/WorkRecord. This tool result surface returns
-        # None until the tool is wired to the resolver (Phase 6/7).
-        self.error: str | None = getattr(job_item, 'error_message', None)
-
-
 def create_job_tools(
     job_service: "JobQueueService",
     queue_mgmt_service: "JobQueueMgmtService",
@@ -378,23 +344,14 @@ def create_job_tools(
     async def job_get(job_id: str) -> dict:
         """Get job details by ID. Use tool_help("job_get") for details."""
         try:
-            # Phase 2 (Batch 4a) — when the virtual-job resolver is
-            # enabled, route through ``service.get_work`` so the same
-            # identifier resolves to either a Task row (worker-pool
-            # side) or a JobItem row (dispatch-queue side). The result
-            # is the unified WorkRecord view-model. With the flag OFF
-            # we fall back to the legacy JobItem-only path so the kill
-            # switch is a clean revert.
-            if job_service.use_virtual_job_resolver:
-                record = await job_service.get_work(job_id)
-                if record is None:
-                    return {"error": "Job not found"}
-                return record.to_dict()
-
-            job_item = await job_service.get_job(job_id)
-            if job_item is None:
+            # Phase 7: only the resolver path remains. ``service.get_work``
+            # resolves either a Task row (worker-pool side) or a JobItem
+            # row (dispatch-queue side) onto the unified WorkRecord
+            # view-model.
+            record = await job_service.get_work(job_id)
+            if record is None:
                 return {"error": "Job not found"}
-            return job_item.to_dict()
+            return record.to_dict()
         except Exception as e:
             return {"error": f"Failed to get job: {str(e)}"}
     job_get._full_doc_ = _FULL_DOCS["job_get"]
@@ -415,100 +372,81 @@ def create_job_tools(
     ) -> dict:
         """List jobs with optional filters. Use tool_help("job_list") for details."""
         try:
-            # Phase 2 (Batch 4a) — when the virtual-job resolver is
-            # enabled, route through ``work_resolver.list_work`` so the
-            # list is the UNION of pending jobs AND running tasks.
-            # With the flag OFF we fall back to the legacy JobItem-only
-            # ``list_jobs`` path (kill switch — reverts cleanly).
+            # Phase 7: resolver is always ON. Route through
+            # ``work_resolver.list_work`` so the list is the UNION of
+            # pending jobs AND running tasks.
             #
             # Status-alias normalisation (``"running"`` → ``"processing"``
             # etc.) runs on the input list before either branch so the
             # natural-language aliases documented in the tool signature
-            # work for both paths. The normalised values are already in
-            # the canonical vocabulary both ``list_jobs`` (JobItem side)
-            # and ``list_work`` (resolver side) understand.
+            # work. The normalised values are already in the canonical
+            # vocabulary ``list_work`` understands.
             #
             # The ``queue_id`` filter is JobItem-only — the Task table
-            # has no queue concept. With the resolver enabled we issue
-            # the resolver call regardless and accept that Task rows
-            # may show up that wouldn't have under the legacy list; the
-            # surface is intentionally widened (this is the whole point
-            # of the virtual job surface). Callers that want
-            # ``queue_id`` filtering semantics on the resolver path can
-            # post-filter the returned records.
+            # has no queue concept. We issue the resolver call regardless
+            # and accept that Task rows may show up that wouldn't have
+            # under the legacy list; the surface is intentionally widened
+            # (this is the whole point of the virtual job surface).
+            # Callers that want ``queue_id`` filtering semantics on the
+            # resolver path can post-filter the returned records.
             from daemon.services.job_queue_service import normalize_statuses
             normalised_statuses = normalize_statuses(statuses)
 
-            if job_service.use_virtual_job_resolver:
-                work_resolver: "WorkResolverService | None" = getattr(
-                    job_service, "_work_resolver", None
-                )
-                if work_resolver is None:
-                    # Resolver wired but flag is ON — degrade gracefully
-                    # to the JobItem-only list rather than crash, so a
-                    # partial-wiring daemon still serves traffic.
-                    jobs = await job_service.list_jobs(
-                        statuses=normalised_statuses,
-                        project_id=project_id,
-                        queue_id=queue_id,
-                        offset=offset,
-                        limit=limit,
-                        include_deleted=include_deleted,
-                    )
-                    result = {
-                        "jobs": [job.to_dict() for job in jobs],
-                        "count": len(jobs),
-                    }
-                    return truncate_dict_result(result, list_key="jobs", limit=limit)
-
-                records = await asyncio.to_thread(
-                    work_resolver.list_work,
+            work_resolver: "WorkResolverService | None" = getattr(
+                job_service, "_work_resolver", None
+            )
+            if work_resolver is None:
+                # Resolver not wired — degrade gracefully to the
+                # JobItem-only list rather than crash, so a partial-wiring
+                # daemon still serves traffic.
+                jobs = await job_service.list_jobs(
+                    statuses=normalised_statuses,
                     project_id=project_id,
-                    instance_id=None,
-                    status=normalised_statuses[0] if (
-                        normalised_statuses and len(normalised_statuses) == 1
-                    ) else None,
-                    kind=None,
-                    root_only=True,  # P-A: jober manages root-instance work only
+                    queue_id=queue_id,
+                    offset=offset,
+                    limit=limit,
+                    include_deleted=include_deleted,
                 )
-
-                # ``list_work`` only accepts a single ``status`` string
-                # — the resolver surface is intentionally narrow. When
-                # the caller supplies multiple statuses we issue the
-                # unfiltered resolver call and post-filter by the
-                # canonical status set so multi-status requests like
-                # ``statuses=["completed", "failed"]`` don't silently
-                # widen to "all records". The single-status case is
-                # already handled by the resolver-level filter above.
-                if normalised_statuses and len(normalised_statuses) > 1:
-                    allowed_statuses = set(normalised_statuses)
-                    records = [
-                        r for r in records if r.status in allowed_statuses
-                    ]
-
-                # ``list_work`` doesn't support pagination — the legacy
-                # ``list_jobs`` accepted ``offset``/``limit``/``include_deleted``.
-                # Apply them client-side: skip soft-deleted records
-                # (WorkRecords don't carry deleted_at, but Task rows
-                # never have a deleted state), apply offset, then limit.
-                page = records[offset : offset + limit]
                 result = {
-                    "jobs": [r.to_dict() for r in page],
-                    "count": len(page),
+                    "jobs": [job.to_dict() for job in jobs],
+                    "count": len(jobs),
                 }
                 return truncate_dict_result(result, list_key="jobs", limit=limit)
 
-            jobs = await job_service.list_jobs(
-                statuses=normalised_statuses,
+            records = await asyncio.to_thread(
+                work_resolver.list_work,
                 project_id=project_id,
-                queue_id=queue_id,
-                offset=offset,
-                limit=limit,
-                include_deleted=include_deleted,
+                instance_id=None,
+                status=normalised_statuses[0] if (
+                    normalised_statuses and len(normalised_statuses) == 1
+                ) else None,
+                kind=None,
+                root_only=True,  # P-A: jober manages root-instance work only
             )
+
+            # ``list_work`` only accepts a single ``status`` string
+            # — the resolver surface is intentionally narrow. When
+            # the caller supplies multiple statuses we issue the
+            # unfiltered resolver call and post-filter by the
+            # canonical status set so multi-status requests like
+            # ``statuses=["completed", "failed"]`` don't silently
+            # widen to "all records". The single-status case is
+            # already handled by the resolver-level filter above.
+            if normalised_statuses and len(normalised_statuses) > 1:
+                allowed_statuses = set(normalised_statuses)
+                records = [
+                    r for r in records if r.status in allowed_statuses
+                ]
+
+            # ``list_work`` doesn't support pagination — the legacy
+            # ``list_jobs`` accepted ``offset``/``limit``/``include_deleted``.
+            # Apply them client-side: skip soft-deleted records
+            # (WorkRecords don't carry deleted_at, but Task rows
+            # never have a deleted state), apply offset, then limit.
+            page = records[offset : offset + limit]
             result = {
-                "jobs": [job.to_dict() for job in jobs],
-                "count": len(jobs),
+                "jobs": [r.to_dict() for r in page],
+                "count": len(page),
             }
             return truncate_dict_result(result, list_key="jobs", limit=limit)
         except Exception as e:
@@ -521,8 +459,7 @@ def create_job_tools(
     async def job_cancel(job_id: str) -> str:
         """Cancel a pending or processing job. Use tool_help("job_cancel") for details."""
         try:
-            # Phase 2 (Batch 4a) — when the virtual-job resolver is
-            # enabled, the work_id may resolve to either a Task row
+            # Phase 7: the work_id resolves to either a Task row
             # (worker-pool side, requires cooperative
             # ``cancel_requested``) or a JobItem row (dispatch-queue
             # side, instant ``cancel_job``). The semantics differ: task
@@ -531,58 +468,56 @@ def create_job_tools(
             # yields; JobItem cancellation is atomic and flips the row
             # to CANCELLED immediately. The tool docstring is updated
             # to flag this.
-            if job_service.use_virtual_job_resolver:
-                record = await job_service.get_work(job_id)
-                if record is None:
-                    return f"ERROR: Could not cancel job {job_id}. Job not found."
+            # Phase 7: resolver is always ON. ``get_work`` resolves the work_id
+            # to either a Task row (cooperative cancel via
+            # ``cancel_requested``) or a JobItem row (instant atomic
+            # ``cancel_job``).
+            record = await job_service.get_work(job_id)
+            if record is None:
+                return f"ERROR: Could not cancel job {job_id}. Job not found."
 
-                # Phase 4: the resolver never emits ``kind="task"`` — Task
-                # rows are split into ``kind="turn"`` (process_message)
-                # or ``kind="report"`` (process_report / send_report).
-                # Both Task kinds need the cooperative ``request_cancel``
-                # path; only ``kind="job"`` (JobItem rows) goes through
-                # the instant ``cancel_job`` path.
-                if record.kind != "job":
-                    # Cooperative task cancel: look up the Task by
-                    # ``work_id`` and call ``task_repo.request_cancel``
-                    # which sets ``cancel_requested=True``. The worker
-                    # thread observes the flag on its next heartbeat
-                    # and stops gracefully — the row stays RUNNING in
-                    # the meantime (this is by design; instant task
-                    # kill would orphan in-flight graph state).
-                    if manager is None or getattr(manager, "_task_repo", None) is None:
-                        return (
-                            f"ERROR: Could not cancel job {job_id}. "
-                            "Task repository not available for task-kind cancellation."
-                        )
-                    task = await asyncio.to_thread(
-                        manager._task_repo.get_by_work_id, job_id
-                    )
-                    if task is None:
-                        return (
-                            f"ERROR: Could not cancel job {job_id}. "
-                            "Task row missing despite resolver match."
-                        )
-                    cancelled = await asyncio.to_thread(
-                        manager._task_repo.request_cancel, task.id
-                    )
-                    if cancelled:
-                        return (
-                            f"Cancel requested for job {job_id[:8]}... "
-                            "(cooperative — the running task will stop at its next checkpoint)."
-                        )
+            # Phase 4: the resolver never emits ``kind="task"`` — Task
+            # rows are split into ``kind="turn"`` (process_message)
+            # or ``kind="report"`` (process_report / send_report).
+            # Both Task kinds need the cooperative ``request_cancel``
+            # path; only ``kind="job"`` (JobItem rows) goes through
+            # the instant ``cancel_job`` path.
+            if record.kind != "job":
+                # Cooperative task cancel: look up the Task by
+                # ``work_id`` and call ``task_repo.request_cancel``
+                # which sets ``cancel_requested=True``. The worker
+                # thread observes the flag on its next heartbeat
+                # and stops gracefully — the row stays RUNNING in
+                # the meantime (this is by design; instant task
+                # kill would orphan in-flight graph state).
+                if manager is None or getattr(manager, "_task_repo", None) is None:
                     return (
                         f"ERROR: Could not cancel job {job_id}. "
-                        "Task is not in a cancellable state (must be RUNNING with no cancel pending)."
+                        "Task repository not available for task-kind cancellation."
                     )
+                task = await asyncio.to_thread(
+                    manager._task_repo.get_by_work_id, job_id
+                )
+                if task is None:
+                    return (
+                        f"ERROR: Could not cancel job {job_id}. "
+                        "Task row missing despite resolver match."
+                    )
+                cancelled = await asyncio.to_thread(
+                    manager._task_repo.request_cancel, task.id
+                )
+                if cancelled:
+                    return (
+                        f"Cancel requested for job {job_id[:8]}... "
+                        "(cooperative — the running task will stop at its next checkpoint)."
+                    )
+                return (
+                    f"ERROR: Could not cancel job {job_id}. "
+                    "Task is not in a cancellable state (must be RUNNING with no cancel pending)."
+                )
 
-                # JobItem branch — instant atomic cancel via the
-                # existing ``cancel_job`` path.
-                success = await job_service.cancel_job(job_id)
-                if success:
-                    return f"Job {job_id} cancelled successfully."
-                return f"ERROR: Could not cancel job {job_id}. Job may not be in a cancellable state."
-
+            # JobItem branch — instant atomic cancel via the
+            # existing ``cancel_job`` path.
             success = await job_service.cancel_job(job_id)
             if success:
                 return f"Job {job_id} cancelled successfully."
@@ -597,23 +532,19 @@ def create_job_tools(
     async def job_retry(job_id: str) -> str:
         """Retry a failed job. Use tool_help("job_retry") for details."""
         try:
-            # P-D (Phase 5, 2026-06-27): when the resolver is enabled,
-            # resolve the work_id FIRST so we can return a precise
-            # error if the caller passed a task-type work_id
-            # (``kind != "job"``). Without this guard a task work_id
-            # falls straight through to the JobItem-only retry path
-            # and returns the generic "may not be retryable" message
-            # — which is misleading because Task rows have no
-            # retry semantics by design. The kill-switch branch
-            # (``use_virtual_job_resolver == False``) preserves the
-            # legacy verbatim behavior.
-            if job_service.use_virtual_job_resolver:
-                record = await job_service.get_work(job_id)
-                if record is not None and record.kind != "job":
-                    return (
-                        f"ERROR: Operation not applicable: {job_id[:8]}... is "
-                        f"task-type work ({record.kind}), which has no retry path."
-                    )
+            # P-D (Phase 5, 2026-06-27): resolve the work_id FIRST so we
+            # can return a precise error if the caller passed a task-type
+            # work_id (``kind != "job"``). Without this guard a task
+            # work_id falls straight through to the JobItem-only retry
+            # path and returns the generic "may not be retryable" message
+            # — which is misleading because Task rows have no retry
+            # semantics by design.
+            record = await job_service.get_work(job_id)
+            if record is not None and record.kind != "job":
+                return (
+                    f"ERROR: Operation not applicable: {job_id[:8]}... is "
+                    f"task-type work ({record.kind}), which has no retry path."
+                )
 
             job_item = await job_service.retry_job(job_id)
             if job_item is not None:
@@ -632,16 +563,13 @@ def create_job_tools(
             # P-D (Phase 5, 2026-06-27): precise error for task-type
             # work_ids — see ``job_retry`` comment for rationale.
             # Tasks are not soft-deletable, so the JobItem-only
-            # ``soft_delete_job`` path is wrong for them. Resolver
-            # ON: resolve first and reject. Resolver OFF: legacy
-            # verbatim behavior (kill switch is a clean revert).
-            if job_service.use_virtual_job_resolver:
-                record = await job_service.get_work(job_id)
-                if record is not None and record.kind != "job":
-                    return (
-                        f"ERROR: Operation not applicable: {job_id[:8]}... is "
-                        f"task-type work ({record.kind}), which has no delete path."
-                    )
+            # ``soft_delete_job`` path is wrong for them.
+            record = await job_service.get_work(job_id)
+            if record is not None and record.kind != "job":
+                return (
+                    f"ERROR: Operation not applicable: {job_id[:8]}... is "
+                    f"task-type work ({record.kind}), which has no delete path."
+                )
 
             job_item = await job_service.soft_delete_job(job_id)
             if job_item is not None:
@@ -660,15 +588,13 @@ def create_job_tools(
             # P-D (Phase 5, 2026-06-27): precise error for task-type
             # work_ids — see ``job_retry`` comment for rationale.
             # Tasks are not soft-deletable, so a restore against a
-            # task work_id is meaningless. Resolver ON: resolve first
-            # and reject. Resolver OFF: legacy verbatim behavior.
-            if job_service.use_virtual_job_resolver:
-                record = await job_service.get_work(job_id)
-                if record is not None and record.kind != "job":
-                    return (
-                        f"ERROR: Operation not applicable: {job_id[:8]}... is "
-                        f"task-type work ({record.kind}), which has no restore path."
-                    )
+            # task work_id is meaningless.
+            record = await job_service.get_work(job_id)
+            if record is not None and record.kind != "job":
+                return (
+                    f"ERROR: Operation not applicable: {job_id[:8]}... is "
+                    f"task-type work ({record.kind}), which has no restore path."
+                )
 
             job_item = await job_service.restore_job(job_id)
             if job_item is not None:
@@ -706,79 +632,51 @@ def create_job_tools(
             # instance_status pre-check, in-flight Task pre-check,
             # ``enqueue_message``) keys on ``instance_id`` and stays
             # exactly as-is.
-            #
-            # The kill-switch branch (``use_virtual_job_resolver ==
-            # False``) keeps the legacy verbatim ``get_job`` path.
-            if job_service.use_virtual_job_resolver:
-                record = await job_service.get_work(old_job_id)
-                if record is None:
-                    return {"error": f"Job {old_job_id} not found"}
+            record = await job_service.get_work(old_job_id)
+            if record is None:
+                return {"error": f"Job {old_job_id} not found"}
 
-                # 1a. Reject soft-deleted jobs — JobItem-only guard.
-                #     ``WorkRecord`` has no ``deleted_at`` field; the
-                #     soft-delete concept only exists on JobItem. When
-                #     ``kind == "job"`` we do a cheap ``get_job`` for
-                #     the column; when ``kind != "job"`` (task / turn /
-                #     report) we SKIP the check — tasks are not
-                #     soft-deletable, so the check is meaningless and
-                #     would also force a second lookup for nothing.
-                if record.kind == "job":
-                    # Reviewer W3 — race guard: if ``get_work`` resolved
-                    # a job but the follow-up ``get_job`` returns None,
-                    # the row was deleted between the two calls.
-                    # Reject as deleted rather than fall through to
-                    # ``enqueue_message`` against a phantom work_id.
-                    old_job = await job_service.get_job(old_job_id)
-                    if old_job is None:
-                        return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
-                    if old_job.deleted_at is not None:
-                        return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
-
-                # 2. Validate the work is in a terminal state.
-                #    Use the canonical vocabulary via
-                #    ``work_status.is_terminal`` so Task
-                #    ``"running"`` (canonical "processing") and JobItem
-                #    ``"processing"`` agree. Terminal set is the same
-                #    as the JobItem-only ``TERMINAL_STATES`` but goes
-                #    through one helper for both sides.
-                from daemon.services.work_status import is_terminal as _is_terminal
-                if not _is_terminal(record.status):
-                    return {
-                        "error": (
-                            f"Job {old_job_id} is not in a terminal state (current: {record.status}). "
-                            "Only completed/failed/cancelled/dead_letter jobs can be continued."
-                        )
-                    }
-
-                # 3. Extract instance_id from the WorkRecord
-                #     (present on both Task and JobItem sides).
-                instance_id = record.instance_id
-                if not instance_id:
-                    return {"error": f"Job {old_job_id} has no associated instance_id"}
-            else:
-                # Kill-switch branch — verbatim legacy path.
+            # 1a. Reject soft-deleted jobs — JobItem-only guard.
+            #     ``WorkRecord`` has no ``deleted_at`` field; the
+            #     soft-delete concept only exists on JobItem. When
+            #     ``kind == "job"`` we do a cheap ``get_job`` for
+            #     the column; when ``kind != "job"`` (task / turn /
+            #     report) we SKIP the check — tasks are not
+            #     soft-deletable, so the check is meaningless and
+            #     would also force a second lookup for nothing.
+            if record.kind == "job":
+                # Reviewer W3 — race guard: if ``get_work`` resolved
+                # a job but the follow-up ``get_job`` returns None,
+                # the row was deleted between the two calls.
+                # Reject as deleted rather than fall through to
+                # ``enqueue_message`` against a phantom work_id.
                 old_job = await job_service.get_job(old_job_id)
                 if old_job is None:
-                    return {"error": f"Job {old_job_id} not found"}
-
-                # 1a. Reject soft-deleted jobs — cannot continue a deleted job
+                    return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
                 if old_job.deleted_at is not None:
                     return {"error": f"Job {old_job_id} has been deleted and cannot be continued"}
 
-                # 2. Validate the job is in a terminal state
-                if old_job.admission_state not in (AdmissionState.DONE.value, AdmissionState.DEAD.value):
-                    return {
-                        "error": (
-                            f"Job {old_job_id} is not in a terminal state (admission_state={old_job.admission_state}). "
-                            "Only terminal jobs (done/dead) can be continued."
-                        )
-                    }
+            # 2. Validate the work is in a terminal state.
+            #    Use the canonical vocabulary via
+            #    ``work_status.is_terminal`` so Task
+            #    ``"running"`` (canonical "processing") and JobItem
+            #    ``"processing"`` agree. Terminal set is the same
+            #    as the JobItem-only ``TERMINAL_STATES`` but goes
+            #    through one helper for both sides.
+            from daemon.services.work_status import is_terminal as _is_terminal
+            if not _is_terminal(record.status):
+                return {
+                    "error": (
+                        f"Job {old_job_id} is not in a terminal state (current: {record.status}). "
+                        "Only completed/failed/cancelled/dead_letter jobs can be continued."
+                    )
+                }
 
-                # 3. Extract instance_id
-                if not old_job.instance_id:
-                    return {"error": f"Job {old_job_id} has no associated instance_id"}
-
-                instance_id = old_job.instance_id
+            # 3. Extract instance_id from the WorkRecord
+            #     (present on both Task and JobItem sides).
+            instance_id = record.instance_id
+            if not instance_id:
+                return {"error": f"Job {old_job_id} has no associated instance_id"}
 
             # 4. Check manager is available
             if manager is None:
@@ -980,40 +878,18 @@ def create_job_tools(
             if not current_instance_id:
                 return "Error: No instance context"
 
-            # Phase 1 (Job as Queue Proxy): every code path now
-            # resolves through :meth:`JobQueueService.get_work` (the
-            # resolver path) regardless of the ``use_virtual_job_resolver``
-            # flag. The previous dual-path design branched on the
-            # flag and built a WorkRecord-shaped shim from a JobItem
-            # when the flag was OFF — that shim read execution state
-            # off the JobItem mirror, violating the Phase 1 exit
-            # criterion. Both branches now converge on the resolver
-            # path. The flag is retained for backward compatibility
-            # with tests that toggle it; Phase 7 removes the flag
-            # outright once the kill-switch is no longer needed.
+            # Phase 7: the only lookup path is the resolver. Unknown work_ids
+            # surface as a clean not-found rather than falling back to
+            # a JobItem-direct read.
             from daemon.services.work_status import is_terminal as _is_terminal
 
             record: "WorkRecord | None" = await job_service.get_work(job_id)
             if record is None:
-                # Resolver not wired (legacy test doubles or pre-init
-                # state). ``get_work`` returns ``None`` when
-                # ``_work_resolver`` is unset — see
-                # :meth:`JobQueueService.get_work`. Fall back to a
-                # direct ``get_job`` lookup so the terminal-state
-                # check below still works on the JobItem mirror
-                # (the JobItem ``status`` column is already in the
-                # canonical vocabulary, so ``is_terminal`` accepts it
-                # unchanged).
-                job_item = await job_service.get_job(job_id)
-                if job_item is None:
-                    return f"Error: Job {job_id} not found"
-                # Project the JobItem onto a record-shaped view so the
-                # rest of this function reads ``.status`` / ``.error``
-                # uniformly. ``notify_watchers`` already has its own
-                # resolver-not-wired fallback, so passing the raw
-                # JobItem values through here keeps the notification
-                # path symmetric with the no-resolver case.
-                record = _LegacyJobItemRecord(job_item)
+                # Phase 7: no legacy fallback. If the resolver cannot
+                # resolve the work_id, the work is unknown to the
+                # system — surface a clean not-found rather than
+                # fall back to a JobItem-direct read.
+                return f"Error: Job {job_id} not found"
 
             # Enforce max 50 watches per instance
             count = watcher_repo.count_watches_for_instance(current_instance_id)
@@ -1131,32 +1007,21 @@ def create_job_tools(
             already_terminal = []
 
             for jid in job_ids:
-                # Phase 1 (Job as Queue Proxy): every lookup goes
-                # through the resolver. The previous dual-path
-                # design branched on ``use_virtual_job_resolver`` and
-                # built a WorkRecord-shaped shim from a JobItem when
-                # the flag was OFF; that shim read execution state
-                # off the JobItem mirror, violating the Phase 1 exit
-                # criterion. Both branches now converge on the
-                # resolver path. When the resolver is not wired
-                # (``get_work`` returns ``None``), fall back to a
-                # direct ``get_job`` lookup so the bulk path stays
-                # symmetric with ``watch_job`` (see that function's
-                # docstring for the matching rationale).
+                # Phase 7: resolver is the only lookup path. Unknown
+                # work_ids are skipped silently on the bulk path — see
+                # the no-resolver fallback comment below for the
+                # rationale.
                 record: "WorkRecord | None" = await job_service.get_work(jid)
 
                 if record is None:
-                    job_item = await job_service.get_job(jid)
-                    if job_item is None:
-                        # Skip silently on the bulk path — the
-                        # ``watch_job`` (single-job) tool surfaces
-                        # "Error: Job … not found" to the agent,
-                        # but on the bulk path the caller already
-                        # passed in a list and the absence of any
-                        # matched job is communicated via the empty
-                        # ``watched`` / ``already_terminal`` lists.
-                        continue
-                    record = _LegacyJobItemRecord(job_item)
+                    # Phase 7: no legacy fallback. Skip silently on
+                    # the bulk path — ``watch_job`` (single-job) tool
+                    # surfaces "Error: Job … not found" to the agent,
+                    # but on the bulk path the caller already passed
+                    # in a list and the absence of any matched job is
+                    # communicated via the empty ``watched`` /
+                    # ``already_terminal`` lists.
+                    continue
 
                 if _is_terminal(record.status):
                     # Register watch first, then notify (notify_watchers sends + cleans up)

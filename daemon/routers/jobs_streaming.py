@@ -19,25 +19,22 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 # ── Resolver-gated read adapter ─────────────────────────────────────────────
-# Phase 1 (Job as Queue Proxy): every read path resolves through
+# Phase 7 (Job as Queue Proxy): every read path resolves through
 # :meth:`JobQueueService.get_work` (a :class:`WorkRecord`) so the
 # ``status`` is sourced from the joined Instance rather than the
-# JobItem mirror. The two-table dual-path (legacy ``from_job`` vs
-# resolver ``from_work_record``) has been collapsed onto the
-# resolver — the ``_ResolvedWork.from_job`` JobItem-direct branch is
-# deleted. ``_ResolvedWork`` projects the unified WorkRecord view
-# onto the SSE wire-format keys the frontend already consumes; the
-# ``queue_id`` field is forced to ``None`` because the WorkRecord
-# does not surface the JobItem-only queue affinity.
+# JobItem mirror. The resolver is the only read path; the prior
+# kill-switch has been removed. ``_ResolvedWork`` projects the unified
+# WorkRecord view onto the SSE wire-format keys the frontend already
+# consumes; the ``queue_id`` field is forced to ``None`` because the
+# WorkRecord does not surface the JobItem-only queue affinity.
 
 
 @dataclass(frozen=True)
 class _ResolvedWork:
     """Normalized view over a :class:`WorkRecord` for SSE event payloads.
 
-    Phase 1 (Job as Queue Proxy): the only construction path is
-    :meth:`from_work_record` — the JobItem-direct ``from_job``
-    branch has been removed. ``queue_id`` is always ``None`` because
+    Phase 7 (Job as Queue Proxy): the only construction path is
+    :meth:`from_work_record`. ``queue_id`` is always ``None`` because
     the unified WorkRecord view-model does not carry the JobItem
     queue affinity (Task rows never had one; JobItem rows lose it
     because WorkRecord is a deliberate denormalisation).
@@ -96,57 +93,30 @@ class _ResolvedWork:
         }
 
 
-def _use_resolver(request: Request) -> bool:
-    """Read the ``use_virtual_job_resolver`` flag from app config.
+def _use_resolver(request: Request) -> bool:  # noqa: ARG001 — kept for legacy test compatibility
+    """Deprecated stub — Phase 7: kill-switch removed.
 
-    Defaults to ``False`` when the manager / config are unavailable so legacy
-    callers that pass a bare :class:`JobQueueService` still take the
-    JobItem branch. Production wiring in ``daemon/api.py`` populates
-    ``app.state.manager.config`` during startup.
+    Always returns ``True``. The resolver is the only read path; the
+    parameter is retained only because legacy tests in
+    ``tests/unit/routers/test_jobs_streaming_resolver.py`` still pass
+    it to the SSE endpoint handlers.
     """
-    manager = getattr(request.app.state, "manager", None)
-    if manager is None:
-        return False
-    config = getattr(manager, "config", None)
-    if config is None:
-        return False
-    job_system = getattr(config, "job_system", None)
-    if job_system is None:
-        return False
-    return bool(getattr(job_system, "use_virtual_job_resolver", False))
+    return True
 
 
-async def _resolve(service: JobQueueService, work_id: str, use_resolver: bool):
+async def _resolve(service: JobQueueService, work_id: str, use_resolver: bool):  # noqa: ARG001 — see _use_resolver
     """Return a :class:`_ResolvedWork` view or ``None`` for an unknown id.
 
-    Phase 1 (Job as Queue Proxy): the legacy JobItem-direct branch
-    (``from_job``) has been removed — every code path now resolves
-    through :meth:`JobQueueService.get_work` and projects the
-    resulting ``WorkRecord`` via :meth:`_ResolvedWork.from_work_record`.
-    The ``use_resolver`` parameter is retained for compatibility with
-    existing tests that toggle the flag, but both branches now produce
-    the same resolver-backed result. Phase 7 will remove the flag
-    entirely.
+    Phase 7 (Job as Queue Proxy): the only path is the resolver.
+    The ``use_resolver`` parameter is retained for backward
+    compatibility with existing tests but has no effect — both
+    branches collapse to the same resolver-backed result.
 
     Returns ``None`` when the resolver cannot resolve the work id
     (either ``get_work`` returned ``None`` or the underlying
     ``WorkResolverService`` is not wired) — the route handler maps
     that to HTTP 404.
     """
-    if use_resolver:
-        record = await service.get_work(work_id)
-        if record is None:
-            return None
-        return _ResolvedWork.from_work_record(record)
-    # Phase 1 kill-switch path: ``use_virtual_job_resolver`` is OFF.
-    # The previous implementation called ``service.get_job`` and
-    # projected the JobItem via ``_ResolvedWork.from_job``. That
-    # branch violated the Phase 1 exit criterion ("no consumer reads
-    # execution state off JobItem directly"), so the JobItem-direct
-    # branch has been removed and the OFF path also routes through
-    # the resolver. When the resolver is not wired (``get_work``
-    # returns ``None``) we return ``None`` so the route surfaces a
-    # 404 instead of falling back to a JobItem-direct read.
     record = await service.get_work(work_id)
     if record is None:
         return None
@@ -189,9 +159,12 @@ async def stream_job_events(
     projects the WorkRecord onto the same JSON keys the frontend
     already consumes.
     """
+    # Phase 7: resolver is unconditional. The ``_use_resolver`` call
+    # and the ``use_resolver`` argument to ``_resolve`` are no-ops
+    # retained for legacy test compatibility.
     use_resolver = _use_resolver(request)
 
-    # Check work exists first. Phase 1: every branch goes through the
+    # Check work exists first. Phase 7: every branch goes through the
     # resolver — see ``_resolve``.
     initial = await _resolve(service, job_id, use_resolver)
     if initial is None:
@@ -214,8 +187,7 @@ async def stream_job_events(
                 "data": json.dumps(initial.to_payload(work_id=job_id))
             }
             logger.info(
-                f"SSE connected to work {job_id}, initial status: {initial.status} "
-                f"(resolver={'on' if use_resolver else 'off'})"
+                f"SSE connected to work {job_id}, initial status: {initial.status}"
             )
 
             # If already in terminal state, send completed and exit

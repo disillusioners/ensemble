@@ -655,9 +655,9 @@ class TestNotifyWatchersFormatting:
 
     @pytest.mark.asyncio
     async def test_completed_format(self, job_queue_service, watcher_repo, instance_manager):
-        """Test B: completed → 'completed ✓', 'Result:'. No progress, no waiting_for."""
+        """Test B: completed → 'completed ✓'. Phase 7a: result_summary no
+        longer included in notifications (column dropped in Phase 5)."""
         job = make_mock_job()
-        job.result_summary = "All done"
         watcher_repo.add_watch(job.job_id, "watcher-1")
         job_queue_service._repository.get = MagicMock(return_value=job)
 
@@ -665,8 +665,9 @@ class TestNotifyWatchersFormatting:
 
         msg = instance_manager.enqueue_message.call_args[1]["message"]
         assert "completed ✓" in msg
-        assert "Result:" in msg
-        assert "All done" in msg
+
+        # Phase 7a: result_summary dropped from notifications
+        assert "Result:" not in msg
 
         # Negative
         assert "Progress:" not in msg

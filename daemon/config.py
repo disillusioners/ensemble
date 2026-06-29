@@ -405,24 +405,10 @@ class JobSystemConfig(BaseSettings):
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
-    # Virtual job resolver (Phase 1, 2026-06-27, feature/virtual-job-management-surface):
-    # when enabled, the virtual-job read API resolves a work_id by
-    # probing the task table and the job_queue_items table and merging
-    # the results into a single canonical view. When disabled, callers
-    # fall back to the per-table primitives. Default ON so the new
-    # surface is exercised in dev/test from day one; the flag exists
-    # so we can roll back to the legacy per-table reads if the merged
-    # resolver turns up a regression. Override via
-    # ENSEMBLE_JOB_SYSTEM_USE_VIRTUAL_JOB_RESOLVER.
-    # Can be removed after P4 is stable and verified in production —
-    # serves as kill switch for the virtual job resolver.
-    use_virtual_job_resolver: bool = Field(
-        default=True,
-        description=(
-            "Enable the virtual job resolver that unifies Task and JobItem "
-            "reads behind a single canonical surface. Default: True."
-        ),
-    )
+    # Phase 7: the WorkResolverService is the only read path. Legacy
+    # per-table primitives (``get_job`` / ``list_jobs`` / ``cancel_job``)
+    # are retained for internal callers but no longer gated by a config
+    # flag.
 
 
 class McpPoolConfig(BaseSettings):
