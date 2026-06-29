@@ -2139,7 +2139,7 @@ class InstanceManager:
         )
 
     def _ensure_postgres_drop_admission_legacy(self) -> None:
-        """Drop the seven legacy ``job_queue_items`` columns on PostgreSQL.
+        """Drop the six legacy ``job_queue_items`` columns on PostgreSQL.
 
         Phase 5 of the Job-as-Queue-Proxy migration. After Phase 4
         cleanup (commit 4eb1758a), ``admission_state`` is the sole
@@ -2148,7 +2148,11 @@ class InstanceManager:
           * ``status``          (frozen at INSERT default 'pending')
           * ``started_at``      * ``completed_at``
           * ``result_summary``  * ``error_message``
-          * ``cancelled_at``    * ``failed_at``
+          * ``cancelled_at``
+
+        ``failed_at`` is retained — the retry engine reads it as the
+        live retry marker (Phase 5 deviation; drop deferred to a
+        future batch).
 
         Three legacy indexes referencing ``status`` are dropped first
         (the index depends on the column, so order matters). The
@@ -2167,7 +2171,7 @@ class InstanceManager:
 
         **Activation gate**: This method MUST NOT be called until the
         JobItem SQLModel (daemon/repositories/job_queue/models.py) no
-        longer maps these seven columns and all production reads have
+        longer maps these six columns and all production reads have
         been converted to ``admission_state``. See the call-site
         comment in :meth:`_run_startup_migrations`.
         """
@@ -2180,7 +2184,7 @@ class InstanceManager:
             "DROP INDEX IF EXISTS idx_job_queue_items_status_type_instance",
             "DROP INDEX IF EXISTS idx_job_queue_items_project_status_deleted",
         ]
-        # Then the seven legacy columns.
+        # Then the six legacy columns (``failed_at`` retained).
         column_statements = [
             "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS status",
             "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS started_at",
@@ -2188,7 +2192,6 @@ class InstanceManager:
             "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS result_summary",
             "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS error_message",
             "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS cancelled_at",
-            "ALTER TABLE job_queue_items DROP COLUMN IF EXISTS failed_at",
         ]
         with self._engine.begin() as conn:
             for stmt in index_statements:

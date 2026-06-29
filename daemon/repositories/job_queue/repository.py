@@ -785,22 +785,15 @@ class JobRepository:
         # transition (e.g. ``cancelled → queued`` mapped to
         # ``done → queued`` would pass Python but fail the row's actual
         # admission_state check).
-        _STATUS_TO_ADMISSION = {
-            JobStatus.PENDING.value: AdmissionState.QUEUED.value,
-            JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
-            JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
-            JobStatus.COMPLETED.value: AdmissionState.DONE.value,
-            JobStatus.FAILED.value: AdmissionState.DONE.value,
-            JobStatus.CANCELLED.value: AdmissionState.DONE.value,
-            JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
-        }
+        # Phase 5: use the module-level ``_JOB_STATUS_TO_ADMISSION`` map
+        # (DRY — defined at line 27). Callers may pass either JobStatus
+        # strings (legacy) or AdmissionState strings (new); unmapped
+        # values pass through unchanged.
         from_admission = (
             None if from_status is None
-            else _STATUS_TO_ADMISSION.get(from_status, from_status)
+            else _JOB_STATUS_TO_ADMISSION.get(from_status, from_status)
         )
-        to_admission = _STATUS_TO_ADMISSION.get(
-            to_status, to_status
-        )
+        to_admission = _JOB_STATUS_TO_ADMISSION.get(to_status, to_status)
 
         # Validate transition is allowed on the admission vocabulary —
         # cheap fail-fast before opening a session / issuing the UPDATE.

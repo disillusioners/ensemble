@@ -4,8 +4,9 @@
 -- MANUAL: TRUE
 -- Description:
 --   Phase 5 (final cleanup) of the Job-as-Queue-Proxy architecture.
---   Drops the 7 legacy columns that were replaced by the
---   ``admission_state`` column and Instance-side execution state:
+--   Drops the 6 legacy columns (``failed_at`` retained) that were
+--   replaced by the ``admission_state`` column and Instance-side
+--   execution state:
 --
 --     * ``job_queue_items.status``           (7-state JobStatus enum)
 --     * ``job_queue_items.started_at``       (moved to Instance.started_at)
@@ -13,12 +14,10 @@
 --     * ``job_queue_items.result_summary``   (moved to Instance.result_summary)
 --     * ``job_queue_items.error_message``    (moved to Instance.error_message)
 --     * ``job_queue_items.cancelled_at``     (moved to Instance.cancelled_at)
---     * ``job_queue_items.failed_at``        (retry marker, now on Instance)
 --
---   NOTE: ``failed_at`` was the LIVE retry marker with 5 read sites.
---   Phase 5b deferred its drop until retry/DLQ paths were fully migrated
---   to Instance-side state. This migration attempts the drop for
---   idempotency; the retry engine must already be using Instance.
+--   ``failed_at`` is retained — the retry engine reads it as the live
+--   retry marker. Its drop is deferred to a future batch that migrates
+--   the retry engine off this column.
 --
 --   After Phase 4 write cutover, ``admission_state`` is the sole
 --   authority for queue gating. ``status`` is frozen at INSERT default
@@ -77,7 +76,6 @@
 --     - ``JobItem.result_summary``   line 277 (str | None)
 --     - ``JobItem.error_message``    line 276 (str | None)
 --     - ``JobItem.cancelled_at``     line 286 (str | None)
---     - ``JobItem.failed_at``        line 298 (str | None, Field default=None)
 
 -- UP
 
@@ -87,7 +85,7 @@ DROP INDEX IF EXISTS idx_job_queue_status;
 DROP INDEX IF EXISTS idx_job_queue_items_project_status_deleted;
 DROP INDEX IF EXISTS idx_job_queue_items_status_type_instance;
 
--- Drop the 7 legacy columns.
+-- Drop the 6 legacy columns (failed_at retained).
 -- Order does not matter; each is independent.
 -- SQLite 3.35+ supports DROP COLUMN; older versions require table rebuild.
 ALTER TABLE job_queue_items DROP COLUMN IF EXISTS status;
@@ -96,7 +94,6 @@ ALTER TABLE job_queue_items DROP COLUMN IF EXISTS completed_at;
 ALTER TABLE job_queue_items DROP COLUMN IF EXISTS result_summary;
 ALTER TABLE job_queue_items DROP COLUMN IF EXISTS error_message;
 ALTER TABLE job_queue_items DROP COLUMN IF EXISTS cancelled_at;
-ALTER TABLE job_queue_items DROP COLUMN IF EXISTS failed_at;
 
 -- NOTE: The ``admission_state`` column and its supporting index
 --       ``idx_job_queue_admission_state`` remain as the canonical
@@ -115,7 +112,7 @@ ALTER TABLE job_queue_items DROP COLUMN IF EXISTS failed_at;
 -- The recreated columns will be empty (NULL/default). Any historical
 -- status/timing/result data is gone.
 
--- Recreate the 7 legacy columns with their original types/defaults.
+-- Recreate the 6 legacy columns with their original types/defaults.
 -- Matches the SQLModel definitions in daemon/repositories/job_queue/models.py.
 ALTER TABLE job_queue_items ADD COLUMN status TEXT NOT NULL DEFAULT 'pending';
 ALTER TABLE job_queue_items ADD COLUMN started_at TEXT;
@@ -123,7 +120,6 @@ ALTER TABLE job_queue_items ADD COLUMN completed_at TEXT;
 ALTER TABLE job_queue_items ADD COLUMN result_summary TEXT;
 ALTER TABLE job_queue_items ADD COLUMN error_message TEXT;
 ALTER TABLE job_queue_items ADD COLUMN cancelled_at TEXT;
-ALTER TABLE job_queue_items ADD COLUMN failed_at TEXT;
 
 -- Recreate the 3 legacy indexes.
 -- Note: These indexes will be empty after UP; they exist only for

@@ -99,7 +99,10 @@ from daemon.repositories.job_queue.repository import JobRepository
 # here. Behavior is identical to the deleted production helper
 # (including the ``QUEUED`` fallback for unknown inputs).
 def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -107,7 +110,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -219,49 +228,42 @@ def _make_job(
 
 
 def _force_state(engine: Engine, job_id: str, status: str) -> None:
-    """Direct UPDATE bypassing the repo API to set arbitrary
-    ``status`` + ``admission_state`` for test setup.
+    """Plant a row in a specific state for query-migration tests.
 
-    The repo's lifecycle methods (start_job / fail_job / complete_job /
-    cancel_job / atomic_transition / atomic_retry) already dual-write
-    ``admission_state``. But several Phase 3 tests need to plant a
-    job in an arbitrary combination (e.g. ``status='processing'`` +
-    ``admission_state='queued'``) to simulate in-flight transitions,
-    which the repo API doesn't expose. This helper does a raw SQL
-    UPDATE so the test can pin the exact column values it cares
-    about. Both columns are kept in lockstep via
-    ``status_to_admission``.
+    Phase 5: ``JobItem.status`` was dropped from the model — only
+    ``admission_state`` is written here. The ``status`` parameter is
+    still JobStatus-shaped (e.g. ``"processing"``,
+    ``"dead_letter"``); :func:`status_to_admission` translates it to
+    the corresponding ``AdmissionState`` value.
     """
     with engine.begin() as conn:
         conn.execute(
             text(
                 "UPDATE job_queue_items "
-                "SET status = :s, admission_state = :a "
+                "SET admission_state = :a "
                 "WHERE job_id = :id"
             ),
-            {"s": status, "a": status_to_admission(status), "id": job_id},
+            {"a": status_to_admission(status), "id": job_id},
         )
 
 
 def _force_admission(engine: Engine, job_id: str, status: str, admission: str) -> None:
-    """Direct UPDATE that sets ``status`` AND ``admission_state``
-    independently.
+    """Direct UPDATE that pins ``admission_state`` to a specific value.
 
-    Used to simulate the B1 single-transaction window where a job is
-    in ``admission_state='queued'`` but a lock has already been
-    acquired, or the in-flight transition where ``status` and
-    ``admission_state`` momentarily disagree. The repo API would
-    reject these combinations; the test pins them to verify the SQL
-    boundary holds under all combinations.
+    Phase 5: ``JobItem.status`` was dropped from the model — only
+    ``admission_state`` is written here. The ``status`` parameter is
+    retained for caller compatibility (some tests still pass
+    ``status=...`` alongside the target ``admission`` value to
+    document the test's intent) but is otherwise ignored.
     """
     with engine.begin() as conn:
         conn.execute(
             text(
                 "UPDATE job_queue_items "
-                "SET status = :s, admission_state = :a "
+                "SET admission_state = :a "
                 "WHERE job_id = :id"
             ),
-            {"s": status, "a": admission, "id": job_id},
+            {"a": admission, "id": job_id},
         )
 
 

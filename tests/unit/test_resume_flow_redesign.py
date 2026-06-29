@@ -87,8 +87,11 @@ from daemon.write_pause_guard import WritePauseGuard
 # Phase 4 cleanup removed ``status_to_admission`` from
 # ``daemon.repositories.job_queue.models``. Redefined here for test
 # seeds that derive ``admission_state`` from a ``status`` value.
-def status_to_admission(status):  # noqa: ANN001,ANN201
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -96,7 +99,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures & helpers ─────────────────────────────────────────────────────

@@ -105,7 +105,10 @@ from daemon.services.dead_letter_service import DeadLetterService
 # here. Behavior is identical to the deleted production helper
 # (including the ``QUEUED`` fallback for unknown inputs).
 def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -113,7 +116,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -427,13 +436,12 @@ class TestJobComplete:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        completed = job_repo.complete_job(job.job_id, result_summary="ok")
+        completed = job_repo.complete_job(job.job_id)
         assert completed is not None
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.result_summary == "ok"
 
     def test_completed_job_not_in_find_processing_jobs(
         self, engine, job_repo: JobRepository
@@ -443,7 +451,7 @@ class TestJobComplete:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.complete_job(job.job_id, result_summary="ok")
+        job_repo.complete_job(job.job_id)
 
         processing = job_repo.find_processing_jobs()
         assert job.job_id not in _job_ids(processing)
@@ -458,7 +466,7 @@ class TestJobComplete:
         """
         job = _make_job(engine, job_repo, project_id="proj-c")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.complete_job(job.job_id, result_summary="ok")
+        job_repo.complete_job(job.job_id,
 
         count = job_repo.count_active_jobs_by_project("proj-c")
         assert count == 0
@@ -483,9 +491,9 @@ class TestJobComplete:
         )
 
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.complete_job(job.job_id, result_summary="ok")
+        job_repo.complete_job(job.job_id,
         job_repo.start_job(job2.job_id, instance_id="inst-2")
-        job_repo.complete_job(job2.job_id, result_summary="ok")
+        job_repo.complete_job(job2.job_id,
 
         assert job.job_id not in _job_ids(
             job_repo.list_pending_by_project("proj-c")
@@ -510,14 +518,12 @@ class TestJobFail:
         """``fail_job`` writes ``status='failed', admission_state='done'``."""
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        failed = job_repo.fail_job(job.job_id, error_message="boom")
+        failed = job_repo.fail_job(job.job_id,
         assert failed is not None
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.error_message == "boom"
-
     def test_failed_job_not_counted_in_active(
         self, engine, job_repo: JobRepository
     ):
@@ -526,7 +532,7 @@ class TestJobFail:
         """
         job = _make_job(engine, job_repo, project_id="proj-d")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="boom")
+        job_repo.fail_job(job.job_id,
 
         assert job_repo.count_active_jobs_by_project("proj-d") == 0
 
@@ -536,7 +542,7 @@ class TestJobFail:
         """Failed jobs must NOT appear in ``find_processing_jobs``."""
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="boom")
+        job_repo.fail_job(job.job_id,
 
         assert job.job_id not in _job_ids(job_repo.find_processing_jobs())
 
@@ -751,7 +757,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id,
 
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
@@ -770,7 +776,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id,
         dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -785,7 +791,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id,
         dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -801,7 +807,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id,
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -814,7 +820,6 @@ class TestDLQFlow:
         assert refetched.admission_state == AdmissionState.QUEUED.value
         # Side effects of replay.
         assert refetched.retry_count == 0
-        assert refetched.error_message is None
         assert refetched.failed_at is None
         assert refetched.instance_id is None
 
@@ -826,7 +831,7 @@ class TestDLQFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-g")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id,
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -863,7 +868,7 @@ class TestRetryFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="transient")
+        job_repo.fail_job(job.job_id,
 
         past = (
             datetime.now(timezone.utc) - timedelta(seconds=10)
@@ -877,8 +882,6 @@ class TestRetryFlow:
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
-        assert refetched.error_message is None
-
     def test_retried_job_appears_in_list_pending(
         self, engine, job_repo: JobRepository
     ):
@@ -888,7 +891,7 @@ class TestRetryFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="transient")
+        job_repo.fail_job(job.job_id,
         past = (
             datetime.now(timezone.utc) - timedelta(seconds=10)
         ).isoformat()
@@ -911,7 +914,7 @@ class TestRetryFlow:
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="transient")
+        job_repo.fail_job(job.job_id,
         past = (
             datetime.now(timezone.utc) - timedelta(seconds=10)
         ).isoformat()
@@ -941,11 +944,11 @@ class TestRetryFlow:
         """``find_retryable_jobs`` excludes jobs whose
         ``next_retry_at`` is still in the future — same as Phase 2,
         but the predicate now sits on top of admission_state='queued'
-        instead of status='failed'.
+        instead of
         """
         job = _make_job(engine, job_repo, project_id="proj-h")
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="transient")
+        job_repo.fail_job(job.job_id,
         future = (
             datetime.now(timezone.utc) + timedelta(hours=1)
         ).isoformat()
@@ -971,7 +974,7 @@ class TestRetryFlow:
 
         # Round 1: start, fail, retry (succeeds, retry_count=1).
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="transient 1")
+        job_repo.fail_job(job.job_id,
         first = job_repo.atomic_retry(
             job_id=job.job_id, max_retries=1, next_retry_at=past
         )
@@ -979,7 +982,7 @@ class TestRetryFlow:
 
         # Round 2: start, fail, retry (refuses — retry_count == max_retries).
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="transient 2")
+        job_repo.fail_job(job.job_id,
         second = job_repo.atomic_retry(
             job_id=job.job_id, max_retries=1, next_retry_at=past
         )
@@ -1107,11 +1110,11 @@ class TestCrossCuttingInvariants:
         # Build a small scenario.
         completed_job = _make_job(engine, job_repo, project_id="proj-c3")
         job_repo.start_job(completed_job.job_id, instance_id="inst-1")
-        job_repo.complete_job(completed_job.job_id, result_summary="ok")
+        job_repo.complete_job(completed_job.job_id,
 
         dead_job = _make_job(engine, job_repo, project_id="proj-c3")
         job_repo.start_job(dead_job.job_id, instance_id="inst-1")
-        job_repo.fail_job(dead_job.job_id, error_message="boom")
+        job_repo.fail_job(dead_job.job_id,
         dlq_service.move_to_dlq_standalone(
             job_id=dead_job.job_id, reason="MAX_RETRIES"
         )
@@ -1167,11 +1170,11 @@ class TestCrossCuttingInvariants:
         # Job 4: pending → processing → completed.
         j4 = _make_job(engine, job_repo, project_id="proj-x")
         job_repo.start_job(j4.job_id, instance_id="inst-1")
-        job_repo.complete_job(j4.job_id, result_summary="ok")
+        job_repo.complete_job(j4.job_id,
         # Job 5: pending → processing → failed → DLQ → replayed (back to queued).
         j5 = _make_job(engine, job_repo, project_id="proj-x")
         job_repo.start_job(j5.job_id, instance_id="inst-1")
-        job_repo.fail_job(j5.job_id, error_message="boom")
+        job_repo.fail_job(j5.job_id,
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=j5.job_id, reason="MAX_RETRIES"
         )
@@ -1218,7 +1221,7 @@ class TestCrossCuttingInvariants:
         # done (completed).
         j_done = _make_job(engine, job_repo, project_id=proj)
         job_repo.start_job(j_done.job_id, instance_id="inst-done")
-        job_repo.complete_job(j_done.job_id, result_summary="ok")
+        job_repo.complete_job(j_done.job_id,
         # paused (still active in admission).
         j_paused = _make_job(engine, job_repo, project_id=proj)
         job_repo.start_job(j_paused.job_id, instance_id="inst-paused")

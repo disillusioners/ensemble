@@ -81,7 +81,10 @@ from daemon.write_pause_guard import WritePauseGuard
 # here. Behavior is identical to the deleted production helper
 # (including the ``QUEUED`` fallback for unknown inputs).
 def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -89,7 +92,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures & helpers ───────────────────────────────────────────────────────

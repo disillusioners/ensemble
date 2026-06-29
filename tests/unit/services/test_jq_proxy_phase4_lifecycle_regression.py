@@ -111,7 +111,10 @@ from daemon.services.job_retry_engine import JobRetryEngine
 # here. Behavior is identical to the deleted production helper
 # (including the ``QUEUED`` fallback for unknown inputs).
 def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -119,7 +122,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -402,14 +411,12 @@ class TestFullJobLifecycle:
         completed = job_repo.finalize_active_to_done(
             job.job_id,
             derived_status=AdmissionState.DONE.value,
-            result_summary="ok",
+
         )
         assert completed is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.result_summary == "ok"
-
     def test_create_start_fail_no_retry_admission_state_walk(
         self, engine, job_repo: JobRepository
     ):
@@ -425,14 +432,12 @@ class TestFullJobLifecycle:
         finalized = job_repo.finalize_active_to_done(
             job.job_id,
             derived_status=AdmissionState.DONE.value,
-            error_message="boom",
+
         )
         assert finalized is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.error_message == "boom"
-
     def test_create_start_fail_retry_admission_state_walk(
         self, engine, job_repo: JobRepository
     ):
@@ -453,7 +458,7 @@ class TestFullJobLifecycle:
         _start_job(engine, job_repo, job.job_id, instance_id="inst-1")
 
         # Pre-fail via fail_job (Phase 2 dual-write mirror).
-        failed = job_repo.fail_job(job.job_id, error_message="transient")
+        failed = job_repo.fail_job(job.job_id,
         assert failed is not None
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
@@ -462,7 +467,7 @@ class TestFullJobLifecycle:
         # Phase 4 retry path — direct from done→queued (the legacy
         # mirror back to PENDING). atomic_retry's SQL guard matches
         # ``admission_state='done'`` (the dual-write mirror for
-        # status='failed') AND ``status='failed'``, so this is the
+        #
         # canonical retry entry point for legacy fail_job callers.
         past = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
         retried = job_repo.atomic_retry(
@@ -474,7 +479,6 @@ class TestFullJobLifecycle:
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
-        assert refetched.error_message is None
         assert refetched.next_retry_at == past
 
     def test_create_start_cancel_admission_state_walk(
@@ -509,7 +513,7 @@ class TestFullJobLifecycle:
 
         # Use ``fail_job`` first so the row matches the legacy
         # ``status='failed'`` eligibility branch (default arg).
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id,
 
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
@@ -535,7 +539,7 @@ class TestFullJobLifecycle:
         _start_job(engine, job_repo, job.job_id, instance_id="inst-1")
 
         # fail → DLQ
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id,
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -552,7 +556,6 @@ class TestFullJobLifecycle:
         assert refetched.admission_state == AdmissionState.QUEUED.value
         # Side effects of replay
         assert refetched.retry_count == 0
-        assert refetched.error_message is None
         assert refetched.failed_at is None
         assert refetched.instance_id is None
 
@@ -624,15 +627,13 @@ class TestChildReportsDoNotMutateParentAdmissionState:
         finalized = job_repo.finalize_active_to_done(
             job.job_id,
             derived_status=AdmissionState.DONE.value,
-            result_summary="parent finished",
+
         )
         assert finalized is not None
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.result_summary == "parent finished"
-
     def test_dual_write_invariant_preserved_after_finalize(
         self, engine, job_repo: JobRepository
     ):
@@ -651,7 +652,7 @@ class TestChildReportsDoNotMutateParentAdmissionState:
         job_repo.finalize_active_to_done(
             j_done_complete.job_id,
             derived_status=AdmissionState.DONE.value,
-            result_summary="ok",
+
         )
 
         j_done_fail = _make_job(engine, job_repo)
@@ -659,7 +660,7 @@ class TestChildReportsDoNotMutateParentAdmissionState:
         job_repo.finalize_active_to_done(
             j_done_fail.job_id,
             derived_status=AdmissionState.DONE.value,
-            error_message="oops",
+
         )
 
         j_done_cancel = _make_job(engine, job_repo)
@@ -709,8 +710,6 @@ class TestErrorReportingFlow:
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.error_message == "boom"
-
     async def test_complete_failed_with_retries_remaining_routes_to_retry(
         self,
         engine,
@@ -762,23 +761,18 @@ class TestErrorReportingFlow:
         pre_fail_job = _refresh(engine, job.job_id)
         assert retry_engine.should_retry(
             pre_fail_job, queue_repo.get(pre_fail_job.queue_id), default_config
-        ) is False, (
-            "should_retry requires status='failed' (Phase 4 retry "
-            "predicate still gates on the legacy status column — "
-            "the retry-without-instance path Plan §3.2 describes "
-            "requires fail_job to mirror first)"
-        )
+        ) is False
 
-        # Pre-fail so the row matches the legacy status='failed'
+        # Pre-fail so the row matches the legacy
         # eligibility check.
-        job_repo.fail_job(job.job_id, error_message="transient")
+        job_repo.fail_job(job.job_id,
 
         # Now should_retry returns True.
         post_fail_job = _refresh(engine, job.job_id)
         assert retry_engine.should_retry(
             post_fail_job, queue_repo.get(post_fail_job.queue_id), default_config
         ) is True, (
-            "should_retry must return True for status='failed' + "
+            "should_retry must return True for
             "retry_count < max_retries"
         )
 
@@ -797,8 +791,6 @@ class TestErrorReportingFlow:
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
-        assert refetched.error_message is None
-
     async def test_complete_failed_retries_exhausted_writes_dead(
         self,
         engine,
@@ -856,15 +848,13 @@ class TestErrorReportingFlow:
         _start_job(engine, job_repo, job.job_id, instance_id="inst-1")
 
         finalized = await job_queue_service.complete_job(
-            job.job_id, demand_state=DemandState.COMPLETED, result_summary="ok"
+            job.job_id, demand_state=DemandState.COMPLETED,
         )
         assert finalized is not None
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.result_summary == "ok"
-
     async def test_complete_cancelled_writes_done(
         self, engine, job_repo: JobRepository, job_queue_service: JobQueueService
     ):
@@ -950,7 +940,7 @@ class TestJobRecoveryOnRestart:
                 instance_id="orphan-inst",
                 decision=Decision.NO_RETRY,
                 job_id=job.job_id,
-                error_message="orphan on restart",
+
             )
         )
         assert canonical_job_id == job.job_id
@@ -959,8 +949,6 @@ class TestJobRecoveryOnRestart:
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.error_message == "orphan on restart"
-
     def test_recovery_skips_already_terminal_jobs(
         self, engine, job_repo: JobRepository, job_queue_service: JobQueueService
     ):
@@ -979,7 +967,7 @@ class TestJobRecoveryOnRestart:
                 instance_id="orphan-inst",
                 decision=Decision.NO_RETRY,
                 job_id=job.job_id,
-                error_message="first",
+
             )
         )
         assert canonical_job_id_1 == job.job_id
@@ -994,7 +982,7 @@ class TestJobRecoveryOnRestart:
                 instance_id="orphan-inst",
                 decision=Decision.NO_RETRY,
                 job_id=job.job_id,
-                error_message="second",
+
             )
         )
         assert canonical_job_id_2 == job.job_id
@@ -1007,8 +995,6 @@ class TestJobRecoveryOnRestart:
         # finalize was a no-op, so it didn't overwrite anything).
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.error_message == "first"
-
     def test_restart_does_not_lose_pending_queued_state(
         self, engine, job_repo: JobRepository
     ):
@@ -1083,7 +1069,7 @@ class TestPhase4CrossCuttingInvariants:
         job = _make_job(engine, job_repo)
         _start_job(engine, job_repo, job.job_id, instance_id="inst-1")
 
-        # If the guard were on status='processing' (Phase 2 style)
+        # If the guard were on
         # we'd still pass since status mirrors admission_state —
         # but Phase 4's added contract is that the SAME row
         # matches even when status is e.g. PAUSED. We test this
@@ -1101,11 +1087,11 @@ class TestPhase4CrossCuttingInvariants:
         finalized = job_repo.finalize_active_to_done(
             job.job_id,
             derived_status=AdmissionState.DONE.value,
-            result_summary="ok",
+
         )
         assert finalized is not None, (
             "finalize_active_to_done must match on "
-            "admission_state='active' (not status='processing') — "
+            "admission_state='active' (not
             "the Phase 4 write-authority flip"
         )
         refetched = _refresh(engine, job.job_id)
@@ -1134,10 +1120,10 @@ class TestPhase4CrossCuttingInvariants:
         # Note: atomic_retry's SQL guard requires
         # ``status='failed'`` as well (the dual-write mirror), so
         # to exercise the ``from_admission_state='active'`` path we
-        # need status='failed' set somehow. The cleanest way is to
+        # need
         # pre-fail then retry — and verify the from_admission_state
         # parameter is consulted.
-        job_repo.fail_job(job.job_id, error_message="transient")
+        job_repo.fail_job(job.job_id,
         retried = job_repo.atomic_retry(
             job_id=job.job_id,
             max_retries=3,
@@ -1151,7 +1137,7 @@ class TestPhase4CrossCuttingInvariants:
         assert refetched.retry_count == 1
 
         # Negative case: passing from_admission_state='active' on
-        # a row whose status='failed' (admission='done') must be
+        # a row whose
         # a no-op — the SQL guard excludes it. We use a SEPARATE
         # freshly-failed row so we don't have to manage the lock
         # release between retries (the lock acquired by
@@ -1160,7 +1146,7 @@ class TestPhase4CrossCuttingInvariants:
         job2 = _make_job(engine, job_repo)
         job_repo.update(job2.job_id, max_retries=3)
         _start_job(engine, job_repo, job2.job_id, instance_id="inst-2")
-        job_repo.fail_job(job2.job_id, error_message="transient 2")
+        job_repo.fail_job(job2.job_id,
 
         retried_again = job_repo.atomic_retry(
             job_id=job2.job_id,

@@ -57,8 +57,11 @@ from daemon.write_pause_guard import WritePauseGuard
 # Phase 4 cleanup removed ``status_to_admission`` from
 # ``daemon.repositories.job_queue.models``. Redefined here for test
 # seeds that derive ``admission_state`` from a ``status`` value.
-def status_to_admission(status):  # noqa: ANN001,ANN201
+def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -66,7 +69,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -182,7 +191,7 @@ def _seed_root_instance(
             agent_name="leader",
             agent_dir="/tmp/leader",
             parent_id=None,
-            status=status,
+
             version=1,
             instance_metadata={},
         )
@@ -206,7 +215,7 @@ def _seed_message(
             instance_id=instance_id,
             content="stale duplicate message",
             type=MessageType.HUMAN.value,
-            status=status,
+
         )
         session.add(msg)
         session.commit()
@@ -288,8 +297,8 @@ class TestRootPendingMessagesNormalPath:
         and return ``root_waiting_children``.
         """
         service = _build_child_reports_service(engine)
-        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
-        _seed_message(engine, instance_id=root_id, status=MessageStatus.READY.value)
+        root_id = _seed_root_instance(engine)
+        _seed_message(engine, instance_id=root_id)
 
         result = service._process_child_completion_db_sync(
             instance_id=root_id,
@@ -347,7 +356,7 @@ class TestDeferredWaitingChildrenNewlyUnconditionalPath:
         the completion gate defers without transitioning status.
         """
         service = _build_child_reports_service(engine)
-        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
+        root_id = _seed_root_instance(engine)
         _seed_dependency_watcher(
             engine, target_instance_id=root_id, state=DependencyWatcherState.PENDING.value
         )
@@ -381,7 +390,7 @@ class TestDeferredWaitingChildrenNewlyUnconditionalPath:
         EVER existed for the instance.
         """
         service = _build_child_reports_service(engine)
-        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
+        root_id = _seed_root_instance(engine)
         # All watchers FIRED — the bus sees zero pending children.
         _seed_dependency_watcher(
             engine,
@@ -433,16 +442,16 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
         message alone — the MESSAGE-job guard is gone).
         """
         service = _build_child_reports_service(engine)
-        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
+        root_id = _seed_root_instance(engine,
         # Pending own-queue message — drives the own-queue pending_count > 0 path.
-        _seed_message(engine, instance_id=root_id, status=MessageStatus.READY.value)
+        _seed_message(engine, instance_id=root_id,
         # Residual MESSAGE JobItem — would have been an active MESSAGE worker
         # before D13. After Phase 5 guard removal, this row is invisible to
         # the completion gate.
         _seed_message_job_item(
             engine,
             instance_id=root_id,
-            status=AdmissionState.ACTIVE.value,
+
         )
 
         result = service._process_child_completion_db_sync(
@@ -485,12 +494,12 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
         guard scanned for).
         """
         service = _build_child_reports_service(engine)
-        root_id = _seed_root_instance(engine, status=InstanceStatus.RUNNING.value)
-        _seed_message(engine, instance_id=root_id, status=MessageStatus.READY.value)
+        root_id = _seed_root_instance(engine,
+        _seed_message(engine, instance_id=root_id,
         _seed_message_job_item(
             engine,
             instance_id=root_id,
-            status=AdmissionState.QUEUED.value,
+
         )
 
         result = service._process_child_completion_db_sync(

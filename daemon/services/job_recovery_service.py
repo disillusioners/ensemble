@@ -156,6 +156,11 @@ class JobRecoveryService:
                     f"is PAUSED — reconciling job PROCESSING → PAUSED"
                 )
                 try:
+                    # Phase 5: under admission_state, PROCESSING→PAUSED maps to
+                    # (active→active) — a same-state no-op. The state machine's
+                    # ``can_transition`` treats ``from == to`` as implicitly valid
+                    # (see ``job_state_machine.py``). Pause is an Instance-side
+                    # concern; the job stays ``active`` in admission_state.
                     await asyncio.to_thread(
                         self._job_repository.atomic_transition,
                         job.job_id,

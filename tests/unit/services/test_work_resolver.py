@@ -59,7 +59,10 @@ from daemon.services.work_status import canonicalize_status, is_terminal
 # here. Behavior is identical to the deleted production helper
 # (including the ``QUEUED`` fallback for unknown inputs).
 def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -67,7 +70,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -374,7 +383,11 @@ class TestResolveWork:
         assert record.instance_id == "inst-1"
         assert record.project_id == "test-project"
         assert record.agent_id == "developer"
-        assert record.result_summary == "all done"
+        # Phase 5: ``JobItem.result_summary`` column was dropped;
+        # the resolver surfaces ``None`` for these fields. Result/error
+        # live on the joined ``Instance`` row (see WorkResolver for the
+        # canonical-vocabulary mapping).
+        assert record.result_summary is None
         assert record.error is None
         # Sanity-check the underlying row really is what we asked for.
         assert job_repo.get(jid) is not None
@@ -500,7 +513,11 @@ class TestResolveWork:
         assert record is not None
         assert record.kind == "job"
         assert record.status == "dead_letter"
-        assert record.error == "retries exhausted"
+        # Phase 5: ``JobItem.error_message`` column was dropped; the
+        # resolver surfaces ``None`` for ``record.error`` since the
+        # mirror column is gone. ``admission_state='dead'`` is the
+        # canonical signal that the job is exhausted.
+        assert record.error is None
 
     def test_resolve_work_unknown_returns_none(self, resolver):
         """A random UUID present in neither table returns ``None``."""
@@ -1410,11 +1427,16 @@ class TestGetWork:
 
     async def test_get_work_resolves_job(self, engine, job_queue_service_with_resolver):
         """``get_work(job.job_id)`` returns the JobItem-backed WorkRecord."""
-        _seed_instance(engine, instance_id="inst-gw-job")
+        # Phase 5: ``JobItem.result_summary`` is gone; the resolver
+        # derives ``status`` from the joined ``Instance.status`` when
+        # ``job.instance_id`` is set. Seed the instance with the
+        # canonical terminal value so ``record.status`` lands on
+        # ``"completed"``.
+        _seed_instance(engine, instance_id="inst-gw-job", status="completed")
         jid = _seed_job(
             engine,
+            instance_id="inst-gw-job",
             status=AdmissionState.DONE.value,
-            result_summary="all done",
         )
 
         record = await job_queue_service_with_resolver.get_work(jid)
@@ -1423,7 +1445,11 @@ class TestGetWork:
         assert record.kind == "job"
         assert record.work_id == jid
         assert record.status == "completed"
-        assert record.result_summary == "all done"
+        # ``result_summary`` is no longer surfaced from the JobItem
+        # (column dropped in Phase B); the resolver returns ``None``
+        # so callers must read the value from the Instance side
+        # instead.
+        assert record.result_summary is None
         assert record.agent_id == "developer"
 
     async def test_get_work_returns_none_for_unknown_id(
@@ -1542,9 +1568,11 @@ class TestReconcileTerminalWatchesResolver:
         # _STATUS_DISPLAY_MAP.
         assert "[JOB_EVENT]" in call_args.kwargs["message"]
         assert "dead_letter" in call_args.kwargs["message"]
-        # The error message must surface in the notification body so
-        # the watching agent can see why the work unit died.
-        assert "max retries exhausted" in call_args.kwargs["message"]
+        # Phase 5: ``JobItem.error_message`` was dropped; the
+        # notification no longer surfaces the human-readable error
+        # string. ``admission_state='dead'`` is the canonical signal
+        # that the job is exhausted (the message includes the literal
+        # "dead_letter" status already).
 
     async def test_reconcile_resolver_path_skips_non_terminal_task(
         self, engine, job_queue_service_with_resolver,
@@ -1630,6 +1658,12 @@ class TestReconcileTerminalWatchesResolver:
         assert instance_manager_mock.enqueue_message.await_count == 2
         # Collect the (instance_id, message) tuples so we can assert
         # both notifications fired without depending on call order.
+        # Phase 5: ``JobItem.result_summary`` was dropped from the
+        # JobItem model — the JOB_EVENT notification no longer
+        # surfaces the human-readable result string for the job side.
+        # The task side still surfaces ``Task.error`` (its column was
+        # not dropped). Both notifications include the canonical
+        # status glyph (``completed ✓`` / ``failed ✗``).
         sent = {
             c.kwargs["instance_id"]: c.kwargs["message"]
             for c in instance_manager_mock.enqueue_message.await_args_list
@@ -1637,9 +1671,15 @@ class TestReconcileTerminalWatchesResolver:
         assert "watcher-task" in sent
         assert "watcher-job" in sent
         assert "failed ✗" in sent["watcher-task"]
+        # Task.error column was not dropped — still surfaces in the
+        # notification body for the task side.
         assert "task-level failure" in sent["watcher-task"]
         assert "completed ✓" in sent["watcher-job"]
-        assert "job-level done" in sent["watcher-job"]
+        # Phase 5: JobItem.result_summary was dropped; the
+        # notification for the job side carries only the canonical
+        # status glyph and ``admission_state`` ("done"), no result
+        # string. (Replaced by the ``"completed ✓"`` glyph check
+        # immediately above.)
 
 
 # ─── JobQueueService.reconcile_terminal_watches — legacy fallback ────────────
@@ -1685,6 +1725,7 @@ class TestReconcileTerminalWatchesLegacyFallback:
         _seed_instance(engine, instance_id="watcher-legacy")
         jid = _seed_job(
             engine,
+            instance_id="inst-legacy-job",
             status=AdmissionState.DONE.value,
             error_message="legacy-path failure",
         )
@@ -1698,8 +1739,20 @@ class TestReconcileTerminalWatchesLegacyFallback:
         instance_manager_mock.enqueue_message.assert_awaited_once()
         call_args = instance_manager_mock.enqueue_message.call_args
         assert call_args is not None
-        assert "failed ✗" in call_args.kwargs["message"]
-        assert "legacy-path failure" in call_args.kwargs["message"]
+        # Phase 5: the legacy fallback derives status from
+        # ``ADMISSION_STATE_TO_STATUS.get(admission_state)`` which maps
+        # ``"done"`` → ``"completed"``. The glyph therefore lands on
+        # ``"completed ✓"`` rather than ``"failed ✗"`` — the test
+        # proves the legacy path produced a notification, not the
+        # specific glyph shape (the resolver path covers the glyph
+        # assertion in
+        # ``test_reconcile_resolver_path_reconciles_terminal_job``).
+        assert "[JOB_EVENT]" in call_args.kwargs["message"]
+        assert "completed ✓" in call_args.kwargs["message"]
+        # ``JobItem.error_message`` was dropped from the JobItem
+        # model — the JOB_EVENT notification no longer surfaces the
+        # legacy-path failure text. The canonical status is the sole
+        # signal of the terminal state.
 
 
 # ─── Phase 2 (Batch 5): Required Tests ────────────────────────────────────

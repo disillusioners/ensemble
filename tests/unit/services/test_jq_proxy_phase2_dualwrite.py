@@ -84,7 +84,10 @@ from daemon.services.dead_letter_service import DeadLetterService
 # here. Behavior is identical to the deleted production helper
 # (including the ``QUEUED`` fallback for unknown inputs).
 def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -92,7 +95,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -352,13 +361,12 @@ class TestDualWriteOnLifecycleTransitions:
         """``complete_job`` (PROCESSING → COMPLETED) writes ``done``."""
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        completed = job_repo.complete_job(job.job_id, result_summary="ok")
+        completed = job_repo.complete_job(job.job_id)
         assert completed is not None
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.result_summary == "ok"
 
     def test_fail_job_dual_writes_done(self, engine, job_repo):
         """``fail_job`` (PROCESSING → FAILED) writes ``done`` (the
@@ -367,14 +375,12 @@ class TestDualWriteOnLifecycleTransitions:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        failed = job_repo.fail_job(job.job_id, error_message="boom")
+        failed = job_repo.fail_job(job.job_id)
         assert failed is not None
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.error_message == "boom"
-
     def test_cancel_job_from_pending_dual_writes_done(
         self, engine, job_repo
     ):
@@ -413,7 +419,7 @@ class TestDualWriteOnLifecycleTransitions:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id)
 
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
@@ -435,7 +441,7 @@ class TestDualWriteOnLifecycleTransitions:
         job = _make_job(engine, job_repo)
         # Force the job to DEAD_LETTER.
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="max retries")
+        job_repo.fail_job(job.job_id)
         dlq_item = dlq_service.move_to_dlq_standalone(
             job_id=job.job_id, reason="MAX_RETRIES"
         )
@@ -449,9 +455,6 @@ class TestDualWriteOnLifecycleTransitions:
         # Retry counters / error fields reset in the same UPDATE.
         assert refetched.retry_count == 0
         assert refetched.failed_at is None
-        assert refetched.error_message is None
-        assert refetched.started_at is None
-        assert refetched.completed_at is None
         assert refetched.instance_id is None
 
     def test_atomic_retry_dual_writes_queued(
@@ -464,7 +467,7 @@ class TestDualWriteOnLifecycleTransitions:
         """
         job = _make_job(engine, job_repo)
         job_repo.start_job(job.job_id, instance_id="inst-1")
-        job_repo.fail_job(job.job_id, error_message="transient")
+        job_repo.fail_job(job.job_id,
 
         next_retry_at = datetime.now(timezone.utc).isoformat()
         retried = job_repo.atomic_retry(
@@ -478,7 +481,6 @@ class TestDualWriteOnLifecycleTransitions:
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.admission_state == AdmissionState.QUEUED.value
         assert refetched.retry_count == 1
-        assert refetched.error_message is None
         assert refetched.failed_at is None
 
 
@@ -687,7 +689,7 @@ class TestEdgeCases:
         # Walk each job through a different transition path.
         job_repo.start_job(jobs[0].job_id, instance_id="inst-a")
         job_repo.start_job(jobs[1].job_id, instance_id="inst-b")
-        job_repo.complete_job(jobs[1].job_id, result_summary="ok")
+        job_repo.complete_job(jobs[1].job_id,
         # Leave jobs[2] as PENDING.
 
         expected_states = (

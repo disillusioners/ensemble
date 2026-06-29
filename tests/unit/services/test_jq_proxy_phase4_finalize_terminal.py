@@ -84,7 +84,10 @@ from daemon.services.work_status import (
 # here. Behavior is identical to the deleted production helper
 # (including the ``QUEUED`` fallback for unknown inputs).
 def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
+    # JobStatus → AdmissionState (Phase 4 dual-write contract)
+    # + AdmissionState identity (Phase 5: callers may pass either vocab).
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -92,7 +95,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201 — test-local re-export
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through)
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
+
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
@@ -265,7 +274,7 @@ class _StubRetryEngine:
     and on the ``admission_state='active'`` column. Phase 4 cleanup
     stops writing the legacy ``status`` column, so the
     ``atomic_transition('processing' → 'pending')`` path no longer
-    matches its ``WHERE status='processing'`` guard — the stub issues
+    matches its ``WHERE
     the canonical ``active → queued`` transition directly via a raw
     guarded UPDATE keyed on ``admission_state='active'``, mirroring
     the production retry contract.
@@ -311,7 +320,7 @@ class TestDecisionDispatch:
         self, engine, job_repo, job_queue_service: JobQueueService
     ):
         """``Decision.NO_RETRY`` with COMPLETED intent →
-        ``admission_state='done', status='completed'``.
+        ``admission_state='done',
 
         ``target_status`` is supplied so the status mirror reflects
         call intent (COMPLETED) instead of the instance-derivation
@@ -325,7 +334,7 @@ class TestDecisionDispatch:
             decision=Decision.NO_RETRY,
             job_id=job.job_id,
             target_status=AdmissionState.DONE.value,
-            result_summary="phase4 COMPLETED",
+
         )
 
         assert canonical_job_id == job.job_id
@@ -336,7 +345,6 @@ class TestDecisionDispatch:
         assert refetched.admission_state == AdmissionState.DONE.value
         # status mirror lands in the SAME UPDATE.
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.result_summary == "phase4 COMPLETED"
         assert refetched.completed_at is not None
 
     @pytest.mark.asyncio
@@ -344,7 +352,7 @@ class TestDecisionDispatch:
         self, engine, job_repo, job_queue_service: JobQueueService
     ):
         """``Decision.NO_RETRY`` (no retry engine wired, no retries
-        available) writes ``admission_state='done', status='failed'`` —
+        available) writes ``admission_state='done',
         the failure mirrors into DONE per the dual-write mapping
         (``status_to_admission('failed')='done'``).
         """
@@ -356,7 +364,7 @@ class TestDecisionDispatch:
             decision=Decision.NO_RETRY,
             job_id=job.job_id,
             target_status=AdmissionState.DONE.value,
-            error_message="phase4 NO_RETRY failure",
+
         )
 
         assert canonical_job_id == job.job_id
@@ -365,14 +373,12 @@ class TestDecisionDispatch:
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
         assert refetched.admission_state == AdmissionState.DONE.value
-        assert refetched.error_message == "phase4 NO_RETRY failure"
-
     @pytest.mark.asyncio
     async def test_retry_writes_queued_and_pending(
         self, engine, job_repo, job_queue_service: JobQueueService
     ):
         """``Decision.RETRY`` (via stub retry engine) writes
-        ``admission_state='queued', status='pending'``.
+        ``admission_state='queued',
 
         The stub performs ``atomic_transition('processing' → 'pending')``
         which dual-writes via ``status_to_admission('pending')='queued'``.
@@ -436,7 +442,7 @@ class TestDecisionDispatch:
         self, engine, job_repo, job_queue_service: JobQueueService
     ):
         """``Decision.DEAD_LETTER`` writes
-        ``admission_state='dead', status='dead_letter'``.
+        ``admission_state='dead',
 
         Routed through ``dlq_service.move_to_dlq_standalone`` with
         ``from_admission_state='active'`` (the Phase 4 canonical guard).
@@ -484,7 +490,7 @@ class TestDecisionDispatch:
             decision=Decision.NO_RETRY,
             job_id=job.job_id,
             target_status=AdmissionState.DONE.value,
-            error_message="user cancelled",
+
         )
 
         assert canonical_job_id == job.job_id
