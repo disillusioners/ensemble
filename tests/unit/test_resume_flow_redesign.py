@@ -69,7 +69,7 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
-from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository, JobStatus, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository, JobStatus
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus, set_dependency_bus

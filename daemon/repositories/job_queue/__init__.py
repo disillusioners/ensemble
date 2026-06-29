@@ -13,6 +13,7 @@ from .models import (
     DeadLetterItem,
     AdmissionState,
     Decision,
+    JobStatus,
     _ADMISSION_TO_LEGACY_STATUS,
     _VALID_LEGACY_STATUSES,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "JobWatcher",
     "AdmissionState",
     "Decision",
+    "JobStatus",
     "_ADMISSION_TO_LEGACY_STATUS",
     "_VALID_LEGACY_STATUSES",
 ]

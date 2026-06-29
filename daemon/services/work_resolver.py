@@ -84,10 +84,10 @@ logger = logging.getLogger(__name__)
 # ``daemon.repositories.job_queue.models._ADMISSION_TO_LEGACY_STATUS``.
 # Import it (rather than re-declaring it here) so the work-resolver
 # stays in sync with the canonical definition. The local
-# ``_ADMISSION_STATE_TO_STATUS`` alias below is kept for the existing
+# Uses the module-level ``_ADMISSION_TO_LEGACY_STATUS`` map (Phase 7b).
 # call sites at lines ~1138 / ~1148 so the migration is a pure
 # rename.
-from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS as _ADMISSION_STATE_TO_STATUS
+from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS
 
 
 # ── Kind discrimination within the Task side ─────────────────────────────
@@ -1137,7 +1137,7 @@ class WorkResolverService:
                     status = canonicalize_status(instance.status)
                 else:
                     status = canonicalize_status(
-                        _ADMISSION_STATE_TO_STATUS.get(
+                        _ADMISSION_TO_LEGACY_STATUS.get(
                             job.admission_state, "pending"
                         )
                     )
@@ -1147,7 +1147,7 @@ class WorkResolverService:
                 # WorkRecord's ``status`` reflects the actual queue
                 # state instead of the frozen ``status`` column.
                 status = canonicalize_status(
-                    _ADMISSION_STATE_TO_STATUS.get(
+                    _ADMISSION_TO_LEGACY_STATUS.get(
                         job.admission_state, "pending"
                     )
                 )
