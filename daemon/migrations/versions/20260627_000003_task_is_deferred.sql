@@ -44,7 +44,7 @@
 
 -- UP
 
--- Add the column. SQLite is loosely typed; ``BOOLEAN`` is stored as
+-- Add the column. SQLite is loosely typed — ``BOOLEAN`` is stored as
 -- INTEGER 0/1, matching how the model field's ``bool`` is persisted
 -- by SQLAlchemy. NOT NULL DEFAULT 0 ensures the existing rows
 -- backfill cleanly and matches the Python default on the model.

@@ -2079,10 +2079,14 @@ class InstanceManager:
             # updated, so re-running does not clobber rows already
             # written by the dual-write code path.
             "ALTER TABLE job_queue_items ADD COLUMN IF NOT EXISTS admission_state TEXT NOT NULL DEFAULT 'queued'",
-            "UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' AND admission_state = 'queued'",
-            "UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processing', 'paused') AND admission_state = 'queued'",
-            "UPDATE job_queue_items SET admission_state = 'done' WHERE status IN ('completed', 'failed', 'cancelled') AND admission_state = 'queued'",
-            "UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter' AND admission_state = 'queued'",
+            # NOTE: the four backfill UPDATE statements that reference
+            # the legacy ``status`` column were moved out of the main
+            # ``statements`` list below — on PostgreSQL databases where
+            # Phase 5 has already dropped ``status`` the raw UPDATEs raise
+            # ``sqlalchemy.exc.ProgrammingError`` (``UndefinedColumn``).
+            # They are re-run in a guarded block after the main transaction
+            # so legacy schemas continue to backfill and post-Phase-5
+            # schemas no-op silently. See ``legacy_status_backfill`` below.
             "CREATE INDEX IF NOT EXISTS idx_job_queue_admission_state ON job_queue_items(admission_state)",
             # ── Phase 2 invariant triggers (plan §8.7.1) ─────────────
             # First CONSTRAINT TRIGGER / DEFERRABLE usage in the
@@ -2108,6 +2112,38 @@ class InstanceManager:
         with self._engine.begin() as conn:
             for stmt in statements:
                 conn.execute(text(stmt))
+
+        # Backfill UPDATEs that reference the legacy ``status`` column.
+        # Phase 5 of the Job-as-Queue-Proxy refactor dropped
+        # ``job_queue_items.status``; on databases that have already
+        # applied that drop, running ``UPDATE … WHERE status = …``
+        # raises ``sqlalchemy.exc.ProgrammingError`` (``UndefinedColumn``).
+        # We catch that specific failure and log at DEBUG so legacy
+        # databases continue to backfill while post-Phase-5 databases
+        # silently skip the now-meaningless statements. Any other
+        # ProgrammingError is re-raised unchanged.
+        import sqlalchemy.exc
+
+        legacy_status_backfill = [
+            "UPDATE job_queue_items SET admission_state = 'queued' WHERE status = 'pending' AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'active' WHERE status IN ('processing', 'paused') AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'done' WHERE status IN ('completed', 'failed', 'cancelled') AND admission_state = 'queued'",
+            "UPDATE job_queue_items SET admission_state = 'dead' WHERE status = 'dead_letter' AND admission_state = 'queued'",
+        ]
+        with self._engine.begin() as conn:
+            for stmt in legacy_status_backfill:
+                try:
+                    conn.execute(text(stmt))
+                except sqlalchemy.exc.ProgrammingError as status_err:
+                    err_msg = str(status_err).lower()
+                    if "does not exist" in err_msg or "undefinedcolumn" in err_msg:
+                        logger.debug(
+                            "Legacy `status` column already dropped; "
+                            "skipping backfill statement: %s",
+                            stmt[:80],
+                        )
+                        continue
+                    raise
 
     def _ensure_postgres_drop_legacy_columns(self) -> None:
         """Drop the legacy completion-state columns on PostgreSQL.

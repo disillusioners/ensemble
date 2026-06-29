@@ -325,10 +325,18 @@ class MigrationRunner:
         with self.engine.begin() as conn:
             # Execute the UP SQL
             try:
-                # Split on semicolons and execute each statement
-                statements = [
-                    s.strip() for s in migration.up_sql.split(";") if s.strip()
-                ]
+                # Strip full-line ``--`` comments before splitting on
+                # ``;`` so semicolons embedded in SQL comments do not
+                # break statement boundaries (defensive: see
+                # ``20260627_000003_task_is_deferred.sql`` for an
+                # in-comment semicolon that previously corrupted the
+                # split). Inline (trailing) comments are left alone —
+                # they share a line with SQL and so cannot mis-direct
+                # the splitter unless they themselves contain ``;``.
+                _raw_lines = migration.up_sql.splitlines()
+                _code_lines = [ln for ln in _raw_lines if not ln.lstrip().startswith("--")]
+                _clean_sql = "\n".join(_code_lines)
+                statements = [s.strip() for s in _clean_sql.split(";") if s.strip()]
                 for stmt in statements:
                     if stmt:
                         try:
@@ -429,9 +437,10 @@ class MigrationRunner:
         
         with self.engine.begin() as conn:
             # Execute the DOWN SQL
-            statements = [
-                s.strip() for s in migration.down_sql.split(";") if s.strip()
-            ]
+            _raw_lines = migration.down_sql.splitlines()
+            _code_lines = [ln for ln in _raw_lines if not ln.lstrip().startswith("--")]
+            _clean_sql = "\n".join(_code_lines)
+            statements = [s.strip() for s in _clean_sql.split(";") if s.strip()]
             for stmt in statements:
                 if stmt:
                     conn.execute(text(stmt))
