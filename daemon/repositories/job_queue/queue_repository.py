@@ -9,7 +9,7 @@ from sqlalchemy import delete as sql_delete, func, update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
-from .models import JobItem, JobQueue, JobStatus, QueueType
+from .models import JobItem, JobQueue, QueueType
 
 
 class JobQueueRepository:

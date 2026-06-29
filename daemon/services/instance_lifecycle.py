@@ -21,7 +21,7 @@ from ..repositories.dependency_bus.models import (
     DependencyWatcherState,
 )
 from ..repositories.instance.models import Instance, InstanceHierarchy, InstanceStatus
-from ..repositories.job_queue.models import AdmissionState, JobStatus
+from ..repositories.job_queue.models import AdmissionState
 from ..repositories.task.models import TaskStatus
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
@@ -1174,7 +1174,7 @@ class InstanceLifecycleService:
                     node_id,
                     InstanceStatus.PAUSED.value,
                     agent_id=agent_ids_by_instance.get(node_id),
-                    job_status=JobStatus.PAUSED.value,
+                    job_status="paused",
                 )
             except Exception as e:
                 logger.warning(

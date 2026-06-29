@@ -23,7 +23,7 @@ from .mcp_server.models import McpServer
 # Job queue repository
 from .job_queue.repository import JobRepository
 from .job_queue.queue_repository import JobQueueRepository
-from .job_queue.models import JobItem, JobStatus, JobLockInfo, JobQueue, QueueType
+from .job_queue.models import JobItem, JobLockInfo, JobQueue, QueueType
 
 # Task repository
 from .task.repository import TaskRepository
@@ -96,7 +96,6 @@ __all__ = [
     "JobRepository",
     "JobQueueRepository",
     "JobItem",
-    "JobStatus",
     "JobLockInfo",
     "JobQueue",
     "QueueType",

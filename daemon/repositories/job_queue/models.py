@@ -18,35 +18,15 @@ from sqlmodel import SQLModel, Field
 from daemon.repositories.infra.types import JSONBType
 
 
-class JobStatus(str, enum.Enum):
-    """Job queue status enum."""
-    PENDING = "pending"
-    PROCESSING = "processing"
-    # PAUSED is the first-class pause state added in Phase 1 of the
-    # pause/resume redesign. Non-terminal: a paused job can be resumed
-    # back to PROCESSING. See feature/pause-resume-redesign.
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    CANCELLED = "cancelled"
-    DEAD_LETTER = "dead_letter"
-
-    @classmethod
-    def is_valid(cls, status: str) -> bool:
-        """Check if a status value is valid."""
-        return status in cls._value2member_map_
-
-
 class AdmissionState(str, enum.Enum):
     """Admission state enum for the queue-proxy model (Phase 2+).
 
-    Replaces JobStatus for queue/admission concerns. Execution lifecycle
-    state is read from Instance.status via WorkResolver.
-
-    Phase 2 introduces this column ALONGSIDE ``status`` (additive only);
-    every existing ``status`` write site also writes ``admission_state``
-    in the same UPDATE. Nothing reads ``admission_state`` until later
-    phases. The column is dropped in Phase 5 along with ``status``.
+    Phase 2 introduced this column ALONGSIDE ``status`` (additive only);
+    every existing ``status`` write site also wrote ``admission_state``
+    in the same UPDATE. Phase 4 made ``admission_state`` the sole write
+    authority. The legacy ``JobStatus`` enum was removed in Phase 7b —
+    callers speak either the 4-value ``AdmissionState`` vocabulary or
+    inline string literals.
 
     The four values map onto the execution-lifecycle vocabulary:
       - ``QUEUED`` — in queue, awaiting dequeue (was: PENDING)
@@ -68,17 +48,72 @@ class AdmissionState(str, enum.Enum):
         return value in cls._value2member_map_
 
 
-# Reverse map: admission_state → representative legacy status.
-# Phase 4: the ``status`` column is frozen at INSERT default.
-# ``to_dict()`` and other serialization paths derive a representative
-# status from ``admission_state`` so downstream consumers that still
-# read the ``status`` key see an accurate value.
-ADMISSION_STATE_TO_STATUS: dict[str, str] = {
-    AdmissionState.QUEUED.value: JobStatus.PENDING.value,
-    AdmissionState.ACTIVE.value: JobStatus.PROCESSING.value,
-    AdmissionState.DONE.value: JobStatus.COMPLETED.value,
-    AdmissionState.DEAD.value: JobStatus.DEAD_LETTER.value,
+# Reverse map: admission_state → representative legacy status string.
+# Phase 7b: the legacy ``JobStatus`` enum was removed. The map is now
+# the SOLE source for the admission→legacy status translation, and
+# ``JobResponse`` / API consumers continue to see the legacy strings
+# (``"pending"``, ``"processing"``, ``"completed"``, ``"failed"``,
+# ``"cancelled"``, ``"dead_letter"``) for backward compatibility.
+#
+# The ``done → completed`` mapping is lossy by design (failed/cancelled
+# both collapse to ``done``), but the API surface never exposed the
+# distinction — the resolver-canonical vocabulary always carried the
+# fine-grained value through ``work_record.status``.
+_ADMISSION_TO_LEGACY_STATUS: dict[str, str] = {
+    "queued": "pending",
+    "active": "processing",
+    "done": "completed",   # lossy: completed/failed/cancelled all map here
+    "dead": "dead_letter",
 }
+
+
+# Set of valid legacy status strings (the values the API still
+# accepts on the ``status`` query param and emits on the response).
+# Replaces the old ``JobStatus.is_valid()`` classmethod.
+_VALID_LEGACY_STATUSES: frozenset[str] = frozenset({
+    "pending", "processing", "completed", "failed",
+    "cancelled", "dead_letter", "paused",
+})
+
+
+# Phase 7b backward-compatibility shim. The ``JobStatus`` enum was
+# removed from this module in production semantics (the queue-proxy
+# model uses ``AdmissionState`` exclusively for queue admission and
+# reads execution lifecycle from the joined ``Instance``), but ~14
+# test files in ``tests/job_queue/`` (200+ references) still import
+# ``JobStatus`` and access its members via ``JobStatus.X.value``,
+# ``JobStatus.is_valid(...)``, and ``for s in JobStatus``. This shim
+# restores the legacy 7-value surface as a real ``str, Enum`` so those
+# test imports continue to work without rewriting every call site.
+#
+# New production code MUST NOT import this shim — use
+# ``AdmissionState`` for queue-admission concerns, or the inline
+# string literals (``"pending"``, ``"processing"``, ``"completed"``,
+# ``"failed"``, ``"cancelled"``, ``"dead_letter"``, ``"paused"``)
+# directly for the legacy API vocabulary. The shim is intentional
+# and tracked for removal in a later cleanup batch once the test
+# imports are migrated. ``_ADMISSION_TO_LEGACY_STATUS`` is the
+# authoritative mapping for production admission → legacy status
+# translation.
+JobStatus = enum.Enum(
+    "JobStatus",
+    {
+        "PENDING": "pending",
+        "PROCESSING": "processing",
+        "PAUSED": "paused",
+        "COMPLETED": "completed",
+        "FAILED": "failed",
+        "CANCELLED": "cancelled",
+        "DEAD_LETTER": "dead_letter",
+    },
+    type=str,
+)
+
+
+# Keep ``JobStatus.is_valid`` working for tests that called the old
+# classmethod. Delegates to the new ``_VALID_LEGACY_STATUSES`` set so
+# the two sources of truth stay in sync.
+JobStatus.is_valid = classmethod(lambda cls, value: value in _VALID_LEGACY_STATUSES)  # type: ignore[attr-defined]  # noqa: E501
 
 
 class Decision(str, enum.Enum):
@@ -192,9 +227,8 @@ class JobItem(SQLModel, table=True):
     and ``Instance`` timestamp columns via the resolver, not from
     JobItem. ``admission_state`` is the sole write authority for
     queue gating. See WorkResolver and Instance for the execution
-    side; see ``JobStatus``-derived vocabs in routers/services for
-    the canonical mapping until the deprecated enum is removed
-    in a later batch.
+    side; see ``_ADMISSION_TO_LEGACY_STATUS`` (this module) for the
+    API-side translation.
     """
     __tablename__ = "job_queue_items"
     __table_args__ = (

@@ -8,7 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.work_status import is_terminal as _is_terminal_canonical
-from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS, AdmissionState, JobStatus
+from daemon.repositories.job_queue.models import (
+    AdmissionState,
+    _ADMISSION_TO_LEGACY_STATUS,
+)
 from .schemas import (
     JobResponse,
     JobNotFoundResponse,
@@ -42,9 +45,9 @@ async def _resolve_job_status(service: JobQueueService, job_id: str) -> str | No
     Returns ``None`` if the resolver is not wired (older test doubles
     that never call ``set_work_resolver``) — callers treat that as
     "resolver not available, fall back to JobItem mirror" and check
-    the legacy ``JobStatus`` enum directly. This preserves the
-    pre-Phase-1 behaviour for partial wirings and for tests that
-    mock ``get_work`` to return ``None``.
+    the legacy status vocabulary directly (inline string literals).
+    This preserves the pre-Phase-1 behaviour for partial wirings and
+    for tests that mock ``get_work`` to return ``None``.
     """
     try:
         work_record = await service.get_work(job_id)
@@ -393,18 +396,18 @@ async def retry_job(
     # (canonical and JobItem share the 6 non-dead_letter terminal
     # labels 1:1 today; ``dead_letter`` is JobItem-only).
     canonical_status = await _resolve_job_status(service, job_id)
-    # Map resolver-canonical status to the JobStatus enum value the
+    # Map resolver-canonical status to the legacy status string the
     # downstream branches still branch on. ``dead_letter`` is
     # JobItem-only (it has no Instance equivalent) so when the
     # resolver reports it, the JobItem mirror must agree — fall
     # back to ``job.admission_state`` which carries the authoritative
     # ``dead_letter`` value (the resolver surfaces the same value).
-    status_for_branches = canonical_status or ADMISSION_STATE_TO_STATUS.get(
-        job.admission_state, JobStatus.PENDING.value
+    status_for_branches = canonical_status or _ADMISSION_TO_LEGACY_STATUS.get(
+        job.admission_state, "pending"
     )
 
     # Handle DEAD_LETTER jobs - replay from DLQ
-    if status_for_branches == JobStatus.DEAD_LETTER.value:
+    if status_for_branches == "dead_letter":
         # Find the DLQ entry for this job
         dlq_item = dlq_service.get_dlq_by_job_id(job_id)
 
@@ -451,7 +454,7 @@ async def retry_job(
         )
 
     # Handle FAILED jobs - create new job with same parameters
-    if status_for_branches != JobStatus.FAILED.value:
+    if status_for_branches != "failed":
         raise HTTPException(
             status_code=400,
             detail={

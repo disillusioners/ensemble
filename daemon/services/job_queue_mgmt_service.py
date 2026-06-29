@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.repository import JobRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobQueue, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobQueue
 
 
 # Reserved system queue names that cannot be created or deleted
@@ -267,9 +267,9 @@ class JobQueueMgmtService:
         )
         
         queue_dict = queue.to_dict()
-        queue_dict["active_jobs"] = counts.get(JobStatus.PROCESSING.value, 0)
-        queue_dict["pending_jobs"] = counts.get(JobStatus.PENDING.value, 0)
-        
+        queue_dict["active_jobs"] = counts.get(AdmissionState.ACTIVE.value, 0)
+        queue_dict["pending_jobs"] = counts.get(AdmissionState.QUEUED.value, 0)
+
         return queue_dict
     
     async def get_queue(
@@ -317,8 +317,8 @@ class JobQueueMgmtService:
             )
             
             queue_dict = queue.to_dict()
-            queue_dict["active_jobs"] = counts.get(JobStatus.PROCESSING.value, 0)
-            queue_dict["pending_jobs"] = counts.get(JobStatus.PENDING.value, 0)
+            queue_dict["active_jobs"] = counts.get(AdmissionState.ACTIVE.value, 0)
+            queue_dict["pending_jobs"] = counts.get(AdmissionState.QUEUED.value, 0)
             result.append(queue_dict)
         
         return result

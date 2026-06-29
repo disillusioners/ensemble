@@ -298,8 +298,8 @@ class JobRetryEngine:
 
             # Validate transition is allowed (cheap fail-fast before
             # opening a session / issuing the UPDATE).
-            # Phase 5: legacy JobStatus vocab retired in the state
-            # machine; ``failed → pending`` (the legacy retry path)
+            # Phase 7b: legacy 7-value job status vocab retired (the enum was
+            # removed); ``failed → pending`` (the legacy retry path)
             # now corresponds to ``done → queued`` on the admission
             # vocabulary. Validating ``(done, queued)`` is on
             # :data:`VALID_TRANSITIONS` (the "replay from done" entry).

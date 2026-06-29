@@ -14,7 +14,7 @@ from ..graph import ThinkingChatOpenAI, clean_llm_config
 from ..persistence import get_instance_messages
 from ..repositories.instance.models import Instance, InstanceStatus
 from ..repositories.message_queue.models import MessageQueue, MessageStatus, MessageType
-from ..repositories.job_queue.models import JobItem, JobStatus
+from ..repositories.job_queue.models import JobItem
 from ..repositories.task.models import Task, TaskType, TaskStatus
 from ..repositories.event.models import Event, EventKind
 from ..repositories.dependency_bus.models import DependencyWatcher, DependencyWatcherState

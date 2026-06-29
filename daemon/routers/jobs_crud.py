@@ -11,7 +11,11 @@ from pydantic import ValidationError
 from daemon.services.job_queue_service import JobQueueService, normalize_statuses
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
-from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS, AdmissionState, JobStatus
+from daemon.repositories.job_queue.models import (
+    AdmissionState,
+    _ADMISSION_TO_LEGACY_STATUS,
+    _VALID_LEGACY_STATUSES,
+)
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
 from daemon.utils import create_service_dependency, validate_agent_id
 from .schemas import (
@@ -30,13 +34,15 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 get_job_queue_service = create_service_dependency(JobQueueService)
 get_dead_letter_svc = create_service_dependency(DeadLetterService)
 
-# Terminal statuses for job lifecycle
-TERMINAL_STATUSES = {
-    JobStatus.COMPLETED.value,
-    JobStatus.FAILED.value,
-    JobStatus.CANCELLED.value,
-    JobStatus.DEAD_LETTER.value,
-}
+# Terminal statuses for job lifecycle (legacy vocabulary — Phase 7b
+# removed the JobStatus enum; these are the inline string values the
+# API still emits / accepts for backward compatibility).
+TERMINAL_STATUSES = frozenset({
+    "completed",
+    "failed",
+    "cancelled",
+    "dead_letter",
+})
 
 
 def _get_manager(request: Request) -> Any:
@@ -131,8 +137,8 @@ def _job_to_response(
         # exit criterion is "execution-state reads resolve through
         # the instance/work layer"; this branch is the documented
         # exception for callers that haven't migrated yet.
-        status = ADMISSION_STATE_TO_STATUS.get(
-            job.admission_state, JobStatus.PENDING.value
+        status = _ADMISSION_TO_LEGACY_STATUS.get(
+            job.admission_state, "pending"
         )
         instance_id = job.instance_id
         # Phase 5: JobItem mirror columns (``result_summary``,
@@ -414,7 +420,7 @@ async def list_jobs(
             )
         # Resolve natural-language aliases (e.g. "running" -> "processing") before validation
         status_list = normalize_statuses(status_list)
-        invalid_statuses = [s for s in status_list if not JobStatus.is_valid(s)]
+        invalid_statuses = [s for s in status_list if s not in _VALID_LEGACY_STATUSES]
         if invalid_statuses:
             raise HTTPException(
                 status_code=400,

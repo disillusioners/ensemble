@@ -57,7 +57,7 @@ from sqlmodel import Session, select, update as sqlmodel_update
 from sqlalchemy import func, text as _sa_text
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
+from daemon.repositories.job_queue import JobItem, JobRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.job_queue.models import AdmissionState, JobLock
 from daemon.repositories.project.repository import SQLModelProjectRepository
@@ -581,12 +581,11 @@ class JobFeedbackObserver:
 
         Phase 2 audit (2026-06-25, pause/resume redesign) carries
         forward: PAUSED jobs (introduced in Phase 1) are excluded by
-        construction — the ``status == JobStatus.PROCESSING.value``
-        checks in this method require PROCESSING status. A paused
-        instance has no PROCESSING job visible to this helper, so
-        ``_process_event`` falls into case 3 (no JobItem context) and
-        the lifecycle event short-circuits via the no-active-job
-        branch downstream.
+        construction — the ``status == 'processing'`` checks in this
+        method require PROCESSING status. A paused instance has no
+        PROCESSING job visible to this helper, so ``_process_event``
+        falls into case 3 (no JobItem context) and the lifecycle event
+        short-circuits via the no-active-job branch downstream.
 
         Args:
             instance_id: The instance ID to look up.
@@ -1135,8 +1134,8 @@ class JobFeedbackObserver:
                         await asyncio.to_thread(
                             self._job_repo.atomic_transition,
                             job_id=ctx.job_id,
-                            from_status=JobStatus.COMPLETED.value,
-                            to_status=JobStatus.PROCESSING.value,
+                            from_status="completed",
+                            to_status="processing",
                         )
                         rearmed = True
                     except InvalidTransitionError as ite:
@@ -1454,8 +1453,8 @@ class JobFeedbackObserver:
                     await asyncio.to_thread(
                         self._job_repo.atomic_transition,
                         job_id=ctx.job_id,
-                        from_status=JobStatus.PROCESSING.value,
-                        to_status=JobStatus.FAILED.value,
+                        from_status="processing",
+                        to_status="failed",
                         completed_at=datetime.now(timezone.utc).isoformat(),
                         error_message=f"Job finalization failed: {e}",
                     )
@@ -2207,9 +2206,9 @@ class JobFeedbackObserver:
         """
         # ─── Validate terminal_status (caller already validated; defensive) ───
         if terminal_status == InstanceStatus.COMPLETED.value:
-            to_status = JobStatus.COMPLETED.value
+            to_status = "completed"
         elif terminal_status == InstanceStatus.ERROR.value:
-            to_status = JobStatus.FAILED.value
+            to_status = "failed"
         else:
             return _FinalizeJobResult(
                 skip=True,

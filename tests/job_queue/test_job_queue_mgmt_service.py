@@ -394,7 +394,7 @@ class TestListQueues:
         system_queue = make_queue(queue_name="system_fifo_queue", is_system=True)
         custom_queue = make_queue(queue_id="q-custom", queue_name="my-queue", is_system=False)
         mock_queue_repo.list_by_project.return_value = [system_queue, custom_queue]
-        mock_queue_repo.count_jobs_by_status.return_value = {"pending": 0, "processing": 0}
+        mock_queue_repo.count_jobs_by_status.return_value = {"queued": 0, "active": 0}
 
         result = await service.list_queues("proj-1")
 
@@ -417,7 +417,7 @@ class TestListQueues:
         """Response includes active and pending job counts."""
         queue = make_queue(queue_name="my-queue")
         mock_queue_repo.list_by_project.return_value = [queue]
-        mock_queue_repo.count_jobs_by_status.return_value = {"pending": 5, "processing": 2}
+        mock_queue_repo.count_jobs_by_status.return_value = {"queued": 5, "active": 2}
 
         result = await service.list_queues("proj-1")
 

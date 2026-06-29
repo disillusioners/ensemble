@@ -586,19 +586,18 @@ class InstanceManager:
             # ``_ensure_postgres_drop_admission_legacy()``. See its
             # docstring for idempotency and lock-cost notes.
             #
-            # The legacy ``JobStatus`` enum still exists in the
-            # daemon/services/* and daemon/routers/* code paths;
-            # those callers are NOT yet migrated off the deprecated
-            # vocabulary. Activating the column drop here is safe
-            # because those callers either (a) interpolate the
-            # legacy value strings into a ``status`` parameter that
-            # is read-only after the drop (DEAD column, missing on
-            # PG) — handled by the PG helper's IF EXISTS clauses —
-            # or (b) will be migrated in a follow-up batch. The
-            # smoke tests in Task 5 confirm the helper activates
-            # without ORM-level errors against a fresh database;
-            # the production readers are out of scope for this
-            # batch.
+            # The legacy ``JobStatus`` enum was removed in Phase 7b; callers
+            # now use inline status string literals or the
+            # ``_ADMISSION_TO_LEGACY_STATUS`` map. Activating the
+            # column drop here is safe because those callers either
+            # (a) interpolate the legacy value strings into a
+            # ``status`` parameter that is read-only after the drop
+            # (DEAD column, missing on PG) — handled by the PG
+            # helper's IF EXISTS clauses — or (b) were migrated in
+            # Phase 7b. The smoke tests in Task 5 confirm the helper
+            # activates without ORM-level errors against a fresh
+            # database; the production readers are out of scope for
+            # this batch.
             self._ensure_postgres_drop_admission_legacy()
 
         # ── D13 data migration: cancel in-flight MESSAGE JobItems ──────────

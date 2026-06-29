@@ -1,7 +1,7 @@
 """Formal state machine for job admission-state transitions (Phase 5).
 
-Replaces the legacy ``JobStatus``-keyed TRANSITIONS dict with a
-``VALID_TRANSITIONS`` set-of-tuples keyed on ``AdmissionState``
+Replaces the legacy 7-value ``JobStatus`` enum (removed in Phase 7b)
+with a ``VALID_TRANSITIONS`` set-of-tuples keyed on ``AdmissionState``
 values. The 7-value enum and the per-transition name strings
 (``"start"``/``"complete"``/...) collapsed under the queue-proxy
 model:

@@ -24,9 +24,8 @@ from daemon.repositories.job_queue import (
     JobRepository,
     JobQueueRepository,
     JobItem,
-    JobStatus,
 )
-from daemon.repositories.job_queue.models import ADMISSION_STATE_TO_STATUS
+from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
@@ -59,8 +58,9 @@ TERMINAL_CANCEL_STATUSES = frozenset([
 # Applied in normalize_statuses() so that agents/LLMs that pass
 # "running" (meaning "processing") get correct results instead of empty lists.
 # ``paused`` is an identity mapping so natural-language queries like
-# ``status="paused"`` resolve to the canonical enum value; pause is
-# non-terminal (see JobStatus.PAUSED docs at models.py:25-28).
+# ``status="paused"`` resolve to the canonical string; pause is
+# non-terminal (paused jobs keep their admission_state='active' and
+# can be resumed back to 'processing').
 STATUS_ALIASES: dict[str, str] = {
     "running": "processing",
     "active": "processing",
@@ -461,7 +461,7 @@ class JobQueueService:
                 # string so the watcher filter (which checks against
                 # legacy ``watch_events`` like "completed",
                 # "dead_letter") matches.
-                legacy_status = ADMISSION_STATE_TO_STATUS.get(
+                legacy_status = _ADMISSION_TO_LEGACY_STATUS.get(
                     job.admission_state, job.admission_state
                 )
                 # Phase 7: error_message column dropped; error text lives on
@@ -925,7 +925,7 @@ class JobQueueService:
         # is a best-effort check; the atomic repo.cancel_job is the source
         # of truth and will raise ValueError for non-cancellable states.
         # Phase 5: validate directly on admission_state vocabulary —
-        # no JobStatus translation. A non-cancellable admission state
+        # no legacy status translation. A non-cancellable admission state
         # is ``done`` (terminal) or ``dead`` (terminal); ``queued`` and
         # ``active`` both have explicit transitions to ``done``.
         if not job_state_machine.can_transition(
@@ -980,7 +980,7 @@ class JobQueueService:
             # don't let the instance-derived status (which falls back
             # to 'failed' for missing/unexpected instance states)
             # mask the cancel intent.
-            target_status=JobStatus.CANCELLED.value,
+            target_status="cancelled",
         )
 
         # The terminal-write boundary only handles ``admission_state=
@@ -1207,11 +1207,11 @@ class JobQueueService:
             ``(job_id, final_status_for_backward_compat)`` tuple.
             ``job_id`` is ``None`` if no active job was found.
             ``final_status_for_backward_compat`` is the legacy
-            ``JobStatus`` enum value written as the ``status`` column
-            mirror (``completed`` / ``failed`` / ``cancelled`` /
-            ``pending`` for queued retry / ``dead_letter`` for DLQ).
-            An empty string indicates no UPDATE was applied (caller
-            should fall back to legacy atomic cancel).
+            status string returned for the API consumer
+            (``"completed"`` / ``"failed"`` / ``"cancelled"`` /
+            ``"pending"`` for queued retry / ``"dead_letter"`` for
+            DLQ). An empty string indicates no UPDATE was applied
+            (caller should fall back to legacy atomic cancel).
         """
         # ── Step 1: locate the job (by job_id or by instance) ──────
         canonical_job_id: str | None = None
@@ -1320,7 +1320,7 @@ class JobQueueService:
                     )
 
                 update_kwargs: dict[str, Any] = {}
-                if derived_status == JobStatus.COMPLETED.value:
+                if derived_status == "completed":
                     update_kwargs["result_summary"] = (
                         result_summary or "Job completed successfully"
                     )
@@ -1365,11 +1365,11 @@ class JobQueueService:
                         self._retry_engine.maybe_retry, canonical_job_id
                     )
                     if retried is not None:
-                        final_status = JobStatus.PENDING.value
+                        final_status = "pending"
                     else:
                         # maybe_retry moved it to DLQ (retries
                         # exhausted); surface that to the caller.
-                        final_status = JobStatus.DEAD_LETTER.value
+                        final_status = "dead_letter"
 
             if decision == Decision.DEAD_LETTER:
                 # Direct active → dead transition via the DLQ service.
@@ -1389,10 +1389,10 @@ class JobQueueService:
                     await asyncio.to_thread(
                         self._repository.atomic_transition,
                         canonical_job_id,
-                        from_status=JobStatus.PROCESSING.value,
-                        to_status=JobStatus.DEAD_LETTER.value,
+                        from_status="processing",
+                        to_status="dead_letter",
                     )
-                    final_status = JobStatus.DEAD_LETTER.value
+                    final_status = "dead_letter"
                 else:
                     await asyncio.to_thread(
                         self._dlq_service.move_to_dlq_standalone,
@@ -1400,7 +1400,7 @@ class JobQueueService:
                         reason="MANUAL",
                         from_admission_state=AdmissionState.ACTIVE.value,
                     )
-                    final_status = JobStatus.DEAD_LETTER.value
+                    final_status = "dead_letter"
         finally:
             # ── Step 3: release lock (always, even on error) ────────
             # Use release_by_instance to clean up regardless of whether
@@ -1444,7 +1444,7 @@ class JobQueueService:
             or not hasattr(self._instance_manager, "_instance_repository")
             or self._instance_manager._instance_repository is None
         ):
-            return JobStatus.FAILED.value
+            return "failed"
         try:
             instance = self._instance_manager._instance_repository.get(
                 instance_id
@@ -1452,17 +1452,17 @@ class JobQueueService:
         except Exception:
             instance = None
         if instance is None:
-            return JobStatus.FAILED.value
+            return "failed"
         if instance.status == InstanceStatus.COMPLETED.value:
-            return JobStatus.COMPLETED.value
+            return "completed"
         if instance.status in (
             InstanceStatus.ERROR.value,
             InstanceStatus.FAILED.value,
         ):
-            return JobStatus.FAILED.value
+            return "failed"
         if instance.status == InstanceStatus.TERMINATED.value:
-            return JobStatus.CANCELLED.value
-        return JobStatus.FAILED.value
+            return "cancelled"
+        return "failed"
 
     async def _get_concurrency_limit(self, queue_id: str) -> int:
         """Get the concurrency limit for a queue.
@@ -2029,9 +2029,9 @@ class JobQueueService:
         # fallback.
         target_status: str | None
         if demand_state == DemandState.COMPLETED:
-            target_status = JobStatus.COMPLETED.value
+            target_status = "completed"
         elif demand_state == DemandState.CANCELLED:
-            target_status = JobStatus.CANCELLED.value
+            target_status = "cancelled"
         else:
             # FAILED — let ``_finalize_terminal`` derive from the
             # instance for NO_RETRY (matches the legacy
@@ -2069,7 +2069,7 @@ class JobQueueService:
                 # Watchers care about the outcome AFTER the retry
                 # decision — DEAD_LETTER is the terminal failure
                 # signal even if ``maybe_retry`` was attempted.
-                if decision == Decision.RETRY and final_status != JobStatus.DEAD_LETTER.value:
+                if decision == Decision.RETRY and final_status != "dead_letter":
                     # Retry scheduled — don't notify FAILED yet; the
                     # retry engine will emit the appropriate signal
                     # when the next attempt terminates.
@@ -2188,9 +2188,9 @@ class JobQueueService:
         # of the instance-derivation fallback.
         target_status: str | None
         if demand_state == DemandState.COMPLETED:
-            target_status = JobStatus.COMPLETED.value
+            target_status = "completed"
         elif demand_state == DemandState.CANCELLED:
-            target_status = JobStatus.CANCELLED.value
+            target_status = "cancelled"
         else:
             target_status = None
 
@@ -2226,7 +2226,7 @@ class JobQueueService:
                         self._loop,
                     )
             elif demand_state == DemandState.FAILED:
-                if decision == Decision.RETRY and final_status != JobStatus.DEAD_LETTER.value:
+                if decision == Decision.RETRY and final_status != "dead_letter":
                     pass  # retry in flight; engine will notify
                 else:
                     if self._loop and self._loop.is_running():
@@ -2321,7 +2321,7 @@ class JobQueueService:
                         canonical_instance_id
                     )
                 update_kwargs: dict[str, Any] = {}
-                if derived_status == JobStatus.COMPLETED.value:
+                if derived_status == "completed":
                     update_kwargs["result_summary"] = (
                         result_summary or "Job completed successfully"
                     )
@@ -2344,25 +2344,25 @@ class JobQueueService:
                 else:
                     retried = self._retry_engine.maybe_retry(canonical_job_id)
                     if retried is not None:
-                        final_status = JobStatus.PENDING.value
+                        final_status = "pending"
                     else:
-                        final_status = JobStatus.DEAD_LETTER.value
+                        final_status = "dead_letter"
 
             if decision == Decision.DEAD_LETTER:
                 if self._dlq_service is None:
                     self._repository.atomic_transition(
                         canonical_job_id,
-                        from_status=JobStatus.PROCESSING.value,
-                        to_status=JobStatus.DEAD_LETTER.value,
+                        from_status="processing",
+                        to_status="dead_letter",
                     )
-                    final_status = JobStatus.DEAD_LETTER.value
+                    final_status = "dead_letter"
                 else:
                     self._dlq_service.move_to_dlq_standalone(
                         canonical_job_id,
                         reason="MANUAL",
                         from_admission_state=AdmissionState.ACTIVE.value,
                     )
-                    final_status = JobStatus.DEAD_LETTER.value
+                    final_status = "dead_letter"
         finally:
             if canonical_instance_id and self._loop and self._loop.is_running():
                 try:

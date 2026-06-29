@@ -553,7 +553,7 @@ class TaskRepository:
                             -- ``status = 'processing'``. The legacy predicate
                             -- excluded PAUSED jobs even though they still hold
                             -- the lock (admission_state='active' under the new
-                            -- model — see Plan §8.1 / ``JobStatus.PAUSED``).
+                            -- model — see Plan §8.1 / ``paused`` admission handling).
                             -- The IN-list also covers the B1 single-transaction
                             -- window where a job briefly sits in
                             -- admission_state='queued' while its lock is held

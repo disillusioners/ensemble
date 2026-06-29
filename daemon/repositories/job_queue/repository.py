@@ -12,26 +12,26 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
-from .models import AdmissionState, JobItem, JobQueue, JobStatus, QueueType
+from .models import AdmissionState, JobItem, JobQueue, QueueType
 
 logger = logging.getLogger(__name__)
 
 
-# ── JobStatus → AdmissionState read-path translation ────────────────────
-# Phase 4 cleanup: the legacy ``status`` column is frozen at its INSERT
-# default and no longer reflects lifecycle state. All read paths
-# (listing, counting, guarding) filter on ``admission_state`` instead.
-# This map translates legacy ``statuses`` parameters (still accepted by
-# ``list()`` / ``list_by_queue()`` for backward compatibility) into the
-# admission_state values that replace them.
-_JOB_STATUS_TO_ADMISSION: dict[str, str] = {
-    JobStatus.PENDING.value: AdmissionState.QUEUED.value,
-    JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
-    JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
-    JobStatus.COMPLETED.value: AdmissionState.DONE.value,
-    JobStatus.FAILED.value: AdmissionState.DONE.value,
-    JobStatus.CANCELLED.value: AdmissionState.DONE.value,
-    JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+# ── Legacy status → AdmissionState read-path translation ───────────────────
+# Phase 7b: the ``JobStatus`` enum was removed. This map translates
+# legacy status filter values (still accepted by ``list()`` /
+# ``list_by_queue()`` for backward compatibility with callers that pass
+# the old 7-value vocabulary) into the 4-value ``AdmissionState``
+# vocabulary that replaced it. Multiple legacy values collapse onto
+# fewer admission states (e.g. completed/failed/cancelled → done).
+_LEGACY_TO_ADMISSION: dict[str, str] = {
+    "pending": AdmissionState.QUEUED.value,
+    "processing": AdmissionState.ACTIVE.value,
+    "paused": AdmissionState.ACTIVE.value,
+    "completed": AdmissionState.DONE.value,
+    "failed": AdmissionState.DONE.value,
+    "cancelled": AdmissionState.DONE.value,
+    "dead_letter": AdmissionState.DEAD.value,
 }
 
 
@@ -54,13 +54,13 @@ _REMOVED_JOB_COLUMNS: frozenset[str] = frozenset({
 
 
 def _statuses_to_admission(statuses: list[str | None]) -> list[str]:
-    """Translate legacy ``statuses`` filter values to ``admission_state`` values.
+    """Translate legacy status filter values to ``admission_state`` values.
 
-    Multiple JobStatus values collapse onto fewer AdmissionState values
+    Multiple legacy values collapse onto fewer AdmissionState values
     (e.g. completed/failed/cancelled → done). The result is de-duplicated.
 
     Args:
-        statuses: List of ``JobStatus`` value strings (may contain None).
+        statuses: List of legacy status strings (may contain None).
 
     Returns:
         De-duplicated list of ``AdmissionState`` value strings.
@@ -70,7 +70,7 @@ def _statuses_to_admission(statuses: list[str | None]) -> list[str]:
     for s in statuses:
         if s is None:
             continue
-        mapped = _JOB_STATUS_TO_ADMISSION.get(s)
+        mapped = _LEGACY_TO_ADMISSION.get(s)
         if mapped and mapped not in seen:
             seen.add(mapped)
             result.append(mapped)
@@ -663,9 +663,10 @@ class JobRepository:
 
         Args:
             queue_id: Queue identifier.
-            statuses: Optional list of ``JobStatus`` value filters. Mutually
-                inclusive with ``admission_states`` — both filters are
-                applied with ``AND`` semantics when supplied.
+            statuses: Optional list of legacy status value filters
+                (e.g. ``"processing"``, ``"pending"``). Mutually inclusive
+                with ``admission_states`` — both filters are applied with
+                ``AND`` semantics when supplied.
             admission_states: Optional list of ``AdmissionState`` value
                 filters. Phase 3 admission-decision migration: prefer this
                 over ``statuses`` for any queue-admission query. PAUSED
@@ -775,25 +776,19 @@ class JobRepository:
         # Lazy import to avoid circular dependency with services package
         from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 
-        # Phase 5: state machine now validates on the 4-value
-        # AdmissionState vocabulary. Map legacy JobStatus strings to
-        # admission states BEFORE validation. The mapping is lossy
-        # (multiple JobStatus values collapse onto one AdmissionState),
-        # so the Python pre-check is permissive — the SQL guard below
-        # (``WHERE admission_state = :from_admission``) remains the
-        # race-safety boundary and will reject an actually-invalid
-        # transition (e.g. ``cancelled → queued`` mapped to
-        # ``done → queued`` would pass Python but fail the row's actual
-        # admission_state check).
-        # Phase 5: use the module-level ``_JOB_STATUS_TO_ADMISSION`` map
-        # (DRY — defined at line 27). Callers may pass either JobStatus
-        # strings (legacy) or AdmissionState strings (new); unmapped
-        # values pass through unchanged.
+        # Phase 7b: the ``JobStatus`` enum was removed. ``atomic_transition``
+        # accepts either legacy status strings or AdmissionState strings on
+        # ``from_status`` / ``to_status``; the map translates legacy values
+        # to admission values for the state-machine pre-check and the SQL
+        # guard. The mapping is lossy (multiple legacy values collapse onto
+        # one AdmissionState), so the Python pre-check is permissive — the
+        # SQL guard (``WHERE admission_state = :from_admission``) remains
+        # the race-safety boundary.
         from_admission = (
             None if from_status is None
-            else _JOB_STATUS_TO_ADMISSION.get(from_status, from_status)
+            else _LEGACY_TO_ADMISSION.get(from_status, from_status)
         )
-        to_admission = _JOB_STATUS_TO_ADMISSION.get(to_status, to_status)
+        to_admission = _LEGACY_TO_ADMISSION.get(to_status, to_status)
 
         # Validate transition is allowed on the admission vocabulary —
         # cheap fail-fast before opening a session / issuing the UPDATE.
@@ -1302,8 +1297,8 @@ SET admission_state = 'queued',
         now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status="pending",
+            to_status="processing",
             started_at=now,
             instance_id=instance_id,
         )
@@ -1514,8 +1509,8 @@ SET admission_state = 'queued',
         now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.COMPLETED.value,
+            from_status="processing",
+            to_status="completed",
             completed_at=now,
             result_summary=result_summary,
         )
@@ -1537,8 +1532,8 @@ SET admission_state = 'queued',
         now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.FAILED.value,
+            from_status="processing",
+            to_status="failed",
             completed_at=now,
             error_message=error_message,
             failed_at=now,
@@ -1659,8 +1654,8 @@ SET admission_state = 'queued',
         now = datetime.now(timezone.utc).isoformat()
         return self.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.CANCELLED.value,
+            from_status="processing",
+            to_status="cancelled",
             completed_at=now,
             error_message=error_message,
         )

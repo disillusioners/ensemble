@@ -80,12 +80,14 @@ logger = logging.getLogger(__name__)
 # ``admission_state`` and pass it through ``canonicalize_status`` so
 # the WorkRecord carries an accurate status instead of always
 # reporting ``"pending"``.
-_ADMISSION_STATE_TO_STATUS: dict[str, str] = {
-    AdmissionState.QUEUED.value: "pending",
-    AdmissionState.ACTIVE.value: "processing",
-    AdmissionState.DONE.value: "completed",
-    AdmissionState.DEAD.value: "dead_letter",
-}
+# Phase 7b: the canonical admission→legacy-status map lives in
+# ``daemon.repositories.job_queue.models._ADMISSION_TO_LEGACY_STATUS``.
+# Import it (rather than re-declaring it here) so the work-resolver
+# stays in sync with the canonical definition. The local
+# ``_ADMISSION_STATE_TO_STATUS`` alias below is kept for the existing
+# call sites at lines ~1138 / ~1148 so the migration is a pure
+# rename.
+from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS as _ADMISSION_STATE_TO_STATUS
 
 
 # ── Kind discrimination within the Task side ─────────────────────────────

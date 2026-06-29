@@ -17,10 +17,12 @@ lifecycle, and the strings they store are not identical:
 * ``task.status`` is a :class:`daemon.repositories.task.models.TaskStatus`
   enum value: ``pending``, ``running``, ``paused``, ``completed``,
   ``failed``, ``cancelled``.
-* ``job_queue_items.status`` is a
-  :class:`daemon.repositories.job_queue.models.JobStatus`` enum value:
-  ``pending``, ``processing``, ``paused``, ``completed``, ``failed``,
-  ``cancelled``, ``dead_letter``.
+* ``job_queue_items.status`` (legacy, dropped in Phase 5) used to be a
+  JobStatus enum value: ``pending``, ``processing``, ``paused``,
+  ``completed``, ``failed``, ``cancelled``, ``dead_letter``. The
+  legacy enum was removed in Phase 7b — the JobItem table now
+  carries only ``admission_state``, and execution lifecycle is read
+  from the joined ``Instance``.
 
 Notably ``task`` uses ``running`` while ``job_queue_items`` uses
 ``processing`` for the in-flight state, and only ``job_queue_items``

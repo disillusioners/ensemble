@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import Decision, JobStatus
+from daemon.repositories.job_queue.models import Decision
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -156,16 +156,17 @@ class JobRecoveryService:
                     f"is PAUSED — reconciling job PROCESSING → PAUSED"
                 )
                 try:
-                    # Phase 5: under admission_state, PROCESSING→PAUSED maps to
-                    # (active→active) — a same-state no-op. The state machine's
-                    # ``can_transition`` treats ``from == to`` as implicitly valid
-                    # (see ``job_state_machine.py``). Pause is an Instance-side
+                    # Phase 7b: under admission_state, PROCESSING→PAUSED
+                    # maps to (active→active) — a same-state no-op. The
+                    # state machine's ``can_transition`` treats
+                    # ``from == to`` as implicitly valid (see
+                    # ``job_state_machine.py``). Pause is an Instance-side
                     # concern; the job stays ``active`` in admission_state.
                     await asyncio.to_thread(
                         self._job_repository.atomic_transition,
                         job.job_id,
-                        from_status=JobStatus.PROCESSING.value,
-                        to_status=JobStatus.PAUSED.value,
+                        from_status="processing",
+                        to_status="paused",
                     )
                     stats["recovered"] += 1
                 except InvalidTransitionError:
