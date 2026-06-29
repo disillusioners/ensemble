@@ -51,7 +51,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import JobLock, JobStatus
+from daemon.repositories.job_queue.models import JobLock, AdmissionState
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import set_dependency_bus

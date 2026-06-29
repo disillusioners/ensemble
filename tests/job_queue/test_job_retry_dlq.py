@@ -136,11 +136,9 @@ def create_dead_letter_job(engine, job_repo, dlq_repo, job_id, dlq_id, status=Jo
         source="api",
         project_id="project-abc",
         queue_id="queue-xyz",
-        status=status.value,
 
         admission_state=status_to_admission(status.value),
         retry_count=3,
-        error_message="Connection timeout after 3 retries",
         failed_at=now,
     )
     
@@ -268,11 +266,9 @@ class TestRetryFailedJob:
             message="Failed job message",
             source="api",
             project_id="project-abc",
-            status=JobStatus.FAILED.value,
 
-            admission_state=status_to_admission(JobStatus.FAILED.value),
+            admission_state=status_to_admission(AdmissionState.DONE.value),
             retry_count=1,
-            error_message="Some error",
         )
         
         with Session(engine) as session:
@@ -292,9 +288,8 @@ class TestRetryFailedJob:
             message="Failed job message",
             source="api",
             project_id="project-abc",
-            status=JobStatus.PENDING.value,
 
-            admission_state=status_to_admission(JobStatus.PENDING.value),
+            admission_state=status_to_admission(AdmissionState.QUEUED.value),
             retry_count=0,
         )
         mock_job_queue_service.retry_job = AsyncMock(return_value=new_job)
@@ -353,9 +348,8 @@ class TestRetryInvalidStates:
             message="Completed job",
             source="api",
             project_id="project-abc",
-            status=JobStatus.COMPLETED.value,
 
-            admission_state=status_to_admission(JobStatus.COMPLETED.value),
+            admission_state=status_to_admission(AdmissionState.DONE.value),
         )
         
         with Session(engine) as session:
@@ -388,9 +382,8 @@ class TestRetryInvalidStates:
             message="Processing job",
             source="api",
             project_id="project-abc",
-            status=JobStatus.PROCESSING.value,
 
-            admission_state=status_to_admission(JobStatus.PROCESSING.value),
+            admission_state=status_to_admission(AdmissionState.ACTIVE.value),
         )
         
         with Session(engine) as session:
@@ -423,9 +416,8 @@ class TestRetryInvalidStates:
             message="Pending job",
             source="api",
             project_id="project-abc",
-            status=JobStatus.PENDING.value,
 
-            admission_state=status_to_admission(JobStatus.PENDING.value),
+            admission_state=status_to_admission(AdmissionState.QUEUED.value),
         )
         
         with Session(engine) as session:
@@ -466,11 +458,9 @@ class TestRetryDeadLetterWithoutDLQEntry:
             message="Dead letter job without DLQ entry",
             source="api",
             project_id="project-abc",
-            status=JobStatus.DEAD_LETTER.value,
 
-            admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
+            admission_state=status_to_admission(AdmissionState.DEAD.value),
             retry_count=0,
-            error_message="Some error",
         )
         
         with Session(engine) as session:

@@ -22,7 +22,7 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 
 
 # =============================================================================
@@ -155,11 +155,11 @@ def create_terminal_job(job_repository, status: str):
     # Transition to terminal state
     job_repository.start_job(job.job_id, "test-instance")
     
-    if status == JobStatus.COMPLETED.value:
+    if status == AdmissionState.DONE.value:
         job_repository.complete_job(job.job_id, "Done")
-    elif status == JobStatus.FAILED.value:
+    elif status == AdmissionState.DONE.value:
         job_repository.fail_job(job.job_id, "Test error")
-    elif status == JobStatus.CANCELLED.value:
+    elif status == AdmissionState.DONE.value:
         job_repository.cancel_job(job.job_id)
     
     return job_repository.get(job.job_id)
@@ -184,7 +184,7 @@ class TestDeleteJobEndpoint:
 
     def test_delete_terminal_completed_job_soft_deletes(self, client, job_repository):
         """Test DELETE on completed job soft-deletes and returns 200."""
-        job = create_terminal_job(job_repository, JobStatus.COMPLETED.value)
+        job = create_terminal_job(job_repository, AdmissionState.DONE.value)
         job_id = job.job_id
         
         response = client.delete(f"/jobs/{job_id}")
@@ -198,7 +198,7 @@ class TestDeleteJobEndpoint:
 
     def test_delete_terminal_failed_job_soft_deletes(self, client, job_repository):
         """Test DELETE on failed job soft-deletes and returns 200."""
-        job = create_terminal_job(job_repository, JobStatus.FAILED.value)
+        job = create_terminal_job(job_repository, AdmissionState.DONE.value)
         job_id = job.job_id
         
         response = client.delete(f"/jobs/{job_id}")
@@ -210,7 +210,7 @@ class TestDeleteJobEndpoint:
 
     def test_delete_terminal_cancelled_job_soft_deletes(self, client, job_repository):
         """Test DELETE on cancelled job soft-deletes and returns 200."""
-        job = create_terminal_job(job_repository, JobStatus.CANCELLED.value)
+        job = create_terminal_job(job_repository, AdmissionState.DONE.value)
         job_id = job.job_id
         
         response = client.delete(f"/jobs/{job_id}")
@@ -264,7 +264,7 @@ class TestDeleteJobEndpoint:
 
     def test_delete_already_deleted_job_returns_400(self, client, job_repository):
         """Test DELETE on already soft-deleted job returns 400."""
-        job = create_terminal_job(job_repository, JobStatus.COMPLETED.value)
+        job = create_terminal_job(job_repository, AdmissionState.DONE.value)
         job_id = job.job_id
         
         # Soft delete via API
@@ -332,7 +332,7 @@ class TestCancelJobEndpoint:
 
     def test_cancel_terminal_job_returns_400(self, client, job_repository):
         """Test cancel on terminal job returns 400."""
-        job = create_terminal_job(job_repository, JobStatus.COMPLETED.value)
+        job = create_terminal_job(job_repository, AdmissionState.DONE.value)
         job_id = job.job_id
         
         response = client.post(f"/jobs/{job_id}/cancel")
@@ -343,7 +343,7 @@ class TestCancelJobEndpoint:
 
     def test_cancel_deleted_job_returns_400(self, client, job_repository):
         """Test cancel on soft-deleted job returns 400."""
-        job = create_terminal_job(job_repository, JobStatus.COMPLETED.value)
+        job = create_terminal_job(job_repository, AdmissionState.DONE.value)
         job_id = job.job_id
         
         # Soft delete
@@ -414,7 +414,7 @@ class TestRestoreJobEndpoint:
     def test_restore_terminal_deleted_job_returns_400(self, client, job_repository):
         """Test restore on soft-deleted terminal job returns 400."""
         # Create a completed job and soft delete it
-        job = create_terminal_job(job_repository, JobStatus.COMPLETED.value)
+        job = create_terminal_job(job_repository, AdmissionState.DONE.value)
         job_id = job.job_id
         
         # Soft delete

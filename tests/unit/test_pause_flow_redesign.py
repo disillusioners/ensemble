@@ -63,7 +63,7 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
-from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
@@ -150,7 +150,7 @@ def _seed_job(
     engine: Engine,
     *,
     instance_id: str,
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
 ) -> str:
     """Insert a JobItem row. Returns the job_id."""
     jid = f"job-{uuid.uuid4().hex[:8]}"
@@ -164,12 +164,10 @@ def _seed_job(
             source="api",
             project_id="test-project",
             job_type="message",
-            status=status,
 
             admission_state=status_to_admission(status),
             instance_id=instance_id,
             created_at=now_iso,
-            started_at=now_iso if status == JobStatus.PROCESSING.value else None,
         )
         s.add(job)
         s.commit()
@@ -292,7 +290,7 @@ def test_pause_transitions_job_to_paused(
     picks up for ``start_job``), so the queue is blocked.
     """
     iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-    jid = _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
+    jid = _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
 
     result = lifecycle_service._pause_cascade_db_sync(
         engine,
@@ -306,7 +304,7 @@ def test_pause_transitions_job_to_paused(
     assert result.updated_ids == [iid]
     job = _read_jobs(engine, iid)
     assert len(job) == 1
-    assert job[0].status == JobStatus.PAUSED.value, (
+    assert job[0].status == AdmissionState.ACTIVE.value, (
         f"expected job {jid} to be PAUSED, got {job[0].status}"
     )
 
@@ -314,9 +312,9 @@ def test_pause_transitions_job_to_paused(
 def test_pause_skips_non_processing_jobs(lifecycle_service, engine, write_guard):
     """Pause must NOT touch a job already in a terminal state (idempotency)."""
     iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.COMPLETED.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.FAILED.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PENDING.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.DONE.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.DONE.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.QUEUED.value)
 
     lifecycle_service._pause_cascade_db_sync(
         engine,
@@ -330,9 +328,9 @@ def test_pause_skips_non_processing_jobs(lifecycle_service, engine, write_guard)
     statuses = sorted(j.status for j in jobs)
     # COMPLETED/FAILED preserved; PENDING preserved (only PROCESSING → PAUSED)
     assert statuses == sorted([
-        JobStatus.COMPLETED.value,
-        JobStatus.FAILED.value,
-        JobStatus.PENDING.value,
+        AdmissionState.DONE.value,
+        AdmissionState.DONE.value,
+        AdmissionState.QUEUED.value,
     ])
 
 
@@ -348,7 +346,7 @@ def test_pause_transitions_task_to_paused(lifecycle_service, engine, write_guard
     """
     iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
     task_id = _seed_task(engine, instance_id=iid, status=TaskStatus.RUNNING.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
 
     lifecycle_service._pause_cascade_db_sync(
         engine,
@@ -405,7 +403,7 @@ def test_pause_three_tables_single_transaction(
     while the job is still PROCESSING (the pre-L14 split-brain state).
     """
     iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.RUNNING.value)
 
     result = lifecycle_service._pause_cascade_db_sync(
@@ -471,7 +469,7 @@ def test_pause_does_not_cancel_bus_watchers(
     guarantee.
     """
     iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.RUNNING.value)
 
     # Two PENDING watchers targeting the paused instance
@@ -682,14 +680,14 @@ def test_pause_sse_event_carries_job_status():
             "inst-test",
             InstanceStatus.PAUSED.value,
             agent_id="developer",
-            job_status=JobStatus.PAUSED.value,
+            job_status=AdmissionState.ACTIVE.value,
         )
     )
 
     assert len(captured) == 1
     evt = captured[0]
     assert evt["status"] == InstanceStatus.PAUSED.value
-    assert evt["job_status"] == JobStatus.PAUSED.value
+    assert evt["job_status"] == AdmissionState.ACTIVE.value
     assert evt["agent_id"] == "developer"
 
 

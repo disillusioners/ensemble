@@ -13,7 +13,7 @@ import pytest
 from datetime import datetime, timedelta, timezone
 
 from daemon.repositories.job_queue import JobRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 
 
 # Base job data without priority (priority varies per test)
@@ -384,7 +384,7 @@ class TestSortOrderRegressionTests:
         repository.start_job(processing_job.job_id, "test-instance")
 
         # Filter for pending only
-        jobs, total = repository.list(statuses=[JobStatus.PENDING.value])
+        jobs, total = repository.list(statuses=[AdmissionState.QUEUED.value])
 
         job_ids = [j.job_id for j in jobs]
         assert pending_job.job_id in job_ids

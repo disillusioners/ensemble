@@ -14,7 +14,7 @@ from pathlib import Path
 
 from daemon.repositories.job_queue.watcher_models import JobWatcher
 from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
-from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, JobStatus
+from daemon.repositories.job_queue import JobRepository, JobQueueRepository, JobItem, AdmissionState
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService, DemandState
@@ -129,14 +129,6 @@ class TestJoberWatchIntegration:
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
-        job.status = "processing"
-        # Phase 4 (Job as Queue Proxy): ``admission_state`` is the
-        # new write authority. Set it explicitly on the mock so the
-        # ``_finalize_terminal`` boundary's admission_state check
-        # (``!= 'active'`` short-circuits non-ACTIVE jobs) accepts
-        # the mock — the underlying MagicMock would otherwise return
-        # a MagicMock for any undeclared attribute, falling through
-        # the boundary as a no-op.
         job.admission_state = "active"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
@@ -345,7 +337,7 @@ class TestJoberWatchIntegration:
         # Mock job service
         mock_job = MagicMock()
         mock_job.job_id = "job-123"
-        mock_job.status = "pending"
+        mock_job.admission_state = "queued"
         mock_job_service = MagicMock(spec=JobQueueService)
         mock_job_service.get_job = AsyncMock(return_value=mock_job)
         mock_job_service.notify_watchers = AsyncMock(return_value=0)
@@ -639,8 +631,8 @@ class TestJoberWatchIntegration:
 
         mock_job = MagicMock()
         mock_job.job_id = "job-123"
-        mock_job.status = "pending"
-        mock_job.to_dict.return_value = {"job_id": "job-123", "status": "pending"}
+        mock_job.admission_state = "queued"
+        mock_job.to_dict.return_value = {"job_id": "job-123", "admission_state": "queued"}
         job_service.enqueue.return_value = mock_job
         job_service.get_job = AsyncMock(return_value=mock_job)
 
@@ -704,7 +696,7 @@ class TestJoberWatchIntegration:
             # Create mock job
             job = MagicMock()
             job.job_id = job_id
-            job.status = status
+            job.admission_state = status
             job.error_message = error
             job.agent_id = "developer"
             job.result_summary = "Test result"
@@ -923,14 +915,6 @@ class TestNotifyWatchersEdgeCases:
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
-        job.status = "processing"
-        # Phase 4 (Job as Queue Proxy): ``admission_state`` is the
-        # new write authority. Set it explicitly on the mock so the
-        # ``_finalize_terminal`` boundary's admission_state check
-        # (``!= 'active'`` short-circuits non-ACTIVE jobs) accepts
-        # the mock — the underlying MagicMock would otherwise return
-        # a MagicMock for any undeclared attribute, falling through
-        # the boundary as a no-op.
         job.admission_state = "active"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
@@ -1046,14 +1030,6 @@ class TestReconcileTerminalWatches:
         job = MagicMock(spec=JobItem)
         job.job_id = "job-12345678-1234-1234-1234-123456789abc"
         job.agent_id = "developer"
-        job.status = "processing"
-        # Phase 4 (Job as Queue Proxy): ``admission_state`` is the
-        # new write authority. Set it explicitly on the mock so the
-        # ``_finalize_terminal`` boundary's admission_state check
-        # (``!= 'active'`` short-circuits non-ACTIVE jobs) accepts
-        # the mock — the underlying MagicMock would otherwise return
-        # a MagicMock for any undeclared attribute, falling through
-        # the boundary as a no-op.
         job.admission_state = "active"
         job.result_summary = "Test job completed successfully"
         job.error_message = None
@@ -1096,7 +1072,7 @@ class TestReconcileTerminalWatches:
             watcher_repo.add_watch(job_id, "instance-456")
             job = MagicMock()
             job.job_id = job_id
-            job.status = status
+            job.admission_state = status
             job.error_message = error
             job.agent_id = "developer"
             job.result_summary = "Test result"

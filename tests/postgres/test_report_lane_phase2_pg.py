@@ -39,7 +39,7 @@ from daemon.repositories.dependency_bus import (
     DependencyWatcherState,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import (
@@ -145,7 +145,7 @@ def _seed_job(
     *,
     instance_id: str,
     job_id: str | None = None,
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
     job_metadata: dict | None = None,
 ) -> str:
     """Insert a JobItem row directly via SQLModel Session.
@@ -166,7 +166,6 @@ def _seed_job(
             message="pg test",
             source="api",
             job_type="message",
-            status=status,
 
             admission_state=status_to_admission(status),
             instance_id=instance_id,
@@ -488,7 +487,7 @@ class TestReportLaneGuardPG:
         _seed_job(
             pg_engine,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-user-pg-123"},
         )
         report_task = task_repo.create(
@@ -521,7 +520,7 @@ class TestReportLaneGuardPG:
         _seed_job(
             pg_engine,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-user-pg-123"},
         )
         msg_task = task_repo.create(
@@ -579,7 +578,7 @@ class TestPauseSafetyCoveragePG:
         _seed_job(
             pg_engine,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
         msg_task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,

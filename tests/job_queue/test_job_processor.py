@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daemon.services.job_processor import JobProcessor
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 from daemon.services.job_queue_service import DemandState
 
 
@@ -47,7 +47,7 @@ class MockJob:
         agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
-        status: str = JobStatus.PENDING.value,
+        status: str = AdmissionState.QUEUED.value,
     ):
         self.job_id = job_id
         self.agent_id = agent_id
@@ -145,7 +145,7 @@ class TestJobProcessorTwoLevelPause:
         started_job.message = "test message"
         started_job.source = "api"
         started_job.instance_id = "instance-123"
-        started_job.status = JobStatus.PROCESSING.value
+        started_job.status = AdmissionState.ACTIVE.value
         # start_job is async
         mock_queue_service.start_job = AsyncMock(return_value=started_job)
         # enqueue_message is async
@@ -237,7 +237,7 @@ class TestJobProcessorTwoLevelPause:
         started_job2.message = "test message"
         started_job2.source = "api"
         started_job2.instance_id = "instance-123"
-        started_job2.status = JobStatus.PROCESSING.value
+        started_job2.status = AdmissionState.ACTIVE.value
         
         queue_paused = MockQueue("queue-1", "project-1", is_paused=True)
         queue_resumed = MockQueue("queue-1", "project-1", is_paused=False)
@@ -284,7 +284,7 @@ class TestJobProcessorPerQueuePolling:
         mock_queue_repo.list_by_project.return_value = [queue1, queue2]
         mock_queue_service._repository.list_pending_by_queue.side_effect = [[job1], [job2]]
         
-        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "instance-123"
         mock_queue_service.start_job.return_value = started_job
 
@@ -309,7 +309,7 @@ class TestJobProcessorPerQueuePolling:
         mock_queue_service._repository.list_pending_by_queue.return_value = [job1, job2, job3]
         
         # start_job returns None when at concurrency limit
-        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "instance-123"
         
         # First job starts successfully, subsequent jobs fail due to lock
@@ -331,13 +331,13 @@ class TestJobProcessorPerQueuePolling:
         """Test that processor picks up PENDING jobs from queue."""
         project = MockProject("project-1", job_queue_paused=False)
         queue = MockQueue("queue-1", "project-1", is_paused=False)
-        job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=JobStatus.PENDING.value)
+        job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.QUEUED.value)
 
         mock_project_repo.list_projects.return_value = [project]
         mock_queue_repo.list_by_project.return_value = [queue]
         mock_queue_service._repository.list_pending_by_queue.return_value = [job]
         
-        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "instance-123"
         mock_queue_service.start_job.return_value = started_job
 
@@ -459,7 +459,7 @@ class TestJobProcessorErrorHandling:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "instance-123"
 
         mock_project_repo.list_projects.return_value = [project]
@@ -484,7 +484,7 @@ class TestJobProcessorErrorHandling:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
         job = MockJob("job-1", project_id="project-1", queue_id="queue-1")
 
-        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "instance-123"
 
         mock_project_repo.list_projects.return_value = [project]
@@ -538,7 +538,7 @@ class TestOrphanJobRecovery:
         queue = MockQueue("queue-1", "project-1", is_paused=False)
 
         # Job in PROCESSING state with instance_id but no actual instance
-        orphan_job = MockJob("job-orphan", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        orphan_job = MockJob("job-orphan", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         orphan_job.instance_id = "missing-instance-id"
         orphan_job.message = "recover me"
         orphan_job.source = "api"
@@ -578,7 +578,7 @@ class TestOrphanJobRecovery:
         project = MockProject("project-1", job_queue_paused=False)
         queue = MockQueue("queue-1", "project-1", is_paused=False)
 
-        orphan_job = MockJob("job-orphan", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        orphan_job = MockJob("job-orphan", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         orphan_job.instance_id = "missing-instance-id"
 
         mock_project_repo.list_projects.return_value = [project]
@@ -608,7 +608,7 @@ class TestOrphanJobRecovery:
         project = MockProject("project-1", job_queue_paused=False)
         queue = MockQueue("queue-1", "project-1", is_paused=False)
 
-        processing_job = MockJob("job-running", project_id="project-1", queue_id="queue-1", status=JobStatus.PROCESSING.value)
+        processing_job = MockJob("job-running", project_id="project-1", queue_id="queue-1", status=AdmissionState.ACTIVE.value)
         processing_job.instance_id = "existing-instance-id"
 
         mock_project_repo.list_projects.return_value = [project]
@@ -979,7 +979,7 @@ class TestJobProcessorInstancePause:
         job.job_type = "message"
 
         started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1",
-                             status=JobStatus.PROCESSING.value)
+                             status=AdmissionState.ACTIVE.value)
         started_job.instance_id = instance_id
         started_job.job_type = "message"
 
@@ -1024,7 +1024,7 @@ class TestJobProcessorInstancePause:
         job.job_type = "task"
 
         started_job = MockJob("task-1", project_id="project-1", queue_id="queue-1",
-                             status=JobStatus.PROCESSING.value)
+                             status=AdmissionState.ACTIVE.value)
         started_job.instance_id = "new-instance-123"
         started_job.job_type = "task"
 
@@ -1059,7 +1059,7 @@ class TestJobProcessorInstancePause:
         job.job_type = "message"
 
         started_job = MockJob("job-1", project_id="project-1", queue_id="queue-1",
-                             status=JobStatus.PROCESSING.value)
+                             status=AdmissionState.ACTIVE.value)
         started_job.instance_id = instance_id
         started_job.job_type = "message"
 

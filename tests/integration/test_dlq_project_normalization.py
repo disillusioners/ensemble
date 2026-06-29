@@ -30,7 +30,7 @@ from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.repositories.project.repository import SQLModelProjectRepository
 
@@ -223,15 +223,15 @@ class TestDLQProjectNormalization:
         # Step 2: Transition to FAILED (simulate failure)
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.QUEUED.value,
+            to_status=AdmissionState.ACTIVE.value,
             started_at=datetime.utcnow().isoformat(),
             instance_id="test-instance",
         )
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.FAILED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.DONE.value,
             completed_at=datetime.utcnow().isoformat(),
             error_message="Simulated failure for DLQ test",
         )
@@ -291,15 +291,15 @@ class TestDLQProjectNormalization:
         # Fail it
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.QUEUED.value,
+            to_status=AdmissionState.ACTIVE.value,
             started_at=datetime.utcnow().isoformat(),
             instance_id="test-instance-2",
         )
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.FAILED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.DONE.value,
             completed_at=datetime.utcnow().isoformat(),
             error_message="Error",
         )
@@ -349,15 +349,15 @@ class TestDLQProjectNormalization:
         # Fail and move to DLQ
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.QUEUED.value,
+            to_status=AdmissionState.ACTIVE.value,
             started_at=datetime.utcnow().isoformat(),
             instance_id="test-instance-3",
         )
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.FAILED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.DONE.value,
             completed_at=datetime.utcnow().isoformat(),
             error_message="Error",
         )
@@ -406,15 +406,15 @@ class TestDLQProjectNormalization:
         # Fail and move to DLQ
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.QUEUED.value,
+            to_status=AdmissionState.ACTIVE.value,
             started_at=datetime.utcnow().isoformat(),
             instance_id="test-instance-4",
         )
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.FAILED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.DONE.value,
             completed_at=datetime.utcnow().isoformat(),
             error_message="Error",
         )
@@ -456,15 +456,15 @@ class TestDLQProjectNormalization:
             # Fail and move to DLQ
             job_repository.atomic_transition(
                 job_id,
-                from_status=JobStatus.PENDING.value,
-                to_status=JobStatus.PROCESSING.value,
+                from_status=AdmissionState.QUEUED.value,
+                to_status=AdmissionState.ACTIVE.value,
                 started_at=datetime.utcnow().isoformat(),
                 instance_id=f"test-instance-{i}",
             )
             job_repository.atomic_transition(
                 job_id,
-                from_status=JobStatus.PROCESSING.value,
-                to_status=JobStatus.FAILED.value,
+                from_status=AdmissionState.ACTIVE.value,
+                to_status=AdmissionState.DONE.value,
                 completed_at=datetime.utcnow().isoformat(),
                 error_message=f"Error {i}",
             )
@@ -505,15 +505,15 @@ class TestDLQProjectNormalization:
         
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.QUEUED.value,
+            to_status=AdmissionState.ACTIVE.value,
             started_at=datetime.utcnow().isoformat(),
             instance_id="test-instance-count",
         )
         job_repository.atomic_transition(
             job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.FAILED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.DONE.value,
             completed_at=datetime.utcnow().isoformat(),
             error_message="Error",
         )

@@ -235,7 +235,7 @@ def _seed_job(
     job_id: str | None = None,
     agent_id: str = "developer",
     instance_id: str | None = None,
-    status: str = JobStatus.PENDING.value,
+    status: str = AdmissionState.QUEUED.value,
     result_summary: str | None = None,
     error_message: str | None = None,
     project_id: str | None = "test-project",
@@ -261,10 +261,7 @@ def _seed_job(
             source="api",
             project_id=project_id,
             priority=5,
-            status=status,
             admission_state=status_to_admission(status),
-            result_summary=result_summary,
-            error_message=error_message,
             instance_id=instance_id,
             created_at=created,
             deleted_at=deleted_at,
@@ -339,7 +336,7 @@ class TestResolveWork:
         _seed_instance(engine, instance_id="inst-1")
         jid = _seed_job(
             engine,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id="inst-1",
             result_summary="all done",
         )
@@ -471,7 +468,7 @@ class TestResolveWork:
         """``dead_letter`` is a JobItem-only canonical value."""
         jid = _seed_job(
             engine,
-            status=JobStatus.DEAD_LETTER.value,
+            status=AdmissionState.DEAD.value,
             error_message="retries exhausted",
         )
 
@@ -508,7 +505,7 @@ class TestResolveWork:
         _seed_job(
             engine,
             job_id=shared_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id="inst-shadow",
         )
 
@@ -563,7 +560,7 @@ class TestListWork:
             engine, instance_id="inst-a", status=TaskStatus.PENDING.value
         )
         job_id = _seed_job(
-            engine, instance_id="inst-b", status=JobStatus.PENDING.value
+            engine, instance_id="inst-b", status=AdmissionState.QUEUED.value
         )
 
         records = resolver.list_work()
@@ -640,10 +637,10 @@ class TestListWork:
         _seed_instance(engine, instance_id="i-job-1", status="running")
         _seed_instance(engine, instance_id="i-job-2", status="pending")
         _seed_job(
-            engine, instance_id="i-job-1", status=JobStatus.PROCESSING.value,
+            engine, instance_id="i-job-1", status=AdmissionState.ACTIVE.value,
         )
         _seed_job(
-            engine, instance_id="i-job-2", status=JobStatus.PENDING.value,
+            engine, instance_id="i-job-2", status=AdmissionState.QUEUED.value,
         )
 
         records = resolver.list_work(status="processing")
@@ -661,8 +658,8 @@ class TestListWork:
     ):
         """``dead_letter`` is JobItem-only — Task rows never match."""
         _seed_task(engine, instance_id="i-dl", status=TaskStatus.FAILED.value)
-        _seed_job(engine, status=JobStatus.DEAD_LETTER.value)
-        _seed_job(engine, status=JobStatus.PENDING.value)
+        _seed_job(engine, status=AdmissionState.DEAD.value)
+        _seed_job(engine, status=AdmissionState.QUEUED.value)
 
         records = resolver.list_work(status="dead_letter")
 
@@ -722,10 +719,10 @@ class TestListWork:
         """``deleted_at IS NOT NULL`` JobItems are invisible to the
         virtual job surface (matches ``JobRepository.list`` default)."""
         active_id = _seed_job(
-            engine, status=JobStatus.PENDING.value, deleted_at=None
+            engine, status=AdmissionState.QUEUED.value, deleted_at=None
         )
         _seed_job(
-            engine, status=JobStatus.PENDING.value,
+            engine, status=AdmissionState.QUEUED.value,
             deleted_at=datetime.now(timezone.utc).isoformat(),
         )
         _seed_task(engine, instance_id="i-task")
@@ -764,7 +761,7 @@ class TestListWork:
             engine,
             instance_id="i-match-job",
             project_id="proj-match",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         # Filter twice (Task and Job side each accept one
@@ -862,15 +859,15 @@ class TestListWorkRootOnly:
         )
         # Root-bound JobItem → kept.
         root_jid = _seed_job(
-            engine, instance_id=root_id, status=JobStatus.PENDING.value
+            engine, instance_id=root_id, status=AdmissionState.QUEUED.value
         )
         # Child-bound JobItem → excluded.
         _seed_job(
-            engine, instance_id=child_id, status=JobStatus.PENDING.value
+            engine, instance_id=child_id, status=AdmissionState.QUEUED.value
         )
         # Queue-stage JobItem (instance_id None) → kept.
         queued_jid = _seed_job(
-            engine, instance_id=None, status=JobStatus.PENDING.value
+            engine, instance_id=None, status=AdmissionState.QUEUED.value
         )
 
         records = resolver.list_work()
@@ -1024,7 +1021,7 @@ class TestListWorkDedup:
         jid = _seed_job(
             engine,
             instance_id="inst-job-pair",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
         # Task turn on the same instance — same logical work unit
         # from the ``job_create`` flow.
@@ -1088,7 +1085,7 @@ class TestListWorkDedup:
         jid = _seed_job(
             engine,
             instance_id="inst-report-root",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
         report_wid = _seed_task(
             engine,
@@ -1124,7 +1121,7 @@ class TestListWorkDedup:
         jid_processing = _seed_job(
             engine,
             instance_id="inst-processing",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
         _seed_task(
             engine,
@@ -1138,7 +1135,7 @@ class TestListWorkDedup:
         jid_completed = _seed_job(
             engine,
             instance_id="inst-completed",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
         )
         _seed_task(
             engine,
@@ -1152,7 +1149,7 @@ class TestListWorkDedup:
         jid_pending = _seed_job(
             engine,
             instance_id="inst-pending",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
         _seed_task(
             engine,
@@ -1201,7 +1198,7 @@ class TestListWorkDedup:
         jid = _seed_job(
             engine,
             instance_id="inst-drift",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
         )
         wid = _seed_task(
             engine,
@@ -1393,7 +1390,7 @@ class TestGetWork:
         _seed_instance(engine, instance_id="inst-gw-job")
         jid = _seed_job(
             engine,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             result_summary="all done",
         )
 
@@ -1506,7 +1503,7 @@ class TestReconcileTerminalWatchesResolver:
         _seed_instance(engine, instance_id="watcher-inst-2")
         jid = _seed_job(
             engine,
-            status=JobStatus.DEAD_LETTER.value,
+            status=AdmissionState.DEAD.value,
             error_message="max retries exhausted",
         )
         watcher_repo.add_watch(jid, "watcher-inst-2")
@@ -1597,7 +1594,7 @@ class TestReconcileTerminalWatchesResolver:
         )
         job_jid = _seed_job(
             engine,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             result_summary="job-level done",
         )
         watcher_repo.add_watch(task_wid, "watcher-task")
@@ -1665,7 +1662,7 @@ class TestReconcileTerminalWatchesLegacyFallback:
         _seed_instance(engine, instance_id="watcher-legacy")
         jid = _seed_job(
             engine,
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             error_message="legacy-path failure",
         )
         # Sanity: the JobItem really is in the repo.
@@ -2092,7 +2089,7 @@ class TestJobListUnion:
         job_id = _seed_job(
             engine,
             instance_id=None,
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
 
         records = resolver.list_work()
@@ -2440,17 +2437,17 @@ class TestJobListMultiStatusFilter:
         # One of each canonical status the multi-filter cares about.
         completed_id = _seed_job(
             engine,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             result_summary="done",
         )
         failed_id = _seed_job(
             engine,
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             error_message="kaboom",
         )
         pending_id = _seed_job(
             engine,
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
 
         # Wire a JobQueueService with the real resolver and the
@@ -2528,12 +2525,12 @@ class TestJobListMultiStatusFilter:
         _seed_instance(engine, instance_id="inst-single-2")
         completed_id = _seed_job(
             engine,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             result_summary="done",
         )
         _seed_job(
             engine,
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             error_message="kaboom",
         )
 
@@ -2590,7 +2587,7 @@ class TestJobListMultiStatusFilter:
         )
         completed_jid = _seed_job(
             engine,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
         )
         # A Task in pending — must NOT match.
         pending_wid = _seed_task(

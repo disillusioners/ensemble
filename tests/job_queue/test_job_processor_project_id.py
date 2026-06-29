@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from daemon.services.job_processor import JobProcessor
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 
 
 # Sample UUID for testing
@@ -58,7 +58,7 @@ class MockJob:
         agent_id: str = "developer",
         project_id: str | None = "project-1",
         queue_id: str = "queue-1",
-        status: str = JobStatus.PENDING.value,
+        status: str = AdmissionState.QUEUED.value,
     ):
         self.job_id = job_id
         self.agent_id = agent_id
@@ -78,7 +78,7 @@ def create_started_job(job_id: str, project_id: str | None, instance_id: str = "
     started_job.message = "test message"
     started_job.source = "api"
     started_job.instance_id = instance_id
-    started_job.status = JobStatus.PROCESSING.value
+    started_job.status = AdmissionState.ACTIVE.value
     started_job.project_id = project_id
     return started_job
 

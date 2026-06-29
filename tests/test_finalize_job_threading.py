@@ -102,7 +102,7 @@ import pytest
 pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM lock/finalize threading")
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import AdmissionState, JobItem, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobItem
 # CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
 # Tests in this module are skipped via ``pytestmark`` above.
 from daemon.services.job_feedback_observer import JobFeedbackObserver
@@ -143,7 +143,7 @@ def seed_job(
     job_id: str | None = None,
     instance_id: str,
     project_id: str = "test-project",
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
 ) -> JobItem:
     """Insert a JobItem row. Returns the JobItem."""
     jid = job_id or f"job-{uuid.uuid4().hex[:8]}"
@@ -155,7 +155,6 @@ def seed_job(
             message="test job",
             source="api",
             job_type="task",
-            status=status,
 
             admission_state=status_to_admission(status),
             instance_id=instance_id,
@@ -446,7 +445,7 @@ async def test_post_commit_rearm_prevents_orphan(engine: Engine):
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     seed_instance(engine, instance_id=instance_id, status=InstanceStatus.RUNNING.value)
     job_item = seed_job(
-        engine, job_id=job_id, instance_id=instance_id, status=JobStatus.PROCESSING.value
+        engine, job_id=job_id, instance_id=instance_id, status=AdmissionState.ACTIVE.value
     )
 
     # ── Build real CM and wire as singleton ────────────────────────────────
@@ -548,9 +547,9 @@ async def test_post_commit_rearm_prevents_orphan(engine: Engine):
     #   → post_gen=2 > pre_gen=1 → RE-ARM job to PROCESSING
     await cm.resolve_response(instance_id, child_a, msg_a, status="responded")
 
-    # Keep the mock's cached job_item.status in sync with the DB so the
+    # Keep the mock's cached job_item.admission_state in sync with the DB so the
     # second handle_correlation_complete lookup finds a PROCESSING job.
-    job_item.status = JobStatus.PROCESSING.value
+    job_item.admission_state = AdmissionState.ACTIVE.value
 
     # ── Wait for the concurrent register to finish ─────────────────────────
     # It was blocked on the lock during finalize; it should complete shortly
@@ -667,7 +666,7 @@ async def test_post_commit_rearm_can_be_disabled(engine: Engine):
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     seed_instance(engine, instance_id=instance_id, status=InstanceStatus.RUNNING.value)
     job_item = seed_job(
-        engine, job_id=job_id, instance_id=instance_id, status=JobStatus.PROCESSING.value
+        engine, job_id=job_id, instance_id=instance_id, status=AdmissionState.ACTIVE.value
     )
 
     cm = CorrelationManager(

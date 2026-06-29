@@ -1,6 +1,13 @@
-"""Comprehensive tests for JobStateMachine.
+"""Comprehensive tests for JobStateMachine (Phase 5 admission vocabulary).
 
 This module tests the formal state machine for job lifecycle transitions.
+Phase 5 rewrote the state machine against the 4-value ``AdmissionState``
+vocabulary (``queued`` / ``active`` / ``done`` / ``dead``) instead of
+the legacy 7-value ``JobStatus`` enum. ``VALID_TRANSITIONS`` is now a
+``set[tuple[str, str]]`` keyed on admission values; transition names
+(``"start"`` / ``"retry"`` / ...) are no longer surfaced by the API
+because the consumer (``_finalize_terminal``) selects the variant via
+the ``Decision`` enum, not the from/to pair.
 """
 
 import pytest
@@ -8,254 +15,83 @@ import pytest
 from daemon.services.job_state_machine import (
     JobStateMachine,
     InvalidTransitionError,
-    TRANSITIONS,
+    VALID_TRANSITIONS,
     job_state_machine,
 )
 
 
 class TestStateMachineCanTransition:
-    """Tests for can_transition() method."""
+    """Tests for can_transition() method on the admission vocabulary."""
 
-    def test_can_transition_none_to_pending(self):
-        """Test None -> PENDING is valid (job creation)."""
+    def test_can_transition_queued_to_active(self):
+        """Queued -> Active is valid (job start)."""
         sm = JobStateMachine()
-        assert sm.can_transition(None, "pending") is True
+        assert sm.can_transition("queued", "active") is True
 
-    def test_can_transition_pending_to_processing(self):
-        """Test PENDING -> PROCESSING is valid (job start)."""
+    def test_can_transition_queued_to_done(self):
+        """Queued -> Done is valid (cancel-from-pending)."""
         sm = JobStateMachine()
-        assert sm.can_transition("pending", "processing") is True
+        assert sm.can_transition("queued", "done") is True
 
-    def test_can_transition_pending_to_cancelled(self):
-        """Test PENDING -> CANCELLED is valid (job cancel)."""
+    def test_can_transition_active_to_done(self):
+        """Active -> Done is valid (complete / fail / abort)."""
         sm = JobStateMachine()
-        assert sm.can_transition("pending", "cancelled") is True
+        assert sm.can_transition("active", "done") is True
 
-    def test_can_transition_processing_to_completed(self):
-        """Test PROCESSING -> COMPLETED is valid (job complete)."""
+    def test_can_transition_active_to_queued(self):
+        """Active -> Queued is valid (retry)."""
         sm = JobStateMachine()
-        assert sm.can_transition("processing", "completed") is True
+        assert sm.can_transition("active", "queued") is True
 
-    def test_can_transition_processing_to_failed(self):
-        """Test PROCESSING -> FAILED is valid (job fail)."""
+    def test_can_transition_active_to_dead(self):
+        """Active -> Dead is valid (DEAD_LETTER decision)."""
         sm = JobStateMachine()
-        assert sm.can_transition("processing", "failed") is True
+        assert sm.can_transition("active", "dead") is True
 
-    def test_can_transition_processing_to_cancelled(self):
-        """Test PROCESSING -> CANCELLED is valid (job abort)."""
+    def test_can_transition_done_to_queued(self):
+        """Done -> Queued is valid (replay from done)."""
         sm = JobStateMachine()
-        assert sm.can_transition("processing", "cancelled") is True
+        assert sm.can_transition("done", "queued") is True
 
-    def test_can_transition_failed_to_pending(self):
-        """Test FAILED -> PENDING is valid (job retry)."""
+    def test_can_transition_dead_to_queued(self):
+        """Dead -> Queued is valid (replay from DLQ)."""
         sm = JobStateMachine()
-        assert sm.can_transition("failed", "pending") is True
+        assert sm.can_transition("dead", "queued") is True
 
-    def test_can_transition_failed_to_dead_letter(self):
-        """Test FAILED -> DEAD_LETTER is valid."""
+    def test_can_transition_done_to_active(self):
+        """Done -> Active is valid (orphan-race post-commit re-arm)."""
         sm = JobStateMachine()
-        assert sm.can_transition("failed", "dead_letter") is True
+        assert sm.can_transition("done", "active") is True
 
-    def test_can_transition_dead_letter_to_pending(self):
-        """Test DEAD_LETTER -> PENDING is valid (job replay)."""
+    def test_can_transition_same_state_active(self):
+        """Same-state Active -> Active is a valid no-op (pause/resume reconcile)."""
         sm = JobStateMachine()
-        assert sm.can_transition("dead_letter", "pending") is True
+        assert sm.can_transition("active", "active") is True
 
-
-class TestStateMachineInvalidTransitions:
-    """Tests for invalid transitions returning False."""
-
-    def test_cannot_transition_completed_to_pending(self):
-        """Test COMPLETED -> PENDING is invalid."""
+    def test_can_transition_same_state_done(self):
+        """Same-state Done -> Done is a valid no-op (idempotent finalize retries)."""
         sm = JobStateMachine()
-        assert sm.can_transition("completed", "pending") is False
+        assert sm.can_transition("done", "done") is True
 
-    def test_cannot_transition_completed_to_processing(self):
-        """Test COMPLETED -> PROCESSING is VALID as the orphan-race re-arm
-        transition (added 2026-06-20). The JobFeedbackObserver
-        ``_finalize_job`` post-commit re-check transitions a just-committed
-        COMPLETED job back to PROCESSING when a concurrent
-        ``register_message_send`` was in-flight during finalization. Without
-        this transition the late child would be silently orphaned.
-        """
+    def test_cannot_transition_queued_to_dead(self):
+        """Queued -> Dead is invalid (must go through Active)."""
         sm = JobStateMachine()
-        assert sm.can_transition("completed", "processing") is True
-        assert sm.get_transition_name("completed", "processing") == "rearm_after_complete"
+        assert sm.can_transition("queued", "dead") is False
 
-    def test_cannot_transition_pending_to_completed(self):
-        """Test PENDING -> COMPLETED is invalid."""
+    def test_cannot_transition_dead_to_active(self):
+        """Dead -> Active is invalid (only Dead -> Queued is allowed)."""
         sm = JobStateMachine()
-        assert sm.can_transition("pending", "completed") is False
+        assert sm.can_transition("dead", "active") is False
 
-    def test_cannot_transition_pending_to_failed(self):
-        """Test PENDING -> FAILED is invalid."""
+    def test_cannot_transition_dead_to_done(self):
+        """Dead -> Done is invalid."""
         sm = JobStateMachine()
-        assert sm.can_transition("pending", "failed") is False
+        assert sm.can_transition("dead", "done") is False
 
-    def test_cannot_transition_processing_to_pending(self):
-        """Test PROCESSING -> PENDING is invalid (but 'requeue' is allowed for MESSAGE jobs)."""
+    def test_cannot_transition_done_to_dead(self):
+        """Done -> Dead is invalid (only Active -> Dead is allowed)."""
         sm = JobStateMachine()
-        assert sm.can_transition("processing", "pending") is True
-
-    def test_cannot_transition_cancelled_to_pending(self):
-        """Test CANCELLED -> PENDING is invalid."""
-        sm = JobStateMachine()
-        assert sm.can_transition("cancelled", "pending") is False
-
-    def test_cannot_transition_cancelled_to_processing(self):
-        """Test CANCELLED -> PROCESSING is invalid."""
-        sm = JobStateMachine()
-        assert sm.can_transition("cancelled", "processing") is False
-
-    def test_cannot_transition_dead_letter_to_completed(self):
-        """Test DEAD_LETTER -> COMPLETED is invalid."""
-        sm = JobStateMachine()
-        assert sm.can_transition("dead_letter", "completed") is False
-
-    def test_cannot_transition_dead_letter_to_failed(self):
-        """Test DEAD_LETTER -> FAILED is invalid."""
-        sm = JobStateMachine()
-        assert sm.can_transition("dead_letter", "failed") is False
-
-
-class TestStateMachineGetTransitionName:
-    """Tests for get_transition_name() method."""
-
-    def test_get_transition_name_create(self):
-        """Test get_transition_name for creation."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name(None, "pending") == "create"
-
-    def test_get_transition_name_start(self):
-        """Test get_transition_name for job start."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("pending", "processing") == "start"
-
-    def test_get_transition_name_cancel(self):
-        """Test get_transition_name for cancel from pending."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("pending", "cancelled") == "cancel"
-
-    def test_get_transition_name_complete(self):
-        """Test get_transition_name for completion."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("processing", "completed") == "complete"
-
-    def test_get_transition_name_fail(self):
-        """Test get_transition_name for failure."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("processing", "failed") == "fail"
-
-    def test_get_transition_name_abort(self):
-        """Test get_transition_name for abort (processing cancel)."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("processing", "cancelled") == "abort"
-
-    def test_get_transition_name_retry(self):
-        """Test get_transition_name for retry."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("failed", "pending") == "retry"
-
-    def test_get_transition_name_dead_letter(self):
-        """Test get_transition_name for dead letter."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("failed", "dead_letter") == "dead_letter"
-
-    def test_get_transition_name_replay(self):
-        """Test get_transition_name for replay."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("dead_letter", "pending") == "replay"
-
-    def test_get_transition_name_invalid_returns_none(self):
-        """Test get_transition_name returns None for invalid transition."""
-        sm = JobStateMachine()
-        assert sm.get_transition_name("completed", "pending") is None
-
-
-class TestStateMachineGetValidTransitions:
-    """Tests for get_valid_transitions() method."""
-
-    def test_get_valid_transitions_from_none(self):
-        """Test valid transitions from None (new job)."""
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions(None)
-        assert ("pending", "create") in result
-        assert len(result) == 1
-
-    def test_get_valid_transitions_from_pending(self):
-        """Test valid transitions from PENDING state."""
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("pending")
-        targets = {target for target, name in result}
-        assert "processing" in targets  # start
-        assert "cancelled" in targets   # cancel
-        assert len(result) == 2
-
-    def test_get_valid_transitions_from_processing(self):
-        """Test valid transitions from PROCESSING state.
-
-        Phase 1 of the pause/resume redesign (2026-06-25) added the
-        PROCESSING → PAUSED ``pause`` transition, so the count is now 5.
-        """
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("processing")
-        targets = {target for target, name in result}
-        assert "completed" in targets   # complete
-        assert "failed" in targets      # fail
-        assert "cancelled" in targets  # abort
-        assert "pending" in targets  # requeue
-        assert "paused" in targets  # pause (Phase 1, 2026-06-25)
-        assert len(result) == 5
-
-    def test_get_valid_transitions_from_failed(self):
-        """Test valid transitions from FAILED state."""
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("failed")
-        targets = {target for target, name in result}
-        assert "pending" in targets       # retry
-        assert "dead_letter" in targets   # dead_letter
-        assert "cancelled" in targets    # cancel_after_fail
-        assert len(result) == 3
-
-    def test_get_valid_transitions_from_dead_letter(self):
-        """Test valid transitions from DEAD_LETTER state."""
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("dead_letter")
-        assert ("pending", "replay") in result
-        assert len(result) == 1
-
-    def test_get_valid_transitions_from_completed(self):
-        """Test valid transitions from COMPLETED state.
-
-        As of 2026-06-20 the only valid transition is the orphan-race
-        re-arm (COMPLETED → PROCESSING via ``rearm_after_complete``).
-        """
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("completed")
-        assert result == [("processing", "rearm_after_complete")]
-
-    def test_get_valid_transitions_from_cancelled(self):
-        """Test valid transitions from CANCELLED state (none)."""
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("cancelled")
-        assert result == []
-
-    def test_get_valid_transitions_from_paused(self):
-        """Test valid transitions from PAUSED state.
-
-        Phase 1 of the pause/resume redesign (2026-06-25) added PAUSED as
-        a non-terminal job state with two outbound transitions:
-        resume (PAUSED → PROCESSING) and cancel_after_pause
-        (PAUSED → CANCELLED). PAUSED has no inbound transitions other
-        than PROCESSING → PAUSED (covered in
-        ``test_get_valid_transitions_from_processing``).
-        """
-        sm = JobStateMachine()
-        result = sm.get_valid_transitions("paused")
-        targets = {target for target, name in result}
-        assert "processing" in targets  # resume
-        assert "cancelled" in targets   # cancel_after_pause
-        assert len(result) == 2
+        assert sm.can_transition("done", "dead") is False
 
 
 class TestStateMachineValidateTransition:
@@ -265,169 +101,149 @@ class TestStateMachineValidateTransition:
         """Test validate_transition doesn't raise for valid transitions."""
         sm = JobStateMachine()
         # Should not raise
-        sm.validate_transition(None, "pending")
-        sm.validate_transition("pending", "processing")
-        sm.validate_transition("processing", "completed")
-        sm.validate_transition("processing", "failed")
-        sm.validate_transition("processing", "cancelled")
+        sm.validate_transition("queued", "active")
+        sm.validate_transition("active", "done")
+        sm.validate_transition("active", "queued")
+        sm.validate_transition("active", "dead")
+        sm.validate_transition("done", "queued")
+        sm.validate_transition("dead", "queued")
 
-    def test_validate_transition_invalid(self):
+    def test_validate_transition_same_state_no_op(self):
+        """Test validate_transition treats same-state transitions as no-ops."""
+        sm = JobStateMachine()
+        # Should not raise — same-state is implicit no-op.
+        sm.validate_transition("active", "active")
+        sm.validate_transition("done", "done")
+
+    def test_validate_transition_invalid_raises(self):
         """Test validate_transition raises InvalidTransitionError for invalid transitions."""
         sm = JobStateMachine()
         with pytest.raises(InvalidTransitionError):
-            sm.validate_transition("completed", "pending")
+            sm.validate_transition("queued", "dead")
+
+    def test_validate_transition_dead_to_active_raises(self):
+        """Test Dead -> Active raises InvalidTransitionError."""
+        sm = JobStateMachine()
+        with pytest.raises(InvalidTransitionError):
+            sm.validate_transition("dead", "active")
 
 
 class TestInvalidTransitionError:
-    """Tests for InvalidTransitionError exception."""
+    """Tests for InvalidTransitionError exception (Phase 5: from_state/to_state attrs)."""
 
     def test_error_attributes(self):
-        """Test InvalidTransitionError has correct attributes."""
+        """Test InvalidTransitionError has from_state/to_state attributes (not from_status/to_status)."""
         error = InvalidTransitionError(
             job_id="job-123",
-            from_status="pending",
-            to_status="completed"
+            from_state="queued",
+            to_state="done",
         )
         assert error.job_id == "job-123"
-        assert error.from_status == "pending"
-        assert error.to_status == "completed"
+        assert error.from_state == "queued"
+        assert error.to_state == "done"
 
     def test_error_message(self):
-        """Test InvalidTransitionError has correct message."""
+        """Test InvalidTransitionError has correct message text."""
         error = InvalidTransitionError(
             job_id="job-456",
-            from_status="processing",
-            to_status="pending"
+            from_state="active",
+            to_state="queued",
         )
         assert "job-456" in str(error)
-        assert "processing" in str(error)
-        assert "pending" in str(error)
+        assert "active" in str(error)
+        assert "queued" in str(error)
         assert "Invalid transition" in str(error)
 
-    def test_error_with_none_from_status(self):
-        """Test InvalidTransitionError with None from_status."""
+    def test_error_with_none_from_state(self):
+        """Test InvalidTransitionError accepts a None from_state."""
         error = InvalidTransitionError(
             job_id="job-789",
-            from_status=None,
-            to_status="completed"
+            from_state=None,
+            to_state="done",
         )
         assert error.job_id == "job-789"
-        assert error.from_status is None
-        assert error.to_status == "completed"
+        assert error.from_state is None
+        assert error.to_state == "done"
+
+    def test_error_inherits_from_value_error(self):
+        """Test InvalidTransitionError inherits from ValueError.
+
+        Phase 5 design choice: lets callers catch both with a single
+        ``except ValueError`` clause. Existing ``except InvalidTransitionError``
+        and ``isinstance`` checks keep working.
+        """
+        error = InvalidTransitionError(
+            job_id="job-001",
+            from_state="queued",
+            to_state="dead",
+        )
+        assert isinstance(error, ValueError)
 
 
-class TestTransitionsConstant:
-    """Tests for TRANSITIONS constant."""
+class TestValidTransitionsConstant:
+    """Tests for VALID_TRANSITIONS set."""
 
-    def test_transitions_has_fifteen_entries(self):
-        """Test TRANSITIONS dict has 15 entries.
+    def test_valid_transitions_has_eight_entries(self):
+        """VALID_TRANSITIONS contains exactly 8 entries under the admission vocabulary.
 
         History:
-          * 12 — original count after the orphan-race fix in 2026-06-20
-            (COMPLETED → PROCESSING ``rearm_after_complete`` was added).
-          * 15 — Phase 1 of the pause/resume redesign (2026-06-25)
-            added three PAUSED transitions:
-              - PROCESSING → PAUSED (``pause``)
-              - PAUSED → PROCESSING (``resume``)
-              - PAUSED → CANCELLED (``cancel_after_pause``)
+          * 15 — pre-Phase-5 (legacy JobStatus 7-state machine, named dict).
+          * 8 — Phase 5 collapsed the named dict onto a set-of-tuples and
+            merged the terminal ``done`` family onto ``active -> done``.
+            Pausing (``processing -> paused``) is an Instance concern and
+            never moves the admission column, so the corresponding set
+            entries were dropped.
         """
-        assert len(TRANSITIONS) == 15
+        assert len(VALID_TRANSITIONS) == 8
 
-    def test_transitions_contains_pause(self):
-        """Test TRANSITIONS contains the PROCESSING → PAUSED ``pause`` transition.
+    def test_valid_transitions_contains_start(self):
+        """VALID_TRANSITIONS contains the queued -> active start transition."""
+        assert ("queued", "active") in VALID_TRANSITIONS
 
-        Added in Phase 1 of the pause/resume redesign (2026-06-25).
+    def test_valid_transitions_contains_cancel_pending(self):
+        """VALID_TRANSITIONS contains queued -> done (cancel-from-pending)."""
+        assert ("queued", "done") in VALID_TRANSITIONS
+
+    def test_valid_transitions_contains_complete_fail_abort(self):
+        """VALID_TRANSITIONS contains active -> done (terminal boundary)."""
+        assert ("active", "done") in VALID_TRANSITIONS
+
+    def test_valid_transitions_contains_retry(self):
+        """VALID_TRANSITIONS contains active -> queued (retry)."""
+        assert ("active", "queued") in VALID_TRANSITIONS
+
+    def test_valid_transitions_contains_dead_letter(self):
+        """VALID_TRANSITIONS contains active -> dead (DEAD_LETTER decision)."""
+        assert ("active", "dead") in VALID_TRANSITIONS
+
+    def test_valid_transitions_contains_replay_from_done(self):
+        """VALID_TRANSITIONS contains done -> queued (replay from done)."""
+        assert ("done", "queued") in VALID_TRANSITIONS
+
+    def test_valid_transitions_contains_replay_from_dlq(self):
+        """VALID_TRANSITIONS contains dead -> queued (replay from DLQ)."""
+        assert ("dead", "queued") in VALID_TRANSITIONS
+
+    def test_valid_transitions_contains_orphan_rearm(self):
+        """VALID_TRANSITIONS contains the orphan-race re-arm: done -> active.
+
+        Used by ``JobFeedbackObserver._finalize_job`` post-commit when a
+        concurrent ``register_message_send`` was in-flight during
+        finalization. Without this transition the late child would be
+        silently orphaned.
         """
-        assert ("processing", "paused") in TRANSITIONS
-        assert TRANSITIONS[("processing", "paused")] == "pause"
+        assert ("done", "active") in VALID_TRANSITIONS
 
-    def test_transitions_contains_resume(self):
-        """Test TRANSITIONS contains the PAUSED → PROCESSING ``resume`` transition.
+    def test_valid_transitions_does_not_contain_none_create(self):
+        """VALID_TRANSITIONS does NOT contain (None, queued).
 
-        Added in Phase 1 of the pause/resume redesign (2026-06-25).
+        The create path is an INSERT into a fresh row, not a state
+        transition. Callers that previously passed ``from_status=None``
+        are moved to the INSERT path; the set-based API raises
+        ``InvalidTransitionError`` for ``None`` (matches the pre-Phase-5
+        behavior of "INSERTs don't go through the state machine").
         """
-        assert ("paused", "processing") in TRANSITIONS
-        assert TRANSITIONS[("paused", "processing")] == "resume"
-
-    def test_transitions_contains_cancel_after_pause(self):
-        """Test TRANSITIONS contains the PAUSED → CANCELLED ``cancel_after_pause`` transition.
-
-        Added in Phase 1 of the pause/resume redesign (2026-06-25) so a
-        user can cancel a paused job via the existing ``cancel_job``
-        path. The state-machine entry is the legal transition; the
-        repository's atomic ``cancellable_states`` SQL guard (see
-        ``JobRepository.cancel_job``) also includes ``PAUSED.value``
-        so the UPDATE-WHERE-IN guard matches.
-        """
-        assert ("paused", "cancelled") in TRANSITIONS
-        assert TRANSITIONS[("paused", "cancelled")] == "cancel_after_pause"
-
-    def test_transitions_contains_create(self):
-        """Test TRANSITIONS contains create transition."""
-        assert (None, "pending") in TRANSITIONS
-        assert TRANSITIONS[(None, "pending")] == "create"
-
-    def test_transitions_contains_start(self):
-        """Test TRANSITIONS contains start transition."""
-        assert ("pending", "processing") in TRANSITIONS
-        assert TRANSITIONS[("pending", "processing")] == "start"
-
-    def test_transitions_contains_cancel(self):
-        """Test TRANSITIONS contains cancel transition."""
-        assert ("pending", "cancelled") in TRANSITIONS
-        assert TRANSITIONS[("pending", "cancelled")] == "cancel"
-
-    def test_transitions_contains_complete(self):
-        """Test TRANSITIONS contains complete transition."""
-        assert ("processing", "completed") in TRANSITIONS
-        assert TRANSITIONS[("processing", "completed")] == "complete"
-
-    def test_transitions_contains_fail(self):
-        """Test TRANSITIONS contains fail transition."""
-        assert ("processing", "failed") in TRANSITIONS
-        assert TRANSITIONS[("processing", "failed")] == "fail"
-
-    def test_transitions_contains_abort(self):
-        """Test TRANSITIONS contains abort transition."""
-        assert ("processing", "cancelled") in TRANSITIONS
-        assert TRANSITIONS[("processing", "cancelled")] == "abort"
-
-    def test_transitions_contains_retry(self):
-        """Test TRANSITIONS contains retry transition."""
-        assert ("failed", "pending") in TRANSITIONS
-        assert TRANSITIONS[("failed", "pending")] == "retry"
-
-    def test_transitions_contains_dead_letter(self):
-        """Test TRANSITIONS contains dead_letter transition."""
-        assert ("failed", "dead_letter") in TRANSITIONS
-        assert TRANSITIONS[("failed", "dead_letter")] == "dead_letter"
-
-    def test_transitions_contains_replay(self):
-        """Test TRANSITIONS contains replay transition."""
-        assert ("dead_letter", "pending") in TRANSITIONS
-        assert TRANSITIONS[("dead_letter", "pending")] == "replay"
-
-    def test_transitions_contains_rearm_after_complete(self):
-        """Test TRANSITIONS contains the orphan-race re-arm transition
-        (COMPLETED → PROCESSING). This is the legal transition that
-        ``JobFeedbackObserver._finalize_job`` uses to re-arm a job whose
-        CM had a late ``register_message_send`` during finalization —
-        without it, the late child is silently orphaned.
-        """
-        assert ("completed", "processing") in TRANSITIONS
-        assert TRANSITIONS[("completed", "processing")] == "rearm_after_complete"
-
-    def test_can_transition_rearm_after_complete(self):
-        """Test ``can_transition`` accepts the re-arm transition."""
-        sm = JobStateMachine()
-        assert sm.can_transition("completed", "processing") is True
-        assert sm.get_transition_name("completed", "processing") == "rearm_after_complete"
-
-    def test_validate_transition_rearm_after_complete(self):
-        """Test ``validate_transition`` does not raise for the re-arm."""
-        sm = JobStateMachine()
-        # Should not raise — the re-arm is a legal transition.
-        sm.validate_transition("completed", "processing")
+        assert (None, "queued") not in VALID_TRANSITIONS
 
 
 class TestJobStateMachineSingleton:
@@ -441,23 +257,24 @@ class TestJobStateMachineSingleton:
         """Test job_state_machine is a JobStateMachine instance."""
         assert isinstance(job_state_machine, JobStateMachine)
 
-    def test_singleton_can_transition(self):
-        """Test singleton can_transition works."""
-        assert job_state_machine.can_transition(None, "pending") is True
-        assert job_state_machine.can_transition("pending", "processing") is True
-        assert job_state_machine.can_transition("completed", "pending") is False
+    def test_singleton_can_transition_valid(self):
+        """Test singleton can_transition accepts valid transitions."""
+        assert job_state_machine.can_transition("queued", "active") is True
+        assert job_state_machine.can_transition("active", "done") is True
 
-    def test_singleton_get_transition_name(self):
-        """Test singleton get_transition_name works."""
-        assert job_state_machine.get_transition_name(None, "pending") == "create"
-        assert job_state_machine.get_transition_name("pending", "processing") == "start"
+    def test_singleton_can_transition_invalid(self):
+        """Test singleton can_transition rejects invalid transitions."""
+        assert job_state_machine.can_transition("queued", "dead") is False
+        assert job_state_machine.can_transition("dead", "active") is False
 
-    def test_singleton_validate_transition(self):
-        """Test singleton validate_transition works."""
+    def test_singleton_validate_transition_does_not_raise(self):
+        """Test singleton validate_transition does not raise for valid transitions."""
         # Should not raise
-        job_state_machine.validate_transition(None, "pending")
-        job_state_machine.validate_transition("pending", "processing")
+        job_state_machine.validate_transition("queued", "active")
+        job_state_machine.validate_transition("active", "done")
+        job_state_machine.validate_transition("done", "queued")
 
-        # Should raise
+    def test_singleton_validate_transition_raises(self):
+        """Test singleton validate_transition raises for invalid transitions."""
         with pytest.raises(InvalidTransitionError):
-            job_state_machine.validate_transition("completed", "pending")
+            job_state_machine.validate_transition("queued", "dead")

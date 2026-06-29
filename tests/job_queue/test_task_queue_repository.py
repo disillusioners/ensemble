@@ -54,8 +54,6 @@ class TestRepositoryCreate:
         job = repository.create(**sample_job_data)
         
         assert job.created_at is not None
-        assert job.started_at is None
-        assert job.completed_at is None
 
     def test_create_job_uuid_format(self, repository, sample_job_data):
         """Test that job_id is a valid UUID."""
@@ -132,8 +130,8 @@ class TestRepositoryList:
         # Start job1
         repository.start_job(job1.job_id, "instance-1")
         
-        pending_jobs, total = repository.list(statuses=[JobStatus.PENDING.value])
-        processing_jobs, _ = repository.list(statuses=[JobStatus.PROCESSING.value])
+        pending_jobs, total = repository.list(statuses=[AdmissionState.QUEUED.value])
+        processing_jobs, _ = repository.list(statuses=[AdmissionState.ACTIVE.value])
         
         assert len(pending_jobs) == 1
         assert pending_jobs[0].job_id == job2.job_id
@@ -286,7 +284,7 @@ class TestRepositoryUpdate:
         with pytest.raises(ValueError) as exc_info:
             # Even a valid status value is rejected — the guard fires
             # before any value validation.
-            repository.update(job.job_id, status=JobStatus.COMPLETED.value)
+            repository.update(job.job_id, status=AdmissionState.DONE.value)
 
         assert "atomic_transition" in str(exc_info.value)
 
@@ -341,7 +339,6 @@ class TestRepositoryJobLifecycle:
         assert started is not None
         assert started.admission_state == AdmissionState.ACTIVE.value
         assert started.instance_id == "instance-1"
-        assert started.started_at is not None
 
     def test_start_already_started_job_raises(self, repository, sample_job_data):
         """Test starting an already started job raises ValueError."""
@@ -370,72 +367,66 @@ class TestRepositoryJobLifecycle:
         """Test completing a processing job."""
         job = repository.create(**sample_job_data)
         started = repository.start_job(job.job_id, "instance-1")
-        
+
         completed = repository.complete_job(
             started.job_id,
             result_summary="Job completed successfully"
         )
-        
+
         assert completed is not None
         assert completed.admission_state == AdmissionState.DONE.value
-        assert completed.completed_at is not None
-        assert completed.result_summary == "Job completed successfully"
 
     def test_complete_pending_job_raises(self, repository, sample_job_data):
         """Test completing a pending job raises InvalidTransitionError."""
         job = repository.create(**sample_job_data)
-        
+
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.complete_job(job.job_id)
-        
-        assert exc_info.value.from_status == "queued"
-        assert exc_info.value.to_status == "completed"
+
+        assert exc_info.value.from_state == "queued"
+        assert exc_info.value.to_state == "completed"
 
     def test_fail_processing_job(self, repository, sample_job_data):
         """Test failing a processing job."""
         job = repository.create(**sample_job_data)
         started = repository.start_job(job.job_id, "instance-1")
-        
+
         failed = repository.fail_job(
             started.job_id,
             error_message="Something went wrong"
         )
-        
+
         assert failed is not None
         assert failed.admission_state == AdmissionState.DONE.value
-        assert failed.completed_at is not None
-        assert failed.error_message == "Something went wrong"
 
     def test_fail_pending_job_raises(self, repository, sample_job_data):
         """Test failing a pending job raises InvalidTransitionError."""
         job = repository.create(**sample_job_data)
-        
+
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.fail_job(job.job_id, "Error")
-        
-        assert exc_info.value.from_status == "queued"
-        assert exc_info.value.to_status == "failed"
+
+        assert exc_info.value.from_state == "queued"
+        assert exc_info.value.to_state == "failed"
 
     def test_cancel_pending_job(self, repository, sample_job_data):
         """Test cancelling a pending job."""
         job = repository.create(**sample_job_data)
-        
+
         cancelled = repository.cancel_job(job.job_id)
-        
+
         assert cancelled is not None
         assert cancelled.admission_state == AdmissionState.DONE.value
-        assert cancelled.cancelled_at is not None
 
     def test_cancel_processing_job(self, repository, sample_job_data):
         """Test cancelling a processing job succeeds (PROCESSING -> CANCELLED)."""
         job = repository.create(**sample_job_data)
         repository.start_job(job.job_id, "instance-1")
-        
+
         cancelled = repository.cancel_job(job.job_id)
-        
+
         assert cancelled is not None
         assert cancelled.admission_state == AdmissionState.DONE.value
-        assert cancelled.cancelled_at is not None
 
 
 class TestRepositoryDelete:
@@ -560,7 +551,7 @@ class TestRepositoryEdgeCases:
         
         # Filter by both status and project
         jobs, total = repository.list(
-            statuses=[JobStatus.PENDING.value],
+            statuses=[AdmissionState.QUEUED.value],
             project_id="test-project"
         )
         
@@ -623,11 +614,10 @@ class TestRepositoryConcurrency:
         # Complete job
         completed = repository.complete_job(job.job_id, "Done")
         assert completed.admission_state == AdmissionState.DONE.value
-        
+
         # Verify final state persists
         final = repository.get(job.job_id)
         assert final.admission_state == AdmissionState.DONE.value
-        assert final.completed_at is not None
 
 
 class TestJobStatusValidation:
@@ -661,7 +651,7 @@ class TestJobItem:
         assert isinstance(job_dict, dict)
         assert job_dict["job_id"] == job.job_id
         assert job_dict["message"] == job.message
-        assert job_dict["status"] == job.status
+        assert job_dict["admission_state"] == job.admission_state
         assert job_dict["metadata"] == job.job_metadata
 
 
@@ -798,14 +788,14 @@ class TestRepositoryListByQueue:
         
         # Filter by PENDING status
         pending_jobs, pending_total = repository.list_by_queue(
-            queue.queue_id, statuses=[JobStatus.PENDING.value]
+            queue.queue_id, statuses=[AdmissionState.QUEUED.value]
         )
         assert pending_total == 2
         assert len(pending_jobs) == 2
         
         # Filter by PROCESSING status
         processing_jobs, processing_total = repository.list_by_queue(
-            queue.queue_id, statuses=[JobStatus.PROCESSING.value]
+            queue.queue_id, statuses=[AdmissionState.ACTIVE.value]
         )
         assert processing_total == 1
         assert len(processing_jobs) == 1
@@ -849,7 +839,6 @@ class TestRepositoryStartJobAtomic:
         assert started is not None
         assert started.admission_state == AdmissionState.ACTIVE.value
         assert started.instance_id == "test-instance"
-        assert started.started_at is not None
 
     def test_start_job_atomic_wrong_status(self, repository, sample_job_data):
         """Test start_job_atomic raises InvalidTransitionError for non-PENDING job."""
@@ -861,8 +850,8 @@ class TestRepositoryStartJobAtomic:
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.start_job_atomic(job.job_id, "instance-2")
 
-        assert exc_info.value.from_status == "active"
-        assert exc_info.value.to_status == "processing"
+        assert exc_info.value.from_state == "active"
+        assert exc_info.value.to_state == "processing"
 
     def test_start_job_atomic_concurrent_safety(self, repository, sample_job_data):
         """Test start_job_atomic ensures only one concurrent start succeeds."""
@@ -880,8 +869,8 @@ class TestRepositoryStartJobAtomic:
         with pytest.raises(InvalidTransitionError) as exc_info:
             repository.start_job_atomic(job.job_id, "instance-2")
 
-        assert exc_info.value.from_status == "active"
-        assert exc_info.value.to_status == "processing"
+        assert exc_info.value.from_state == "active"
+        assert exc_info.value.to_state == "processing"
 
         # Verify only one job was started
         retrieved = repository.get(job.job_id)
@@ -1033,7 +1022,7 @@ class TestRepositoryGetActiveByInstance:
         pending_job = repository.create(
             **sample_job_data, instance_id="inst-pending"
         )
-        # pending_job.status is PENDING by default.
+        # pending_job.admission_state is QUEUED by default.
 
         result = repository.get_active_by_instance("inst-pending")
 

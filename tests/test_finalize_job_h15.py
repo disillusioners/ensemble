@@ -70,7 +70,7 @@ pytestmark = pytest.mark.skip(
 )
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue import JobItem, JobStatus
+from daemon.repositories.job_queue import JobItem, AdmissionState
 from daemon.repositories.job_queue.models import JobLock
 from daemon.services.dependency_bus import set_dependency_bus
 from daemon.services.job_feedback_observer import JobFeedbackObserver
@@ -149,7 +149,7 @@ def seed_job(
     job_id: str | None = None,
     instance_id: str,
     project_id: str = "test-project",
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
 ) -> JobItem:
     """Insert a JobItem row. Returns the JobItem."""
     jid = job_id or f"job-{uuid.uuid4().hex[:8]}"
@@ -161,7 +161,6 @@ def seed_job(
             message="test job",
             source="api",
             job_type="task",
-            status=status,
 
             admission_state=status_to_admission(status),
             instance_id=instance_id,
@@ -344,7 +343,7 @@ class TestH15AtomicityHappyPath:
         job = seed_job(engine, instance_id=instance_id)
         lock_id = seed_lock(engine, instance_id=instance_id)
 
-        assert get_job(engine, job.job_id).status == JobStatus.PROCESSING.value
+        assert get_job(engine, job.job_id).status == AdmissionState.ACTIVE.value
         assert get_instance(engine, instance_id).status == InstanceStatus.RUNNING.value
         assert count_locks(engine, instance_id) == 1
 
@@ -354,7 +353,7 @@ class TestH15AtomicityHappyPath:
             await observer.handle_correlation_complete(instance_id, "completed")
 
         # Job transitioned to COMPLETED.
-        assert get_job(engine, job.job_id).status == JobStatus.COMPLETED.value
+        assert get_job(engine, job.job_id).status == AdmissionState.DONE.value
         # Instance transitioned to COMPLETED.
         assert get_instance(engine, instance_id).status == InstanceStatus.COMPLETED.value
         # Lock was deleted (inlined in the sync helper's WriteGuardSession).
@@ -374,7 +373,7 @@ class TestH15AtomicityHappyPath:
     async def test_job_instance_lock_all_commit_together_error(self, engine):
         """ERROR path: job→FAILED, instance→ERROR, lock deleted."""
         instance_id = seed_instance(engine, status=InstanceStatus.RUNNING.value)
-        job = seed_job(engine, instance_id=instance_id, status=JobStatus.PROCESSING.value)
+        job = seed_job(engine, instance_id=instance_id, status=AdmissionState.ACTIVE.value)
         lock_id = seed_lock(engine, instance_id=instance_id)
 
         observer, mocks = make_observer(engine)
@@ -382,7 +381,7 @@ class TestH15AtomicityHappyPath:
         with patched_completion_registry():
             await observer.handle_correlation_complete(instance_id, "error")
 
-        assert get_job(engine, job.job_id).status == JobStatus.FAILED.value
+        assert get_job(engine, job.job_id).status == AdmissionState.DONE.value
         assert get_instance(engine, instance_id).status == InstanceStatus.ERROR.value
         assert count_locks(engine, instance_id) == 0
 
@@ -425,7 +424,7 @@ class TestH15InstanceAlreadyTerminal:
             await observer.handle_correlation_complete(instance_id, "completed")
 
         # Job still transitions (independent of instance state).
-        assert get_job(engine, job.job_id).status == JobStatus.COMPLETED.value
+        assert get_job(engine, job.job_id).status == AdmissionState.DONE.value
         # Lock still released.
         assert count_locks(engine, instance_id) == 0
         # Instance status is still COMPLETED (already terminal → write skipped).
@@ -465,7 +464,7 @@ class TestH15InstanceMissing:
             await observer.handle_correlation_complete(instance_id, "completed")
 
         # Job still transitions.
-        assert get_job(engine, job.job_id).status == JobStatus.COMPLETED.value
+        assert get_job(engine, job.job_id).status == AdmissionState.DONE.value
         # Lock still released.
         assert count_locks(engine, instance_id) == 0
         # No SSE/CR/lifecycle (no instance to notify).
@@ -526,7 +525,7 @@ class TestH15C1Abort:
             await observer.handle_correlation_complete(self.instance_id, "completed")
 
         # Nothing changed.
-        assert get_job(engine, self.job_id).status == JobStatus.PROCESSING.value
+        assert get_job(engine, self.job_id).status == AdmissionState.ACTIVE.value
         assert get_instance(engine, self.instance_id).status == InstanceStatus.RUNNING.value
         assert count_locks(engine, self.instance_id) == 1  # lock NOT released
 
@@ -566,8 +565,8 @@ class TestH15InvalidTransition:
         def fake_sync(*args, **kwargs):
             raise InvalidTransitionError(
                 job_id=job.job_id,
-                from_status=JobStatus.COMPLETED.value,  # already COMPLETED
-                to_status=JobStatus.COMPLETED.value,
+                from_status=AdmissionState.DONE.value,  # already COMPLETED
+                to_status=AdmissionState.DONE.value,
             )
 
         observer._finalize_job_db_sync = fake_sync
@@ -576,7 +575,7 @@ class TestH15InvalidTransition:
             await observer.handle_correlation_complete(instance_id, "completed")
 
         # Nothing changed (no new write).
-        assert get_job(engine, job.job_id).status == JobStatus.PROCESSING.value
+        assert get_job(engine, job.job_id).status == AdmissionState.ACTIVE.value
         assert count_locks(engine, instance_id) == 1  # lock still held
 
         # No side effects.
@@ -627,7 +626,7 @@ class TestH15W3FailSafe:
             await observer.handle_correlation_complete(instance_id, "completed")
 
         # Job was transitioned to FAILED by the fail-safe.
-        assert get_job(engine, job.job_id).status == JobStatus.FAILED.value
+        assert get_job(engine, job.job_id).status == AdmissionState.DONE.value
         # Lock was NOT released by the fail-safe (W3 only transitions the job).
         assert count_locks(engine, instance_id) == 1
 
@@ -658,14 +657,14 @@ class TestM10OrphanCleanup:
         self.completed_job = seed_job(
             engine,
             instance_id=self.completed_instance_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
         # Next pending job in the same project.
         self.next_job = seed_job(
             engine,
             instance_id=None,
             project_id=self.completed_job.project_id,
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
 
     @pytest.mark.asyncio
@@ -696,9 +695,8 @@ class TestM10OrphanCleanup:
                 message="next job",
                 source="api",
                 job_type="task",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 instance_id=instance_id,
                 project_id=self.next_job.project_id,
             )
@@ -742,9 +740,8 @@ class TestM10OrphanCleanup:
             message="next job",
             source="api",
             job_type="task",
-            status=JobStatus.PENDING.value,
 
-            admission_state=status_to_admission(JobStatus.PENDING.value),
+            admission_state=status_to_admission(AdmissionState.QUEUED.value),
             instance_id=None,
             project_id=self.next_job.project_id,
         )

@@ -282,17 +282,16 @@ class _LegacyJobItemRecord:
     __slots__ = ("status", "error")
 
     def __init__(self, job_item: Any) -> None:
-        # Derive the canonical vocabulary string from
-        # ``admission_state`` (Phase 4: the ``status`` column is frozen
-        # at the INSERT default). ``ADMISSION_STATE_TO_STATUS`` maps
-        # the 4-value admission_state back to a representative legacy
-        # status string.
-        # ``JobItem.error_message`` is the user-visible failure text
-        # the ``[JOB_EVENT]`` notification surfaces as ``Error: …``.
+        # Phase 5: derive canonical status from admission_state via the
+        # compat map (JobStatus column is dropped; ADMISSION_STATE_TO_STATUS
+        # remains as the legacy→canonical bridge).
         self.status: str = ADMISSION_STATE_TO_STATUS.get(
             job_item.admission_state, "pending"
         )
-        self.error: str | None = job_item.error_message
+        # Phase 5: JobItem.error_message column dropped. The error text now
+        # lives on the Instance/WorkRecord. This tool result surface returns
+        # None until the tool is wired to the resolver (Phase 6/7).
+        self.error: str | None = getattr(job_item, 'error_message', None)
 
 
 def create_job_tools(

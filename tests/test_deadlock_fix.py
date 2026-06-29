@@ -71,7 +71,7 @@ from daemon.repositories.instance.repository import (
     SQLModelInstanceRepository,
     get_agent_name,
 )
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageQueue,
     MessageStatus,

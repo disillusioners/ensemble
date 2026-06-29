@@ -7,7 +7,7 @@ of the job queue repository.
 import pytest
 
 from daemon.repositories.job_queue import AdmissionState, JobRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 
 
 class TestSoftDelete:

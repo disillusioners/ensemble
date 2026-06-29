@@ -38,7 +38,7 @@ import pytest
 
 from daemon.manager import MessageResult
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.execution_gate import ExecutionGateService
 
 
@@ -80,14 +80,14 @@ def _make_mock_job(
     *,
     job_id: str = "job-test-123",
     instance_id: str = "inst-test-123",
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
     message: str = "Hello",
 ) -> MagicMock:
     """Build a MagicMock JobItem with the minimum attributes ``handle`` reads."""
     job = MagicMock()
     job.job_id = job_id
     job.instance_id = instance_id
-    job.status = status
+    job.admission_state = status
     job.message = message
     job.job_type = "message"
     job.project_id = "test-project"

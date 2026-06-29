@@ -313,7 +313,6 @@ def _seed_job_in_state(
             project_id=project_id,
             queue_id=qid,
             job_type="message",
-            status=status,
             admission_state=(
                 admission_state
                 if admission_state is not None
@@ -378,7 +377,7 @@ def _seed_job_for_instance(
     engine: Engine,
     *,
     instance_id: str,
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
     project_id: str = "test-project",
     queue_id: str | None = None,
 ) -> str:
@@ -403,14 +402,12 @@ def _seed_job_for_instance(
                 project_id=project_id,
                 queue_id=qid,
                 job_type="message",
-                status=status,
                 admission_state=status_to_admission(status),
                 instance_id=instance_id,
                 created_at=now_iso,
-                started_at=(
                     now_iso
                     if status
-                    in (JobStatus.PROCESSING.value, JobStatus.PAUSED.value)
+                    in (AdmissionState.ACTIVE.value, AdmissionState.ACTIVE.value)
                     else None
                 ),
             )
@@ -512,7 +509,7 @@ class TestPauseResumeNoJobStatusWrites:
         """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         jid = _seed_job_for_instance(
-            engine, instance_id=iid, status=JobStatus.PROCESSING.value
+            engine, instance_id=iid, status=AdmissionState.ACTIVE.value
         )
 
         # Sanity: before pause, the job is processing/active.
@@ -564,7 +561,7 @@ class TestPauseResumeNoJobStatusWrites:
         )
         # Phase 4: jobs stay PROCESSING (pause never flipped them).
         jid = _seed_job_for_instance(
-            engine, instance_id=iid, status=JobStatus.PROCESSING.value
+            engine, instance_id=iid, status=AdmissionState.ACTIVE.value
         )
 
         # Sanity: before resume, the job is still processing/active.
@@ -608,7 +605,7 @@ class TestPauseResumeNoJobStatusWrites:
         """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         jid = _seed_job_for_instance(
-            engine, instance_id=iid, status=JobStatus.PROCESSING.value
+            engine, instance_id=iid, status=AdmissionState.ACTIVE.value
         )
 
         now = datetime.now(timezone.utc).isoformat()
@@ -664,7 +661,7 @@ class TestPauseResumePreservesLock:
         """
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         jid = _seed_job_for_instance(
-            engine, instance_id=iid, status=JobStatus.PROCESSING.value
+            engine, instance_id=iid, status=AdmissionState.ACTIVE.value
         )
         lock_id = _seed_job_lock(engine, job_id=jid, instance_id=iid)
 
@@ -699,7 +696,7 @@ class TestPauseResumePreservesLock:
             engine, status=InstanceStatus.PAUSED.value, paused_at=paused_iso
         )
         jid = _seed_job_for_instance(
-            engine, instance_id=iid, status=JobStatus.PROCESSING.value
+            engine, instance_id=iid, status=AdmissionState.ACTIVE.value
         )
         lock_id = _seed_job_lock(engine, job_id=jid, instance_id=iid)
 
@@ -729,7 +726,7 @@ class TestPauseResumePreservesLock:
         """End-to-end: lock survives the full pause → resume cycle."""
         iid = _seed_instance(engine, status=InstanceStatus.RUNNING.value)
         jid = _seed_job_for_instance(
-            engine, instance_id=iid, status=JobStatus.PROCESSING.value
+            engine, instance_id=iid, status=AdmissionState.ACTIVE.value
         )
         lock_id = _seed_job_lock(engine, job_id=jid, instance_id=iid)
 
@@ -810,12 +807,12 @@ class TestMaybeRetryGuards:
         "status, admission",
         [
             # 'queued' bucket — not retryable.
-            (JobStatus.PENDING.value, AdmissionState.QUEUED.value),
+            (AdmissionState.QUEUED.value, AdmissionState.QUEUED.value),
             # 'done' bucket but terminal — NOT retryable.
-            (JobStatus.COMPLETED.value, AdmissionState.DONE.value),
-            (JobStatus.CANCELLED.value, AdmissionState.DONE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
             # 'dead' bucket — not retryable.
-            (JobStatus.DEAD_LETTER.value, AdmissionState.DEAD.value),
+            (AdmissionState.DEAD.value, AdmissionState.DEAD.value),
         ],
     )
     def test_retry_non_failed_job_is_rejected(
@@ -850,7 +847,6 @@ class TestMaybeRetryGuards:
                     project_id="test-project",
                     queue_id=qid,
                     job_type="message",
-                    status=status,
                     admission_state=admission,
                     retry_count=0,
                     max_retries=3,

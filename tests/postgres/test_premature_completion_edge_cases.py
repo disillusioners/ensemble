@@ -48,7 +48,7 @@ from daemon.config import JobSystemConfig
 from daemon.repositories.event.models import Event  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
+from daemon.repositories.job_queue import JobItem, JobRepository, AdmissionState
 from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
 import pytest
 
@@ -198,7 +198,7 @@ def _make_job(
     *,
     instance_id: str,
     project_id: str = "test-project",
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
 ) -> JobItem:
     """Insert a JobItem row into the test DB."""
     job = JobItem(
@@ -209,7 +209,6 @@ def _make_job(
         source="api",
         job_type="task",
         priority=5,
-        status=status,
 
         admission_state=status_to_admission(status),
         instance_id=instance_id,
@@ -425,7 +424,7 @@ class TestEmptyChildrenList:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -445,7 +444,7 @@ class TestEmptyChildrenList:
             await asyncio.sleep(0.1)
 
             # Job should still be COMPLETED (unchanged)
-            assert _read_job_status(pg_engine, job_id) == JobStatus.COMPLETED.value
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.DONE.value
             # Instance should still be RUNNING (unchanged)
             assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.RUNNING.value
         finally:
@@ -519,7 +518,7 @@ class TestErrorDuringRevival:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.COMPLETED.value
@@ -587,7 +586,7 @@ class TestErrorDuringRevival:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         now_str = datetime.now(timezone.utc).isoformat()
@@ -674,7 +673,7 @@ class TestMultipleConcurrentWaves:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -707,7 +706,7 @@ class TestMultipleConcurrentWaves:
             rearmed_1 = await _wait_for_rearm(cm, parent_id)
             assert rearmed_1, "rearm_parent should have fired after wave 1"
 
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value, (
                 "Job should still be PROCESSING after wave 1 deferred"
             )
 
@@ -726,7 +725,7 @@ class TestMultipleConcurrentWaves:
             rearmed_2 = await _wait_for_rearm(cm, parent_id)
             assert rearmed_2, "rearm_parent should have fired after wave 2"
 
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value, (
                 "Job should still be PROCESSING after wave 2 deferred"
             )
 
@@ -745,7 +744,7 @@ class TestMultipleConcurrentWaves:
             await asyncio.sleep(0.2)
 
             # All waves complete → job should be COMPLETED
-            assert _read_job_status(pg_engine, job_id) == JobStatus.COMPLETED.value, (
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.DONE.value, (
                 "Job should be COMPLETED after all 3 waves resolved"
             )
         finally:
@@ -793,7 +792,7 @@ class TestMultipleConcurrentWaves:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -838,7 +837,7 @@ class TestMultipleConcurrentWaves:
             await _wait_for_rearm(cm, parent_id)
 
             # Under BOTH flag states the job stays PROCESSING after wave 1.
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value
 
             # Under BOTH flag states the CM retains the parent entry
             # (either via rearm_parent for legacy, or naturally because
@@ -866,7 +865,7 @@ class TestMultipleConcurrentWaves:
             await asyncio.sleep(0.1)
 
             # Under BOTH flag states the job stays PROCESSING after wave 2.
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value
 
             # Final completion: resolve ALL remaining correlations,
             # waiting_for=0. Both gates pass; job finalizes.
@@ -875,7 +874,7 @@ class TestMultipleConcurrentWaves:
             await notify_corr_resolve(parent_id, c2b, m2b)
             await asyncio.sleep(0.2)
 
-            assert _read_job_status(pg_engine, job_id) == JobStatus.COMPLETED.value, (
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.DONE.value, (
                 "Job should be COMPLETED after final wave"
             )
         finally:
@@ -916,7 +915,7 @@ class TestGenuinelyCompletedParent:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
         )
 
         # W1 Python guard: check for active (PENDING/PROCESSING) job
@@ -955,7 +954,7 @@ class TestGenuinelyCompletedParent:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
         )
 
         with pg_engine.connect() as conn:
@@ -987,7 +986,7 @@ class TestGenuinelyCompletedParent:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.CANCELLED.value,
+            status=AdmissionState.DONE.value,
         )
 
         with pg_engine.connect() as conn:
@@ -1059,14 +1058,14 @@ class TestJobContinueWatchJobPattern:  # Phase B scope
         _make_job(
             pg_engine, parent_job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
         # A separate child JOB (not instance) — job_continue/watch_job variant.
         # This job is independent and does NOT affect the parent's waiting_for.
         _make_job(
             pg_engine, child_job_id,
             instance_id=f"other-{uuid.uuid4().hex[:8]}",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(parent_job_id)
@@ -1092,14 +1091,14 @@ class TestJobContinueWatchJobPattern:  # Phase B scope
             await asyncio.sleep(0.1)
 
             # Parent job should be COMPLETED
-            assert _read_job_status(pg_engine, parent_job_id) == JobStatus.COMPLETED.value, (
+            assert _read_job_status(pg_engine, parent_job_id) == AdmissionState.DONE.value, (
                 "Parent job should finalize when no spawned children exist"
             )
             # Parent instance should be COMPLETED
             assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.COMPLETED.value
 
             # The child JOB should be unaffected — still PROCESSING
-            assert _read_job_status(pg_engine, child_job_id) == JobStatus.PROCESSING.value, (
+            assert _read_job_status(pg_engine, child_job_id) == AdmissionState.ACTIVE.value, (
                 "Watched child job should be unaffected by parent finalization"
             )
         finally:
@@ -1127,7 +1126,7 @@ class TestJobContinueWatchJobPattern:  # Phase B scope
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         cm = CorrelationManager(
@@ -1145,7 +1144,7 @@ class TestJobContinueWatchJobPattern:  # Phase B scope
             await notify_corr_resolve(parent_id, ghost_child, ghost_msg)
 
             # No crash, no state change
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value
             assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.RUNNING.value
         finally:
             await cm.stop()
@@ -1216,7 +1215,7 @@ class TestOriginalBugReproduction:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -1264,7 +1263,7 @@ class TestOriginalBugReproduction:
 
             # ── Step 4: Assert job NOT completed ──────────────────────────
             job_status = _read_job_status(pg_engine, job_id)
-            assert job_status == JobStatus.PROCESSING.value, (
+            assert job_status == AdmissionState.ACTIVE.value, (
                 f"BUG REPRODUCTION: parent job flipped to '{job_status}' "
                 f"after wave 1 — should stay PROCESSING. "
                 f"The waiting_for / CM gate should have deferred finalization."
@@ -1300,7 +1299,7 @@ class TestOriginalBugReproduction:
             )
 
             final_job_status = _read_job_status(pg_engine, job_id)
-            assert final_job_status == JobStatus.COMPLETED.value, (
+            assert final_job_status == AdmissionState.DONE.value, (
                 f"Parent job should be COMPLETED after all waves done, "
                 f"got '{final_job_status}'"
             )

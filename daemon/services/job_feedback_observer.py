@@ -1149,8 +1149,8 @@ class JobFeedbackObserver:
                         logger.info(
                             f"Observer: re-arm skipped — job "
                             f"{ctx.job_id[:8]} no longer COMPLETED "
-                            f"(current: {ite.from_status} → "
-                            f"{ite.to_status})"
+                            f"(current: {ite.from_state} → "
+                            f"{ite.to_state})"
                         )
                     except Exception as rearm_exc:
                         # Defensive: never let a re-arm failure crash the
@@ -1374,7 +1374,7 @@ class JobFeedbackObserver:
             # skip silently. This is the primary idempotency mechanism.
             logger.debug(
                 f"Race condition: job {ctx.job_id[:8] if ctx.job_id else 'no_job'}... already transitioned "
-                f"(current: {e.from_status} -> {e.to_status}), skipping"
+                f"(current: {e.from_state} -> {e.to_state}), skipping"
             )
             return
         except RuntimeError:
@@ -2498,8 +2498,8 @@ class JobFeedbackObserver:
                     # silent return).
                     raise InvalidTransitionError(
                         job_id=job_id,
-                        from_status=existing.status,
-                        to_status=to_status,
+                        from_state=existing.status,
+                        to_state=to_status,
                     )
             else:
                 # Phase 2.5 (Task 2.5.4): no JobItem to update.

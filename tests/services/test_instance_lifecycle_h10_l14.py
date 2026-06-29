@@ -54,7 +54,7 @@ from daemon.repositories.instance.models import (
     InstanceHierarchy,
     InstanceStatus,
 )
-from daemon.repositories.job_queue.models import JobItem, JobLock, JobStatus
+from daemon.repositories.job_queue.models import JobItem, JobLock, AdmissionState
 from daemon.repositories.message_queue.models import MessageQueue, MessageStatus
 import pytest
 
@@ -165,7 +165,7 @@ def seed_job(
     instance_id: str,
     job_id: str | None = None,
     project_id: str = "test-project",
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
     job_type: str = "task",
 ) -> str:
     """Insert a JobItem row. Returns the job_id."""
@@ -180,7 +180,6 @@ def seed_job(
                 message="test job",
                 source="api",
                 job_type=job_type,
-                status=status,
 
                 admission_state=status_to_admission(status),
                 instance_id=instance_id,
@@ -397,23 +396,23 @@ async def test_h10_terminate_cancels_all_non_terminal_jobs_atomically(
     job_proc = seed_job(
         engine,
         instance_id=instance_id,
-        status=JobStatus.PROCESSING.value,
+        status=AdmissionState.ACTIVE.value,
     )
     job_pend = seed_job(
         engine,
         instance_id=instance_id,
-        status=JobStatus.PENDING.value,
+        status=AdmissionState.QUEUED.value,
     )
     job_msg = seed_job(
         engine,
         instance_id=instance_id,
-        status=JobStatus.PENDING.value,
+        status=AdmissionState.QUEUED.value,
         job_type="message",
     )
     job_done = seed_job(
         engine,
         instance_id=instance_id,
-        status=JobStatus.COMPLETED.value,
+        status=AdmissionState.DONE.value,
     )
 
     manager = make_mock_manager(engine, write_guard)
@@ -423,13 +422,13 @@ async def test_h10_terminate_cancels_all_non_terminal_jobs_atomically(
     # All non-terminal jobs are now CANCELLED.
     jobs_after = get_jobs_for_instance(engine, instance_id)
     jobs_by_id = {j.job_id: j for j in jobs_after}
-    assert jobs_by_id[job_proc].status == JobStatus.CANCELLED.value, (
+    assert jobs_by_id[job_proc].status == AdmissionState.DONE.value, (
         "PROCESSING job must be CANCELLED in same transaction as instance terminate"
     )
-    assert jobs_by_id[job_pend].status == JobStatus.CANCELLED.value
-    assert jobs_by_id[job_msg].status == JobStatus.CANCELLED.value
+    assert jobs_by_id[job_pend].status == AdmissionState.DONE.value
+    assert jobs_by_id[job_msg].status == AdmissionState.DONE.value
     # COMPLETED is terminal — left alone.
-    assert jobs_by_id[job_done].status == JobStatus.COMPLETED.value
+    assert jobs_by_id[job_done].status == AdmissionState.DONE.value
 
 
 @pytest.mark.asyncio
@@ -515,7 +514,7 @@ async def test_h10_terminate_is_idempotent_on_already_terminated(
     instance_id = seed_instance(
         engine, status=InstanceStatus.TERMINATED.value  # already terminal
     )
-    seed_job(engine, instance_id=instance_id, status=JobStatus.PROCESSING.value)
+    seed_job(engine, instance_id=instance_id, status=AdmissionState.ACTIVE.value)
 
     manager = make_mock_manager(engine, write_guard)
     svc = make_lifecycle_service(manager)
@@ -527,7 +526,7 @@ async def test_h10_terminate_is_idempotent_on_already_terminated(
     # Job was NOT touched (the re-entrancy guard short-circuited).
     jobs_after = get_jobs_for_instance(engine, instance_id)
     assert len(jobs_after) == 1
-    assert jobs_after[0].status == JobStatus.PROCESSING.value, (
+    assert jobs_after[0].status == AdmissionState.ACTIVE.value, (
         "Already-terminal instance must NOT cascade-cancel its jobs"
     )
 
@@ -896,7 +895,7 @@ async def test_h10_terminate_crash_safety_no_partial_state(engine, write_guard):
     instance_id = seed_instance(
         engine, status=InstanceStatus.RUNNING.value, waiting_for=5
     )
-    seed_job(engine, instance_id=instance_id, status=JobStatus.PROCESSING.value)
+    seed_job(engine, instance_id=instance_id, status=AdmissionState.ACTIVE.value)
     seed_lock(engine, instance_id=instance_id)
     seed_message(engine, instance_id=instance_id)
 
@@ -950,7 +949,7 @@ async def test_h10_terminate_crash_safety_no_partial_state(engine, write_guard):
     # Job still PROCESSING (the in-session UPDATE rolled back).
     jobs = get_jobs_for_instance(engine, instance_id)
     assert len(jobs) == 1
-    assert jobs[0].status == JobStatus.PROCESSING.value
+    assert jobs[0].status == AdmissionState.ACTIVE.value
 
     # Lock still present.
     locks = get_locks_for_instance(engine, instance_id)

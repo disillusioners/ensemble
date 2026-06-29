@@ -113,12 +113,12 @@ class TestNormalizeStatusesCanonical:
     def test_all_canonical_values_unchanged(self):
         """All canonical JobStatus values pass through."""
         canonical_values = [
-            JobStatus.PENDING.value,
-            JobStatus.PROCESSING.value,
-            JobStatus.COMPLETED.value,
-            JobStatus.FAILED.value,
-            JobStatus.CANCELLED.value,
-            JobStatus.DEAD_LETTER.value,
+            AdmissionState.QUEUED.value,
+            AdmissionState.ACTIVE.value,
+            AdmissionState.DONE.value,
+            AdmissionState.DONE.value,
+            AdmissionState.DONE.value,
+            AdmissionState.DEAD.value,
         ]
         result = normalize_statuses(canonical_values)
         assert result == canonical_values
@@ -259,17 +259,17 @@ def _create_job_in_state(repository: JobRepository, status: str, project_id: str
         priority=5,
     )
     # New jobs are PENDING; transition to target status using repo methods
-    if status == JobStatus.PENDING.value:
+    if status == AdmissionState.QUEUED.value:
         pass  # already pending
-    elif status == JobStatus.PROCESSING.value:
+    elif status == AdmissionState.ACTIVE.value:
         repository.start_job(job.job_id, "test-instance")
-    elif status == JobStatus.COMPLETED.value:
+    elif status == AdmissionState.DONE.value:
         repository.start_job(job.job_id, "test-instance")
         repository.complete_job(job.job_id, "Done")
-    elif status == JobStatus.FAILED.value:
+    elif status == AdmissionState.DONE.value:
         repository.start_job(job.job_id, "test-instance")
         repository.fail_job(job.job_id, "Test error")
-    elif status == JobStatus.CANCELLED.value:
+    elif status == AdmissionState.DONE.value:
         repository.cancel_job(job.job_id)
     else:
         raise ValueError(f"Unsupported test status: {status}")
@@ -285,10 +285,10 @@ class TestServiceListJobsWithAlias:
     ):
         """list_jobs(statuses=['running']) returns jobs with status='processing'."""
         # Seed: 2 processing jobs, 1 pending job, 1 completed job
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
 
         # Call list_jobs with natural-language alias "running"
         jobs = await job_queue_service.list_jobs(statuses=["running"])
@@ -302,9 +302,9 @@ class TestServiceListJobsWithAlias:
         self, job_queue_service, job_repository
     ):
         """list_jobs(statuses=['done']) returns jobs with status='completed'."""
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
 
         jobs = await job_queue_service.list_jobs(statuses=["done"])
 
@@ -316,10 +316,10 @@ class TestServiceListJobsWithAlias:
         self, job_queue_service, job_repository
     ):
         """list_jobs(statuses=['waiting']) returns jobs with status='pending'."""
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
 
         jobs = await job_queue_service.list_jobs(statuses=["waiting"])
 
@@ -329,10 +329,10 @@ class TestServiceListJobsWithAlias:
     @pytest.mark.asyncio
     async def test_list_jobs_with_mixed_aliases(self, job_queue_service, job_repository):
         """list_jobs with multiple aliases resolves each independently."""
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
-        _create_job_in_state(job_repository, JobStatus.FAILED.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
 
         jobs = await job_queue_service.list_jobs(statuses=["running", "done", "error"])
 
@@ -350,8 +350,8 @@ class TestServiceListJobsWithAlias:
         self, job_queue_service, job_repository
     ):
         """list_jobs(statuses=['processing']) — canonical still works after the fix."""
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
 
         jobs = await job_queue_service.list_jobs(statuses=["processing"])
 
@@ -391,8 +391,8 @@ class TestHttpListJobsWithAlias:
     ):
         """GET /jobs?status=running returns PROCESSING jobs (not empty, not 400)."""
         # Seed: 1 PROCESSING job, 1 PENDING job
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
 
         response = client.get("/jobs", params={"status": "running"})
 
@@ -409,9 +409,9 @@ class TestHttpListJobsWithAlias:
 
     def test_get_jobs_with_done_alias_returns_completed(self, client, job_repository):
         """GET /jobs?status=done returns COMPLETED jobs."""
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
 
         response = client.get("/jobs", params={"status": "done"})
 
@@ -424,22 +424,22 @@ class TestHttpListJobsWithAlias:
 
     def test_get_jobs_with_waiting_alias_returns_pending(self, client, job_repository):
         """GET /jobs?status=waiting returns PENDING jobs."""
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
 
         response = client.get("/jobs", params={"status": "waiting"})
 
         assert response.status_code == 200
         data = response.json()
         assert data["total"] == 1
-        assert data["jobs"][0]["status"] == JobStatus.PENDING.value
+        assert data["jobs"][0]["status"] == AdmissionState.QUEUED.value
 
     def test_get_jobs_with_comma_separated_aliases(self, client, job_repository):
         """GET /jobs?status=running,done,error returns all matching jobs."""
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
-        _create_job_in_state(job_repository, JobStatus.FAILED.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
 
         response = client.get("/jobs", params={"status": "running,done,error"})
 
@@ -453,8 +453,8 @@ class TestHttpListJobsWithAlias:
 
     def test_get_jobs_with_canonical_value_still_works(self, client, job_repository):
         """GET /jobs?status=processing (canonical) still works after the fix."""
-        _create_job_in_state(job_repository, JobStatus.PROCESSING.value)
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
+        _create_job_in_state(job_repository, AdmissionState.ACTIVE.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
 
         response = client.get("/jobs", params={"status": "processing"})
 
@@ -477,8 +477,8 @@ class TestHttpListJobsWithAlias:
 
     def test_get_jobs_no_status_param_returns_all(self, client, job_repository):
         """GET /jobs (no status filter) returns all jobs regardless of fix."""
-        _create_job_in_state(job_repository, JobStatus.PENDING.value)
-        _create_job_in_state(job_repository, JobStatus.COMPLETED.value)
+        _create_job_in_state(job_repository, AdmissionState.QUEUED.value)
+        _create_job_in_state(job_repository, AdmissionState.DONE.value)
 
         response = client.get("/jobs")
 

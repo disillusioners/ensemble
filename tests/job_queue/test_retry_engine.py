@@ -136,14 +136,14 @@ def create_job_in_session(engine, **kwargs) -> JobItem:
         "agent_dir": "/agents/test-agent",
         "message": "Test message",
         "source": "test",
-        "status": JobStatus.PENDING.value,
+        "status": AdmissionState.QUEUED.value,
         # admission_state mirrors status via the dual-write helper. The
         # JobItem model default is QUEUED, so when callers pass an
         # explicit status we must compute the corresponding admission
         # state here — otherwise the row carries status='failed' but
         # admission_state='queued' and the find_retryable_jobs query
         # (which filters on admission_state='queued') would pick it up.
-        "admission_state": status_to_admission(JobStatus.PENDING.value),
+        "admission_state": status_to_admission(AdmissionState.QUEUED.value),
         "priority": 5,
         "retry_count": 0,
         "project_id": "test-project",  # Required for move_to_dlq
@@ -284,7 +284,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             failed_at="2026-06-28T00:00:00+00:00",
             retry_count=1,
             max_retries=3,
@@ -299,7 +299,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             retry_count=3,
             max_retries=3,  # Exhausted
         )
@@ -313,7 +313,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             retry_count=5,
             max_retries=3,
         )
@@ -351,7 +351,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             retry_count=0,
         )
         
@@ -364,7 +364,7 @@ class TestShouldRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             retry_count=0,
             max_retries=0,  # Explicitly disabled
         )
@@ -461,7 +461,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             retry_count=1,
             max_retries=3,
             error_message="Connection timeout",
@@ -474,7 +474,6 @@ class TestMaybeRetry:
         assert result.admission_state == AdmissionState.QUEUED.value
         assert result.retry_count == 2  # Incremented
         assert result.next_retry_at is not None
-        assert result.error_message is None  # Cleared
         assert result.failed_at is None  # Cleared
 
     def test_maybe_retry_dlq_path(self, retry_engine, dlq_repo, engine):
@@ -482,7 +481,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             retry_count=3,  # Exhausted
             max_retries=3,
             queue_id="queue-123",
@@ -505,7 +504,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
         
         result = retry_engine.maybe_retry("job-123")
@@ -517,7 +516,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
         )
         
         result = retry_engine.maybe_retry("job-123")
@@ -535,7 +534,7 @@ class TestMaybeRetry:
         job = create_job_in_session(
             engine,
             job_id="job-specific-id",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             failed_at="2026-06-28T00:00:00+00:00",
             retry_count=0,
             max_retries=3,
@@ -566,7 +565,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.PENDING.value,  # Phase 3: post-atomic_retry state
+            status=AdmissionState.QUEUED.value,  # Phase 3: post-atomic_retry state
             retry_count=1,
             max_retries=3,
             next_retry_at=past_time.isoformat(),
@@ -583,7 +582,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.PENDING.value,  # Phase 3
+            status=AdmissionState.QUEUED.value,  # Phase 3
             retry_count=1,
             max_retries=3,
             next_retry_at=future_time.isoformat(),
@@ -601,7 +600,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-1",
             project_id="project-a",
-            status=JobStatus.PENDING.value,  # Phase 3
+            status=AdmissionState.QUEUED.value,  # Phase 3
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
@@ -609,7 +608,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-2",
             project_id="project-b",
-            status=JobStatus.PENDING.value,  # Phase 3
+            status=AdmissionState.QUEUED.value,  # Phase 3
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
@@ -629,7 +628,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.COMPLETED.value,  # Not retry-eligible (terminal)
+            status=AdmissionState.DONE.value,  # Not retry-eligible (terminal)
             retry_count=1,
             next_retry_at=past_time.isoformat(),
         )
@@ -643,7 +642,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-123",
-            status=JobStatus.PENDING.value,  # Phase 3
+            status=AdmissionState.QUEUED.value,  # Phase 3
             retry_count=1,
             next_retry_at=None,  # No retry scheduled
         )
@@ -673,7 +672,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-found",
             project_id="project-a",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             next_retry_at=past_time.isoformat(),
         )
 
@@ -681,7 +680,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-future",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             next_retry_at=future_time.isoformat(),
         )
 
@@ -689,7 +688,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-completed",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             next_retry_at=past_time.isoformat(),
         )
 
@@ -697,7 +696,7 @@ class TestFindRetryableJobs:
         create_job_in_session(
             engine,
             job_id="job-no-retry",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             next_retry_at=None,
         )
 
@@ -706,7 +705,7 @@ class TestFindRetryableJobs:
             engine,
             job_id="job-project-b",
             project_id="project-b",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             next_retry_at=past_time.isoformat(),
         )
 
@@ -731,7 +730,7 @@ class TestRetryEngineIntegration:
         create_job_in_session(
             engine,
             job_id="job-cycle",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             retry_count=0,
             max_retries=2,
             error_message="First failure",
@@ -758,7 +757,7 @@ class TestRetryEngineIntegration:
         with SQLModelSession(engine) as session:
             from daemon.repositories.job_queue.models import JobItem
             job_update = session.get(JobItem, "job-cycle")
-            job_update.status = JobStatus.FAILED.value
+            job_update.status = AdmissionState.DONE.value
             job_update.admission_state = "done"
             job_update.error_message = "Second failure"
             job_update.failed_at = datetime.utcnow().isoformat()
@@ -776,7 +775,7 @@ class TestRetryEngineIntegration:
         with SQLModelSession(engine) as session:
             from daemon.repositories.job_queue.models import JobItem
             job_update = session.get(JobItem, "job-cycle")
-            job_update.status = JobStatus.FAILED.value
+            job_update.status = AdmissionState.DONE.value
             job_update.admission_state = "done"
             job_update.error_message = "Third failure"
             job_update.failed_at = datetime.utcnow().isoformat()
@@ -803,7 +802,7 @@ class TestRetryEngineIntegration:
         job = create_job_in_session(
             engine,
             job_id="job-config-test",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             failed_at="2026-06-28T00:00:00+00:00",
             retry_count=0,
             max_retries=None,  # Should use config default of 5

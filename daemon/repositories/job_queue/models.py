@@ -184,24 +184,27 @@ class JobItem(SQLModel, table=True):
 
     Jobs are serialized per-project to ensure only one job runs
     per project at a time.
+
+    Phase 5 (Job-as-Queue-Proxy): this model is a pure queue ticket.
+    Execution lifecycle state (``status``, ``started_at``,
+    ``completed_at``, ``result_summary``, ``error_message``,
+    ``cancelled_at``, ``failed_at``) is read from ``Instance.status``
+    and ``Instance`` timestamp columns via the resolver, not from
+    JobItem. ``admission_state`` is the sole write authority for
+    queue gating. See WorkResolver and Instance for the execution
+    side; see ``JobStatus``-derived vocabs in routers/services for
+    the canonical mapping until the deprecated enum is removed
+    in a later batch.
     """
     __tablename__ = "job_queue_items"
     __table_args__ = (
-        Index("idx_job_queue_status", "status"),
         Index("idx_job_queue_instance", "instance_id"),
         Index("idx_job_queue_project", "project_id"),
         Index("idx_job_queue_items_queue", "queue_id"),
-        Index("idx_job_queue_items_project_status_deleted", "project_id", "status", "deleted_at"),
-        Index("idx_job_queue_items_status_type_instance", "status", "job_type", "instance_id"),
-        # Phase 2 of feature/job-as-queue-proxy. The ``admission_state``
-        # column co-moves with ``status`` (Phase 2 dual-write
-        # contract, retired in Phase 4 cleanup). Phase 4 cleanup:
-        # ``admission_state`` is the sole write authority; the
-        # ``status`` column is no longer written and is frozen at
-        # the INSERT default. ``status`` itself is dropped in
-        # Phase 5. The index supports the ``WHERE admission_state IN
-        # ('queued', 'active')`` predicates used by the work-resolver
-        # sweep and the gating / count queries.
+        # The ``admission_state`` index supports the
+        # ``WHERE admission_state IN ('queued', 'active')``
+        # predicates used by the work-resolver sweep and the
+        # gating / count queries.
         Index("idx_job_queue_admission_state", "admission_state"),
         # M6 fix: partial UNIQUE index on ``idempotency_key`` so that
         # ``create_or_get_by_idempotency_key`` can use
@@ -248,33 +251,25 @@ class JobItem(SQLModel, table=True):
 
     # Scheduling
     priority: int = Field(default=5, ge=1, le=10)  # 1=lowest, 10=highest
-    status: str = Field(default=JobStatus.PENDING.value)
-    # Phase 4 cleanup: ``status`` is no longer written — the column
-    # exists for Phase 5 to drop, but stays frozen at the INSERT
-    # default (``PENDING``). ``admission_state`` is the sole
-    # authority. Defaults to QUEUED so freshly-inserted rows are
-    # already in the correct admission bucket without needing a
-    # backfill on the INSERT path.
+    # Phase 4 cleanup: ``admission_state`` is the sole authority
+    # for queue gating (Plan §3.1). Defaults to QUEUED so
+    # freshly-inserted rows are already in the correct admission
+    # bucket without needing a backfill on the INSERT path.
     admission_state: str = Field(
         default=AdmissionState.QUEUED.value,
         # ``server_default`` keeps ``SQLModel.metadata.create_all()`` (used
         # by the PG test conftest) in sync with the Alembic migration's
         # ``DEFAULT 'queued'``. Without it, raw-SQL INSERTs that omit
         # the column (e.g. tests/postgres/test_optimistic_locking.py)
-        # violate the NOT NULL constraint. Phase 5 will drop both the
-        # column and this default.
+        # violate the NOT NULL constraint.
         sa_column_kwargs={"server_default": text("'queued'")},
     )
 
-    # Timing
+    # Timing (queue-side only; execution timing lives on Instance)
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    started_at: str | None = None
-    completed_at: str | None = None
 
-    # Result (filled on completion)
+    # Work-record relationship (execution state is read from Instance)
     instance_id: str | None = Field(default=None)
-    error_message: str | None = None
-    result_summary: str | None = None
 
     # Metadata (avoiding SQLAlchemy's reserved 'metadata' attribute)
     job_metadata: dict[str, Any] = Field(
@@ -282,21 +277,22 @@ class JobItem(SQLModel, table=True):
         sa_column=Column("metadata", JSONBType)
     )
 
-    # Cancellation
-    cancelled_at: str | None = None
-
     # Soft delete
     deleted_at: str | None = None
 
     # Job type: "task" (serial) or "message" (parallel)
     job_type: str = Field(default="task")
 
-    # Retry handling
+    # Retry counters and scheduling (queue-side).
     retry_count: int = Field(default=0, ge=0)
     max_retries: int | None = Field(default=None)
     idempotency_key: str | None = Field(default=None, max_length=255)
-    failed_at: str | None = Field(default=None)
     next_retry_at: str | None = Field(default=None)
+    # Retry marker — distinguishes a FAILED-path ``done`` row
+    # (retryable) from COMPLETED/CANCELLED ``done`` rows (terminal).
+    # Read by JobRetryEngine. The plan deferred full removal to a
+    # future batch that migrates the retry engine off this marker.
+    failed_at: str | None = Field(default=None)
 
     # Optimistic locking version. SQLAlchemy's version_id_col makes every
     # ORM-flushed UPDATE / DELETE on this row append `AND version = :expected`
@@ -318,7 +314,16 @@ class JobItem(SQLModel, table=True):
     __mapper_args__ = {"version_id_col": _job_item_version_col}
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dictionary for serialization."""
+        """Convert to dictionary for serialization.
+
+        Phase 5: only queue-side fields are emitted. Execution
+        lifecycle state (``status``, ``started_at``,
+        ``completed_at``, ``result_summary``, ``error_message``,
+        ``cancelled_at``, ``failed_at``) is read from the joined
+        ``Instance`` via the resolver (see WorkResolver) — not
+        from this row. Callers that need execution state must
+        resolve the work record explicitly.
+        """
         return {
             "job_id": self.job_id,
             "agent_id": self.agent_id,
@@ -328,25 +333,17 @@ class JobItem(SQLModel, table=True):
             "project_id": self.project_id,
             "queue_id": self.queue_id,
             "priority": self.priority,
-            "status": ADMISSION_STATE_TO_STATUS.get(
-                self.admission_state, JobStatus.PENDING.value
-            ),
             "admission_state": self.admission_state,
             "created_at": self.created_at,
-            "started_at": self.started_at,
-            "completed_at": self.completed_at,
             "instance_id": self.instance_id,
-            "error_message": self.error_message,
-            "result_summary": self.result_summary,
             "metadata": dict(self.job_metadata) if self.job_metadata else {},
-            "cancelled_at": self.cancelled_at,
             "deleted_at": self.deleted_at,
             "retry_count": self.retry_count,
             "max_retries": self.max_retries,
             "idempotency_key": self.idempotency_key,
             "job_type": self.job_type,
-            "failed_at": self.failed_at,
             "next_retry_at": self.next_retry_at,
+            "failed_at": self.failed_at,
         }
 
 

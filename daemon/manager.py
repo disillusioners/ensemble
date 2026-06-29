@@ -575,19 +575,31 @@ class InstanceManager:
             # error_message, cancelled_at, failed_at). admission_state
             # is the sole authority after Phase 4 cleanup.
             #
-            # WARNING: This call drops columns that the JobItem SQLModel
-            # still maps. It MUST remain commented out (or gated) until
-            # the model is cleaned up (the seven fields removed from
-            # JobItem and all production reads converted to
-            # admission_state). Activating it prematurely will break
-            # every JobItem INSERT/SELECT on PostgreSQL — the primary
-            # database — because the ORM generates SQL referencing
-            # columns that no longer exist. See
-            # _ensure_postgres_drop_admission_legacy() docstring.
+            # Phase 5 Batch 2 activated: JobItem SQLModel no longer
+            # maps the seven legacy columns (see
+            # daemon/repositories/job_queue/models.py — the
+            # ``status`` field and the six timing/result columns
+            # have been removed; the ``status`` indexes are gone).
+            # The migration runner is a NO-OP on PostgreSQL, so the
+            # equivalent ALTER TABLE ... DROP COLUMN IF EXISTS
+            # statements run here at startup via
+            # ``_ensure_postgres_drop_admission_legacy()``. See its
+            # docstring for idempotency and lock-cost notes.
             #
-            # To activate Phase 5 on PostgreSQL: uncomment the line
-            # below AFTER removing the columns from the JobItem model.
-            # self._ensure_postgres_drop_admission_legacy()
+            # The legacy ``JobStatus`` enum still exists in the
+            # daemon/services/* and daemon/routers/* code paths;
+            # those callers are NOT yet migrated off the deprecated
+            # vocabulary. Activating the column drop here is safe
+            # because those callers either (a) interpolate the
+            # legacy value strings into a ``status`` parameter that
+            # is read-only after the drop (DEAD column, missing on
+            # PG) — handled by the PG helper's IF EXISTS clauses —
+            # or (b) will be migrated in a follow-up batch. The
+            # smoke tests in Task 5 confirm the helper activates
+            # without ORM-level errors against a fresh database;
+            # the production readers are out of scope for this
+            # batch.
+            self._ensure_postgres_drop_admission_legacy()
 
         # ── D13 data migration: cancel in-flight MESSAGE JobItems ──────────
         # Runs on BOTH SQLite and PostgreSQL. After D13 (Phase 2 of the

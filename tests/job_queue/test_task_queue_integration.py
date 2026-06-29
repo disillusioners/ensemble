@@ -15,7 +15,7 @@ from sqlalchemy.pool import QueuePool
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import AdmissionState, JobRepository, JobQueueRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
@@ -161,8 +161,7 @@ class TestIntegrationBasicWorkflow:
         
         assert completed is not None
         assert completed.admission_state == AdmissionState.DONE.value
-        assert completed.completed_at is not None
-        
+
         # Step 4: Verify final state
         final = await integration_service.get_job(job.job_id)
         assert final.admission_state == AdmissionState.DONE.value
@@ -616,8 +615,8 @@ class TestIntegrationCrashRecovery:
         # direct status writes, and the atomic variant is race-safe.
         updated = integration_service._repository.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PENDING.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.QUEUED.value,
             instance_id=None,  # Clear instance
         )
         assert updated is not None
@@ -944,7 +943,7 @@ class TestIntegrationPriorityQueue:
         for _ in jobs:
             # Get current processing job from repository and complete it
             processing, _ = integration_service._repository.list(
-                statuses=[JobStatus.PROCESSING.value],
+                statuses=[AdmissionState.ACTIVE.value],
                 project_id="project-1"
             )
             if processing:
@@ -1097,7 +1096,7 @@ class TestIntegrationEndToEnd:
             for i in range(jobs_per_project):
                 # Get current processing job from repository and complete it
                 processing, _ = integration_service._repository.list(
-                    statuses=[JobStatus.PROCESSING.value],
+                    statuses=[AdmissionState.ACTIVE.value],
                     project_id=f"project-{project_id}"
                 )
                 if processing:
@@ -1105,7 +1104,7 @@ class TestIntegrationEndToEnd:
                 # Start next job if there is one
                 if i + 1 < jobs_per_project:
                     next_pending, _ = integration_service._repository.list(
-                        statuses=[JobStatus.PENDING.value],
+                        statuses=[AdmissionState.QUEUED.value],
                         project_id=f"project-{project_id}"
                     )
                     if next_pending:

@@ -245,7 +245,7 @@ def _seed_message_job_item(
     *,
     instance_id: str,
     job_id: str | None = None,
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
 ) -> str:
     """Insert a JobItem row of ``job_type='message'`` for the given instance.
 
@@ -264,7 +264,6 @@ def _seed_message_job_item(
             source="api",
             instance_id=instance_id,
             job_type="message",
-            status=status,
 
             admission_state=status_to_admission(status),
         )
@@ -443,7 +442,7 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
         _seed_message_job_item(
             engine,
             instance_id=root_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         result = service._process_child_completion_db_sync(
@@ -471,7 +470,7 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
                 )
             ).all()
             assert len(jobs) == 1
-            assert jobs[0].status == JobStatus.PROCESSING.value
+            assert jobs[0].status == AdmissionState.ACTIVE.value
 
     def test_stale_pending_message_job_does_not_block_waiting_children(
         self, engine: Engine
@@ -491,7 +490,7 @@ class TestStaleMessageJobDoesNotBlockWaitingChildren:
         _seed_message_job_item(
             engine,
             instance_id=root_id,
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
 
         result = service._process_child_completion_db_sync(

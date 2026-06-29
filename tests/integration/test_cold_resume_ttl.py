@@ -50,7 +50,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.instance_lifecycle import InstanceLifecycleService
 from daemon.write_pause_guard import WritePauseGuard
@@ -148,9 +148,8 @@ def _seed_paused_job(engine: Engine, instance_id: str) -> str:
             agent_id="developer",
             agent_dir="/tmp/agents/developer",
             message="paused message",
-            status=JobStatus.PAUSED.value,
 
-            admission_state=status_to_admission(JobStatus.PAUSED.value),
+            admission_state=status_to_admission(AdmissionState.ACTIVE.value),
             created_at=now_iso,
         )
         s.add(job)
@@ -297,13 +296,13 @@ class TestColdResumeAfterTTLEviction:
             assert inst.status == inst_status_1
             assert inst.paused_at == inst_paused_at_1
             job = s.get(JobItem, job_id)
-            assert job.status == job_status_1
+            assert job.admission_state == job_status_1
             task = s.get(Task, task_id)
             assert task.status == task_status_1
 
         # State after second pass equals state after first pass.
         assert inst_status_1 == InstanceStatus.RUNNING.value
-        assert job_status_1 == JobStatus.PROCESSING.value
+        assert job_status_1 == AdmissionState.ACTIVE.value
         assert task_status_1 == TaskStatus.CANCELLED.value
 
     def test_resume_db_sync_handles_empty_tree(self, engine):

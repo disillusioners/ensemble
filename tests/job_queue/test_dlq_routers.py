@@ -224,7 +224,7 @@ class TestDLQEndpoints:
         # Mock job returned after replay
         mock_job = MagicMock()
         mock_job.job_id = "job-456"
-        mock_job.status = "pending"
+        mock_job.admission_state = "queued"
         
         dlq_service.get_dlq = MagicMock(return_value=sample_item)
         dlq_service.replay_from_dlq = MagicMock(return_value=mock_job)

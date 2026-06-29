@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.services.job_queue_service import JobQueueService, DemandState, TERMINAL_STATUSES
 
 
@@ -50,13 +50,13 @@ class MockJob:
     # the legacy ``status`` value onto its ``AdmissionState`` bucket so
     # service-level assertions on ``admission_state`` see the right value.
     _STATUS_TO_ADMISSION = {
-        JobStatus.PENDING.value: AdmissionState.QUEUED.value,
-        JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
-        JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
-        JobStatus.COMPLETED.value: AdmissionState.DONE.value,
-        JobStatus.FAILED.value: AdmissionState.DONE.value,
-        JobStatus.CANCELLED.value: AdmissionState.DONE.value,
-        JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+        AdmissionState.QUEUED.value: AdmissionState.QUEUED.value,
+        AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
+        AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
+        AdmissionState.DONE.value: AdmissionState.DONE.value,
+        AdmissionState.DONE.value: AdmissionState.DONE.value,
+        AdmissionState.DONE.value: AdmissionState.DONE.value,
+        AdmissionState.DEAD.value: AdmissionState.DEAD.value,
     }
 
     def __init__(
@@ -65,7 +65,7 @@ class MockJob:
         agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
-        status: str = JobStatus.PENDING.value,
+        status: str = AdmissionState.QUEUED.value,
         instance_id: str | None = None,
         job_type: str = "task",
         admission_state: str | None = None,
@@ -208,7 +208,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -244,7 +244,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -280,7 +280,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -316,7 +316,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -352,7 +352,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -382,7 +382,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=None,  # TASK job - no pre-set instance
             job_type="task",
         )
@@ -392,7 +392,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id="new-instance-123",
             job_type="task",
         )
@@ -419,7 +419,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=None,
             job_type="task",
         )
@@ -427,7 +427,7 @@ class TestStartJobInstanceStatusChecks:
 
         started_job = MockJob(
             job_id=job_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id="new-instance-123",
             job_type="task",
         )
@@ -455,7 +455,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id="non-existent-instance",
             job_type="task",
         )
@@ -483,7 +483,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -546,7 +546,7 @@ class TestStartJobInstanceStatusChecks:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -650,7 +650,7 @@ class TestTerminateInstanceJobCleanup:
             job_id="processing-task",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -686,7 +686,7 @@ class TestTerminateInstanceJobCleanup:
             job_id="pending-task",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -718,7 +718,7 @@ class TestTerminateInstanceJobCleanup:
             job_id="processing-message",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id=instance_id,
             job_type="message",
         )
@@ -751,7 +751,7 @@ class TestTerminateInstanceJobCleanup:
             job_id="pending-message",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="message",
         )
@@ -786,7 +786,7 @@ class TestTerminateInstanceJobCleanup:
             job_id="failed-job",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -818,7 +818,7 @@ class TestTerminateInstanceJobCleanup:
             job_id="cancelled-job",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.CANCELLED.value,
+            status=AdmissionState.DONE.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -849,7 +849,7 @@ class TestTerminateInstanceJobCleanup:
             job_id="dlq-job",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.DEAD_LETTER.value,
+            status=AdmissionState.DEAD.value,
             instance_id=instance_id,
             job_type="task",
         )
@@ -888,21 +888,21 @@ class TestTerminateInstanceJobCleanup:
             job_id="pending-task",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             job_type="task",
         )
         processing_message = MockJob(
             job_id="processing-message",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             job_type="message",
         )
         completed_job = MockJob(
             job_id="completed-job",
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             job_type="task",
         )
 
@@ -1011,7 +1011,7 @@ class TestJobProcessorOrphanDetection:
         orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
-        orphan_task.status = JobStatus.PROCESSING.value
+        orphan_task.status = AdmissionState.ACTIVE.value
         orphan_task.instance_id = terminated_instance_id
         orphan_task.job_type = "task"
         orphan_task.message = "test"
@@ -1067,7 +1067,7 @@ class TestJobProcessorOrphanDetection:
         orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
-        orphan_task.status = JobStatus.PROCESSING.value
+        orphan_task.status = AdmissionState.ACTIVE.value
         orphan_task.instance_id = completed_instance_id
         orphan_task.job_type = "task"
         orphan_task.message = "test"
@@ -1120,7 +1120,7 @@ class TestJobProcessorOrphanDetection:
         orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
-        orphan_task.status = JobStatus.PROCESSING.value
+        orphan_task.status = AdmissionState.ACTIVE.value
         orphan_task.instance_id = error_instance_id
         orphan_task.job_type = "task"
         orphan_task.message = "test"
@@ -1173,7 +1173,7 @@ class TestJobProcessorOrphanDetection:
         orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
-        orphan_task.status = JobStatus.PROCESSING.value
+        orphan_task.status = AdmissionState.ACTIVE.value
         orphan_task.instance_id = paused_instance_id
         orphan_task.job_type = "task"
         orphan_task.message = "test"
@@ -1224,7 +1224,7 @@ class TestJobProcessorOrphanDetection:
         orphan_task.agent_id = "developer"
         orphan_task.project_id = "project-1"
         orphan_task.queue_id = "queue-1"
-        orphan_task.status = JobStatus.PROCESSING.value
+        orphan_task.status = AdmissionState.ACTIVE.value
         orphan_task.instance_id = missing_instance_id
         orphan_task.job_type = "task"
         orphan_task.message = "test"
@@ -1277,7 +1277,7 @@ class TestJobProcessorOrphanDetection:
         message_job.agent_id = "developer"
         message_job.project_id = "project-1"
         message_job.queue_id = "queue-1"
-        message_job.status = JobStatus.PROCESSING.value
+        message_job.status = AdmissionState.ACTIVE.value
         message_job.instance_id = completed_instance_id
         message_job.job_type = "message"
         message_job.message = "test message"
@@ -1336,7 +1336,7 @@ class TestJobProcessorOrphanDetection:
         message_job.agent_id = "developer"
         message_job.project_id = "project-1"
         message_job.queue_id = "queue-1"
-        message_job.status = JobStatus.PROCESSING.value
+        message_job.status = AdmissionState.ACTIVE.value
         message_job.instance_id = terminated_instance_id
         message_job.job_type = "message"
         message_job.message = "test message"
@@ -1393,7 +1393,7 @@ class TestJobProcessorOrphanDetection:
         message_job.agent_id = "developer"
         message_job.project_id = "project-1"
         message_job.queue_id = "queue-1"
-        message_job.status = JobStatus.PROCESSING.value
+        message_job.status = AdmissionState.ACTIVE.value
         message_job.instance_id = completed_instance_id
         message_job.job_type = "message"
         message_job.message = "test message"

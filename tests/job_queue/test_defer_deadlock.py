@@ -14,7 +14,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from daemon.services.job_processor import JobProcessor
-from daemon.repositories.job_queue.models import JobItem, JobStatus, QueueType
+from daemon.repositories.job_queue.models import JobItem, AdmissionState, QueueType
 
 
 class MockProject:
@@ -51,7 +51,7 @@ class MockJob:
         agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
-        status: str = JobStatus.PENDING.value,
+        status: str = AdmissionState.QUEUED.value,
     ):
         self.job_id = job_id
         self.agent_id = agent_id
@@ -144,10 +144,10 @@ class TestDeferQueueDeadlockScenario:
         defer_queue_b = MockQueue("defer-queue-B", "project-1", is_paused=False, queue_type="defer")
 
         # Both defer queues have PENDING jobs
-        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PENDING.value)
-        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=JobStatus.PENDING.value)
+        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.QUEUED.value)
+        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=AdmissionState.QUEUED.value)
 
-        started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PROCESSING.value)
+        started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a.instance_id = "instance-A"
 
         mock_project_repo.list_projects.return_value = [project]
@@ -194,11 +194,11 @@ class TestDeferQueueDeadlockScenario:
         defer_queue_c = MockQueue("defer-queue-C", "project-1", is_paused=False, queue_type="defer")
 
         # All three defer queues have PENDING jobs
-        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PENDING.value)
-        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=JobStatus.PENDING.value)
-        job_c = MockJob("job-C", project_id="project-1", queue_id="defer-queue-C", status=JobStatus.PENDING.value)
+        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.QUEUED.value)
+        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=AdmissionState.QUEUED.value)
+        job_c = MockJob("job-C", project_id="project-1", queue_id="defer-queue-C", status=AdmissionState.QUEUED.value)
 
-        started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PROCESSING.value)
+        started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a.instance_id = "instance-A"
 
         mock_project_repo.list_projects.return_value = [project]
@@ -248,9 +248,9 @@ class TestDeferQueueDeadlockScenario:
         defer_queue_b = MockQueue("defer-queue-B", "project-1", is_paused=False, queue_type="defer")
 
         # FIFO has PENDING, both defer queues have PENDING
-        fifo_job = MockJob("job-fifo", project_id="project-1", queue_id="fifo-queue", status=JobStatus.PENDING.value)
-        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PENDING.value)
-        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=JobStatus.PENDING.value)
+        fifo_job = MockJob("job-fifo", project_id="project-1", queue_id="fifo-queue", status=AdmissionState.QUEUED.value)
+        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.QUEUED.value)
+        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=AdmissionState.QUEUED.value)
 
         mock_project_repo.list_projects.return_value = [project]
         mock_queue_repo.list_by_project.return_value = [fifo_queue, defer_queue_a, defer_queue_b]
@@ -296,10 +296,10 @@ class TestDeferQueueDeadlockScenario:
         defer_queue_b = MockQueue("defer-queue-B", "project-1", is_paused=False, queue_type="defer")
 
         # FIFO has no jobs, both defer queues have PENDING
-        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PENDING.value)
-        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=JobStatus.PENDING.value)
+        job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.QUEUED.value)
+        job_b = MockJob("job-B", project_id="project-1", queue_id="defer-queue-B", status=AdmissionState.QUEUED.value)
 
-        started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PROCESSING.value)
+        started_job_a = MockJob("job-A", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a.instance_id = "instance-A"
 
         mock_project_repo.list_projects.return_value = [project]
@@ -352,12 +352,12 @@ class TestDeferQueueConcurrencyLimit:
         defer_queue_b = MockQueue("defer-queue-B", "project-1", is_paused=False, queue_type="defer", concurrency_limit=1)
 
         # Each queue has 2 pending jobs
-        job_a1 = MockJob("job-A1", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PENDING.value)
-        job_a2 = MockJob("job-A2", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PENDING.value)
-        job_b1 = MockJob("job-B1", project_id="project-1", queue_id="defer-queue-B", status=JobStatus.PENDING.value)
-        job_b2 = MockJob("job-B2", project_id="project-1", queue_id="defer-queue-B", status=JobStatus.PENDING.value)
+        job_a1 = MockJob("job-A1", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.QUEUED.value)
+        job_a2 = MockJob("job-A2", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.QUEUED.value)
+        job_b1 = MockJob("job-B1", project_id="project-1", queue_id="defer-queue-B", status=AdmissionState.QUEUED.value)
+        job_b2 = MockJob("job-B2", project_id="project-1", queue_id="defer-queue-B", status=AdmissionState.QUEUED.value)
 
-        started_job_a1 = MockJob("job-A1", project_id="project-1", queue_id="defer-queue-A", status=JobStatus.PROCESSING.value)
+        started_job_a1 = MockJob("job-A1", project_id="project-1", queue_id="defer-queue-A", status=AdmissionState.ACTIVE.value)
         started_job_a1.instance_id = "instance-A1"
 
         mock_project_repo.list_projects.return_value = [project]

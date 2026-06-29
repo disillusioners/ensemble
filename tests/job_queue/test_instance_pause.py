@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from daemon.models.instance import InstanceStatus
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 from daemon.services.job_queue_service import JobQueueService, DemandState
 
 
@@ -51,7 +51,7 @@ class MockJob:
         agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
-        status: str = JobStatus.PENDING.value,
+        status: str = AdmissionState.QUEUED.value,
         instance_id: str | None = None,
         job_type: str = "task",
         admission_state: str | None = None,
@@ -139,7 +139,7 @@ class TestJobQueueServiceInstancePause:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="message",
         )
@@ -176,7 +176,7 @@ class TestJobQueueServiceInstancePause:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=instance_id,
             job_type="message",
         )
@@ -192,7 +192,7 @@ class TestJobQueueServiceInstancePause:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id=instance_id,
             job_type="message",
         )
@@ -225,7 +225,7 @@ class TestJobQueueServiceInstancePause:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             instance_id=None,  # TASK jobs don't have pre-set instance_id
             job_type="task",
         )
@@ -236,7 +236,7 @@ class TestJobQueueServiceInstancePause:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             instance_id="new-instance-123",  # Generated on start
             job_type="task",
         )
@@ -275,14 +275,14 @@ class TestJobQueueServiceInstancePause:
             job_id=job_id,
             project_id="project-1",
             queue_id="queue-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             job_type="task",
         )
         mock_repository.get.return_value = job
 
         started_job = MockJob(
             job_id=job_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             job_type="task",
         )
         # B1: mock the single-transaction method
@@ -384,7 +384,7 @@ class TestJobProcessorInstancePause:
         job.agent_id = "developer"
         job.project_id = "project-1"
         job.queue_id = "queue-1"
-        job.status = JobStatus.PENDING.value
+        job.admission_state = AdmissionState.QUEUED.value
         job.instance_id = instance_id
         job.job_type = "message"
         job.message = "test message"
@@ -447,7 +447,7 @@ class TestJobProcessorInstancePause:
         job.agent_id = "developer"
         job.project_id = "project-1"
         job.queue_id = "queue-1"
-        job.status = JobStatus.PENDING.value
+        job.admission_state = AdmissionState.QUEUED.value
         job.instance_id = instance_id
         job.job_type = "message"
         job.message = "test message"
@@ -458,7 +458,7 @@ class TestJobProcessorInstancePause:
         started_job.agent_id = "developer"
         started_job.project_id = "project-1"
         started_job.queue_id = "queue-1"
-        started_job.status = JobStatus.PROCESSING.value
+        started_job.status = AdmissionState.ACTIVE.value
         started_job.instance_id = instance_id
         started_job.job_type = "message"
 

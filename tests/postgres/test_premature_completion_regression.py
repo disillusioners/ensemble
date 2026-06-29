@@ -51,7 +51,7 @@ from daemon.config import JobSystemConfig
 from daemon.repositories.event.models import Event  # noqa: F401
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue import JobItem, JobRepository, JobStatus
+from daemon.repositories.job_queue import JobItem, JobRepository, AdmissionState
 from daemon.repositories.message_queue.repository import SQLModelMessageQueueRepository
 import pytest
 
@@ -201,7 +201,7 @@ def _make_job(
     *,
     instance_id: str,
     project_id: str = "test-project",
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
 ) -> JobItem:
     """Insert a JobItem row into the test DB."""
     job = JobItem(
@@ -212,7 +212,6 @@ def _make_job(
         source="api",
         job_type="task",
         priority=5,
-        status=status,
 
         admission_state=status_to_admission(status),
         instance_id=instance_id,
@@ -429,7 +428,7 @@ class TestMultiWaveCompletion:
             #   * Flag ON: waiting_for=1 > 0 in DB → gate defers.
             #   * Flag OFF: CM has 1 pending correlation → gate defers.
             job_status = _read_job_status(pg_engine, job_id)
-            assert job_status == JobStatus.PROCESSING.value, (
+            assert job_status == AdmissionState.ACTIVE.value, (
                 f"Gate should have deferred: job transitioned to {job_status} "
                 f"(DB waiting_for={_read_waiting_for(pg_engine, parent_id)}, "
                 f"CM pending={cm.get_pending_count(parent_id)})"
@@ -455,7 +454,7 @@ class TestMultiWaveCompletion:
             await notify_corr_resolve(parent_id, child_b, msg_b)
             await asyncio.sleep(0.1)
             job_status_w2 = _read_job_status(pg_engine, job_id)
-            assert job_status_w2 == JobStatus.COMPLETED.value, (
+            assert job_status_w2 == AdmissionState.DONE.value, (
                 f"Job should be COMPLETED after wave 2 resolved, got {job_status_w2}"
             )
         finally:
@@ -509,7 +508,7 @@ class TestMultiWaveCompletion:
 
             # Job should transition to COMPLETED
             job_status = _read_job_status(pg_engine, job_id)
-            assert job_status == JobStatus.COMPLETED.value, (
+            assert job_status == AdmissionState.DONE.value, (
                 f"Job should be COMPLETED when waiting_for=0, got {job_status}"
             )
         finally:
@@ -549,7 +548,7 @@ class TestRevivalSafetyNet:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         assert _read_instance_status(pg_engine, parent_id) == InstanceStatus.COMPLETED.value
@@ -684,7 +683,7 @@ class TestStuckJobRecovery:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -718,7 +717,7 @@ class TestStuckJobRecovery:
                     break
 
             # Job should still be PROCESSING (deferred).
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value, (
                 f"Job should still be PROCESSING after wave 1 deferred, "
                 f"got {_read_job_status(pg_engine, job_id)}"
             )
@@ -740,7 +739,7 @@ class TestStuckJobRecovery:
 
             # Now job should be COMPLETED (waiting_for=0 + CM complete).
             job_status = _read_job_status(pg_engine, job_id)
-            assert job_status == JobStatus.COMPLETED.value
+            assert job_status == AdmissionState.DONE.value
         finally:
             await cm.stop()
             set_correlation_manager(None)
@@ -786,7 +785,7 @@ class TestTerminalStateProtection:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         # W1 Python guard (mirrors instance.py:614-617): the revival
@@ -1036,7 +1035,7 @@ class TestEndToEndMultiWave:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -1077,7 +1076,7 @@ class TestEndToEndMultiWave:
 
             # After wave 1 complete but with wave 2 pending:
             job_status_after_w1 = _read_job_status(pg_engine, job_id)
-            assert job_status_after_w1 == JobStatus.PROCESSING.value, (
+            assert job_status_after_w1 == AdmissionState.ACTIVE.value, (
                 f"Job should be PROCESSING after wave 1 with wave 2 pending, "
                 f"got {job_status_after_w1}"
             )
@@ -1100,7 +1099,7 @@ class TestEndToEndMultiWave:
 
             # All waves complete, waiting_for=0 → job should be COMPLETED
             job_status_final = _read_job_status(pg_engine, job_id)
-            assert job_status_final == JobStatus.COMPLETED.value, (
+            assert job_status_final == AdmissionState.DONE.value, (
                 f"Job should be COMPLETED after all waves, got {job_status_final}"
             )
         finally:
@@ -1168,7 +1167,7 @@ class TestProductionPathFinalizeJob:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -1193,7 +1192,7 @@ class TestProductionPathFinalizeJob:
         # RuntimeError. The job must remain in PROCESSING (not
         # FAILED) so the configuration error is visible to operators
         # and not masked by spurious per-job FAILED transitions.
-        assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+        assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value, (
             f"PRODUCTION PATH (CM, W2): expected job to remain in "
             f"PROCESSING (RuntimeError propagates), got "
             f"{_read_job_status(pg_engine, job_id)}"
@@ -1233,7 +1232,7 @@ class TestProductionPathFinalizeJob:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -1253,7 +1252,7 @@ class TestProductionPathFinalizeJob:
         # W2 contract: the W3 fail-safe does NOT catch a propagated
         # RuntimeError. Job must remain in PROCESSING (not FAILED) so
         # the misconfiguration is visible to operators.
-        assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+        assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value, (
             f"PRODUCTION PATH (CM, W2): expected job to remain in "
             f"PROCESSING (RuntimeError propagates), got "
             f"{_read_job_status(pg_engine, job_id)}"
@@ -1294,7 +1293,7 @@ class TestProductionPathFinalizeJob:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -1323,7 +1322,7 @@ class TestProductionPathFinalizeJob:
             # propagated RuntimeError. Job must remain in
             # PROCESSING (not FAILED) so the misconfiguration is
             # visible to operators.
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value, (
                 f"PRODUCTION PATH (CM, W2): expected job to remain in "
                 f"PROCESSING (RuntimeError propagates), got "
                 f"{_read_job_status(pg_engine, job_id)}"
@@ -1363,7 +1362,7 @@ class TestProductionPathFinalizeJob:
         _make_job(
             pg_engine, job_id,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         job = pg_job_repo.get(job_id)
@@ -1397,7 +1396,7 @@ class TestProductionPathFinalizeJob:
             # propagated RuntimeError. Job must remain in
             # PROCESSING (not FAILED) so the misconfiguration is
             # visible to operators.
-            assert _read_job_status(pg_engine, job_id) == JobStatus.PROCESSING.value, (
+            assert _read_job_status(pg_engine, job_id) == AdmissionState.ACTIVE.value, (
                 f"PRODUCTION PATH (CM, W2): expected job to remain in "
                 f"PROCESSING (RuntimeError propagates), got "
                 f"{_read_job_status(pg_engine, job_id)}"

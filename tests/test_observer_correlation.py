@@ -390,7 +390,7 @@ class TestIdempotency:
         first_call = mocks["sync_mock"].call_args
 
         # Simulate job already transitioned (idempotency guard).
-        job.status = JobStatus.COMPLETED.value
+        job.admission_state = AdmissionState.DONE.value
 
         # Second call: idempotency guard catches it.
         await observer.handle_correlation_complete(job.instance_id, "completed")
@@ -827,13 +827,13 @@ class TestC2ConcurrentFinalize:
             ):
                 nonlocal call_count
                 call_count += 1
-                if job.status != JobStatus.PROCESSING.value:
+                if job.admission_state != AdmissionState.ACTIVE.value:
                     raise InvalidTransitionError(
                         job_id=job_id_arg,
-                        from_status=JobStatus.PROCESSING.value,
-                        to_status=JobStatus.COMPLETED.value,
+                        from_status=AdmissionState.ACTIVE.value,
+                        to_status=AdmissionState.DONE.value,
                     )
-                job.status = JobStatus.COMPLETED.value
+                job.admission_state = AdmissionState.DONE.value
                 return _FinalizeJobResult(
                     skip=False,
                     terminal_status=InstanceStatus.COMPLETED.value,

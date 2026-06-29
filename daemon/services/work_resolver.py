@@ -462,20 +462,26 @@ def _instance_started_at(
 ) -> str | None:
     """Resolve the ``started_at`` value for a JobItem-backed WorkRecord.
 
-    Phase 1 (Job as Queue Proxy) precedence:
+    Phase 5 (Job as Queue Proxy) precedence — Instance-side authoritative:
 
     1. ``Instance.last_activity_at`` — the worker pool's first heartbeat
        on the instance; the closest analogue to "work began".
     2. ``Instance.created_at`` — the Instance row's creation time as a
        fallback when ``last_activity_at`` has not been set yet (e.g. a
        freshly-spawned instance that has not yet checked in).
-    3. ``job.started_at`` — the JobItem mirror column, still populated
-       during Phase 1's transition period.
+    3. Fallback ``None`` — the previous ``job.started_at`` JobItem mirror
+       column was dropped in Phase B (see phase5-breakage-inventory
+       B10). The Instance-side sources above are now authoritative; if
+       neither is populated, the function returns ``None`` rather than
+       reading the deprecated column.
 
     Args:
-        instance: Optional pre-fetched Instance row. ``None`` short-
-            circuits to the JobItem mirror.
-        job: The JobItem row whose mirror ``started_at`` is the fallback.
+        instance: Optional pre-fetched Instance row. ``None`` falls
+            through to the ``None`` fallback (no JobItem mirror to
+            consult under Phase 5).
+        job: The JobItem row. Retained for API symmetry with the
+            completed_at resolver below; no attributes on it are read
+            directly after Phase 5.
 
     Returns:
         An ISO-8601 string, or ``None`` if no timing source is available.
@@ -487,7 +493,11 @@ def _instance_started_at(
         value = _serialize_instance_datetime(instance.created_at)
         if value is not None:
             return value
-    return job.started_at
+    # Phase 5: ``job.started_at`` mirror column was dropped from the
+    # JobItem model in Phase B. The Instance-side sources above are
+    # authoritative; fall through to ``None`` rather than reading the
+    # deprecated column.
+    return None
 
 
 def _instance_completed_at(
@@ -498,15 +508,18 @@ def _instance_completed_at(
 ) -> str | None:
     """Resolve the ``completed_at`` value for a JobItem-backed WorkRecord.
 
-    Phase 1 (Job as Queue Proxy) precedence:
+    Phase 5 (Job as Queue Proxy) precedence — Instance-side authoritative:
 
     1. ``Instance.updated_at`` — only meaningful when the Instance is
        in a terminal state. ``updated_at`` is the last write before the
        terminal transition (the transaction that flips ``status`` and
        the Instance mirrors is one DB write — see ``_finalize_job_db_sync``
        Step 2).
-    2. ``job.completed_at`` — the JobItem mirror column, still populated
-       during Phase 1's transition period.
+    2. Fallback ``None`` — the previous ``job.completed_at`` JobItem mirror
+       column was dropped in Phase B (see phase5-breakage-inventory
+       B10). The Instance-side sources above are now authoritative; if
+       the Instance is non-terminal (or absent) the function returns
+       ``None`` rather than reading the deprecated column.
 
     A non-terminal Instance is treated as "not yet completed" — we
     surface ``None`` rather than the Instance ``updated_at`` so the
@@ -536,7 +549,11 @@ def _instance_completed_at(
         value = _serialize_instance_datetime(instance.updated_at)
         if value is not None:
             return value
-    return job.completed_at
+    # Phase 5: ``job.completed_at`` mirror column was dropped from the
+    # JobItem model in Phase B. The Instance-side sources above are
+    # authoritative; fall through to ``None`` rather than reading the
+    # deprecated column.
+    return None
 
 
 # ── WorkResolverService ────────────────────────────────────────────────────
@@ -1140,11 +1157,13 @@ class WorkResolverService:
             instance_id=job.instance_id,
             project_id=job.project_id,
             agent_id=job.agent_id,
-            # Phase 1 transitional: JobItem mirror columns. See the
-            # method docstring for why Instance-sourcing lands in a
-            # later phase.
-            result_summary=job.result_summary,
-            error=job.error_message,
+            # Phase 5: ``job.result_summary`` and ``job.error_message``
+            # mirror columns were dropped from the JobItem model in
+            # Phase B. Source from the Instance/WorkRecord resolver
+            # path; pass ``None`` here so the caller can rely on the
+            # resolver's derived values instead of stale mirror fields.
+            result_summary=None,
+            error=None,
             created_at=_parse_iso_datetime(job.created_at),
             # Timing: prefer the Instance columns when an Instance row
             # was provided (or just looked up above). ``last_activity_at``

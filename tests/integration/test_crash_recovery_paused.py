@@ -62,7 +62,7 @@ from daemon.repositories.dependency_bus.repository import (
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
-from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.services.dependency_bus import DependencyBus, FollowUp
 from daemon.services.job_recovery_service import JobRecoveryService
@@ -159,9 +159,8 @@ def _seed_processing_job(engine: Engine, instance_id: str) -> str:
             agent_id="developer",
             agent_dir="/tmp/agents/developer",
             message="test message",
-            status=JobStatus.PROCESSING.value,
 
-            admission_state=status_to_admission(JobStatus.PROCESSING.value),
+            admission_state=status_to_admission(AdmissionState.ACTIVE.value),
             created_at=now_iso,
         )
         s.add(job)
@@ -295,7 +294,7 @@ class TestC2JobRecoveryReconciliation:
             assert job is not None
             assert job.admission_state == AdmissionState.ACTIVE.value, (
                 f"Expected PROCESSING → PAUSED reconciliation, "
-                f"got status={job.status}"
+                f"got admission_state={job.admission_state}"
             )
 
     @pytest.mark.asyncio
@@ -354,7 +353,7 @@ class TestC2JobRecoveryReconciliation:
             job = s.get(JobItem, job_id)
             assert job.admission_state == AdmissionState.DONE.value, (
                 f"TERMINATED + PROCESSING → FAILED expected, "
-                f"got status={job.status}"
+                f"got admission_state={job.admission_state}"
             )
 
     @pytest.mark.asyncio

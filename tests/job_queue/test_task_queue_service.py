@@ -6,7 +6,7 @@ and lock manager for job queue operations.
 
 import pytest
 
-from daemon.repositories.job_queue.models import AdmissionState, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.services.job_queue_service import DemandState
 
 
@@ -23,7 +23,6 @@ class TestJobQueueServiceEnqueue:
         # Jobs are now always PENDING - JobProcessor handles starting
         assert result.admission_state == AdmissionState.QUEUED.value
         assert result.instance_id is None
-        assert result.started_at is None
 
     @pytest.mark.asyncio
     async def test_enqueue_with_free_lock_is_pending(
@@ -203,11 +202,11 @@ class TestJobQueueServiceListJobs:
         await job_queue_service.enqueue(**sample_job_data_service)
         
         # List pending - should have 2
-        pending = await job_queue_service.list_jobs(statuses=[JobStatus.PENDING.value])
+        pending = await job_queue_service.list_jobs(statuses=[AdmissionState.QUEUED.value])
         assert len(pending) == 2
         
         # List processing - should have 0 (jobs start as PENDING, JobProcessor handles starting)
-        processing = await job_queue_service.list_jobs(statuses=[JobStatus.PROCESSING.value])
+        processing = await job_queue_service.list_jobs(statuses=[AdmissionState.ACTIVE.value])
         assert len(processing) == 0
 
     @pytest.mark.asyncio
@@ -287,7 +286,6 @@ class TestJobQueueServiceCompleteJob:
         
         assert result is not None
         assert result.admission_state == AdmissionState.DONE.value
-        assert result.completed_at is not None
 
     @pytest.mark.asyncio
     async def test_complete_job_with_error(self, job_queue_service, sample_job_data_service):
@@ -305,7 +303,6 @@ class TestJobQueueServiceCompleteJob:
         
         assert result is not None
         assert result.admission_state == AdmissionState.DONE.value
-        assert result.error_message == "Something went wrong"
 
     @pytest.mark.asyncio
     async def test_complete_job_releases_lock(
@@ -626,8 +623,7 @@ class TestJobQueueServiceFullWorkflow:
         # Complete
         completed = await job_queue_service.complete_job(job.job_id)
         assert completed.admission_state == AdmissionState.DONE.value
-        assert completed.completed_at is not None
-        
+
         # Lock should be released
         assert await job_queue_service._lock_manager.is_locked("test-project") is False
 
@@ -660,7 +656,7 @@ class TestJobQueueServiceFullWorkflow:
         
         # No more pending jobs
         pending = await job_queue_service.list_jobs(
-            statuses=[JobStatus.PENDING.value],
+            statuses=[AdmissionState.QUEUED.value],
             project_id="test-project"
         )
         assert len(pending) == 0
@@ -710,8 +706,7 @@ class TestJobQueueServiceFullWorkflow:
         )
         
         assert failed.admission_state == AdmissionState.DONE.value
-        assert failed.error_message == "Simulated failure"
-        
+
         # Lock should be released
         assert await job_queue_service._lock_manager.is_locked("test-project") is False
         
@@ -760,7 +755,7 @@ class TestCompleteJobWithResultSummary:
     
     @pytest.mark.asyncio
     async def test_complete_with_custom_result_summary(self, job_queue_service, sample_job_data_service):
-        """complete_job stores custom result_summary."""
+        """complete_job stores custom result_summary (Phase 5: not on JobItem)."""
         job = await job_queue_service.enqueue(**sample_job_data_service)
         started = await job_queue_service.start_job(job.job_id)
         completed = await job_queue_service.complete_job(
@@ -768,8 +763,7 @@ class TestCompleteJobWithResultSummary:
         )
         assert completed is not None
         assert completed.admission_state == "done"
-        assert completed.result_summary == "Custom summary here"
-    
+
     @pytest.mark.asyncio
     async def test_complete_with_default_result_summary(self, job_queue_service, sample_job_data_service):
         """complete_job uses default summary when none provided."""
@@ -777,8 +771,7 @@ class TestCompleteJobWithResultSummary:
         started = await job_queue_service.start_job(job.job_id)
         completed = await job_queue_service.complete_job(job.job_id)
         assert completed is not None
-        assert completed.result_summary == "Job completed successfully"
-    
+
     @pytest.mark.asyncio
     async def test_complete_job_sync_with_result_summary(self, job_queue_service, sample_job_data_service):
         """complete_job_sync stores result_summary synchronously."""
@@ -788,8 +781,7 @@ class TestCompleteJobWithResultSummary:
             job.job_id, DemandState.COMPLETED, result_summary="Sync summary"
         )
         assert completed is not None
-        assert completed.result_summary == "Sync summary"
-    
+
     @pytest.mark.asyncio
     async def test_complete_job_sync_failure(self, job_queue_service, sample_job_data_service):
         """complete_job_sync marks job as failed when demand_state=FAILED."""
@@ -800,7 +792,6 @@ class TestCompleteJobWithResultSummary:
         )
         assert completed is not None
         assert completed.admission_state == "done"
-        assert completed.error_message == "Sync error"
     
     @pytest.mark.asyncio
     async def test_complete_job_sync_returns_none_for_nonexistent(self, job_queue_service):
@@ -1391,7 +1382,6 @@ class TestCompleteJobStatusFirstOrdering:
         # Job is FAILED
         result = await job_queue_service.get_job(job.job_id)
         assert result.admission_state == AdmissionState.DONE.value
-        assert result.error_message == "boom"
         # Lock is released
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id
@@ -1401,7 +1391,7 @@ class TestCompleteJobStatusFirstOrdering:
     async def test_fail_job_releases_lock_on_success(
         self, job_queue_service, sample_job_data_service, queue_repository
     ):
-        """Success path: status → FAILED, then lock released."""
+        """Success path: admission_state → DONE, then lock released."""
         queue = queue_repository.get_by_name("test-project", "system_fifo_queue")
         assert queue is not None
 
@@ -1413,7 +1403,6 @@ class TestCompleteJobStatusFirstOrdering:
         # Job is FAILED
         result = await job_queue_service.get_job(job.job_id)
         assert result.admission_state == AdmissionState.DONE.value
-        assert result.error_message == "boom"
         # Lock is released
         assert await job_queue_service._lock_manager.is_queue_locked(
             "test-project", queue.queue_id

@@ -12,7 +12,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session as SQLModelSession
 
 from daemon.repositories.job_queue import AdmissionState, JobRepository, DeadLetterRepository, JobQueueRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus, DeadLetterItem
+from daemon.repositories.job_queue.models import JobItem, AdmissionState, DeadLetterItem
 from daemon.services.dead_letter_service import (
     DeadLetterService,
     DLQItemNotFoundError,
@@ -87,15 +87,15 @@ def failed_job(engine, job_repository, queue_repository):
     # Transition to PROCESSING then FAILED
     job_repository.atomic_transition(
         job.job_id,
-        from_status=JobStatus.PENDING.value,
-        to_status=JobStatus.PROCESSING.value,
+        from_status=AdmissionState.QUEUED.value,
+        to_status=AdmissionState.ACTIVE.value,
         started_at=datetime.utcnow().isoformat(),
         instance_id="test-instance",
     )
     job_repository.atomic_transition(
         job.job_id,
-        from_status=JobStatus.PROCESSING.value,
-        to_status=JobStatus.FAILED.value,
+        from_status=AdmissionState.ACTIVE.value,
+        to_status=AdmissionState.DONE.value,
         completed_at=datetime.utcnow().isoformat(),
         error_message="Connection timeout",
     )
@@ -126,15 +126,15 @@ def create_failed_job(engine, job_repository, queue_repository, message="Test jo
     )
     job_repository.atomic_transition(
         job.job_id,
-        from_status=JobStatus.PENDING.value,
-        to_status=JobStatus.PROCESSING.value,
+        from_status=AdmissionState.QUEUED.value,
+        to_status=AdmissionState.ACTIVE.value,
         started_at=datetime.utcnow().isoformat(),
         instance_id=f"instance-{job.job_id[:8]}",
     )
     job_repository.atomic_transition(
         job.job_id,
-        from_status=JobStatus.PROCESSING.value,
-        to_status=JobStatus.FAILED.value,
+        from_status=AdmissionState.ACTIVE.value,
+        to_status=AdmissionState.DONE.value,
         completed_at=datetime.utcnow().isoformat(),
         error_message=f"Error for {message}",
     )
@@ -291,8 +291,8 @@ class TestMoveToDLQStandalone:
         )
         job_repository.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.QUEUED.value,
+            to_status=AdmissionState.ACTIVE.value,
             started_at=datetime.utcnow().isoformat(),
             instance_id="test-instance",
         )
@@ -444,7 +444,6 @@ class TestReplayFromDLQ:
         # Verify fields are reset
         assert replayed_job.retry_count == 0
         assert replayed_job.failed_at is None
-        assert replayed_job.error_message is None
 
     def test_replay_from_dlq_job_not_in_dead_letter_state(self, engine, job_repository, dlq_repository, queue_repository, dead_letter_service):
         """Test replay raises error if job is not in dead_letter state."""
@@ -460,16 +459,15 @@ class TestReplayFromDLQ:
         # replay guard rejects the job (status is frozen/legacy).
         with SQLModelSession(engine) as session:
             job_item = session.get(JobItem, job.job_id)
-            job_item.status = JobStatus.FAILED.value
             job_item.admission_state = AdmissionState.DONE.value
             session.commit()
-        
+
         # Replay should fail because job is not in dead_letter state
         with pytest.raises(InvalidTransitionError) as exc_info:
             dead_letter_service.replay_from_dlq(dlq_item.dlq_id)
-        
-        assert exc_info.value.from_status == AdmissionState.DONE.value
-        assert exc_info.value.to_status == JobStatus.PENDING.value
+
+        assert exc_info.value.from_state == AdmissionState.DONE.value
+        assert exc_info.value.to_state == AdmissionState.QUEUED.value
 
 
 class TestListDLQ:
@@ -1008,8 +1006,8 @@ class TestDeadLetterServiceIntegration:
         # Replay first job
         dead_letter_service.replay_from_dlq(dlq_ids[0])
         
-        # Verify one is back to PENDING, two remain in DLQ
-        assert job_repository.get(job_ids[0]).status == JobStatus.PENDING.value
+        # Verify one is back to QUEUED, two remain in DLQ
+        assert job_repository.get(job_ids[0]).admission_state == AdmissionState.QUEUED.value
         assert dlq_repository.count() == 2
         
         # Delete remaining DLQ items
@@ -1039,8 +1037,8 @@ class TestDeadLetterServiceIntegration:
                 reason="MANUAL",
             )
         
-        # Verify job is still PENDING
-        assert job_repository.get(job.job_id).status == JobStatus.PENDING.value
+        # Verify job is still QUEUED
+        assert job_repository.get(job.job_id).admission_state == AdmissionState.QUEUED.value
         
         # Verify no DLQ items exist
         assert dead_letter_service.count_dlq() == 0
@@ -1172,9 +1170,6 @@ class TestSQLStatusGuard:
         assert replayed.admission_state == AdmissionState.QUEUED.value
         assert replayed.retry_count == 0
         assert replayed.failed_at is None
-        assert replayed.error_message is None
-        assert replayed.started_at is None
-        assert replayed.completed_at is None
         assert replayed.instance_id is None
 
     def test_move_to_dlq_shared_session_emits_sql_with_status_failed_guard(
@@ -1248,8 +1243,8 @@ class TestSQLStatusGuard:
         )
         job_repository.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PENDING.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.QUEUED.value,
+            to_status=AdmissionState.ACTIVE.value,
             started_at=datetime.utcnow().isoformat(),
             instance_id="test-instance",
         )
@@ -1290,7 +1285,6 @@ class TestSQLStatusGuard:
         # replay guard rejects the job (status is frozen/legacy).
         with SQLModelSession(engine) as session:
             job_item = session.get(JobItem, job.job_id)
-            job_item.status = JobStatus.FAILED.value
             job_item.admission_state = AdmissionState.DONE.value
             session.commit()
 

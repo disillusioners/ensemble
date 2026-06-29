@@ -40,7 +40,7 @@ from sqlmodel import Session, SQLModel, select
 
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.services.work_resolver import WorkRecord, WorkResolverService
 
@@ -203,7 +203,7 @@ def _seed_job(
     job_id: str | None = None,
     agent_id: str = "developer",
     instance_id: str | None = None,
-    status: str = JobStatus.PENDING.value,
+    status: str = AdmissionState.QUEUED.value,
     result_summary: str | None = None,
     error_message: str | None = None,
     project_id: str | None = "test-project",
@@ -229,15 +229,10 @@ def _seed_job(
             source="api",
             project_id=project_id,
             priority=5,
-            status=status,
 
             admission_state=status_to_admission(status),
-            result_summary=result_summary,
-            error_message=error_message,
             instance_id=instance_id,
             created_at=created,
-            started_at=started_at,
-            completed_at=completed_at,
             deleted_at=None,
             job_metadata={},
         )
@@ -276,7 +271,7 @@ class TestInstanceDerivedStatus:
         jid = _seed_job(
             engine,
             instance_id="inst-pending-overrun",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
 
         record = resolver.resolve_work(jid)
@@ -308,7 +303,7 @@ class TestInstanceDerivedStatus:
         jid = _seed_job(
             engine,
             instance_id="inst-drift",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             result_summary="stale mirror says done",
         )
 
@@ -349,7 +344,7 @@ class TestTimingColumnsFromInstance:
         jid = _seed_job(
             engine,
             instance_id="inst-timing",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             started_at="1999-01-01T00:00:00+00:00",  # clearly wrong on purpose
             completed_at="1999-01-01T00:00:00+00:00",
         )
@@ -387,7 +382,7 @@ class TestTimingColumnsFromInstance:
         jid = _seed_job(
             engine,
             instance_id="inst-terminal",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             started_at="2026-06-01T10:30:00+00:00",
             completed_at="1999-12-31T00:00:00+00:00",  # bogus mirror
         )
@@ -435,7 +430,7 @@ class TestTimingColumnsFromInstance:
         jid = _seed_job(
             engine,
             instance_id="inst-nonterm",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             started_at="2026-06-01T10:00:00+00:00",
             completed_at="2026-06-01T11:00:00+00:00",
         )
@@ -471,7 +466,7 @@ class TestTimingColumnsFromInstance:
         jid = _seed_job(
             engine,
             instance_id="inst-nonterm-clean",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             started_at="2026-06-01T10:00:00+00:00",
             completed_at=None,  # mirror also empty
         )
@@ -518,7 +513,7 @@ class TestLegacyFallback:
         jid = _seed_job(
             engine,
             instance_id=None,
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             result_summary="orphaned completion",
         )
 
@@ -551,7 +546,7 @@ class TestLegacyFallback:
         jid = _seed_job(
             engine,
             instance_id="ghost-instance-uuid",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             error_message="orphan failure",
         )
 
@@ -587,7 +582,7 @@ class TestLegacyFallback:
         jid = _seed_job(
             engine,
             instance_id="inst-dlq",
-            status=JobStatus.DEAD_LETTER.value,
+            status=AdmissionState.DEAD.value,
             error_message="max retries exhausted",
         )
 
@@ -614,7 +609,7 @@ class TestLegacyFallback:
         jid = _seed_job(
             engine,
             instance_id=None,
-            status=JobStatus.DEAD_LETTER.value,
+            status=AdmissionState.DEAD.value,
             error_message="queue-stage DLQ",
         )
 
@@ -697,7 +692,7 @@ class TestListWorkBatchEfficiency:
             _seed_job(
                 engine,
                 instance_id=inst_id,
-                status=JobStatus.PROCESSING.value,
+                status=AdmissionState.ACTIVE.value,
             )
 
         # Capture every query issued during list_work.
@@ -774,7 +769,7 @@ class TestListWorkBatchEfficiency:
                     _seed_job(
                         sub_engine,
                         instance_id=inst_id,
-                        status=JobStatus.PROCESSING.value,
+                        status=AdmissionState.ACTIVE.value,
                     )
 
                 # Reset capture (the seed inserts issued SELECTs we
@@ -834,7 +829,7 @@ class TestJobWithNoInstance:
         jid = _seed_job(
             engine,
             instance_id=None,
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
         )
 
         record = resolver.resolve_work(jid)
@@ -866,7 +861,7 @@ class TestJobWithDeletedInstance:
         jid = _seed_job(
             engine,
             instance_id="deleted-uuid-12345",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             started_at="2026-06-01T10:00:00+00:00",
             completed_at=None,
         )
@@ -907,7 +902,7 @@ class TestJobWithCompletedInstance:
         jid = _seed_job(
             engine,
             instance_id="inst-completed",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         record = resolver.resolve_work(jid)
@@ -936,7 +931,7 @@ class TestJobWithErrorInstance:
         jid = _seed_job(
             engine,
             instance_id="inst-err",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             error_message="instance-level error",
         )
 
@@ -973,7 +968,7 @@ class TestJobWithWaitingChildrenInstance:
         jid = _seed_job(
             engine,
             instance_id="inst-wc",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
         )
 
         record = resolver.resolve_work(jid)

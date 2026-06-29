@@ -118,7 +118,7 @@ from daemon.repositories.dependency_bus import (  # noqa: F401
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus  # noqa: F401
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus  # noqa: F401
+from daemon.repositories.job_queue.models import JobItem, AdmissionState  # noqa: F401
 from daemon.repositories.message_queue.models import (  # noqa: F401
     MessageQueue,
     MessageStatus,

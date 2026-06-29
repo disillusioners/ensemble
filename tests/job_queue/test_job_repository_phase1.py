@@ -8,7 +8,7 @@ Tests for:
 import pytest
 
 from daemon.repositories.job_queue import JobRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 
 
 class TestCreateWithJobTypeAndInstanceId:

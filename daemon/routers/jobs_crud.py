@@ -135,11 +135,16 @@ def _job_to_response(
             job.admission_state, JobStatus.PENDING.value
         )
         instance_id = job.instance_id
-        result_summary = job.result_summary
-        error_message = job.error_message
+        # Phase 5: JobItem mirror columns (``result_summary``,
+        # ``error_message``, ``started_at``, ``completed_at``) were
+        # removed from the SQLModel in Phase B; the legacy fallback
+        # returns ``None`` for them. Use the resolver/``work_record``
+        # path above (lines 116-117) for Instance-sourced values.
+        result_summary = None
+        error_message = None
         # Legacy timing: read directly from the JobItem mirror columns.
-        started_at = job.started_at
-        completed_at = job.completed_at
+        started_at = None
+        completed_at = None
         created_at = job.created_at
 
     return JobResponse(
@@ -170,7 +175,10 @@ def _job_to_response(
         error_message=error_message,
         source=job.source,
         job_metadata=job.job_metadata,
-        cancelled_at=job.cancelled_at,
+        # Phase 5: ``cancelled_at`` column was dropped from JobItem.
+        # Cancellation timestamp is now derivable from
+        # ``Instance.status == TERMINATED`` + ``Instance.terminated_at``.
+        cancelled_at=None,
         idempotency_key=job.idempotency_key,
         position=position,
         message=message or job.message,

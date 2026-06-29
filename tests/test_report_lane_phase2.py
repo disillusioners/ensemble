@@ -32,14 +32,14 @@ from sqlmodel import Session, SQLModel
 # Register all table models so create_all() picks them up.
 import daemon.repositories.dependency_bus.models  # noqa: F401
 import daemon.repositories.instance.models  # noqa: F401  (Instance, InstanceHierarchy)
-import daemon.repositories.job_queue.models  # noqa: F401  (JobItem, JobStatus)
+import daemon.repositories.job_queue.models  # noqa: F401  (JobItem, AdmissionState)
 import daemon.repositories.message_queue.models  # noqa: F401  (MessageQueue)
 import daemon.repositories.task.models  # noqa: F401  (Task, TaskStatus, TaskType)
 from daemon.repositories.dependency_bus import (
     DependencyWatcherRepository,
 )
 from daemon.repositories.instance.models import Instance, InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
 from daemon.repositories.task.repository import TaskRepository
 from daemon.services.dependency_bus import (
@@ -159,7 +159,7 @@ def _seed_job(
     *,
     instance_id: str,
     job_id: str | None = None,
-    status: str = JobStatus.PROCESSING.value,
+    status: str = AdmissionState.ACTIVE.value,
     job_type: str = "message",
     job_metadata: dict | None = None,
 ) -> str:
@@ -181,7 +181,6 @@ def _seed_job(
             message="test message",
             source="api",
             job_type=job_type,
-            status=status,
 
             admission_state=status_to_admission(status),
             instance_id=instance_id,
@@ -441,7 +440,7 @@ class TestReportLaneGuard:
         _seed_job(
             engine,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-user-123"},
         )
         # A child-completion report task for the same parent, with a
@@ -485,7 +484,7 @@ class TestReportLaneGuard:
         _seed_job(
             engine,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-user-123"},
         )
         # A PROCESS_MESSAGE task with a non-matching message_id (not
@@ -531,7 +530,7 @@ class TestReportLaneGuard:
         _seed_job(
             engine,
             instance_id=parent_id,
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             job_metadata={"message_id": "msg-matching-001"},
         )
         # PROCESS_MESSAGE task with the SAME message_id as the job —
@@ -808,7 +807,7 @@ class TestPauseSafety:
         parent_id = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
         # Add a RUNNING PROCESSING MESSAGE job so the cross-system guard
         # doesn't block (that guard is scoped to PROCESS_MESSAGE only).
-        _seed_job(engine, instance_id=parent_id, status=JobStatus.PROCESSING.value)
+        _seed_job(engine, instance_id=parent_id, status=AdmissionState.ACTIVE.value)
         msg_task = task_repo.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id=parent_id,
@@ -1115,7 +1114,7 @@ class TestCrashRecovery:
         from sqlmodel import select as sel
 
         parent_id = _seed_instance(engine, status=InstanceStatus.COMPLETED.value)
-        job_id = _seed_job(engine, instance_id=parent_id, status=JobStatus.PROCESSING.value)
+        job_id = _seed_job(engine, instance_id=parent_id, status=AdmissionState.ACTIVE.value)
 
         # Verify the job is PROCESSING.
         with Session(engine) as s:
@@ -1132,9 +1131,9 @@ class TestCrashRecovery:
                 SET status = :new_status
                 WHERE job_id = :job_id AND status = :expected_status
             """), {
-                "new_status": JobStatus.COMPLETED.value,
+                "new_status": AdmissionState.DONE.value,
                 "job_id": job_id,
-                "expected_status": JobStatus.PROCESSING.value,
+                "expected_status": AdmissionState.ACTIVE.value,
             })
             assert result.rowcount == 1
 
@@ -1145,9 +1144,9 @@ class TestCrashRecovery:
                 SET status = :new_status
                 WHERE job_id = :job_id AND status = :expected_status
             """), {
-                "new_status": JobStatus.COMPLETED.value,
+                "new_status": AdmissionState.DONE.value,
                 "job_id": job_id,
-                "expected_status": JobStatus.PROCESSING.value,
+                "expected_status": AdmissionState.ACTIVE.value,
             })
             assert result.rowcount == 0, (
                 "Second finalize with same guard should be a no-op (0 rows)"

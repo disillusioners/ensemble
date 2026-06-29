@@ -409,7 +409,6 @@ class TestShouldRetry:
             message="Test message",
             source="api",
             project_id="project-abc",
-            status="failed",
 
             admission_state=status_to_admission("failed"),
             retry_count=0,
@@ -441,12 +440,11 @@ class TestMaybeRetry:
         )
         
         result = retry_engine.maybe_retry("job-123")
-        
+
         assert result is not None
         assert result.admission_state == "queued"
         assert result.retry_count == 2  # Incremented
         assert result.next_retry_at is not None
-        assert result.error_message is None  # Cleared
         assert result.failed_at is None  # Cleared
 
     def test_maybe_retry_exhausted_moves_to_dlq(self, retry_engine, job_repo, dlq_repo, engine):
@@ -501,12 +499,11 @@ class TestMaybeRetry:
             with pytest.raises(RuntimeError, match="DB write failed"):
                 retry_engine.maybe_retry("job-123")
 
-        # Job should remain in FAILED state after rollback
+# Job should remain in FAILED state after rollback
         job = job_repo.get("job-123")
         assert job is not None
         assert job.admission_state == "done"
         assert job.retry_count == 3
-        assert job.error_message == "Connection timeout"
 
         # Nothing should be in DLQ
         dlq_item = dlq_repo.get_by_job_id("job-123")
@@ -616,7 +613,6 @@ class TestMaybeRetryAtomicConcurrency:
         )
         assert final.admission_state == "queued"
         assert final.failed_at is None
-        assert final.error_message is None
         assert final.next_retry_at is not None
 
     def test_atomic_retry_skips_when_retry_count_at_max(self, job_repo, engine):
@@ -734,7 +730,6 @@ class TestMaybeRetryAtomicConcurrency:
         assert final is not None
         assert final.admission_state == "done"
         assert final.retry_count == 1  # Not incremented
-        assert final.error_message == "Connection timeout"  # Not cleared
 
     def test_maybe_retry_skips_concurrently_dead_lettered_job(self, retry_engine, job_repo, dlq_repo, engine):
         """End-to-end: a job moved to DLQ between read and retry must

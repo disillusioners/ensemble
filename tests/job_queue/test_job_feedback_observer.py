@@ -10,7 +10,7 @@ without relying on the full async event loop to avoid timing issues.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, ANY
 
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import JobRepository, AdmissionState
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.instance.models import InstanceStatus
@@ -101,11 +101,10 @@ def create_mock_job(job_id: str = "test-job-id", status: str = "processing", ins
     """Create a mock JobItem with the specified attributes."""
     mock_job = MagicMock(spec=JobItem)
     mock_job.job_id = job_id
-    mock_job.status = status
+    mock_job.admission_state = status
     mock_job.instance_id = instance_id
     # Phase 4: admission_state is the sole authority. Derive it from
     # the legacy status so service-level comparisons see the right value.
-    mock_job.admission_state = _STATUS_TO_ADMISSION.get(status, "queued")
     return mock_job
 
 
@@ -706,8 +705,8 @@ class TestObserverRaceCondition:
         sync_mock = MagicMock(side_effect=make_fake_sync(
             raise_exc=InvalidTransitionError(
                 job_id="job-123",
-                from_status="processing",
-                to_status="completed",
+                from_state="processing",
+                to_state="completed",
             )
         ))
         observer._finalize_job_db_sync = sync_mock
@@ -1202,8 +1201,8 @@ class TestObserverLifecycleResilience:
         sync_mock = MagicMock(side_effect=make_fake_sync(
             raise_exc=InvalidTransitionError(
                 job_id="job-123",
-                from_status="processing",
-                to_status="completed",
+                from_state="processing",
+                to_state="completed",
             )
         ))
         observer._finalize_job_db_sync = sync_mock

@@ -34,7 +34,7 @@ from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem, JobQueue, JobStatus
+from daemon.repositories.job_queue.models import JobItem, JobQueue, AdmissionState
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
@@ -268,11 +268,8 @@ def _seed_completed_job(
             source="api",
             project_id="test-project",
             priority=5,
-            status=JobStatus.COMPLETED.value,
 
-            admission_state=status_to_admission(JobStatus.COMPLETED.value),
-            result_summary="done",
-            error_message=None,
+            admission_state=status_to_admission(AdmissionState.DONE.value),
             instance_id=None,
             queue_id=queue_id,
             created_at=datetime.now(timezone.utc).isoformat(),

@@ -13,7 +13,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
-from daemon.repositories.job_queue.models import JobStatus, JobItem, AdmissionState
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.services.job_queue_service import DemandState
 
 # Phase 4 cleanup: ``status`` is frozen at the INSERT default (``pending``)
@@ -21,13 +21,13 @@ from daemon.services.job_queue_service import DemandState
 # value onto its ``AdmissionState`` bucket so mock jobs expose the
 # ``admission_state`` that service-level assertions read.
 _STATUS_TO_ADMISSION = {
-    JobStatus.PENDING.value: AdmissionState.QUEUED.value,
-    JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
-    JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
-    JobStatus.COMPLETED.value: AdmissionState.DONE.value,
-    JobStatus.FAILED.value: AdmissionState.DONE.value,
-    JobStatus.CANCELLED.value: AdmissionState.DONE.value,
-    JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+    AdmissionState.QUEUED.value: AdmissionState.QUEUED.value,
+    AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
+    AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
+    AdmissionState.DONE.value: AdmissionState.DONE.value,
+    AdmissionState.DONE.value: AdmissionState.DONE.value,
+    AdmissionState.DONE.value: AdmissionState.DONE.value,
+    AdmissionState.DEAD.value: AdmissionState.DEAD.value,
 }
 
 
@@ -44,7 +44,6 @@ def make_mock_job(
     job.job_id = job_id
     job.instance_id = instance_id
     job.project_id = project_id
-    job.status = status
     job.admission_state = _STATUS_TO_ADMISSION.get(status, AdmissionState.ACTIVE.value)
     job.agent_id = agent_id
     job.message = message

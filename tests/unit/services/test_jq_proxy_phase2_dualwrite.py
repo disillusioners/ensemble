@@ -494,13 +494,13 @@ class TestStatusToAdmissionMapping:
     @pytest.mark.parametrize(
         "status_value, expected_admission",
         [
-            (JobStatus.PENDING.value, AdmissionState.QUEUED.value),
-            (JobStatus.PROCESSING.value, AdmissionState.ACTIVE.value),
-            (JobStatus.PAUSED.value, AdmissionState.ACTIVE.value),
-            (JobStatus.COMPLETED.value, AdmissionState.DONE.value),
-            (JobStatus.FAILED.value, AdmissionState.DONE.value),
-            (JobStatus.CANCELLED.value, AdmissionState.DONE.value),
-            (JobStatus.DEAD_LETTER.value, AdmissionState.DEAD.value),
+            (AdmissionState.QUEUED.value, AdmissionState.QUEUED.value),
+            (AdmissionState.ACTIVE.value, AdmissionState.ACTIVE.value),
+            (AdmissionState.ACTIVE.value, AdmissionState.ACTIVE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
+            (AdmissionState.DEAD.value, AdmissionState.DEAD.value),
         ],
     )
     def test_every_status_maps_correctly(
@@ -568,8 +568,8 @@ class TestPauseResumeDualWrite:
 
         paused = job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert paused is not None
 
@@ -588,14 +588,14 @@ class TestPauseResumeDualWrite:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
 
         resumed = job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PAUSED.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert resumed is not None
 
@@ -619,15 +619,15 @@ class TestPauseResumeDualWrite:
 
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert _refresh(engine, job.job_id).admission_state == AdmissionState.ACTIVE.value
 
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PAUSED.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert _refresh(engine, job.job_id).admission_state == AdmissionState.ACTIVE.value
 

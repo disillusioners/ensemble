@@ -379,8 +379,16 @@ class JobQueueService:
                     if progress:
                         notification_parts.append(f"  Progress:\n{progress}")
                 else:
-                    if job.result_summary:
-                        notification_parts.append(f"  Result:\n{job.result_summary}")
+                    # Phase 5: ``job.result_summary`` was dropped from
+                    # the JobItem model in Phase B. Guard the read
+                    # with ``getattr`` so the watcher notification
+                    # never crashes on legacy rows that may still
+                    # carry the attribute in fixture data; the live
+                    # path here uses ``error`` (from the resolver) as
+                    # the authoritative failure detail.
+                    result_summary = getattr(job, 'result_summary', None)
+                    if result_summary:
+                        notification_parts.append(f"  Result:\n{result_summary}")
                     if error:
                         notification_parts.append(f"  Error: {error}")
 
@@ -486,8 +494,14 @@ class JobQueueService:
         for watch in all_watches:
             job = await asyncio.to_thread(self._repository.get, watch.job_id)
             if job and job.admission_state in terminal_admission:
+                # Phase 5: ``job.error_message`` was dropped from the
+                # JobItem model in Phase B. Guard with ``getattr`` so
+                # the legacy reconcile path can't crash on jobs that
+                # lack the attribute; the canonical
+                # ``reconcile_terminal_watches`` path resolves the
+                # error via the WorkResolver instead.
                 await self.notify_watchers(
-                    watch.job_id, job.admission_state, job.error_message
+                    watch.job_id, job.admission_state, getattr(job, 'error_message', None)
                 )
                 reconciled += 1
 
@@ -946,12 +960,13 @@ class JobQueueService:
         # Pre-validate with state machine for better error messages. This
         # is a best-effort check; the atomic repo.cancel_job is the source
         # of truth and will raise ValueError for non-cancellable states.
-        # Phase 4: translate admission_state to representative status for
-        # the state machine check.
-        representative_status = ADMISSION_STATE_TO_STATUS.get(
-            job.admission_state, JobStatus.PENDING.value
-        )
-        if not job_state_machine.can_transition(representative_status, JobStatus.CANCELLED.value):
+        # Phase 5: validate directly on admission_state vocabulary —
+        # no JobStatus translation. A non-cancellable admission state
+        # is ``done`` (terminal) or ``dead`` (terminal); ``queued`` and
+        # ``active`` both have explicit transitions to ``done``.
+        if not job_state_machine.can_transition(
+            job.admission_state, AdmissionState.DONE.value
+        ):
             return False
 
         # Special case: ACTIVE with an alive instance requires a

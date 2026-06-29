@@ -358,7 +358,7 @@ class TestTaskClaiming:
         "Done! 👋 lost" bug)."""
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         from daemon.repositories.instance.models import Instance
 
         now = datetime.now(timezone.utc).isoformat()
@@ -378,13 +378,11 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-J",
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))
@@ -403,12 +401,10 @@ class TestTaskClaiming:
         # COMPLETED → admission_state='done', which is excluded by the
         # new ``admission_state IN ('queued', 'active')`` predicate in
         # claim_pending_task / has_blocked_pending_tasks (Phase 3
-        # admission-decision migration). Setting only ``status`` would
-        # leave ``admission_state`` at its default of 'queued' and the
-        # gate would never release.
+        # admission-decision migration). Setting only ``admission_state``
+        # is enough now — ``status`` column is gone in Phase 5.
         with SQLModelSession(engine) as session:
             job = session.get(JobItem, "job-J1")
-            job.status = JobStatus.COMPLETED.value
             job.admission_state = "done"
             session.commit()
 
@@ -425,7 +421,7 @@ class TestTaskClaiming:
         job: deadlock."""
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         from daemon.repositories.instance.models import Instance
 
         now = datetime.now(timezone.utc).isoformat()
@@ -445,13 +441,11 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-W",
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))
@@ -477,7 +471,7 @@ class TestTaskClaiming:
         original cross-system guard for the no-instance-row edge case."""
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
 
         now = datetime.now(timezone.utc).isoformat()
         with SQLModelSession(engine) as session:
@@ -487,13 +481,11 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-X-no-row",
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))
@@ -533,7 +525,7 @@ class TestTaskClaiming:
         """
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
 
         now = datetime.now(timezone.utc).isoformat()
         with SQLModelSession(engine) as session:
@@ -543,13 +535,11 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="cleanup",
                 source="system",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="cleanup",
                 instance_id="inst-K",
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))
@@ -580,7 +570,7 @@ class TestTaskClaiming:
         queue — a livelock."""
         from datetime import datetime, timezone
         from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
 
         now = datetime.now(timezone.utc).isoformat()
         with SQLModelSession(engine) as session:
@@ -590,13 +580,11 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-L",
                 created_at=now,
-                started_at=now,
                 deleted_at=now,  # soft-deleted while still PROCESSING
                 priority=0,
                 retry_count=0,
@@ -634,7 +622,7 @@ class TestTaskClaiming:
         message_id).
         """
         from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         from daemon.repositories.instance.models import Instance
 
         now = datetime.now(timezone.utc).isoformat()
@@ -656,9 +644,8 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-UD-1",
                 # message_id in job_metadata must match the Task's
@@ -667,7 +654,6 @@ class TestTaskClaiming:
                 # dispatcher from the legacy dual-path.
                 job_metadata={"message_id": "m-UD-1"},
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))
@@ -705,7 +691,7 @@ class TestTaskClaiming:
         parent's Task to admit itself.
         """
         from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         from daemon.repositories.instance.models import Instance
 
         now = datetime.now(timezone.utc).isoformat()
@@ -722,15 +708,13 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-MIS-1",
                 # Parent's user message_id is "m-parent".
                 job_metadata={"message_id": "m-parent"},
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))
@@ -775,7 +759,7 @@ class TestTaskClaiming:
         the guard must still fire.
         """
         from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         from daemon.repositories.instance.models import Instance
 
         now = datetime.now(timezone.utc).isoformat()
@@ -792,15 +776,13 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-TERM-1",
                 # Parent's user message_id is "m-TERM-1".
                 job_metadata={"message_id": "m-TERM-1"},
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))
@@ -844,7 +826,7 @@ class TestTaskClaiming:
         refactor doesn't silently invert it.
         """
         from sqlmodel import Session as SQLModelSession
-        from daemon.repositories.job_queue.models import JobItem, JobStatus
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
         from daemon.repositories.instance.models import Instance
 
         now = datetime.now(timezone.utc).isoformat()
@@ -861,9 +843,8 @@ class TestTaskClaiming:
                 agent_dir="agents/leader",
                 message="hi",
                 source="api",
-                status=JobStatus.PROCESSING.value,
 
-                admission_state=status_to_admission(JobStatus.PROCESSING.value),
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-EMPTY-1",
                 # Explicitly empty job_metadata — same as the
@@ -872,7 +853,6 @@ class TestTaskClaiming:
                 # test is self-contained.
                 job_metadata={},
                 created_at=now,
-                started_at=now,
                 priority=0,
                 retry_count=0,
             ))

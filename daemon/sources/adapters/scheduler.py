@@ -726,7 +726,7 @@ Original scheduled task:
             logger.info(
                 f"Scheduled job queued: source={self.source_id}, "
                 f"execution_id={execution_id}, job_id={job_item.job_id}, "
-                f"status={job_item.status}"
+                f"admission_state={job_item.admission_state}"
             )
             
             if self._execution_callback:

@@ -15,7 +15,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import AdmissionState, JobRepository, JobQueueRepository
-from daemon.repositories.job_queue.models import JobStatus, JobItem, AdmissionState
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
@@ -126,8 +126,8 @@ class TestRepositorySoftDelete:
         repository.fail_job(job_id, "test error")
         repository.atomic_transition(
             job_id,
-            from_status=JobStatus.FAILED.value,
-            to_status=JobStatus.DEAD_LETTER.value,
+            from_status=AdmissionState.DONE.value,
+            to_status=AdmissionState.DEAD.value,
         )
         
         # Soft delete
@@ -662,7 +662,7 @@ class TestSchedulerSafetyIntegration:
         
         # Verify list_all_pending does NOT return it
         pending = repository.list(
-            statuses=[JobStatus.PENDING.value],
+            statuses=[AdmissionState.QUEUED.value],
             project_id=sample_job_data_service["project_id"],
             include_deleted=False,
         )[0]  # list() returns (jobs, total)

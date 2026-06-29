@@ -18,7 +18,7 @@ from sqlmodel import SQLModel, Session
 
 from daemon.routers.dlq import router, set_dead_letter_service
 from daemon.services.dead_letter_service import DeadLetterService
-from daemon.repositories.job_queue.models import JobItem, DeadLetterItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, DeadLetterItem, AdmissionState
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.dead_letter_repository import DeadLetterRepository
 
@@ -115,11 +115,9 @@ def create_dlq_items_for_project(engine, dlq_repository, project_id, count, reas
             source="api",
             project_id=project_id,
             queue_id=f"queue-{project_id}",
-            status=JobStatus.DEAD_LETTER.value,
 
-            admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
+            admission_state=status_to_admission(AdmissionState.DEAD.value),
             retry_count=3,
-            error_message=f"Error for job {i}",
         )
         
         with Session(engine) as session:
@@ -438,9 +436,8 @@ class TestReplayAllResponseStructure:
                 source="api",
                 project_id=project_id,
                 queue_id="queue-other",
-                status=JobStatus.DEAD_LETTER.value,
 
-                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
+                admission_state=status_to_admission(AdmissionState.DEAD.value),
             )
             
             with Session(engine) as session:
@@ -502,9 +499,8 @@ class TestReplayAllResponseStructure:
                 source="api",
                 project_id=project_id,
                 queue_id="default-queue",
-                status=JobStatus.DEAD_LETTER.value,
 
-                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
+                admission_state=status_to_admission(AdmissionState.DEAD.value),
             )
             
             with Session(engine) as session:
@@ -543,9 +539,8 @@ class TestReplayAllResponseStructure:
                 source="api",
                 project_id=project_id,
                 queue_id="default-queue",
-                status=JobStatus.DEAD_LETTER.value,
 
-                admission_state=status_to_admission(JobStatus.DEAD_LETTER.value),
+                admission_state=status_to_admission(AdmissionState.DEAD.value),
             )
             
             with Session(engine) as session:
@@ -608,7 +603,7 @@ class TestReplayAllErrorHandling:
         # Make one job not in DEAD_LETTER state (simulate error condition)
         # by updating the job status back to COMPLETED
         job = dlq_service._job_repo.get(dlq_items[1].job_id)
-        job.status = "completed"
+        job.admission_state = "done"
         
         # Call replay-all
         response = client.post(f"/projects/{project_id}/dlq/replay-all")

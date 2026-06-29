@@ -401,7 +401,7 @@ class TestFullJobLifecycle:
         # ``admission_state='active'``.
         completed = job_repo.finalize_active_to_done(
             job.job_id,
-            derived_status=JobStatus.COMPLETED.value,
+            derived_status=AdmissionState.DONE.value,
             result_summary="ok",
         )
         assert completed is not None
@@ -424,7 +424,7 @@ class TestFullJobLifecycle:
 
         finalized = job_repo.finalize_active_to_done(
             job.job_id,
-            derived_status=JobStatus.FAILED.value,
+            derived_status=AdmissionState.DONE.value,
             error_message="boom",
         )
         assert finalized is not None
@@ -623,7 +623,7 @@ class TestChildReportsDoNotMutateParentAdmissionState:
         # COMPLETED-derived status).
         finalized = job_repo.finalize_active_to_done(
             job.job_id,
-            derived_status=JobStatus.COMPLETED.value,
+            derived_status=AdmissionState.DONE.value,
             result_summary="parent finished",
         )
         assert finalized is not None
@@ -650,7 +650,7 @@ class TestChildReportsDoNotMutateParentAdmissionState:
         _start_job(engine, job_repo, j_done_complete.job_id, instance_id="i-c")
         job_repo.finalize_active_to_done(
             j_done_complete.job_id,
-            derived_status=JobStatus.COMPLETED.value,
+            derived_status=AdmissionState.DONE.value,
             result_summary="ok",
         )
 
@@ -658,7 +658,7 @@ class TestChildReportsDoNotMutateParentAdmissionState:
         _start_job(engine, job_repo, j_done_fail.job_id, instance_id="i-f")
         job_repo.finalize_active_to_done(
             j_done_fail.job_id,
-            derived_status=JobStatus.FAILED.value,
+            derived_status=AdmissionState.DONE.value,
             error_message="oops",
         )
 
@@ -954,7 +954,7 @@ class TestJobRecoveryOnRestart:
             )
         )
         assert canonical_job_id == job.job_id
-        assert final_status == JobStatus.FAILED.value
+        assert final_status == AdmissionState.DONE.value
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
@@ -983,7 +983,7 @@ class TestJobRecoveryOnRestart:
             )
         )
         assert canonical_job_id_1 == job.job_id
-        assert final_status_1 == JobStatus.FAILED.value
+        assert final_status_1 == AdmissionState.DONE.value
 
         # Second finalize (simulating a concurrent recovery writer
         # that flipped the row concurrently): the boundary sees
@@ -1093,14 +1093,14 @@ class TestPhase4CrossCuttingInvariants:
         # admission_state-keyed guard must accept the row.
         with Session(engine) as s:
             row = s.exec(select(JobItem).where(JobItem.job_id == job.job_id)).one()
-            row.status = JobStatus.PAUSED.value
+            row.status = AdmissionState.ACTIVE.value
             row.admission_state = AdmissionState.ACTIVE.value
             s.add(row)
             s.commit()
 
         finalized = job_repo.finalize_active_to_done(
             job.job_id,
-            derived_status=JobStatus.COMPLETED.value,
+            derived_status=AdmissionState.DONE.value,
             result_summary="ok",
         )
         assert finalized is not None, (

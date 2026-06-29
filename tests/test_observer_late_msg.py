@@ -27,7 +27,7 @@ import pytest
 
 pytestmark = pytest.mark.skip(reason="Phase 5: CorrelationManager removed; tests CM-observer integration")
 
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import JobRepository, AdmissionState
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.instance.models import InstanceStatus
 # CM-era imports removed in Phase 5 (CorrelationManager → DependencyBus).
@@ -237,7 +237,7 @@ class TestLateMessageArrival:
             # Simulate the job now being in COMPLETED state (the real DB
             # would have this; the mock's atomic_transition doesn't mutate
             # job.status automatically).
-            job.status = JobStatus.COMPLETED.value
+            job.admission_state = AdmissionState.DONE.value
             first_call_count = mocks["sync_mock"].call_count
 
             # ── Cycle 2: new send_message → re-register in CM ──
@@ -286,10 +286,10 @@ class TestLateMessageArrival:
             mocks["sync_mock"].assert_called_once()
 
             # Simulate job in COMPLETED state.
-            job.status = JobStatus.COMPLETED.value
+            job.admission_state = AdmissionState.DONE.value
 
             # Now a new lifecycle event arrives for the same instance.
-            # _process_event checks job.status and returns early.
+            # _process_event checks job.admission_state and returns early.
             await observer._process_event(make_lifecycle_event(parent_id))
 
             # No new transitions.

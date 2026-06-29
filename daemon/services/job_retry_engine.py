@@ -298,21 +298,13 @@ class JobRetryEngine:
 
             # Validate transition is allowed (cheap fail-fast before
             # opening a session / issuing the UPDATE).
-            # Phase 4: the JobStatus state machine
-            # (``job_state_machine.py``) operates on JobStatus enum
-            # values. The legacy retry path is ``failed → pending``
-            # (job_state_machine.py:29), which is what the
-            # ``fail_job`` → ``atomic_retry`` flow exercises. The new
-            # Phase 4 path (Plan §3.2 retry-without-instance
-            # guarantee) goes ``active → queued`` directly through
-            # ``_finalize_terminal(Decision.RETRY)`` and doesn't
-            # call this method (it uses the repository's
-            # ``atomic_transition`` with the inlined
-            # JobStatus→AdmissionState mapping, which handles the
-            # FAILED→PENDING transition directly). The validate
-            # here is therefore the LEGACY path's check.
+            # Phase 5: legacy JobStatus vocab retired in the state
+            # machine; ``failed → pending`` (the legacy retry path)
+            # now corresponds to ``done → queued`` on the admission
+            # vocabulary. Validating ``(done, queued)`` is on
+            # :data:`VALID_TRANSITIONS` (the "replay from done" entry).
             job_state_machine.validate_transition(
-                "failed", "pending"
+                AdmissionState.DONE.value, AdmissionState.QUEUED.value
             )
 
             # 3. Atomic UPDATE with admission_state + retry_count guards.
@@ -380,7 +372,15 @@ class JobRetryEngine:
             # for notification context (error_message, retry_count).
             with SQLModelSession(self._job_repo.engine) as session:
                 notified = session.get(JobItem, job_id)
-                error_msg = notified.error_message if notified else None
+                # Phase 5: ``error_message`` was dropped from the
+                # JobItem model in Phase B; use ``getattr`` to stay
+                # resilient against rows that still carry the
+                # attribute in fixture data. Notification context
+                # also falls back to ``retry_count`` (which still
+                # lives on JobItem) for the log line below.
+                error_msg = (
+                    getattr(notified, 'error_message', None) if notified else None
+                )
 
             logger.info(
                 f"Job {job_id} moved to DLQ after "

@@ -1,56 +1,69 @@
-"""Formal state machine for job lifecycle transitions."""
+"""Formal state machine for job admission-state transitions (Phase 5).
+
+Replaces the legacy ``JobStatus``-keyed TRANSITIONS dict with a
+``VALID_TRANSITIONS`` set-of-tuples keyed on ``AdmissionState``
+values. The 7-value enum and the per-transition name strings
+(``"start"``/``"complete"``/...) collapsed under the queue-proxy
+model:
+
+    * complete / fail / cancel / abort all map to ``active → done``
+      — the consumer of the boundary (``_finalize_terminal``) now
+      selects the variant via the ``Decision`` enum (``NO_RETRY`` /
+      ``RETRY`` / ``DEAD_LETTER``), not the from/to state pair.
+    * ``(X, X)`` "self loop" entries (active → active for the
+      pause/no-op reconcile path, done → done for idempotent finalize
+      retries) are treated as implicitly valid no-ops by
+      :meth:`JobStateMachine.can_transition` / ``validate_transition``;
+      pause/resume are Instance concerns and never move the admission
+      column. The set-based membership check on
+      :data:`VALID_TRANSITIONS` keeps its strict semantics — same-state
+      entries are NOT enumerated there because they are categorically
+      no-ops, not state transitions.
+    * the ``(None, queued)`` "create" entry is omitted — the create
+      path is an INSERT into a fresh row, not a state transition.
+      Callers that previously passed ``from_status=None`` are moved
+      to the INSERT path; the set-based API raises
+      ``InvalidTransitionError`` for ``None`` (matches the pre-Phase-5
+      behavior of "INSERTs don't go through the state machine").
+
+Per-call reason names (``start``/``complete``/``retry``/...) were
+used only for logging in :func:`repository.atomic_transition`'s
+``logger.info("... | %s -> %s (%s) | ...")`` call. With the
+queue-proxy model the ``(from, to)`` pair uniquely identifies the
+transition, so the name is redundant — the log call has been
+updated to drop the name and emit ``(from, to)`` directly.
+"""
 
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Set, Tuple
+
+from daemon.repositories.job_queue.models import AdmissionState
 
 logger = logging.getLogger(__name__)
 
-# Status string constants (avoid importing JobStatus to prevent circular import)
-_STATUS_PENDING = "pending"
-_STATUS_PROCESSING = "processing"
-_STATUS_COMPLETED = "completed"
-_STATUS_FAILED = "failed"
-_STATUS_CANCELLED = "cancelled"
-_STATUS_DEAD_LETTER = "dead_letter"
-_STATUS_PAUSED = "paused"
 
-# State transition table: (from_state, to_state) -> transition_name
-# Using string literals directly to avoid circular imports
-TRANSITIONS: Dict[Tuple[str | None, str], str] = {
-    (None, _STATUS_PENDING): "create",
-    (_STATUS_PENDING, _STATUS_PROCESSING): "start",
-    (_STATUS_PENDING, _STATUS_CANCELLED): "cancel",
-    (_STATUS_PROCESSING, _STATUS_COMPLETED): "complete",
-    (_STATUS_PROCESSING, _STATUS_FAILED): "fail",
-    (_STATUS_PROCESSING, _STATUS_CANCELLED): "abort",
-    (_STATUS_PROCESSING, _STATUS_PENDING): "requeue",
-    (_STATUS_FAILED, _STATUS_PENDING): "retry",
-    (_STATUS_FAILED, _STATUS_DEAD_LETTER): "dead_letter",
-    (_STATUS_FAILED, _STATUS_CANCELLED): "cancel_after_fail",
-    (_STATUS_DEAD_LETTER, _STATUS_PENDING): "replay",
-    # Pause/resume transitions (Phase 1 of pause/resume redesign, 2026-06-25):
-    # Allow a running job to be suspended (PROCESSING→PAUSED), resumed back to
-    # PROCESSING (PAUSED→PROCESSING), or terminated while paused
-    # (PAUSED→CANCELLED). JobStatus.PAUSED enum is added in a parallel task.
-    (_STATUS_PROCESSING, _STATUS_PAUSED): "pause",
-    (_STATUS_PAUSED, _STATUS_PROCESSING): "resume",
-    (_STATUS_PAUSED, _STATUS_CANCELLED): "cancel_after_pause",
-    # Orphan-race re-arm (2026-06-20): after a job is committed to COMPLETED
-    # the post-commit re-check in JobFeedbackObserver._finalize_job may detect
-    # a concurrent ``register_message_send`` that bumped the CM generation
-    # counter during finalization. The job must be transitioned back to
-    # PROCESSING so the late child's eventual resolve can find a PROCESSING
-    # job (otherwise ``_get_processing_job_for_instance`` returns None and
-    # the child is silently orphaned). This transition is the only legal
-    # way to un-stick a finalized job whose CM had a late register.
-    (_STATUS_COMPLETED, _STATUS_PROCESSING): "rearm_after_complete",
+# Phase 5: transitions on the 4-value admission vocabulary.
+# 8 entries cover every transition exercised by ``_finalize_terminal``,
+# ``cancel_job``, ``JobRetryEngine.maybe_retry`` (RETRY → ``active →
+# queued``), the DLQ replay path (``done → queued`` / ``dead →
+# queued``), and the orphan-race post-commit re-arm in
+# ``JobFeedbackObserver`` (``done → active``).
+VALID_TRANSITIONS: Set[Tuple[str, str]] = {
+    (AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value),   # start
+    (AdmissionState.QUEUED.value, AdmissionState.DONE.value),     # cancel pending
+    (AdmissionState.ACTIVE.value, AdmissionState.DONE.value),     # complete / fail / cancel / abort (NO_RETRY)
+    (AdmissionState.ACTIVE.value, AdmissionState.QUEUED.value),   # retry (RETRY)
+    (AdmissionState.ACTIVE.value, AdmissionState.DEAD.value),     # dead-letter (DEAD_LETTER)
+    (AdmissionState.DONE.value, AdmissionState.QUEUED.value),     # replay from done
+    (AdmissionState.DEAD.value, AdmissionState.QUEUED.value),     # replay from DLQ
+    (AdmissionState.DONE.value, AdmissionState.ACTIVE.value),     # orphan-race post-commit re-arm
 }
 
 
 class InvalidTransitionError(ValueError):
-    """Raised when an invalid state transition is attempted.
+    """Raised when an invalid admission-state transition is attempted.
 
     Inheriting from ``ValueError`` (instead of plain ``Exception``) lets
     callers catch both ``InvalidTransitionError`` and other value-style
@@ -59,78 +72,69 @@ class InvalidTransitionError(ValueError):
     checks keep working because the subclass relationship is preserved.
     """
 
-    def __init__(self, job_id: str, from_status: str | None, to_status: str) -> None:
+    def __init__(self, job_id: str, from_state: str | None, to_state: str) -> None:
         self.job_id = job_id
-        self.from_status = from_status
-        self.to_status = to_status
+        self.from_state = from_state
+        self.to_state = to_state
         super().__init__(
-            f"Invalid transition for job {job_id}: {from_status} → {to_status}"
+            f"Invalid transition for job {job_id}: {from_state} \u2192 {to_state}"
         )
 
 
 class JobStateMachine:
-    """Formal state machine for job lifecycle transitions."""
+    """Formal state machine for job admission-state transitions."""
 
-    def can_transition(self, from_status: str | None, to_status: str) -> bool:
+    def can_transition(self, from_state: str | None, to_state: str) -> bool:
         """Check if a transition is valid.
 
-        Args:
-            from_status: Current state (None for new jobs).
-            to_status: Target state.
-
-        Returns:
-            True if the transition is allowed.
-        """
-        return (from_status, to_status) in TRANSITIONS
-
-    def get_transition_name(
-        self, from_status: str | None, to_status: str
-    ) -> str | None:
-        """Get the name of a transition.
+        Same-state transitions (``from_state == to_state``) are
+        treated as implicit no-ops and return ``True``: pause/resume
+        are Instance concerns that don't move the admission column
+        (e.g. ``JobRecoveryService`` reconciles ``PROCESSING → PAUSED``
+        by issuing ``atomic_transition(active, active)``, a no-op on
+        the admission column). Returning ``True`` here is the least
+        invasive way to keep those callers working without populating
+        :data:`VALID_TRANSITIONS` with self-loops.
 
         Args:
-            from_status: Current state (None for new jobs).
-            to_status: Target state.
+            from_state: Current admission state (``None`` is never valid
+                under the queue-proxy model — creation is an INSERT).
+            to_state: Target admission state.
 
         Returns:
-            Transition name (e.g., 'start', 'complete') or None if invalid.
+            True iff ``from_state == to_state`` (no-op) OR
+            ``(from_state, to_state)`` is in :data:`VALID_TRANSITIONS`.
         """
-        return TRANSITIONS.get((from_status, to_status))
-
-    def get_valid_transitions(
-        self, from_status: str | None
-    ) -> List[tuple[str, str]]:
-        """Get all valid target states from a given state.
-
-        Args:
-            from_status: Current state (None for new jobs).
-
-        Returns:
-            List of (target_state, transition_name) tuples.
-        """
-        return [
-            (to_state, name)
-            for (f_state, to_state), name in TRANSITIONS.items()
-            if f_state == from_status
-        ]
+        if from_state == to_state:
+            return True  # no-op; pause/resume are Instance concerns
+        return (from_state, to_state) in VALID_TRANSITIONS
 
     def validate_transition(
-        self, from_status: str | None, to_status: str
+        self, from_state: str | None, to_state: str, job_id: str = ""
     ) -> None:
         """Validate transition, raising InvalidTransitionError if invalid.
 
+        Same-state transitions are treated as implicit no-ops and
+        pass validation without raising. See
+        :meth:`can_transition` for the full rationale.
+
         Args:
-            from_status: Current state (None for new jobs).
-            to_status: Target state.
+            from_state: Current admission state.
+            to_state: Target admission state.
+            job_id: Job ID for the error message (optional — call sites
+                that don't have it can pass an empty string; the
+                underlying UPDATE will reject with the same error).
 
         Raises:
             InvalidTransitionError: If the transition is not allowed.
         """
-        if not self.can_transition(from_status, to_status):
+        if from_state == to_state:
+            return  # no-op; pause/resume are Instance concerns
+        if not self.can_transition(from_state, to_state):
             raise InvalidTransitionError(
-                job_id="",  # Job ID should be provided by caller
-                from_status=from_status,
-                to_status=to_status,
+                job_id=job_id,
+                from_state=from_state,
+                to_state=to_state,
             )
 
 

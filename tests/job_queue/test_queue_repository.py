@@ -795,11 +795,11 @@ class TestJobStatusValues:
 
     def test_all_status_values(self):
         """Test all job status values."""
-        assert JobStatus.PENDING.value == "pending"
-        assert JobStatus.PROCESSING.value == "processing"
-        assert JobStatus.COMPLETED.value == "completed"
-        assert JobStatus.FAILED.value == "failed"
-        assert JobStatus.CANCELLED.value == "cancelled"
+        assert AdmissionState.QUEUED.value == "pending"
+        assert AdmissionState.ACTIVE.value == "processing"
+        assert AdmissionState.DONE.value == "completed"
+        assert AdmissionState.DONE.value == "failed"
+        assert AdmissionState.DONE.value == "cancelled"
 
     def test_is_valid_status(self):
         """Test status validation."""

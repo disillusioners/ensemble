@@ -342,7 +342,6 @@ class TestReplayDLQItem:
             queue_id="queue-xyz",
             admission_state=status_to_admission("dead_letter"),
             retry_count=3,
-            error_message="Test error",
         )
         with Session(engine) as session:
             session.add(job)

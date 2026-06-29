@@ -8,7 +8,7 @@ from daemon.services.job_queue_mgmt_service import (
     JobQueueMgmtService,
     RESERVED_QUEUE_NAMES,
 )
-from daemon.repositories.job_queue.models import AdmissionState, JobQueue, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobQueue
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from daemon.services.job_queue_service import JobQueueService
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 
 
 class MockQueue:
@@ -45,7 +45,7 @@ class MockJob:
         agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
-        status: str = JobStatus.PENDING.value,
+        status: str = AdmissionState.QUEUED.value,
         priority: int = 5,
         created_at: str = "2025-01-01T00:00:00",
     ):

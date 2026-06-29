@@ -497,7 +497,7 @@ class TestEnqueueJobRejectsMessage:
         """``enqueue(job_type="task")`` still works (dispatch-queue path)."""
         from unittest.mock import AsyncMock, MagicMock, patch
         from daemon.services.job_queue_service import JobQueueService
-        from daemon.repositories.job_queue.models import JobStatus
+        from daemon.repositories.job_queue.models import AdmissionState
 
         service = JobQueueService(
             repository=MagicMock(),
@@ -507,7 +507,7 @@ class TestEnqueueJobRejectsMessage:
         # Stub the repo's create() to return a fake JobItem
         fake_job = MagicMock()
         fake_job.job_id = "task-job-1"
-        fake_job.status = JobStatus.PENDING.value
+        fake_job.status = AdmissionState.QUEUED.value
         # ``_queue_repo.get(queue_id)`` is called when queue_id is provided
         # directly (the test bypasses name resolution). The returned object
         # must have ``.project_id == "test-project"`` or the production

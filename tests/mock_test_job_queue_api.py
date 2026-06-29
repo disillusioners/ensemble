@@ -16,7 +16,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import JobRepository
-from daemon.repositories.job_queue.models import JobStatus, JobItem
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService
 from daemon.routers.jobs import set_job_queue_service
@@ -113,7 +113,7 @@ def valid_job_data_no_project():
 
 def create_mock_job(
     job_id="test-job-123",
-    status=JobStatus.PENDING.value,
+    status=AdmissionState.QUEUED.value,
     priority=5,
     agent_dir="/agents/developer",
     project_id="test-project",
@@ -128,7 +128,7 @@ def create_mock_job(
     """Create a mock JobItem for testing."""
     job = MagicMock(spec=JobItem)
     job.job_id = job_id
-    job.status = status
+    job.admission_state = status
     job.priority = priority
     job.agent_dir = agent_dir
     job.project_id = project_id

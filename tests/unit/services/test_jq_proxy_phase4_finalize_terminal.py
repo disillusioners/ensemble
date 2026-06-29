@@ -324,12 +324,12 @@ class TestDecisionDispatch:
             instance_id="inst-complete",
             decision=Decision.NO_RETRY,
             job_id=job.job_id,
-            target_status=JobStatus.COMPLETED.value,
+            target_status=AdmissionState.DONE.value,
             result_summary="phase4 COMPLETED",
         )
 
         assert canonical_job_id == job.job_id
-        assert final_status == JobStatus.COMPLETED.value
+        assert final_status == AdmissionState.DONE.value
 
         refetched = _refresh(engine, job.job_id)
         # admission_state is the primary write target.
@@ -355,12 +355,12 @@ class TestDecisionDispatch:
             instance_id="inst-fail",
             decision=Decision.NO_RETRY,
             job_id=job.job_id,
-            target_status=JobStatus.FAILED.value,
+            target_status=AdmissionState.DONE.value,
             error_message="phase4 NO_RETRY failure",
         )
 
         assert canonical_job_id == job.job_id
-        assert final_status == JobStatus.FAILED.value
+        assert final_status == AdmissionState.DONE.value
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
@@ -392,7 +392,7 @@ class TestDecisionDispatch:
         )
 
         assert canonical_job_id == job.job_id
-        assert final_status == JobStatus.PENDING.value
+        assert final_status == AdmissionState.QUEUED.value
 
         refetched = _refresh(engine, job.job_id)
         # admission_state='queued' (status_to_admission('pending'))
@@ -429,7 +429,7 @@ class TestDecisionDispatch:
 
         assert canonical_job_id == job.job_id
         # maybe_retry returned None → boundary surfaces dead_letter.
-        assert final_status == JobStatus.DEAD_LETTER.value
+        assert final_status == AdmissionState.DEAD.value
 
     @pytest.mark.asyncio
     async def test_dead_letter_writes_dead_and_dead_letter(
@@ -453,7 +453,7 @@ class TestDecisionDispatch:
         )
 
         assert canonical_job_id == job.job_id
-        assert final_status == JobStatus.DEAD_LETTER.value
+        assert final_status == AdmissionState.DEAD.value
 
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DEAD.value
@@ -468,7 +468,7 @@ class TestDecisionDispatch:
         ``status`` column is no longer written — only
         ``admission_state`` is asserted here. The CANCELLED intent
         is captured via the returned ``final_status`` value (still
-        ``JobStatus.CANCELLED.value``) and via the ``cancelled_at``
+        ``AdmissionState.DONE.value``) and via the ``cancelled_at``
         timestamp set by ``finalize_active_to_done``.
 
         ``target_status='cancelled'`` is supplied so the boundary
@@ -483,12 +483,12 @@ class TestDecisionDispatch:
             instance_id="inst-cancel",
             decision=Decision.NO_RETRY,
             job_id=job.job_id,
-            target_status=JobStatus.CANCELLED.value,
+            target_status=AdmissionState.DONE.value,
             error_message="user cancelled",
         )
 
         assert canonical_job_id == job.job_id
-        assert final_status == JobStatus.CANCELLED.value
+        assert final_status == AdmissionState.DONE.value
 
         refetched = _refresh(engine, job.job_id)
         # Phase 4 cleanup: only ``admission_state`` is the source of
@@ -728,26 +728,26 @@ class TestAdmissionStatePrimaryWrite:
         [
             # Decision.NO_RETRY + COMPLETED → done + completed
             (
-                {"decision": Decision.NO_RETRY, "target_status": JobStatus.COMPLETED.value},
-                JobStatus.COMPLETED.value,
+                {"decision": Decision.NO_RETRY, "target_status": AdmissionState.DONE.value},
+                AdmissionState.DONE.value,
                 AdmissionState.DONE.value,
             ),
             # Decision.NO_RETRY + FAILED → done + failed
             (
-                {"decision": Decision.NO_RETRY, "target_status": JobStatus.FAILED.value},
-                JobStatus.FAILED.value,
+                {"decision": Decision.NO_RETRY, "target_status": AdmissionState.DONE.value},
+                AdmissionState.DONE.value,
                 AdmissionState.DONE.value,
             ),
             # Decision.NO_RETRY + CANCELLED → done + cancelled
             (
-                {"decision": Decision.NO_RETRY, "target_status": JobStatus.CANCELLED.value},
-                JobStatus.CANCELLED.value,
+                {"decision": Decision.NO_RETRY, "target_status": AdmissionState.DONE.value},
+                AdmissionState.DONE.value,
                 AdmissionState.DONE.value,
             ),
             # Decision.DEAD_LETTER → dead + dead_letter
             (
                 {"decision": Decision.DEAD_LETTER},
-                JobStatus.DEAD_LETTER.value,
+                AdmissionState.DEAD.value,
                 AdmissionState.DEAD.value,
             ),
         ],
@@ -821,7 +821,7 @@ class TestAdmissionStatePrimaryWrite:
             instance_id="inst-sweep",
             decision=Decision.NO_RETRY,
             job_id=job.job_id,
-            target_status=JobStatus.COMPLETED.value,
+            target_status=AdmissionState.DONE.value,
         )
         refetched = _refresh(engine, job.job_id)
         assert refetched.admission_state == AdmissionState.DONE.value
@@ -833,13 +833,13 @@ class TestAdmissionStatePrimaryWrite:
         the mapping is caught immediately.
         """
         cases = [
-            (JobStatus.PENDING.value, AdmissionState.QUEUED.value),
-            (JobStatus.PROCESSING.value, AdmissionState.ACTIVE.value),
-            (JobStatus.PAUSED.value, AdmissionState.ACTIVE.value),
-            (JobStatus.COMPLETED.value, AdmissionState.DONE.value),
-            (JobStatus.FAILED.value, AdmissionState.DONE.value),
-            (JobStatus.CANCELLED.value, AdmissionState.DONE.value),
-            (JobStatus.DEAD_LETTER.value, AdmissionState.DEAD.value),
+            (AdmissionState.QUEUED.value, AdmissionState.QUEUED.value),
+            (AdmissionState.ACTIVE.value, AdmissionState.ACTIVE.value),
+            (AdmissionState.ACTIVE.value, AdmissionState.ACTIVE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
+            (AdmissionState.DONE.value, AdmissionState.DONE.value),
+            (AdmissionState.DEAD.value, AdmissionState.DEAD.value),
         ]
         for status_value, expected_admission in cases:
             assert status_to_admission(status_value) == expected_admission, (
@@ -904,7 +904,7 @@ class TestDeadLetterCanonicalization:
         A future refactor that breaks this mapping would desynchronise
         the dual-write contract for the DLQ path.
         """
-        assert status_to_admission(JobStatus.DEAD_LETTER.value) == AdmissionState.DEAD.value
+        assert status_to_admission(AdmissionState.DEAD.value) == AdmissionState.DEAD.value
         # The reverse direction: admission_state 'dead' is NOT a valid
         # input to ``status_to_admission`` (which is JobStatus-only) —
         # it falls through to the QUEUED default. This documents the

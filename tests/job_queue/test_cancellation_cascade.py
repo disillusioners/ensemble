@@ -10,7 +10,7 @@ Tests the cancel_job() method in JobQueueService which handles:
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import JobRepository, AdmissionState
 
 
 class MockJobItem:

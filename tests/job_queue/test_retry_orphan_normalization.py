@@ -14,7 +14,7 @@ from sqlmodel import SQLModel
 
 from daemon.constants import SYSTEM_DEFAULT_PROJECT_ID
 from daemon.repositories.job_queue import AdmissionState, JobRepository, JobQueueRepository
-from daemon.repositories.job_queue.models import JobStatus
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_queue_service import JobQueueService

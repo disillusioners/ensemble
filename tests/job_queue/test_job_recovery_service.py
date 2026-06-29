@@ -377,8 +377,8 @@ class TestJobRecoveryStartup:
         mock_instance_repo.get.return_value = None
         mock_job_repo.atomic_transition.side_effect = InvalidTransitionError(
             job_id=mock_job.job_id,
-            from_status="processing",
-            to_status="failed",
+            from_state="processing",
+            to_state="failed",
         )
 
         stats = await service.recover_on_startup()
@@ -528,8 +528,8 @@ class TestFailOrphanedJobLockOrdering:
 
         mock_job_repo.atomic_transition.side_effect = InvalidTransitionError(
             job_id=mock_job.job_id,
-            from_status="processing",
-            to_status="failed",
+            from_state="processing",
+            to_state="failed",
         )
 
         result = await service._fail_orphaned_job(
@@ -663,8 +663,8 @@ class TestFailOrphanedJobLockOrdering:
             call_order.append("atomic_transition")
             raise InvalidTransitionError(
                 job_id=mock_job.job_id,
-                from_status="processing",
-                to_status="failed",
+                from_state="processing",
+                to_state="failed",
             )
 
         def track_release(*args, **kwargs):

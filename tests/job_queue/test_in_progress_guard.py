@@ -27,7 +27,7 @@ import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from daemon.repositories.job_queue import JobRepository, JobStatus
+from daemon.repositories.job_queue import JobRepository, AdmissionState
 from daemon.repositories.job_queue.models import JobItem
 from daemon.repositories.job_queue.watcher_models import (
     ALL_TERMINAL_STATES,
@@ -99,14 +99,13 @@ def make_mock_job(
     """Create a MagicMock(spec=JobItem) with the given attributes."""
     mock_job = MagicMock(spec=JobItem)
     mock_job.job_id = job_id
-    mock_job.status = status
+    mock_job.admission_state = status
     mock_job.instance_id = instance_id
     mock_job.agent_id = agent_id
     mock_job.result_summary = "Test job completed"
     mock_job.error_message = None
     mock_job.project_id = "test-project"
     mock_job.queue_id = "system_fifo_queue"
-    mock_job.admission_state = _STATUS_TO_ADMISSION.get(status, "queued")
     return mock_job
 
 
@@ -464,8 +463,7 @@ class TestJobProcessorOrphanWatchdogWaitingForGuard:
         job.source = "api"
         job.project_id = "test-project"
         job.queue_id = "system_parallel_queue"
-        job.status = JobStatus.PROCESSING.value
-        job.admission_state = _STATUS_TO_ADMISSION.get(job.status, "queued")
+        job.admission_state = AdmissionState.ACTIVE.value
         job.instance_id = instance_id
         job.job_type = job_type
         return job

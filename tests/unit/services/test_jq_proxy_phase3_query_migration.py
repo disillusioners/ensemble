@@ -456,8 +456,8 @@ class TestC2FifoPriority:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert _refresh(engine, job.job_id).admission_state == AdmissionState.ACTIVE.value
 
@@ -621,8 +621,8 @@ class TestC3RaceDeleteProtection:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert _refresh(engine, job.job_id).admission_state == AdmissionState.ACTIVE.value
         _acquire_with_slot(lock_repo, "test-project", job.queue_id, job.job_id, slot=0)
@@ -800,8 +800,8 @@ class TestA_FindProcessingJobs:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
 
         processing = job_repo.find_processing_jobs()
@@ -1211,8 +1211,8 @@ class TestD_FindJobsByInstance:
         job_repo.start_job(job.job_id, instance_id=inst)
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
 
         jobs = job_repo.find_jobs_by_instance(inst)

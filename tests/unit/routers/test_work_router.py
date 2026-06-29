@@ -36,7 +36,7 @@ from sqlmodel import Session, SQLModel
 
 from daemon.repositories.instance.models import Instance
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
-from daemon.repositories.job_queue.models import JobItem, JobQueue, JobStatus
+from daemon.repositories.job_queue.models import JobItem, JobQueue, AdmissionState
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.repositories.task.repository import TaskRepository
@@ -190,7 +190,7 @@ def _seed_job(
     job_id: str | None = None,
     instance_id: str | None = None,
     project_id: str | None = "test-project",
-    status: str = JobStatus.PENDING.value,
+    status: str = AdmissionState.QUEUED.value,
     queue_id: str | None = None,
 ) -> str:
     """Insert a JobItem row and return its job_id."""
@@ -219,11 +219,8 @@ def _seed_job(
             source="api",
             project_id=project_id,
             priority=5,
-            status=status,
 
             admission_state=status_to_admission(status),
-            result_summary=None,
-            error_message=None,
             instance_id=instance_id,
             queue_id=queue_id,
             created_at=datetime.now(timezone.utc).isoformat(),

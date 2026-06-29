@@ -32,7 +32,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
 
 from daemon.repositories.job_queue import AdmissionState, JobRepository
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 
 
 # ─────────────────────────────────────────────────────────────────────────────

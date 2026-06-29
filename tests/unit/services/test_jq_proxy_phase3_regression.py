@@ -632,8 +632,8 @@ class TestPauseResume:
 
         paused = job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert paused is not None
 
@@ -653,8 +653,8 @@ class TestPauseResume:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
 
         # Paused job MUST still be counted.
@@ -672,8 +672,8 @@ class TestPauseResume:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
 
         # Paused job appears in ``find_processing_jobs`` because
@@ -688,14 +688,14 @@ class TestPauseResume:
         job_repo.start_job(job.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
 
         resumed = job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PAUSED.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert resumed is not None
 
@@ -715,15 +715,15 @@ class TestPauseResume:
 
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert job_repo.count_active_jobs_by_project("proj-f") == 1
 
         job_repo.atomic_transition(
             job.job_id,
-            from_status=JobStatus.PAUSED.value,
-            to_status=JobStatus.PROCESSING.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         assert job_repo.count_active_jobs_by_project("proj-f") == 1
 
@@ -1161,8 +1161,8 @@ class TestCrossCuttingInvariants:
         job_repo.start_job(j3.job_id, instance_id="inst-1")
         job_repo.atomic_transition(
             j3.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
         # Job 4: pending → processing → completed.
         j4 = _make_job(engine, job_repo, project_id="proj-x")
@@ -1224,8 +1224,8 @@ class TestCrossCuttingInvariants:
         job_repo.start_job(j_paused.job_id, instance_id="inst-paused")
         job_repo.atomic_transition(
             j_paused.job_id,
-            from_status=JobStatus.PROCESSING.value,
-            to_status=JobStatus.PAUSED.value,
+            from_status=AdmissionState.ACTIVE.value,
+            to_status=AdmissionState.ACTIVE.value,
         )
 
         # 1. count_active_jobs_by_project — queued + active (incl. paused).

@@ -69,7 +69,7 @@ from daemon.repositories.instance.models import (
     Instance,
     InstanceStatus,
 )
-from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository, JobStatus
+from daemon.repositories.job_queue import AdmissionState, JobItem, JobRepository
 from daemon.repositories.job_queue.lock_repository import LockRepository
 from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.dependency_bus import get_dependency_bus, set_dependency_bus
@@ -164,7 +164,7 @@ def _seed_job(
     engine: Engine,
     *,
     instance_id: str,
-    status: str = JobStatus.PAUSED.value,
+    status: str = AdmissionState.ACTIVE.value,
 ) -> str:
     """Insert a JobItem row. Returns the job_id."""
     jid = f"job-{uuid.uuid4().hex[:8]}"
@@ -178,17 +178,15 @@ def _seed_job(
             source="api",
             project_id="test-project",
             job_type="message",
-            status=status,
 
             admission_state=status_to_admission(status),
             instance_id=instance_id,
             created_at=now_iso,
-            started_at=(
                 now_iso
                 if status
                 in (
-                    JobStatus.PROCESSING.value,
-                    JobStatus.PAUSED.value,
+                    AdmissionState.ACTIVE.value,
+                    AdmissionState.ACTIVE.value,
                 )
                 else None
             ),
@@ -309,7 +307,7 @@ def test_resume_transitions_job_to_processing(
     JobProcessor's queue sweep can re-discover it.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    jid = _seed_job(engine, instance_id=iid, status=JobStatus.PAUSED.value)
+    jid = _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
 
     result = lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -322,7 +320,7 @@ def test_resume_transitions_job_to_processing(
     assert result.updated_ids == [iid]
     jobs = _read_jobs(engine, iid)
     assert len(jobs) == 1
-    assert jobs[0].status == JobStatus.PROCESSING.value, (
+    assert jobs[0].status == AdmissionState.ACTIVE.value, (
         f"expected job {jid} to be PROCESSING, got {jobs[0].status}"
     )
 
@@ -335,12 +333,12 @@ def test_resume_skips_non_paused_jobs(lifecycle_service, engine, write_guard):
     concurrent transition is left alone.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.COMPLETED.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.FAILED.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PENDING.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PROCESSING.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.DONE.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.DONE.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.QUEUED.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
     # The PAUSED one is the only one that should transition.
-    _seed_job(engine, instance_id=iid, status=JobStatus.PAUSED.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
 
     lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -354,11 +352,11 @@ def test_resume_skips_non_paused_jobs(lifecycle_service, engine, write_guard):
     statuses = sorted(j.status for j in jobs)
     # COMPLETED/FAILED/PENDING preserved; PAUSED → PROCESSING (now 2 PROCESSING)
     assert statuses == sorted([
-        JobStatus.COMPLETED.value,
-        JobStatus.FAILED.value,
-        JobStatus.PENDING.value,
-        JobStatus.PROCESSING.value,  # pre-existing
-        JobStatus.PROCESSING.value,  # flipped from PAUSED
+        AdmissionState.DONE.value,
+        AdmissionState.DONE.value,
+        AdmissionState.QUEUED.value,
+        AdmissionState.ACTIVE.value,  # pre-existing
+        AdmissionState.ACTIVE.value,  # flipped from PAUSED
     ]), (
         f"expected exactly one PAUSED → PROCESSING transition; got {statuses}"
     )
@@ -396,7 +394,7 @@ def test_resume_transitions_task_to_pending(
     task_id = _seed_task(
         engine, instance_id=iid, status=TaskStatus.PAUSED.value
     )
-    _seed_job(engine, instance_id=iid, status=JobStatus.PAUSED.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
 
     lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -470,7 +468,7 @@ def test_resume_three_tables_single_transaction(
     inverse of the pre-Phase 2 bug.
     """
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PAUSED.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.PAUSED.value)
 
     result = lifecycle_service._resume_cascade_db_sync(
@@ -538,7 +536,7 @@ def test_resume_does_not_complete_paused_task(
     task_id = _seed_task(
         engine, instance_id=iid, status=TaskStatus.PAUSED.value
     )
-    _seed_job(engine, instance_id=iid, status=JobStatus.PAUSED.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
 
     lifecycle_service._resume_cascade_db_sync(
         engine,
@@ -569,7 +567,7 @@ def mock_job() -> MagicMock:
     """Build a MagicMock(spec=JobItem) for the observer tests."""
     job = MagicMock(spec=JobItem)
     job.job_id = f"job-{uuid.uuid4().hex[:8]}"
-    job.status = JobStatus.PROCESSING.value
+    job.admission_state = AdmissionState.ACTIVE.value
     job.instance_id = f"inst-{uuid.uuid4().hex[:8]}"
     job.agent_id = "developer"
     job.message = "resume"
@@ -833,7 +831,7 @@ def test_paused_to_cancelled_via_terminate_still_works(engine):
     from sqlmodel import update as sqlmodel_update
 
     iid = _seed_instance(engine, status=InstanceStatus.PAUSED.value)
-    _seed_job(engine, instance_id=iid, status=JobStatus.PAUSED.value)
+    _seed_job(engine, instance_id=iid, status=AdmissionState.ACTIVE.value)
     _seed_task(engine, instance_id=iid, status=TaskStatus.PAUSED.value)
 
     # Simulate terminate's status transition (this is the same

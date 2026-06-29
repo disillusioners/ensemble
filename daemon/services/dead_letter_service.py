@@ -154,7 +154,13 @@ class DeadLetterService:
             project_id=job.project_id,
             queue_id=job.queue_id,
             priority=job.priority,
-            error_message=job.error_message or "",
+            # Phase 5: ``job.error_message`` was dropped from the
+            # JobItem model in Phase B; use ``getattr`` to stay
+            # compatible with stale rows that may still carry the
+            # attribute in fixture data. ``failed_at`` was re-added
+            # to the model in Phase 5 Batch 2 (see JobItem.failed_at)
+            # so it can be read directly.
+            error_message=getattr(job, 'error_message', None) or "",
             retry_count=job.retry_count,
             failed_at=job.failed_at or datetime.now(timezone.utc).isoformat(),
             reason=reason,
@@ -289,7 +295,13 @@ class DeadLetterService:
                 project_id=job.project_id,
                 queue_id=job.queue_id,
                 priority=job.priority,
-                error_message=job.error_message or "",
+                # Phase 5: ``job.error_message`` was dropped from the
+                # JobItem model in Phase B; use ``getattr`` to stay
+                # compatible with stale rows that may still carry the
+                # attribute in fixture data. ``failed_at`` was re-added
+                # to the model in Phase 5 Batch 2 (see JobItem.failed_at)
+                # so it can be read directly.
+                error_message=getattr(job, 'error_message', None) or "",
                 retry_count=job.retry_count,
                 failed_at=job.failed_at or datetime.now(timezone.utc).isoformat(),
                 reason=reason,
@@ -350,7 +362,11 @@ class DeadLetterService:
                 # Notify watchers after successful commit
                 if self._job_queue_service and self._loop and self._loop.is_running():
                     asyncio.run_coroutine_threadsafe(
-                        self._job_queue_service.notify_watchers(job_id, "dead_letter", job.error_message),
+                        # Phase 5: ``job.error_message`` was dropped from
+                        # the JobItem model in Phase B; ``getattr``
+                        # shields the post-commit watcher notify from
+                        # AttributeError on legacy rows.
+                        self._job_queue_service.notify_watchers(job_id, "dead_letter", getattr(job, 'error_message', None)),
                         self._loop,
                     )
 
@@ -416,8 +432,8 @@ class DeadLetterService:
                 from daemon.services.job_state_machine import InvalidTransitionError
                 raise InvalidTransitionError(
                     job_id=job_id,
-                    from_status=job.admission_state,
-                    to_status="pending",
+                    from_state=job.admission_state,
+                    to_state="pending",
                 )
 
             # Atomic UPDATE with admission_state guard (defense-in-
@@ -440,10 +456,17 @@ class DeadLetterService:
                 .values(
                     admission_state=AdmissionState.QUEUED.value,
                     retry_count=0,
+                    # Phase 5: ``failed_at`` was re-added to the
+                    # JobItem model in Phase 5 Batch 2 and stays as
+                    # the live retry marker (clear on DLQ replay so
+                    # the next finalize sees ``failed_at=None`` and
+                    # treats this row as a fresh NON-FAILED-path
+                    # entry). ``error_message``, ``started_at``,
+                    # ``completed_at`` mirror columns were dropped
+                    # from the SQLModel in Phase B — those assignments
+                    # are removed. ``instance_id=None`` is still a
+                    # valid column reset.
                     failed_at=None,
-                    error_message=None,
-                    started_at=None,
-                    completed_at=None,
                     instance_id=None,
                 )
             )
@@ -454,10 +477,10 @@ class DeadLetterService:
                 from daemon.services.job_state_machine import InvalidTransitionError
                 raise InvalidTransitionError(
                     job_id=job_id,
-                    from_status=job.admission_state,
-                    to_status="pending",
+                    from_state=job.admission_state,
+                    to_state="pending",
                 )
-            
+
             # Delete the DLQ item
             session.delete(dlq_item)
             

@@ -16,7 +16,7 @@ import pytest
 
 from daemon.models.instance import InstanceStatus
 from daemon.services.job_processor import JobProcessor
-from daemon.repositories.job_queue.models import JobItem, JobStatus
+from daemon.repositories.job_queue.models import JobItem, AdmissionState
 from daemon.services.job_queue_service import DemandState
 from daemon.services.dependency_bus import set_dependency_bus
 
@@ -74,7 +74,7 @@ class MockJob:
         agent_id: str = "developer",
         project_id: str = "project-1",
         queue_id: str = "queue-1",
-        status: str = JobStatus.PROCESSING.value,
+        status: str = AdmissionState.ACTIVE.value,
         job_type: str = "message",  # Must be 'message' to trigger the status guard code path
     ):
         self.job_id = job_id
@@ -285,7 +285,7 @@ class TestStatusStrEnumGuard:
 
         # Create a PROCESSING MESSAGE job with instance_id
         # job_type='message' is required to trigger the status guard code path
-        job = MockJob(status=JobStatus.PROCESSING.value, job_type="message")
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with string status (the bug scenario)
@@ -328,7 +328,7 @@ class TestStatusStrEnumGuard:
         )
 
         # Create a PROCESSING MESSAGE job with instance_id
-        job = MockJob(status=JobStatus.PROCESSING.value, job_type="message")
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with enum status
@@ -365,7 +365,7 @@ class TestStatusStrEnumGuard:
         )
 
         # Create a PROCESSING MESSAGE job with instance_id
-        job = MockJob(status=JobStatus.PROCESSING.value, job_type="message")
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with error string status
@@ -403,7 +403,7 @@ class TestStatusStrEnumGuard:
         )
 
         # Create a PROCESSING MESSAGE job with instance_id
-        job = MockJob(status=JobStatus.PROCESSING.value, job_type="message")
+        job = MockJob(status=AdmissionState.ACTIVE.value, job_type="message")
         job.instance_id = "test-instance-id"
 
         # Mock DB returning instance with error enum status

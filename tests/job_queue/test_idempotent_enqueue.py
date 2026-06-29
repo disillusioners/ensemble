@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from daemon.services.job_queue_service import JobQueueService
-from daemon.repositories.job_queue.models import AdmissionState, JobItem, JobStatus
+from daemon.repositories.job_queue.models import AdmissionState, JobItem
 
 # Test system project ID (must match conftest.py in job_queue)
 TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
@@ -26,13 +26,13 @@ TEST_SYSTEM_PROJECT_ID = "71931ae0-0f25-5fbf-853b-2a78cc978d7e"
 # were constructed with, so service-level assertions on ``admission_state``
 # see the right bucket.
 _STATUS_TO_ADMISSION = {
-    JobStatus.PENDING.value: AdmissionState.QUEUED.value,
-    JobStatus.PROCESSING.value: AdmissionState.ACTIVE.value,
-    JobStatus.PAUSED.value: AdmissionState.ACTIVE.value,
-    JobStatus.COMPLETED.value: AdmissionState.DONE.value,
-    JobStatus.FAILED.value: AdmissionState.DONE.value,
-    JobStatus.CANCELLED.value: AdmissionState.DONE.value,
-    JobStatus.DEAD_LETTER.value: AdmissionState.DEAD.value,
+    AdmissionState.QUEUED.value: AdmissionState.QUEUED.value,
+    AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
+    AdmissionState.ACTIVE.value: AdmissionState.ACTIVE.value,
+    AdmissionState.DONE.value: AdmissionState.DONE.value,
+    AdmissionState.DONE.value: AdmissionState.DONE.value,
+    AdmissionState.DONE.value: AdmissionState.DONE.value,
+    AdmissionState.DEAD.value: AdmissionState.DEAD.value,
 }
 
 
@@ -40,7 +40,7 @@ def make_mock_job(
     job_id: str = "test-job-1",
     agent_id: str = "developer",
     project_id: str = "test-project",
-    status: str = JobStatus.PENDING.value,
+    status: str = AdmissionState.QUEUED.value,
     idempotency_key: str | None = None,
     created_at: datetime | None = None,
 ) -> MagicMock:
@@ -61,8 +61,7 @@ def make_mock_job(
     job.job_id = job_id
     job.agent_id = agent_id
     job.project_id = project_id
-    job.status = status
-    job.admission_state = _STATUS_TO_ADMISSION.get(status, AdmissionState.QUEUED.value)
+    job.admission_state = status
     job.message = "test message"
     job.source = "api"
     job.priority = 5
@@ -280,7 +279,7 @@ class TestIdempotentEnqueue:
         """
         existing_job = make_mock_job(
             job_id="existing-job-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             idempotency_key="key-123",
         )
         mock_repository.find_by_idempotency_key.return_value = existing_job
@@ -317,7 +316,7 @@ class TestIdempotentEnqueue:
         """
         existing_job = make_mock_job(
             job_id="existing-job-2",
-            status=JobStatus.PROCESSING.value,
+            status=AdmissionState.ACTIVE.value,
             idempotency_key="key-456",
         )
         mock_repository.find_by_idempotency_key.return_value = existing_job
@@ -355,7 +354,7 @@ class TestIdempotentEnqueue:
         """
         existing_job = make_mock_job(
             job_id="completed-job-1",
-            status=JobStatus.COMPLETED.value,
+            status=AdmissionState.DONE.value,
             idempotency_key="key-789",
         )
         mock_repository.find_by_idempotency_key.return_value = existing_job
@@ -398,7 +397,7 @@ class TestIdempotentEnqueue:
         """
         existing_job = make_mock_job(
             job_id="failed-job-1",
-            status=JobStatus.FAILED.value,
+            status=AdmissionState.DONE.value,
             idempotency_key="key-failed",
         )
         mock_repository.find_by_idempotency_key.return_value = existing_job
@@ -436,7 +435,7 @@ class TestIdempotentEnqueue:
         """
         existing_job = make_mock_job(
             job_id="cancelled-job-1",
-            status=JobStatus.CANCELLED.value,
+            status=AdmissionState.DONE.value,
             idempotency_key="key-cancelled",
         )
         mock_repository.find_by_idempotency_key.return_value = existing_job
@@ -590,7 +589,7 @@ class TestIdempotentEnqueueEdgeCases:
         """
         existing_job = make_mock_job(
             job_id="dead-letter-job-1",
-            status=JobStatus.DEAD_LETTER.value,
+            status=AdmissionState.DEAD.value,
             idempotency_key="key-dlq",
         )
         mock_repository.find_by_idempotency_key.return_value = existing_job
@@ -711,7 +710,7 @@ class TestIdempotentEnqueueTTL:
         old_time = datetime.now(timezone.utc) - timedelta(hours=30)
         existing_job = make_mock_job(
             job_id="old-job-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             idempotency_key="key-ttl",
             created_at=old_time,
         )
@@ -751,7 +750,7 @@ class TestIdempotentEnqueueTTL:
         recent_time = datetime.now(timezone.utc) - timedelta(hours=10)
         existing_job = make_mock_job(
             job_id="recent-job-1",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             idempotency_key="key-ttl-recent",
             created_at=recent_time,
         )
@@ -795,7 +794,7 @@ class TestIdempotentEnqueueTTL:
         old_time = datetime.now(timezone.utc) - timedelta(hours=2)
         existing_job = make_mock_job(
             job_id="old-job-custom",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             idempotency_key="key-custom-ttl",
             created_at=old_time,
         )
@@ -835,7 +834,7 @@ class TestIdempotentEnqueueTTL:
         boundary_time = datetime.now(timezone.utc) - timedelta(hours=24, minutes=0)
         existing_job = make_mock_job(
             job_id="boundary-job",
-            status=JobStatus.PENDING.value,
+            status=AdmissionState.QUEUED.value,
             idempotency_key="key-boundary",
             created_at=boundary_time,
         )
