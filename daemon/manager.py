@@ -2274,27 +2274,23 @@ class InstanceManager:
                 with self._engine.begin() as conn:
                     conn.execute(text(stmt))
             except sqlalchemy.exc.ProgrammingError as tr_err:
+                # Only swallow UndefinedColumn errors raised against the
+                # ``error_message`` column specifically — the substring
+                # ``"does not exist"`` is too broad (it also matches
+                # "relation does not exist", "type does not exist",
+                # etc.) and would silently mask unrelated schema drift.
+                # ``error_message`` was dropped by Phase 5, so this
+                # branch fires on Phase 5+ databases; pre-Phase-5
+                # schemas succeed without entering the except block.
+                #
+                # NOTE: ``InFailedSqlTransaction`` is unreachable here
+                # because each statement runs in its own connection /
+                # transaction (``with self._engine.begin() as conn``
+                # opens a fresh transaction per loop iteration) — a
+                # failure in one iteration cannot poison the next.
                 err_msg = str(tr_err).lower()
-                if "does not exist" in err_msg or "undefinedcolumn" in err_msg:
-                    logger.debug(
-                        "Legacy `error_message` column already dropped "
-                        "(Phase 5+); skipping terminal_reason backfill "
-                        "statement: %s",
-                        stmt[:80],
-                    )
-                else:
-                    raise
-            except sqlalchemy.exc.InternalError as tr_err:
-                # ``InFailedSqlTransaction`` from psycopg arrives as
-                # ``InternalError`` (not ``ProgrammingError``) when a
-                # prior statement in this batch aborted the
-                # transaction. Treat the same as ``UndefinedColumn``.
-                err_msg = str(tr_err).lower()
-                if (
-                    "does not exist" in err_msg
-                    or "undefinedcolumn" in err_msg
-                    or "infailedsqltransaction" in err_msg
-                    or "current transaction is aborted" in err_msg
+                if "column" in err_msg and (
+                    "does not exist" in err_msg or "undefinedcolumn" in err_msg
                 ):
                     logger.debug(
                         "Legacy `error_message` column already dropped "

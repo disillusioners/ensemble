@@ -26,26 +26,16 @@
 --
 --   Phase 5 compatibility: the ``error_message`` column was DROPPED
 --   by Phase 5 (``20260628_000002_drop_admission_legacy.sql`` /
---   ``20260628_000002_drop_job_queue_legacy_columns.sql``). The first
---   UPDATE references ``error_message`` and will raise
---   ``no such column: error_message`` on Phase 5+ databases. SQLite
---   supports table-rebuild migration patterns, so the safe-default
---   second UPDATE (default to 'completed') is the operative
---   backfill on Phase 5+ databases — the first UPDATE will fail on
---   those schemas and abort the script. To stay idempotent and
---   runnable on BOTH pre-Phase-5 and post-Phase-5 databases, the
---   migration is split into two separately-applied migrations:
---
---     * This file (``20260701_000001_backfill_terminal_reason.sql``)
---       applies the safe-default backfill only (``terminal_reason =
---       'completed'`` for NULL rows). This works on BOTH pre-Phase-5
---       and post-Phase-5 databases — it does not touch the dropped
---       ``error_message`` column.
---     * The ``error_message``-aware backfill (``terminal_reason =
---       'failed'`` for non-empty legacy error_message rows) runs
---       inline in ``daemon/manager.py::_ensure_postgres_columns``
---       for PostgreSQL (see the ``terminal_reason_backfill`` block
---       there for the rationale and try/except pattern).
+--   ``20260628_000002_drop_job_queue_legacy_columns.sql``). The
+--   failed-aware UPDATE below references ``error_message`` and will
+--   raise ``no such column: error_message`` on Phase 5+ databases.
+--   The migration runner (``daemon/migrations/runner.py`` lines
+--   374-380) catches that specific error and idempotently skips the
+--   statement so the safe-default UPDATE below becomes the operative
+--   backfill on Phase 5+ schemas. On pre-Phase-5 databases the
+--   failed-aware UPDATE runs first and stamps ``failed`` where the
+--   legacy ``error_message`` was non-empty, then the safe-default
+--   UPDATE catches any remaining NULLs.
 --
 --   The PostgreSQL counterpart lives in
 --   ``daemon/manager.py::_ensure_postgres_columns`` (the .sql runner
@@ -53,6 +43,18 @@
 --   inlined there).
 
 -- UP
+
+-- Failed-aware backfill: rows with a non-empty legacy
+-- ``error_message`` are stamped as 'failed' (the F3 spec says these
+-- rows almost certainly terminated via the FAILED path). The
+-- ``error_message`` column is dropped by Phase 5; the migration
+-- runner catches ``no such column: error_message`` and skips this
+-- UPDATE on Phase 5+ databases so the second UPDATE (default to
+-- 'completed') is the sole backfill.
+UPDATE job_queue_items
+SET terminal_reason = 'failed'
+WHERE admission_state = 'done' AND terminal_reason IS NULL
+  AND error_message IS NOT NULL AND error_message != '';
 
 -- Safe-default backfill: any 'done' row with NULL terminal_reason
 -- is stamped as 'completed'. This matches the lossy legacy

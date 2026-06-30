@@ -1382,6 +1382,43 @@ class JobQueueService:
                     )
                     if retried is not None:
                         final_status = "pending"
+                        # W1 fix: release the lock the job was holding
+                        # BEFORE the ACTIVE→QUEUED transition so a
+                        # subsequent cancel of the queued job (which
+                        # routes through ``_finalize_terminal`` with
+                        # ``_dispatch_skipped=True`` and therefore
+                        # releases no lock) does not leak the lock
+                        # indefinitely. Idempotent w.r.t. the
+                        # ``finally`` block below: ``release_by_job``
+                        # returns False on no-op so the second release
+                        # is a harmless no-op.
+                        if (
+                            canonical_project_id
+                            and canonical_queue_id
+                        ):
+                            try:
+                                # W3 symmetry: same 5s timeout as the
+                                # finally-block release below.
+                                await asyncio.wait_for(
+                                    self._lock_manager.release_queue_lock(
+                                        canonical_project_id,
+                                        canonical_queue_id,
+                                        canonical_job_id,
+                                    ),
+                                    timeout=5,
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    f"_finalize_terminal RETRY: lock "
+                                    f"release timed out after 5s for "
+                                    f"job {canonical_job_id[:8]}..."
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"_finalize_terminal RETRY: lock "
+                                    f"release failed for job "
+                                    f"{canonical_job_id[:8]}...: {e}"
+                                )
                     else:
                         # maybe_retry moved it to DLQ (retries
                         # exhausted); surface that to the caller.
@@ -1455,10 +1492,24 @@ class JobQueueService:
                 # Path 2: scoped release — only THIS job's lock is
                 # deleted; sibling jobs' locks survive.
                 try:
-                    await self._lock_manager.release_queue_lock(
-                        canonical_project_id,
-                        canonical_queue_id,
-                        canonical_job_id,
+                    # W3 fix: wrap the async lock release in
+                    # ``asyncio.wait_for`` so the boundary cannot block
+                    # forever if the lock manager hangs. The sync twin
+                    # already uses ``future.result(timeout=5)`` — this
+                    # makes the async / sync paths symmetric with a
+                    # shared 5-second deadline.
+                    await asyncio.wait_for(
+                        self._lock_manager.release_queue_lock(
+                            canonical_project_id,
+                            canonical_queue_id,
+                            canonical_job_id,
+                        ),
+                        timeout=5,
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"_finalize_terminal: lock release timed out "
+                        f"after 5s for job {canonical_job_id[:8]}..."
                     )
                 except Exception as e:
                     logger.warning(
@@ -1481,8 +1532,20 @@ class JobQueueService:
                         f"queue_id={canonical_queue_id!r})"
                     )
                     try:
-                        await self._lock_manager.release_by_instance(
-                            canonical_instance_id
+                        # W3 fix: mirror Path 2's timeout so the
+                        # instance-wide fallback cannot block forever.
+                        await asyncio.wait_for(
+                            self._lock_manager.release_by_instance(
+                                canonical_instance_id
+                            ),
+                            timeout=5,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            f"_finalize_terminal: "
+                            f"release_by_instance timed out after 5s "
+                            f"for instance "
+                            f"{canonical_instance_id[:8]}..."
                         )
                     except Exception as e:
                         logger.warning(
@@ -2497,6 +2560,42 @@ class JobQueueService:
                     retried = self._retry_engine.maybe_retry(canonical_job_id)
                     if retried is not None:
                         final_status = "pending"
+                        # W1 fix: mirror the async twin's lock release
+                        # on the ACTIVE→QUEUED retry transition.
+                        # Without this, a subsequent cancel of the
+                        # queued job routes through this same method
+                        # with ``_dispatch_skipped=True`` (because the
+                        # job is now ``admission_state='queued'``), and
+                        # Path 1 of the finally block below releases
+                        # nothing — the lock leaks indefinitely. Release
+                        # here, before the transition is observed by
+                        # any concurrent caller, so the queued job
+                        # starts clean. The finally-block release is
+                        # idempotent (``release_by_job`` returns False
+                        # on no-op), so the double release is safe.
+                        if (
+                            canonical_project_id
+                            and canonical_queue_id
+                            and self._loop
+                            and self._loop.is_running()
+                        ):
+                            try:
+                                future = asyncio.run_coroutine_threadsafe(
+                                    self._lock_manager.release_queue_lock(
+                                        canonical_project_id,
+                                        canonical_queue_id,
+                                        canonical_job_id,
+                                    ),
+                                    self._loop,
+                                )
+                                future.result(timeout=5)
+                            except Exception as e:
+                                logger.warning(
+                                    "_finalize_terminal_sync RETRY: "
+                                    "lock release failed for job %s: %s",
+                                    canonical_job_id[:8],
+                                    e,
+                                )
                     else:
                         final_status = "dead_letter"
 
@@ -2549,6 +2648,21 @@ class JobQueueService:
                             canonical_job_id[:8],
                             e,
                         )
+                else:
+                    # C3 fix: previously the sync twin silently skipped
+                    # the lock release when the event loop was unset /
+                    # closed, leaking the lock with no diagnostic. Log
+                    # a WARNING so operators can trace which job's lock
+                    # was leaked and why the release was skipped.
+                    logger.warning(
+                        "_finalize_terminal_sync skipped lock release "
+                        "for job %s (project=%s, queue=%s, instance=%s) "
+                        "— event loop unavailable",
+                        canonical_job_id,
+                        canonical_project_id,
+                        canonical_queue_id,
+                        canonical_instance_id,
+                    )
             else:
                 # Path 3: virtual job OR JobItem missing
                 # project_id/queue_id. Fall back to instance-wide
@@ -2576,6 +2690,21 @@ class JobQueueService:
                             canonical_instance_id[:8],
                             e,
                         )
+                elif canonical_instance_id:
+                    # C3 fix: mirror Path 2's diagnostic for the
+                    # instance-wide fallback. Without this, a
+                    # close-during-finalize race leaks the lock with no
+                    # signal to the operator.
+                    logger.warning(
+                        "_finalize_terminal_sync skipped "
+                        "release_by_instance fallback for instance %s "
+                        "(job=%s, project=%s, queue=%s) "
+                        "— event loop unavailable",
+                        canonical_instance_id,
+                        canonical_job_id,
+                        canonical_project_id,
+                        canonical_queue_id,
+                    )
 
         if _dispatch_skipped:
             return canonical_job_id, ""

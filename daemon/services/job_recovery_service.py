@@ -201,16 +201,28 @@ class JobRecoveryService:
         terminal-write boundary ``JobQueueService._finalize_terminal``
         with ``Decision.NO_RETRY``. The boundary handles the
         ``active → done`` write (admission_state='done',
-        status='failed') and the lock release in its finally block
-        — guaranteeing the lock is released on every code path
-        (success, ``InvalidTransitionError``, unexpected exceptions).
+        status='failed') AND the scoped per-job lock release in its
+        finally block — guaranteeing the lock is released on every
+        code path (success, ``InvalidTransitionError``, unexpected
+        exceptions) WITHOUT touching sibling locks.
+
+        C1 fix (Phase 2 follow-up): the previous implementation
+        additionally called ``release_by_instance(job.instance_id)``
+        in an outer ``finally`` block, unconditionally wiping ALL
+        locks for the instance — the F4/F7 sibling-lock-deletion
+        bug, reintroduced in the recovery path post-92cb026a. That
+        outer block is removed. The legacy fallback branch (no
+        ``_job_queue_service`` wired) now does a scoped
+        ``release_by_job(project_id, queue_id, job_id)`` itself so
+        the structural invariant — "lock for this job is released
+        on success" — still holds in the test-only path.
 
         Pre-fix, this method issued ``atomic_transition(processing
         → failed)`` directly and released the lock in a ``finally``
         block. The structural guarantee is preserved (the lock is
-        always released), but the work now goes through the
-        boundary so a future recovery code path cannot silently
-        bypass retry/DLQ handling.
+        always released on success), but the work now goes through
+        the boundary so a future recovery code path cannot silently
+        bypass retry/DLQ handling or the per-job lock-scoping rule.
 
         Args:
             job: The job to fail.
@@ -236,6 +248,10 @@ class JobRecoveryService:
         try:
             if self._job_queue_service is not None:
                 # Preferred path: use the boundary on JobQueueService.
+                # The boundary releases the lock scoped to this job
+                # (release_by_job) in its own finally block — we must
+                # NOT release here or we'd double-release / wipe sibling
+                # locks. C1 fix removes the prior outer finally block.
                 canonical_job_id, _ = await self._job_queue_service._finalize_terminal(
                     instance_id=job.instance_id or "",
                     decision=Decision.NO_RETRY,
@@ -245,16 +261,15 @@ class JobRecoveryService:
                 )
                 if canonical_job_id is not None:
                     stats["recovered"] += 1
-                    if self._job_queue_service is not None:
-                        try:
-                            await self._job_queue_service.notify_watchers(
-                                job.job_id, "failed", error_message
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                f"_fail_orphaned_job: notify_watchers failed "
-                                f"for {job.job_id[:8]}...: {e}"
-                            )
+                    try:
+                        await self._job_queue_service.notify_watchers(
+                            job.job_id, "failed", error_message
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"_fail_orphaned_job: notify_watchers failed "
+                            f"for {job.job_id[:8]}...: {e}"
+                        )
                     return True
                 # Boundary returned None — the job was not in
                 # admission_state='active' (already transitioned by
@@ -266,11 +281,15 @@ class JobRecoveryService:
                 )
                 return False
             else:
-                # No JobQueueService wired (rare — only in tests).
-                # Fall back to the legacy direct atomic_transition +
-                # lock release. Preserves the pre-fix semantics so
-                # tests that construct JobRecoveryService without a
-                # JobQueueService keep working.
+                # Legacy fallback (rare — only in tests that construct
+                # JobRecoveryService without a JobQueueService). The
+                # legacy path does NOT route through ``_finalize_terminal``
+                # so it must release the lock itself — C1 fix uses the
+                # SCOPED ``release_by_job(project_id, queue_id, job_id)``
+                # to honor the F4/F7 invariant. ``release_by_instance``
+                # here would wipe sibling locks (different jobs on the
+                # same instance) — that is the exact bug this fix
+                # removes from the main path.
                 now = datetime.now(timezone.utc).isoformat()
                 await asyncio.to_thread(
                     self._job_repository.atomic_transition,
@@ -280,20 +299,34 @@ class JobRecoveryService:
                     completed_at=now,
                     error_message=error_message,
                 )
-                stats["recovered"] += 1
-                if self._job_queue_service is not None:
+                # C1 fix: scoped per-job lock release (F4/F7). Only
+                # attempt release when we have all three key parts;
+                # otherwise the lock row cannot be matched and the
+                # call is a safe no-op.
+                if job.project_id and job.queue_id and job.job_id:
                     try:
-                        await self._job_queue_service.notify_watchers(
-                            job.job_id, "failed", error_message
+                        await asyncio.to_thread(
+                            self._lock_repository.release_by_job,
+                            job.project_id,
+                            job.queue_id,
+                            job.job_id,
                         )
-                    except Exception as e:
-                        logger.warning(
-                            f"_fail_orphaned_job (legacy): notify_watchers failed "
-                            f"for {job.job_id[:8]}...: {e}"
+                    except Exception as lock_err:
+                        # Lock release failure must not mask the
+                        # successful transition — log and continue.
+                        logger.error(
+                            f"_fail_orphaned_job (legacy): failed to "
+                            f"release lock for job {job.job_id[:8]}...: "
+                            f"{lock_err}"
                         )
+                stats["recovered"] += 1
                 return True
         except InvalidTransitionError:
             # Job was already transitioned by another actor — this is expected.
+            # No lock release here: the actor that transitioned the job
+            # already released its lock (per F4/F7 contract). Re-releasing
+            # would be either a no-op or, with the buggy
+            # ``release_by_instance``, a sibling-lock wipe.
             logger.info(
                 f"Job {job.job_id[:8]}... already transitioned during recovery, skipping"
             )
@@ -301,22 +334,14 @@ class JobRecoveryService:
         except Exception as e:
             logger.error(f"Failed to recover job {job.job_id[:8]}...: {e}")
             return False
-        finally:
-            # 3. Release lock AFTER the transition attempt. The
-            #    ``_finalize_terminal`` boundary already releases in
-            #    its own finally block; this is a defense-in-depth
-            #    guarantee for the legacy fallback path (where the
-            #    boundary is bypassed). The lock is keyed by
-            #    ``instance_id`` (matches the start_job contract).
-            if job.instance_id:
-                try:
-                    await asyncio.to_thread(
-                        self._lock_repository.release_by_instance, job.instance_id
-                    )
-                except Exception as lock_err:
-                    # Do not mask the original exception; just log so an
-                    # operator can investigate stuck lock rows.
-                    logger.error(
-                        f"Failed to release lock for instance {job.instance_id} "
-                        f"during recovery of job {job.job_id[:8]}...: {lock_err}"
-                    )
+        # C1 fix: REMOVED the outer ``finally`` block that called
+        # ``release_by_instance(job.instance_id)``. That unconditional
+        # call was reintroducing the F4/F7 sibling-lock-deletion bug
+        # in the recovery path post-92cb026a:
+        # - Main path (``_job_queue_service`` wired) already releases
+        #   the lock scoped to this job inside ``_finalize_terminal``.
+        # - Legacy path (``_job_queue_service is None``) now releases
+        #   the lock scoped to this job above, before returning.
+        # There is no path through this method that still needs an
+        # instance-wide lock release — and any such path would be the
+        # exact bug we are fixing.

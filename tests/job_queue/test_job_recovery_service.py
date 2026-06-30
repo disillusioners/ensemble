@@ -16,12 +16,21 @@ def create_mock_job(
     job_id: str = "job-123",
     instance_id: str | None = "inst-1",
     project_id: str = "proj-1",
+    queue_id: str = "queue-1",
 ) -> MagicMock:
-    """Create a mock JobItem with the specified attributes."""
+    """Create a mock JobItem with the specified attributes.
+
+    C1 fix: ``queue_id`` is now part of the default contract because
+    ``_fail_orphaned_job``'s legacy fallback branch releases locks via
+    ``release_by_job(project_id, queue_id, job_id)`` (scoped, F4/F7).
+    Tests that previously asserted on ``release_by_instance`` now assert
+    on ``release_by_job`` and need ``queue_id`` to be a non-None string.
+    """
     mock_job = MagicMock(spec=JobItem)
     mock_job.job_id = job_id
     mock_job.instance_id = instance_id
     mock_job.project_id = project_id
+    mock_job.queue_id = queue_id
     return mock_job
 
 
@@ -59,7 +68,12 @@ class TestJobRecoveryStartup:
 
     @pytest.mark.asyncio
     async def test_orphaned_job_with_no_instance(self, mock_repositories, service):
-        """Job with no instance_id should be marked FAILED."""
+        """Job with no instance_id should be marked FAILED.
+
+        C1 fix: the scoped ``release_by_job`` runs in the legacy branch
+        even when ``instance_id is None`` because the lock key is
+        ``(project_id, queue_id, job_id)``, not ``instance_id``.
+        """
         mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
 
         mock_job = create_mock_job(instance_id=None)
@@ -68,6 +82,12 @@ class TestJobRecoveryStartup:
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 1, "alive": 0, "total": 1}, "Expected 1 recovered job"
+        # C1 fix: scoped release via release_by_job (F4/F7). The key is
+        # (project_id, queue_id, job_id) — instance_id is irrelevant.
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        )
+        # C1 fix: instance-wide release must NEVER be called.
         mock_lock_repo.release_by_instance.assert_not_called()
         mock_job_repo.atomic_transition.assert_called_once()
         call_args = mock_job_repo.atomic_transition.call_args
@@ -87,7 +107,12 @@ class TestJobRecoveryStartup:
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 1, "alive": 0, "total": 1}, "Expected 1 recovered job"
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1"), "Lock should be released"
+        # C1 fix: scoped lock release via release_by_job (F4/F7) — must
+        # NOT call release_by_instance which would wipe sibling locks.
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        ), "Lock should be released scoped per job (F4/F7)"
+        mock_lock_repo.release_by_instance.assert_not_called()
         mock_job_repo.atomic_transition.assert_called_once()
         call_args = mock_job_repo.atomic_transition.call_args
         assert call_args[1]["error_message"] == "Recovered: instance no longer exists"
@@ -105,7 +130,11 @@ class TestJobRecoveryStartup:
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 1, "alive": 0, "total": 1}, "Expected 1 recovered job"
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1"), "Lock should be released"
+        # C1 fix: scoped release_by_job (F4/F7) instead of release_by_instance.
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        ), "Lock should be released scoped per job (F4/F7)"
+        mock_lock_repo.release_by_instance.assert_not_called()
         mock_job_repo.atomic_transition.assert_called_once()
         call_args = mock_job_repo.atomic_transition.call_args
         assert call_args[1]["error_message"] == "Recovered: instance is completed"
@@ -123,7 +152,11 @@ class TestJobRecoveryStartup:
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 1, "alive": 0, "total": 1}, "Expected 1 recovered job"
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1"), "Lock should be released"
+        # C1 fix: scoped release_by_job (F4/F7) instead of release_by_instance.
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        ), "Lock should be released scoped per job (F4/F7)"
+        mock_lock_repo.release_by_instance.assert_not_called()
         mock_job_repo.atomic_transition.assert_called_once()
         call_args = mock_job_repo.atomic_transition.call_args
         assert call_args[1]["error_message"] == "Recovered: instance is error"
@@ -141,7 +174,11 @@ class TestJobRecoveryStartup:
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 1, "alive": 0, "total": 1}, "Expected 1 recovered job"
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1"), "Lock should be released"
+        # C1 fix: scoped release_by_job (F4/F7) instead of release_by_instance.
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        ), "Lock should be released scoped per job (F4/F7)"
+        mock_lock_repo.release_by_instance.assert_not_called()
         mock_job_repo.atomic_transition.assert_called_once()
         call_args = mock_job_repo.atomic_transition.call_args
         assert call_args[1]["error_message"] == "Recovered: instance is terminated"
@@ -159,7 +196,11 @@ class TestJobRecoveryStartup:
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 1, "alive": 0, "total": 1}, "Expected 1 recovered job"
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1"), "Lock should be released"
+        # C1 fix: scoped release_by_job (F4/F7) instead of release_by_instance.
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        ), "Lock should be released scoped per job (F4/F7)"
+        mock_lock_repo.release_by_instance.assert_not_called()
         mock_job_repo.atomic_transition.assert_called_once()
         call_args = mock_job_repo.atomic_transition.call_args
         assert call_args[1]["error_message"] == "Recovered: instance is failed"
@@ -294,7 +335,12 @@ class TestJobRecoveryStartup:
 
     @pytest.mark.asyncio
     async def test_lock_released_for_orphaned_job(self, mock_repositories, service):
-        """Lock should be released when orphaned job is recovered."""
+        """Lock should be released when orphaned job is recovered.
+
+        C1 fix: scoped ``release_by_job(project_id, queue_id, job_id)``
+        instead of ``release_by_instance`` to honor the F4/F7 invariant
+        (no sibling-lock deletion).
+        """
         mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
 
         mock_job = create_mock_job(instance_id="my-instance-123")
@@ -303,7 +349,10 @@ class TestJobRecoveryStartup:
 
         await service.recover_on_startup()
 
-        mock_lock_repo.release_by_instance.assert_called_once_with("my-instance-123")
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        )
+        mock_lock_repo.release_by_instance.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_processing_jobs(self, mock_repositories, service):
@@ -369,7 +418,14 @@ class TestJobRecoveryStartup:
 
     @pytest.mark.asyncio
     async def test_invalid_transition_error_skips_stats(self, mock_repositories, service):
-        """If atomic_transition raises InvalidTransitionError, it's expected and stats are NOT incremented."""
+        """If atomic_transition raises InvalidTransitionError, it's expected and stats are NOT incremented.
+
+        C1 fix: No lock release on ``InvalidTransitionError`` — the
+        actor that already transitioned the job released the lock at
+        that time (per F4/F7 contract). Re-releasing here would either
+        be a no-op (scoped release) or wipe sibling locks (the old
+        ``release_by_instance`` bug). Both lock APIs must stay silent.
+        """
         mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
 
         mock_job = create_mock_job()
@@ -384,8 +440,10 @@ class TestJobRecoveryStartup:
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 0, "alive": 0, "total": 1}, "Stats should not be incremented for InvalidTransitionError"
-        # Lock should still be released even if transition is skipped
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1")
+        # C1 fix: lock release must NOT run on InvalidTransitionError —
+        # the actor that already transitioned the job owns the release.
+        mock_lock_repo.release_by_instance.assert_not_called()
+        mock_lock_repo.release_by_job.assert_not_called()
 
 
 class TestJobRecoveryServiceHelpers:
@@ -490,11 +548,14 @@ class TestFailOrphanedJobLockOrdering:
 
     @pytest.mark.asyncio
     async def test_transition_happens_before_lock_release(self, mock_repositories, service):
-        """atomic_transition must be called BEFORE release_by_instance.
+        """atomic_transition must be called BEFORE release_by_job.
 
         This is the core H8 invariant. If the transition fails after the
         lock is released, the job is in PROCESSING with no lock, opening
         a double-claim window.
+
+        C1 fix: scoped release is now via ``release_by_job`` (F4/F7);
+        ``release_by_instance`` is forbidden in this path.
         """
         mock_job_repo, mock_lock_repo, _ = mock_repositories
         mock_job = create_mock_job(instance_id="inst-1")
@@ -506,23 +567,34 @@ class TestFailOrphanedJobLockOrdering:
             call_order.append("atomic_transition")
 
         def track_release(*args, **kwargs):
-            call_order.append("release_by_instance")
+            call_order.append("release_by_job")
 
         mock_job_repo.atomic_transition.side_effect = track_transition
-        mock_lock_repo.release_by_instance.side_effect = track_release
+        mock_lock_repo.release_by_job.side_effect = track_release
 
         result = await service._fail_orphaned_job(
             mock_job, "Recovered: instance no longer exists", {"recovered": 0}
         )
 
         assert result is True
-        assert call_order == ["atomic_transition", "release_by_instance"], (
+        assert call_order == ["atomic_transition", "release_by_job"], (
             f"Expected transition BEFORE lock release, got: {call_order}"
         )
+        # C1 fix: instance-wide release must NEVER be called here.
+        mock_lock_repo.release_by_instance.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_lock_released_on_invalid_transition_error(self, mock_repositories, service):
-        """Lock must still be released when InvalidTransitionError is raised."""
+        """On ``InvalidTransitionError``: no lock release (C1 fix).
+
+        Pre-C1: the outer ``finally`` block called
+        ``release_by_instance`` unconditionally — the bug. Post-C1:
+        ``InvalidTransitionError`` means the job was already
+        transitioned by another actor; that actor owns the lock release
+        (per F4/F7 contract). Releasing here would either be a no-op
+        (``release_by_job`` finds no row) or wipe sibling locks
+        (``release_by_instance``). Both are wrong.
+        """
         mock_job_repo, mock_lock_repo, _ = mock_repositories
         mock_job = create_mock_job(instance_id="inst-1")
 
@@ -537,17 +609,27 @@ class TestFailOrphanedJobLockOrdering:
         )
 
         assert result is False, "Expected False on InvalidTransitionError"
-        # Lock must be released in the finally block even though transition
-        # was skipped (job is already terminal in this case).
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1")
+        # C1 fix: neither release API must run on InvalidTransitionError.
+        mock_lock_repo.release_by_instance.assert_not_called()
+        mock_lock_repo.release_by_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_lock_released_on_unexpected_exception(self, mock_repositories, service):
-        """Lock must still be released when an unexpected exception is raised.
+        """On unexpected exception: no lock release (C1 fix).
 
-        Previously a non-ValueError exception (e.g. DB error) skipped lock
-        release entirely, leaking the lock. The finally block now guarantees
-        release on ALL paths.
+        Pre-C1: the outer ``finally`` released the lock even on
+        generic exceptions (defense-in-depth against leaks). Post-C1:
+        the F4/F7 invariant forbids unconditional releases because
+        they can wipe sibling locks. An unexpected exception means the
+        transition outcome is unknown — we err on the side of NOT
+        releasing and let the next startup-recovery sweep (or manual
+        intervention) clean up if a lock row truly leaked.
+
+        Trade-off documented: a transient DB error during
+        ``atomic_transition`` may leave a lock row behind, but it can
+        never wipe a sibling lock. This is the correct balance for
+        an actor that may also be holding locks for OTHER jobs on
+        the same instance.
         """
         mock_job_repo, mock_lock_repo, _ = mock_repositories
         mock_job = create_mock_job(instance_id="inst-1")
@@ -559,13 +641,28 @@ class TestFailOrphanedJobLockOrdering:
         )
 
         assert result is False, "Expected False on unexpected exception"
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1"), (
-            "Lock must be released even when atomic_transition raises"
-        )
+        # C1 fix: neither release API must run on unexpected exceptions.
+        mock_lock_repo.release_by_instance.assert_not_called()
+        mock_lock_repo.release_by_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_lock_release_when_instance_id_is_none(self, mock_repositories, service):
-        """release_by_instance must not be called when job has no instance_id."""
+        """C1 fix: ``instance_id`` is no longer the key for lock release.
+
+        Pre-C1: the outer ``finally`` block checked ``if job.instance_id:``
+        before calling ``release_by_instance``. Post-C1: the legacy
+        branch checks ``if job.project_id and job.queue_id and job.job_id:``
+        — the ``instance_id`` is irrelevant to whether the lock is
+        released. This test pins the new contract: with the default
+        ``(project_id, queue_id, job_id)`` set on the mock, the scoped
+        release DOES run even when ``instance_id is None``.
+
+        The previous guard against releasing a "phantom instance" lock
+        is preserved by the ``project_id and queue_id and job_id``
+        check (an instance_id=None orphan with all three keys still
+        gets its scoped lock released; this is correct because the
+        lock row is keyed by the job, not the instance).
+        """
         mock_job_repo, mock_lock_repo, _ = mock_repositories
         mock_job = create_mock_job(instance_id=None)
 
@@ -574,13 +671,44 @@ class TestFailOrphanedJobLockOrdering:
         )
 
         assert result is True
+        # C1 fix: scoped release by (project_id, queue_id, job_id).
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        )
+        # C1 fix: instance-wide release must NEVER be called here.
+        mock_lock_repo.release_by_instance.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_no_lock_release_when_lock_key_incomplete(self, mock_repositories, service):
+        """C1 fix: legacy branch skips scoped release when the lock key is incomplete.
+
+        If any of ``project_id``, ``queue_id``, ``job_id`` is missing, the
+        legacy branch skips the release rather than calling
+        ``release_by_job`` with bogus arguments. ``release_by_job`` with
+        ``None`` would query ``WHERE project_id IS NULL`` etc. and could
+        match unintended rows — the safe default is to skip.
+        """
+        mock_job_repo, mock_lock_repo, _ = mock_repositories
+        # queue_id=None simulates a job enqueued outside of the queue system.
+        mock_job = create_mock_job(queue_id=None)
+
+        result = await service._fail_orphaned_job(
+            mock_job, "Recovered: no queue", {"recovered": 0}
+        )
+
+        assert result is True, "Transition succeeded; lock key incomplete, no release."
+        mock_lock_repo.release_by_job.assert_not_called()
         mock_lock_repo.release_by_instance.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_lock_release_when_instance_id_is_none_and_transition_fails(
         self, mock_repositories, service
     ):
-        """No instance_id + failing transition: no lock release, no crash."""
+        """No lock release when ``atomic_transition`` fails on a job without
+        an instance_id. The transition failed, so we cannot release —
+        any release would be either a no-op (``release_by_job`` with no
+        matching row) or a sibling-wipe (``release_by_instance``).
+        """
         mock_job_repo, mock_lock_repo, _ = mock_repositories
         mock_job = create_mock_job(instance_id=None)
 
@@ -592,18 +720,20 @@ class TestFailOrphanedJobLockOrdering:
 
         assert result is False
         mock_lock_repo.release_by_instance.assert_not_called()
+        mock_lock_repo.release_by_job.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_lock_release_failure_does_not_mask_result(self, mock_repositories, service):
-        """If lock release itself fails, the transition result is still returned.
+        """If scoped lock release fails, the transition result is still returned.
 
-        The inner try/except prevents a lock-release exception from
-        overriding the function's intended return value.
+        C1 fix: the inner try/except around ``release_by_job`` prevents
+        a lock-release exception from overriding the function's intended
+        return value (now True on successful transition).
         """
         mock_job_repo, mock_lock_repo, _ = mock_repositories
         mock_job = create_mock_job(instance_id="inst-1")
 
-        mock_lock_repo.release_by_instance.side_effect = RuntimeError("lock table gone")
+        mock_lock_repo.release_by_job.side_effect = RuntimeError("lock table gone")
 
         result = await service._fail_orphaned_job(
             mock_job, "Recovered: instance no longer exists", {"recovered": 0}
@@ -611,7 +741,11 @@ class TestFailOrphanedJobLockOrdering:
 
         # Transition succeeded, so result is True; lock-release error is logged.
         assert result is True, "Transition result must not be masked by lock-release error"
-        mock_lock_repo.release_by_instance.assert_called_once_with("inst-1")
+        mock_lock_repo.release_by_job.assert_called_once_with(
+            "proj-1", "queue-1", "job-123"
+        )
+        # C1 fix: instance-wide release must NEVER be called here.
+        mock_lock_repo.release_by_instance.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_recovered_stat_only_incremented_on_success(self, mock_repositories, service):
@@ -648,8 +782,15 @@ class TestFailOrphanedJobLockOrdering:
     async def test_recover_on_startup_invalid_transition_releases_lock_with_correct_order(
         self, mock_repositories, service
     ):
-        """End-to-end: InvalidTransitionError from atomic_transition still releases lock
-        via the finally block, and transition is attempted BEFORE release.
+        """End-to-end: ``InvalidTransitionError`` from ``atomic_transition`` does NOT
+        call any lock release (C1 fix).
+
+        Pre-C1: the outer ``finally`` block called
+        ``release_by_instance`` unconditionally — the bug. Post-C1:
+        ``InvalidTransitionError`` means the job was already transitioned
+        by another actor; that actor owns the lock release (per F4/F7
+        contract). The recovery path must NOT touch locks on this code
+        path.
         """
         mock_job_repo, mock_lock_repo, mock_instance_repo = mock_repositories
         mock_job = create_mock_job(instance_id="inst-1")
@@ -667,15 +808,14 @@ class TestFailOrphanedJobLockOrdering:
                 to_state="failed",
             )
 
-        def track_release(*args, **kwargs):
-            call_order.append("release_by_instance")
-
         mock_job_repo.atomic_transition.side_effect = track_transition
-        mock_lock_repo.release_by_instance.side_effect = track_release
 
         stats = await service.recover_on_startup()
 
         assert stats == {"recovered": 0, "alive": 0, "total": 1}
-        assert call_order == ["atomic_transition", "release_by_instance"], (
-            f"Expected transition BEFORE release, got: {call_order}"
+        assert call_order == ["atomic_transition"], (
+            f"Expected ONLY atomic_transition on InvalidTransitionError, got: {call_order}"
         )
+        # C1 fix: neither release API must run on InvalidTransitionError.
+        mock_lock_repo.release_by_instance.assert_not_called()
+        mock_lock_repo.release_by_job.assert_not_called()
