@@ -1336,7 +1336,10 @@ class InstanceManager:
         )
         self._maintenance_service.set_job_queue_service(self._job_queue_service)
         self._maintenance_service.set_request_registry(self._request_registry._requests)
-        self._maintenance_service.set_task_repository(self._task_repo)
+        # NOTE: set_task_repository() is wired in setup_worker_pool() AFTER
+        # self._task_repo is assigned (line ~2438). initialize() runs before
+        # setup_worker_pool() per daemon/api.py startup order, so calling it
+        # here would raise AttributeError.
 
         # Register checkpoint cleanup job
         checkpoint_cleanup = CheckpointCleanupJob(
@@ -2436,6 +2439,12 @@ class InstanceManager:
         # (``MessageJobHandler._find_running_task_for_instance``)
         # can read the repo without reaching into a private local.
         self._task_repo = task_repo
+        # Wire the maintenance service's task repository here (after
+        # ``self._task_repo`` is assigned) so the shared idle probe can use
+        # ``TaskRepository.has_active_non_deferred_work``. Calling this in
+        # ``initialize()`` would crash because ``self._task_repo`` is only
+        # assigned later in ``setup_worker_pool()`` per daemon/api.py.
+        self._maintenance_service.set_task_repository(self._task_repo)
         event_repo = EventRepository(engine=self._engine)
 
         # Backfill last_heartbeat_at for any RUNNING tasks that lack one
