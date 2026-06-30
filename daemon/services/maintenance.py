@@ -91,6 +91,15 @@ class MaintenanceService:
         # References for idle check
         self._job_queue_service: Any = None
         self._request_registry: dict | None = None
+        # Phase 1 of the defer-seam bugfix (2026-06-30): the shared
+        # ``has_active_non_deferred_work`` predicate replaces the
+        # ``list_all_pending`` blind-spot in ``_is_idle`` so the gate sees
+        # ``task`` rows (the unified work path) and not only ``JobItem``
+        # rows. Wired in by ``set_task_repository``; ``None`` means the
+        # task-table probe is skipped — matches the existing "missing
+        # dependency ⇒ skip the check" pattern used by the other two
+        # references above.
+        self._task_repository: Any = None
 
     def register(
         self,
@@ -132,6 +141,25 @@ class MaintenanceService:
             registry: The request registry dict from ActiveRequestRegistry._requests.
         """
         self._request_registry = registry
+
+    def set_task_repository(self, task_repository: Any) -> None:
+        """Set the TaskRepository reference for the shared idle probe.
+
+        Phase 1 of the defer-seam bugfix (2026-06-30, Category B):
+        ``_is_idle`` used to call ``list_all_pending`` on the job-queue
+        repository only, which never sees ``task`` rows. This setter wires
+        the same ``TaskRepository.has_active_non_deferred_work`` predicate
+        used by ``claim_pending_task`` so the maintenance idle gate and the
+        worker pool's claim path share one definition of "non-deferred
+        in-flight work" and can never disagree.
+
+        Args:
+            task_repository: The ``TaskRepository`` instance used to call
+                ``has_active_non_deferred_work(None)`` for the system-wide
+                task probe. Pass ``None`` to disable the task probe (the
+                gate will then only see JobItems + active LLM requests).
+        """
+        self._task_repository = task_repository
 
     async def start(self) -> None:
         """Start the maintenance service background loop."""
@@ -212,29 +240,77 @@ class MaintenanceService:
     async def _is_idle(self) -> bool:
         """Check if the system is idle (no active work).
 
-        System is considered idle when:
-        - No active jobs in the job queue service
-        - No active LLM requests in the request registry
+        System is considered idle when ALL of the following hold:
+        - No non-deferred tasks in PENDING or RUNNING status, system-wide
+          (shared ``TaskRepository.has_active_non_deferred_work`` predicate;
+          also folded into ``claim_pending_task`` so the gate and the
+          claim path never disagree — Phase 1 of the defer-seam bugfix,
+          2026-06-30).
+        - No JobItems with ``admission_state`` in ('queued', 'active')
+          (covers the full admission lifecycle: work waiting to start AND
+          work in-flight that holds the queue lock — ``list_all_pending``
+          alone missed the 'active' bucket).
+        - No active LLM requests in the request registry.
 
         Returns:
             True if system is idle and can run maintenance tasks.
         """
-        # Check for active jobs in job queue service.
-        # Wrap the sync DB call in ``asyncio.to_thread`` so SQLite WAL write
+        # 1. Check for active non-deferred tasks (system-wide).
+        # This is the shared ``has_active_non_deferred_work`` predicate
+        # used by ``claim_pending_task`` and other defer-queue call sites
+        # — keeping the gate in sync with the claim path is the whole
+        # point of the Phase 1 refactor (Category B in the bugfix plan).
+        # Wrapped in ``asyncio.to_thread`` because the predicate is a sync
+        # SQLModel/SQLAlchemy call that takes a connection from the engine
+        # pool under SQLite WAL — same rationale as ``list_all_pending``
+        # below. If ``_task_repository`` was never wired (e.g. partial
+        # init or test setup that doesn't care about tasks), the probe is
+        # skipped, matching the existing "missing dependency ⇒ skip the
+        # check" pattern.
+        if self._task_repository is not None:
+            try:
+                has_work = await asyncio.to_thread(
+                    self._task_repository.has_active_non_deferred_work, None
+                )
+                if has_work:
+                    return False
+            except Exception as e:
+                logger.warning(f"Failed to check task repository: {e}")
+
+        # 2. Check for queued or active JobItems (queue-policy state).
+        # ``list_all_pending`` only sees ``admission_state='queued'``;
+        # ``find_processing_jobs`` only sees ``admission_state='active'``.
+        # Both must be checked to cover the full admission lifecycle — a
+        # job that has been claimed and is executing still holds the queue
+        # lock and must keep the maintenance job from running. Each call
+        # is wrapped in ``asyncio.to_thread`` so SQLite WAL write
         # contention cannot block the event loop. This loop runs every
-        # ``check_interval_minutes`` (default 15); if a pending query deadlocks
-        # the event loop, the entire daemon freezes — same root cause as
-        # the ``notify_watchers`` / ``enqueue_message`` deadlock chain.
+        # ``check_interval_minutes`` (default 15); if a pending query
+        # deadlocks the event loop, the entire daemon freezes — same
+        # root cause as the ``notify_watchers`` / ``enqueue_message``
+        # deadlock chain.
+        #
+        # ``len(...)`` is used for the truthiness check (not ``if x:``)
+        # so the gate remains correct under ``MagicMock`` test doubles
+        # that don't explicitly stub ``find_processing_jobs`` — a
+        # bare ``MagicMock()`` is truthy via ``__bool__`` but reports
+        # ``len() == 0`` via ``__len__``, matching the production
+        # "empty list ⇒ idle" semantics. ``list_all_pending`` is already
+        # explicitly stubbed by every test (``MagicMock(return_value=[])``)
+        # so plain truthiness is safe for it.
         if self._job_queue_service is not None:
             try:
                 repo = self._job_queue_service._repository
                 pending = await asyncio.to_thread(repo.list_all_pending)
                 if pending:
                     return False
+                processing = await asyncio.to_thread(repo.find_processing_jobs)
+                if len(processing) > 0:
+                    return False
             except Exception as e:
                 logger.warning(f"Failed to check job queue: {e}")
 
-        # Check for active LLM requests
+        # 3. Check for active LLM requests
         if self._request_registry is not None:
             if len(self._request_registry) > 0:
                 return False

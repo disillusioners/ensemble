@@ -352,10 +352,22 @@ class TestTaskClaiming:
 
     def test_claim_skips_when_message_job_processing_for_instance(self, repository, engine):
         """Cross-system guard: a task for an instance with a PROCESSING MESSAGE
-        job in job_queue_items must not be claimed concurrently. This prevents
-        the langgraph checkpoint race where the task forks from a stale state
-        and shadows the AIMessage produced by the job (the
-        "Done! 👋 lost" bug)."""
+        job carrying a stamped ``message_id`` must NOT be claimed concurrently.
+        This prevents the langgraph checkpoint race where the task forks from
+        a stale state and shadows the AIMessage produced by the job (the
+        "Done! 👋 lost" bug).
+
+        Phase 3 P1 fix (2026-06-30): the carve-out was made NULL-safe. A
+        JobItem without ``message_id`` (legacy / dispatch-only case) no
+        longer blocks its own instance's task — the
+        ``json_extract(metadata, '$.message_id') IS NOT NULL`` predicate
+        must hold before the matching-Task carve-out can fire. The guard
+        STILL fires for stamped JobItems because the matching Task row
+        exists in PENDING status and the carve-out releases the block;
+        the test exercises the stamped-blocked path so we don't regress
+        the carve-out semantics while validating the NULL-safe
+        exemption is a NEW exemption, not a global unblock.
+        """
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
         from daemon.repositories.job_queue.models import JobItem, AdmissionState
@@ -364,7 +376,11 @@ class TestTaskClaiming:
         now = datetime.now(timezone.utc).isoformat()
         # Insert a PROCESSING MESSAGE job for inst-J with an instance in
         # running status (waiting_for=0) — the job is actively driving
-        # graph.astream and must block the task.
+        # graph.astream and must block the task. The job carries a
+        # stamped ``message_id`` so the P1 NULL-safe guard releases
+        # the matching-Task carve-out (NOT EXISTS returns TRUE → block
+        # fires). Without message_id stamped, the carve-out would be
+        # skipped and the task would be claimable.
         with SQLModelSession(engine) as session:
             session.add(Instance(
                 instance_id="inst-J",
@@ -382,22 +398,34 @@ class TestTaskClaiming:
                 admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-J",
+                # Stamped message_id is REQUIRED for the cross-system
+                # guard to fire (Phase 3 P1 NULL-safe fix). Without
+                # this, the JobItem would NOT block its own instance's
+                # task — see ``test_claim_unaffected_by_null_message_id_job``.
+                job_metadata={"message_id": "m1"},
                 created_at=now,
                 priority=0,
                 retry_count=0,
             ))
             session.commit()
 
-        # A pending task for the same instance must NOT be claimable
-        t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-J", message_id="m1")
+        # A pending task with the SAME message_id must NOT be claimable
+        # — the carve-out releases the guard when a matching Task row
+        # exists, but a different instance's task (with a non-matching
+        # message_id) is still blocked.
+        t_other = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-J",
+            message_id="m-other",
+        )
         assert repository.claim_pending_task(worker_id="worker-1") is None
 
         # has_pending_tasks_blocked_by_busy_instance should also report True
         assert repository.has_pending_tasks_blocked_by_busy_instance() is True
 
-        # Complete the job → t1 becomes claimable. Phase 2 dual-write
-        # contract (see ``status_to_admission``): every status mutation
-        # must co-move ``admission_state`` in the same transaction.
+        # Complete the job → the other-instance task becomes claimable.
+        # Phase 2 dual-write contract: every status mutation must
+        # co-move ``admission_state`` in the same transaction.
         # COMPLETED → admission_state='done', which is excluded by the
         # new ``admission_state IN ('queued', 'active')`` predicate in
         # claim_pending_task / has_blocked_pending_tasks (Phase 3
@@ -410,7 +438,81 @@ class TestTaskClaiming:
 
         claimed = repository.claim_pending_task(worker_id="worker-1")
         assert claimed is not None
+        assert claimed.id == t_other.id
+
+    def test_claim_unaffected_by_null_message_id_job(self, repository, engine):
+        """Phase 3 P1 fix (2026-06-30): a JobItem with NULL message_id
+        in its metadata does NOT block its own instance's task.
+
+        Before the fix, ``json_extract(NULL/'{}', '$.message_id')``
+        returned NULL and the matching-Task carve-out compared
+        ``t.message_id = NULL`` (UNKNOWN), so ``NOT EXISTS`` defaulted
+        to TRUE and the JobItem spuriously blocked its own task —
+        self-deadlock. The P1 fix added an
+        ``IS NOT NULL`` requirement so a NULL/empty JobItem metadata
+        is treated as a non-blocker (the legacy dual-path /
+        dispatch-only case).
+
+        This is the inverse of ``test_claim_skips_when_message_job_processing_for_instance``
+        (which still pins the stamped-message-id blocking case). Both
+        tests pin a contract the production carve-out must keep.
+        """
+        from sqlmodel import Session as SQLModelSession
+        from datetime import datetime, timezone
+        from daemon.repositories.job_queue.models import JobItem, AdmissionState
+        from daemon.repositories.instance.models import Instance
+
+        now = datetime.now(timezone.utc).isoformat()
+        # PROCESSING MESSAGE job with NULL/empty job_metadata. The
+        # carved-out guard cannot fire because ``message_id`` is NULL,
+        # so the task MUST be claimable.
+        with SQLModelSession(engine) as session:
+            session.add(Instance(
+                instance_id="inst-NULL-MID",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                status="running",
+            ))
+            session.add(JobItem(
+                job_id="job-NULL-MID",
+                agent_id="leader",
+                agent_dir="agents/leader",
+                message="hi",
+                source="api",
+
+                admission_state=status_to_admission(AdmissionState.ACTIVE.value),
+                job_type="message",
+                instance_id="inst-NULL-MID",
+                # No message_id — the NULL-safe carve-out does NOT
+                # fire for this row, so it cannot block its own
+                # instance's task.
+                job_metadata={},
+                created_at=now,
+                priority=0,
+                retry_count=0,
+            ))
+            session.commit()
+
+        # A pending task for the same instance MUST be claimable —
+        # the JobItem without stamped message_id is the legacy /
+        # dispatch-only case the P1 fix accommodates.
+        t1 = repository.create(
+            task_type=TaskType.PROCESS_MESSAGE.value,
+            instance_id="inst-NULL-MID",
+            message_id="m1",
+        )
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None, (
+            "Phase 3 P1 NULL-safe fix: a JobItem with no message_id "
+            "must NOT block its own instance's task. Got None — the "
+            "self-deadlock regressed."
+        )
         assert claimed.id == t1.id
+
+        # The busy-instance probe must report False: the JobItem has
+        # no message_id so the matching-Task carve-out cannot fire,
+        # so the instance is treated as not actively blocked.
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
     def test_claim_allowed_when_job_processing_but_instance_waiting_for_children(self, repository, engine):
         """WAITING_CHILDREN carve-out: when the instance is in WAITING_CHILDREN
@@ -464,16 +566,35 @@ class TestTaskClaiming:
         assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
     def test_claim_blocked_when_instance_waiting_for_children_but_no_instance_row(self, repository, engine):
-        """Defensive: if the job's instance_id has no matching `instances`
-        row (e.g. mid-creation), COALESCE(waiting_for, 0) = 0 falls
+        """Phase 3 P1 fix (2026-06-30) update: defensive contract test
+        for the NULL-safe cross-system guard.
+
+        If the job's instance_id has no matching ``instances`` row
+        (e.g. mid-creation), COALESCE(waiting_for, 0) = 0 falls
         through and the missing-status NULL check treats it as not
-        WAITING_CHILDREN, so the job blocks as before. This preserves the
-        original cross-system guard for the no-instance-row edge case."""
+        WAITING_CHILDREN. Pre-P1, this case ALSO meant the JobItem
+        blocked its own instance's task via the
+        ``t.message_id = NULL`` UNKNOWN comparison. Post-P1, the
+        NULL-safe carve-out requires a stamped message_id before
+        firing, so a JobItem without ``job_metadata->>'message_id'``
+        does NOT block.
+
+        This test pins the post-P1 contract: a JobItem with empty
+        ``job_metadata`` AND no instance row MUST NOT block its own
+        instance's task (the carve-out is inert without a message_id).
+        The pre-P1 self-deadlock regression is exactly what the new
+        ``test_claim_unaffected_by_null_message_id_job`` covers; the
+        "no instance row" wrinkle is folded in here as a defensive
+        assertion on the JOIN's COALESCE fallback.
+        """
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
         from daemon.repositories.job_queue.models import JobItem, AdmissionState
 
         now = datetime.now(timezone.utc).isoformat()
+        # JobItem with no matching instance row AND no stamped
+        # message_id. Pre-P1 this would self-deadlock; post-P1 the
+        # task is claimable.
         with SQLModelSession(engine) as session:
             session.add(JobItem(
                 job_id="job-X1",
@@ -485,16 +606,27 @@ class TestTaskClaiming:
                 admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-X-no-row",
+                # Empty job_metadata — no message_id stamped. The
+                # P1 NULL-safe carve-out does NOT fire here, so the
+                # JobItem does NOT block its own instance's task.
+                job_metadata={},
                 created_at=now,
                 priority=0,
                 retry_count=0,
             ))
             session.commit()
 
+        # Post-P1: the task IS claimable. The no-instance-row edge
+        # case preserves the NULL-safe carve-out's exemption: a
+        # JobItem without message_id is not a blocker.
         t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-X-no-row", message_id="m1")
-        # No instance row → COALESCE makes waiting_for=0, status NULL → job
-        # IS treated as actively processing → task is blocked.
-        assert repository.claim_pending_task(worker_id="worker-1") is None
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None, (
+            "Phase 3 P1 fix: a JobItem without stamped message_id must "
+            "not block its own instance's task (NULL-safe carve-out). "
+            "The no-instance-row edge case does not regress this contract."
+        )
+        assert claimed.id == t1.id
 
     def test_claim_unaffected_by_non_message_job_types(self, repository, engine):
         """Phase 2.5 (D13) pin: the cross-system guard in
@@ -505,23 +637,22 @@ class TestTaskClaiming:
         longer created), so the previous "only MESSAGE jobs block"
         carve-out is no longer relevant in the post-D13 world.
 
-        The new contract: a non-MESSAGE (e.g. ``cleanup``) processing
-        job for the instance DOES block a ``claim_pending_task``
-        call for the same instance. The pre-D13 carve-out (a
-        CLEANUP job did NOT block because it doesn't touch the
-        langgraph thread) was correct for the legacy dual-path
-        architecture, but after D13 the carve-out's premise (MESSAGE
-        is the only "graph-driving" job_type) no longer holds.
-        WorkerPool admission now happens via the
-        ``NOT EXISTS (... task t message_id ...)`` carve-out in
-        the subquery (matching Task + pending/running status), not
-        via the job_type filter.
+        Phase 3 P1 update (2026-06-30): the carve-out was made
+        NULL-safe. A CLEANUP ``JobItem`` with empty
+        ``job_metadata`` (no ``message_id``) does NOT block its own
+        instance's task — the matching-Task carve-out cannot fire
+        without a stamped message_id, and the NULL-safe guard treats
+        the JobItem as a non-blocker.
 
         This test pins the new behaviour: a CLEANUP processing
-        job with empty ``job_metadata`` (no message_id) blocks
-        the task claim, because the ``NOT EXISTS`` carve-out
-        returns TRUE (no matching Task row exists) and the
-        inner subquery returns the instance.
+        job with empty ``job_metadata`` (no message_id) does NOT
+        block the task claim, because the NULL-safe carve-out
+        exemption applies to non-MESSAGE jobs just as it does to
+        MESSAGE ones. The matching-Task carve-out's premise (a
+        stamped message_id means the dispatcher has admitted the
+        task) still holds for CLEANUP jobs IF their metadata carries
+        a message_id; this test focuses on the legacy / dispatch-only
+        no-message-id case.
         """
         from sqlmodel import Session as SQLModelSession
         from datetime import datetime, timezone
@@ -539,26 +670,30 @@ class TestTaskClaiming:
                 admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="cleanup",
                 instance_id="inst-K",
+                # Empty job_metadata — no message_id stamped. Per
+                # the Phase 3 P1 NULL-safe fix, this JobItem does
+                # NOT block its own instance's task (the carve-out
+                # cannot fire without a stamped message_id).
+                job_metadata={},
                 created_at=now,
                 priority=0,
                 retry_count=0,
             ))
             session.commit()
 
-        # A pending task for inst-K MUST be blocked — the
-        # processing CLEANUP job still holds the slot in the
-        # post-D13 world (the cross-system guard fires for any
-        # processing JobItem; the job_type filter is removed).
+        # A pending task for inst-K MUST be claimable — the
+        # processing CLEANUP job has no stamped message_id, so the
+        # NULL-safe carve-out exemption applies (Phase 3 P1 fix).
         t1 = repository.create(task_type=TaskType.PROCESS_MESSAGE.value, instance_id="inst-K", message_id="m1")
         claimed = repository.claim_pending_task(worker_id="worker-1")
-        assert claimed is None, (
-            f"Task for inst-K must be blocked by the processing "
-            f"CLEANUP job (post-D13: any processing JobItem blocks, "
-            f"not just MESSAGE); got: {claimed}"
+        assert claimed is not None, (
+            f"Phase 3 P1 NULL-safe fix: a non-MESSAGE JobItem without "
+            f"stamped message_id must NOT block its own instance's task. "
+            f"Got: {claimed}"
         )
-        # The busy-instance probe also reports True (a
-        # non-MESSAGE processing job still blocks).
-        assert repository.has_pending_tasks_blocked_by_busy_instance() is True
+        assert claimed.id == t1.id
+        # The busy-instance probe also reports False (same reasoning).
+        assert repository.has_pending_tasks_blocked_by_busy_instance() is False
 
     def test_claim_unaffected_by_soft_deleted_processing_job(self, repository, engine):
         """Regression: a soft-deleted PROCESSING MESSAGE job must NOT block
@@ -817,15 +952,28 @@ class TestTaskClaiming:
         assert repository.has_pending_tasks_blocked_by_busy_instance() is True
 
     def test_claim_blocked_when_job_metadata_is_empty(self, repository, engine):
-        """Defensive: a JobItem with empty ``job_metadata`` (e.g. a
-        manually-injected or legacy row) must NOT release the guard.
-        On both backends, ``json_extract(NULL/'{}', '$.message_id')``
-        returns NULL, so the ``t.message_id = NULL`` comparison is
-        UNKNOWN and the ``NOT EXISTS`` defaults to TRUE (blocker
-        fires). This pins the NULL-extraction fallback so a future
-        refactor doesn't silently invert it.
+        """Phase 3 P1 update (2026-06-30): the contract pinned by this
+        test changed when the cross-system guard was made NULL-safe.
+
+        Pre-P1: a JobItem with empty ``job_metadata`` blocked its own
+        instance's task because ``json_extract(NULL/'{}', '$.message_id')``
+        returned NULL and the matching-Task carve-out compared
+        ``t.message_id = NULL`` (UNKNOWN), so ``NOT EXISTS`` defaulted
+        to TRUE (blocker fires). The legacy test asserted this as
+        "defensive: empty metadata → block".
+
+        Post-P1: the carve-out requires
+        ``json_extract(metadata, '$.message_id') IS NOT NULL`` before
+        firing. A JobItem with empty ``job_metadata`` (json_extract
+        returns NULL) is therefore NOT a blocker — the
+        NULL-safe exemption applies. This test now pins the post-P1
+        contract: empty ``job_metadata`` means the JobItem is treated
+        as a non-blocker (the legacy / dispatch-only case). The
+        ``NULL-extraction fallback`` is still pinned — just with the
+        new semantics that "no message_id" means "no block".
         """
         from sqlmodel import Session as SQLModelSession
+        from datetime import datetime, timezone
         from daemon.repositories.job_queue.models import JobItem, AdmissionState
         from daemon.repositories.instance.models import Instance
 
@@ -847,10 +995,11 @@ class TestTaskClaiming:
                 admission_state=status_to_admission(AdmissionState.ACTIVE.value),
                 job_type="message",
                 instance_id="inst-EMPTY-1",
-                # Explicitly empty job_metadata — same as the
+                # Empty job_metadata — same as
                 # ``test_claim_skips_when_message_job_processing_for_instance``
-                # fixture (line 324) but for a fresh instance so the
-                # test is self-contained.
+                # but for a fresh instance so the test is self-contained.
+                # Post-P1: this JobItem does NOT block its own
+                # instance's task (NULL-safe carve-out).
                 job_metadata={},
                 created_at=now,
                 priority=0,
@@ -858,14 +1007,21 @@ class TestTaskClaiming:
             ))
             session.commit()
 
-        # Even with a matching Task, the empty job_metadata means
-        # json_extract returns NULL → NOT EXISTS TRUE → blocker fires.
+        # Post-P1: the task IS claimable. Empty job_metadata means
+        # json_extract returns NULL → carve-out does not fire →
+        # the JobItem is a non-blocker. This is the inverse of the
+        # pre-P1 behaviour that this test originally pinned.
         t1 = repository.create(
             task_type=TaskType.PROCESS_MESSAGE.value,
             instance_id="inst-EMPTY-1",
             message_id="anything",
         )
-        assert repository.claim_pending_task(worker_id="worker-1") is None
+        claimed = repository.claim_pending_task(worker_id="worker-1")
+        assert claimed is not None, (
+            "Phase 3 P1 NULL-safe fix: empty job_metadata must NOT "
+            "block the task claim. Got None — the self-deadlock regressed."
+        )
+        assert claimed.id == t1.id
 
 
 class TestDeferQueueGate:

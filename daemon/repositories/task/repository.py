@@ -563,6 +563,23 @@ class TaskRepository:
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
                               AND (i.status IS NULL OR i.status != :status_waiting_children)
+                              -- Phase 3 P1 fix (2026-06-30): NULL-safe
+                              -- cross-system guard. When a JobItem has no
+                              -- ``message_id`` in its metadata, the
+                              -- ``NOT EXISTS`` subquery below would
+                              -- compare ``t.message_id = NULL`` and
+                              -- resolve to UNKNOWN, so ``NOT EXISTS``
+                              -- would default to TRUE — the JobItem
+                              -- would block its own instance's task
+                              -- (self-deadlock). The guard now requires
+                              -- the JobItem to actually carry a
+                              -- ``message_id`` before it can block on
+                              -- the corresponding Task row. A JobItem
+                              -- without ``message_id`` is the legacy
+                              -- dual-path / dispatch-only case and
+                              -- never participates in the
+                              -- message-coordination carve-out.
+                              AND {json_extract_message_id} IS NOT NULL
                               AND NOT EXISTS (
                                   SELECT 1 FROM task t
                                   WHERE t.message_id = {json_extract_message_id}
@@ -1045,6 +1062,17 @@ class TaskRepository:
         inconsistent idle/busy decisions (spurious wakeups or workers
         sleeping through admissible work).
 
+        Phase 3 F11 fix (2026-06-30): the carve-out above is now NULL-
+        safe — the predicate requires ``j_running.metadata->>'message_id'``
+        to be non-NULL before consulting the unified-dispatcher
+        carve-out. A JobItem without ``message_id`` is the legacy /
+        dispatch-only case and must NOT be treated as a blocker via the
+        message-coordination carve-out (the ``t_admitted.message_id =
+        NULL`` comparison is UNKNOWN, so ``NOT EXISTS`` would default
+        to TRUE and the JobItem would block its own instance). The
+        guard mirrors the P1 fix in :meth:`claim_pending_task` so the
+        claim path and the busy-instance probe never disagree.
+
         Returns:
             True if any pending task is blocked by Fix B's per-instance guard
             (task-level or job-queue-level).
@@ -1094,6 +1122,19 @@ class TaskRepository:
                             -- create ``JobItem`` rows. The subquery
                             -- now checks ALL processing ``JobItem``
                             -- rows (TASK-type dispatch-queue jobs).
+                            --
+                            -- Phase 3 F11 fix (2026-06-30): NULL-safe
+                            -- cross-system guard. Without this check,
+                            -- a JobItem whose metadata has no
+                            -- ``message_id`` (legacy / dispatch-only
+                            -- JobItems) would compare
+                            -- ``t_admitted.message_id = NULL`` and
+                            -- the NOT EXISTS would default to TRUE,
+                            -- causing the JobItem to spuriously
+                            -- block — the same self-deadlock the P1
+                            -- fix addresses in ``claim_pending_task``.
+                            -- The two predicates MUST stay in sync.
+                            AND {json_extract_message_id} IS NOT NULL
                             AND NOT EXISTS (
                                 SELECT 1 FROM task t_admitted
                                 WHERE t_admitted.message_id = {json_extract_message_id}
@@ -1110,6 +1151,96 @@ class TaskRepository:
                 "status_waiting_children": InstanceStatus.WAITING_CHILDREN.value,
             }).fetchone()
             return row is not None
+
+    def has_active_non_deferred_work(self, project_id: str | None = None) -> bool:
+        """Return True if there is any non-deferred in-flight task.
+
+        Phase 3 Part B2 (2026-06-30, defer-seam bugfix Phase 1). The
+        shared predicate backing the defer-queue idle gate: returns
+        True iff at least one row exists in ``task`` with status
+        ``pending`` or ``running`` and ``is_deferred = false``. The
+        gate is shared by:
+
+        * :meth:`claim_pending_task` — folds the predicate into the
+          atomic claim's inner SELECT so deferred candidates are held
+          back while non-deferred work is active in the same project.
+        * Job-queue call sites that admit deferred jobs into the
+          dispatch queue (e.g. the project-scoped probe used by the
+          defer-queue idle gate in
+          ``daemon/services/job_queue_mgmt_service.py``) — they use
+          this helper instead of re-implementing the same EXISTS
+          query so the claim path and the admission probe never
+          disagree.
+
+        Args:
+            project_id: Optional project scope.
+
+              * ``project_id=None`` (default): system-wide probe — the
+                project filter is omitted entirely. Any non-deferred
+                in-flight task in any project triggers a True return.
+                This is the conservative gate for the worker pool's
+                claim path (it must never starve a non-deferred task
+                in any project).
+              * ``project_id="abc"``: only count tasks whose
+                ``instance_id`` belongs to an instance in that project.
+                Tasks whose instance has no ``instances`` row do not
+                match the INNER JOIN and are excluded — consistent with
+                the defer-queue idle gate's project resolution in
+                :meth:`claim_pending_task` (which resolves a deferred
+                candidate's project via ``instances`` and falls back
+                to NULL when no row exists).
+
+        Returns:
+            True if at least one non-deferred PENDING or RUNNING task
+            exists (scoped per ``project_id``); False otherwise.
+
+        Dialect notes:
+            * ``t.is_deferred = :is_deferred_false`` with a Python
+              ``False`` bound parameter — matches the existing
+              dual-driver pattern in :meth:`claim_pending_task` and
+              :meth:`schedule_retry` so the boolean comparison works
+              on both SQLite (INTEGER 0/1) and PostgreSQL (BOOLEAN
+              false/true).
+            * ``SELECT EXISTS(...)`` returns a single boolean column
+              (0/1 on both backends) and is wrapped in ``bool()`` so
+              the return type is invariant across drivers.
+            * The status ``IN (:status_pending, :status_running)``
+              parameterised list mirrors the same pattern in
+              :meth:`has_inflight_task` / :meth:`has_pending_tasks_blocked_by_busy_instance`
+              — no dialect branching needed.
+        """
+        with self.engine.begin() as conn:
+            if project_id is None:
+                stmt = text("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM task t
+                        JOIN instances i ON t.instance_id = i.instance_id
+                        WHERE t.status IN (:status_pending, :status_running)
+                          AND t.is_deferred = :is_deferred_false
+                    )
+                """)
+                row = conn.execute(stmt, {
+                    "status_pending": TaskStatus.PENDING.value,
+                    "status_running": TaskStatus.RUNNING.value,
+                    "is_deferred_false": False,
+                }).fetchone()
+            else:
+                stmt = text("""
+                    SELECT EXISTS(
+                        SELECT 1 FROM task t
+                        JOIN instances i ON t.instance_id = i.instance_id
+                        WHERE t.status IN (:status_pending, :status_running)
+                          AND t.is_deferred = :is_deferred_false
+                          AND i.project_id = :project_id
+                    )
+                """)
+                row = conn.execute(stmt, {
+                    "status_pending": TaskStatus.PENDING.value,
+                    "status_running": TaskStatus.RUNNING.value,
+                    "is_deferred_false": False,
+                    "project_id": project_id,
+                }).fetchone()
+            return bool(row[0])
 
     def count_by_status(self) -> dict[str, int]:
         """Get count of tasks by status.

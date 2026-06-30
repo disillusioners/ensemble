@@ -121,6 +121,43 @@ class JobRepository:
             return pg_insert
         return sqlite_insert
 
+    def _json_set_text_sql(self, column: str, key: str, param: str) -> str:
+        """Return a dialect-aware SQL fragment that sets ``key`` on a
+        JSON/JSONB ``column`` to a bound-parameter text value.
+
+        The two supported backends use different syntax for in-place
+        JSON mutation:
+
+        * PostgreSQL JSONB: ``column || jsonb_build_object('key', :param)``
+          — the ``||`` operator is atomic, treats NULL as empty, and
+          overwrites an existing key (matching the intended semantics
+          of ``stamp_message_id``).
+        * SQLite: ``json_set(COALESCE(column, '{}'), '$.key', :param)`` —
+          ``COALESCE`` keeps the call safe when the column is NULL,
+          and ``json_set`` overwrites an existing key.
+
+        Mirrors the dialect-detection pattern of
+        :meth:`TaskRepository._json_extract_text_sql` — the ``key`` is
+        interpolated as a static constant and ``param`` is interpolated
+        as a bound-parameter reference. Callers MUST pass a static
+        string for ``key`` (this method is not user-input-safe by
+        design) and bind the actual value to ``:param`` themselves.
+
+        Args:
+            column: Bare column reference (e.g. ``"metadata"``).
+            key: Static JSON key to set.
+            param: Bound-parameter name (e.g. ``"message_id"``).
+
+        Returns:
+            SQL fragment suitable for direct interpolation into a
+            ``text()`` statement.
+        """
+        if self.engine.dialect.name == "postgresql":
+            return f"{column} || jsonb_build_object('{key}', :{param})"
+        # SQLite: ``{{}}`` escapes to the literal ``{}`` default JSON
+        # object in the f-string output.
+        return f"json_set(COALESCE({column}, '{{}}'), '$.{key}', :{param})"
+
     # --------------------------------------------------------
     # CREATE
     # --------------------------------------------------------
@@ -1211,6 +1248,46 @@ SET admission_state = 'queued',
             db_session.refresh(job)
 
             return job
+
+    def stamp_message_id(self, job_id: str, message_id: str) -> None:
+        """Stamp ``message_id`` onto ``job_queue_items.metadata`` after enqueue.
+
+        Phase 1 of the defer-seam bugfix: ``claim_pending_task`` correlates
+        MESSAGE JobItems to their original ``message_id`` via the JSON
+        extraction at ``job_queue_items.metadata->>'message_id'`` (PG) /
+        ``json_extract(metadata, '$.message_id')`` (SQLite). The extraction
+        always returned NULL because the admission path never wrote the
+        value, so the cross-system guard could not match active MESSAGE
+        JobItems to the corresponding ``message_queue`` row → self-deadlock.
+
+        This method performs a dialect-aware single-statement UPDATE so
+        concurrent writers targeting different keys compose correctly
+        (mirrors the gold-template pattern in
+        ``InstanceRepository.set_metadata``):
+
+        * PostgreSQL: ``metadata || jsonb_build_object('message_id', :message_id)``
+        * SQLite:     ``json_set(COALESCE(metadata, '{}'), '$.message_id', :message_id)``
+
+        No-op when the row does not exist (``rowcount = 0`` is not an
+        error; the caller will handle the missing row on the next read).
+
+        Args:
+            job_id: Job identifier whose metadata to stamp.
+            message_id: Original message_id to correlate against.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            sql_fragment = self._json_set_text_sql(
+                "metadata", "message_id", "message_id"
+            )
+            stmt = text(
+                f"UPDATE job_queue_items SET metadata = {sql_fragment} "
+                f"WHERE job_id = :job_id"
+            )
+            db_session.execute(
+                stmt,
+                {"message_id": message_id, "job_id": job_id},
+            )
+            db_session.commit()
 
     def start_job(
         self,

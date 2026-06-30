@@ -1336,6 +1336,7 @@ class InstanceManager:
         )
         self._maintenance_service.set_job_queue_service(self._job_queue_service)
         self._maintenance_service.set_request_registry(self._request_registry._requests)
+        self._maintenance_service.set_task_repository(self._task_repo)
 
         # Register checkpoint cleanup job
         checkpoint_cleanup = CheckpointCleanupJob(

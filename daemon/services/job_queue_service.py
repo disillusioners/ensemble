@@ -1746,17 +1746,50 @@ class JobQueueService:
             queue = await asyncio.to_thread(self._queue_repo.get, qid)
             queue_type_map[qid] = queue.queue_type == "defer" if queue else False
         
-        # Check once if non-defer work is active (used for defer jobs only)
-        non_defer_active = 0
+        # Check once if non-defer work is active (used for defer jobs only).
+        # Phase 1 (defer-seam bugfix 2026-07-01): Gate B now consults the
+        # shared ``TaskRepository.has_active_non_deferred_work`` predicate.
+        # Previously this read went through
+        # ``JobRepository.count_active_jobs_in_non_defer_queues`` which could
+        # diverge from the ``task``-table probe used by
+        # ``TaskRepository.claim_pending_task`` and produced TOCTOU races
+        # where the two paths observed different non-defer sets in the same
+        # instant. The shared predicate returns ``True`` iff any row in
+        # ``task`` has ``status IN ('pending','running')`` and
+        # ``is_deferred = false``, optionally scoped by project — so the
+        # claim path and the admission probe never disagree.
+        #
+        # Access: ``TaskRepository`` lives on the InstanceManager
+        # (``manager._task_repo`` set up in ``InstanceManager.initialize``,
+        # exposed here as ``self._instance_manager._task_repo``). That mirrors
+        # the established pattern of accessing sub-repositories through the
+        # instance manager (see e.g. ``self._instance_manager._instance_repository``).
+        instance_manager = getattr(self, "_instance_manager", None)
+        task_repo = (
+            getattr(instance_manager, "_task_repo", None)
+            if instance_manager is not None
+            else None
+        )
+        non_defer_active = False
         for job in pending:
             is_defer = queue_type_map.get(job.queue_id, False)
             if is_defer:
-                # Defer job found - check if non-defer work is active
-                non_defer_active = await asyncio.to_thread(
-                    self._repository.count_active_jobs_in_non_defer_queues, project_id
-                )
+                # Defer job found - check if non-defer work is active.
+                # Defensive: tests construct ``JobQueueService`` without
+                # ``_instance_manager`` or before ``_task_repo`` is wired on
+                # the manager. Without the predicate we conservatively hold
+                # defer jobs back (treat as "non-defer active"), which
+                # preserves the F8 fix semantics — the original gate also
+                # could not evaluate in that scenario and defaulted to
+                # blocking defer work.
+                if task_repo is None:
+                    non_defer_active = True
+                else:
+                    non_defer_active = await asyncio.to_thread(
+                        task_repo.has_active_non_deferred_work, project_id
+                    )
                 break
-        
+
         # Iterate through pending jobs and select first eligible
         for job in pending:
             is_defer = queue_type_map.get(job.queue_id, False)
@@ -1765,7 +1798,7 @@ class JobQueueService:
                 return job
             else:
                 # Defer job - only return if non-defer work is idle
-                if non_defer_active == 0:
+                if not non_defer_active:
                     return job
                 # Otherwise skip this defer job and continue checking
         return None

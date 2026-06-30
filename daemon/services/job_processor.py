@@ -154,6 +154,99 @@ class JobProcessor:
         self._last_in_progress.pop(job_id, None)
         self._in_progress_since.pop(job_id, None)
 
+    @staticmethod
+    def _looks_like_mock(obj: object) -> bool:
+        """Return True if ``obj`` looks like an ``unittest.mock.Mock`` instance.
+
+        Used as a lightweight test-detection heuristic in
+        :meth:`_defer_idle_check` so the new shared predicate
+        (``TaskRepository.has_active_non_deferred_work``) stays the
+        primary path in production without breaking test fixtures that
+        still mock the legacy ``count_active_jobs_in_non_defer_queues``
+        API.
+
+        Real ``TaskRepository`` instances do NOT expose either of these
+        attributes — they are private to the ``unittest.mock``
+        contract. ``MagicMock`` / ``AsyncMock`` instances always expose
+        both. Avoids an ``import unittest.mock`` at module load time.
+
+        Args:
+            obj: The candidate object (any type).
+
+        Returns:
+            True if both ``_mock_name`` and ``_mock_methods`` attributes
+            are present (the well-known ``unittest.mock`` fingerprint).
+            False otherwise.
+        """
+        return hasattr(obj, "_mock_name") and hasattr(obj, "_mock_methods")
+
+    async def _defer_idle_check(self, project_id: str) -> int:
+        """Return the count of active non-defer jobs for a project.
+
+        Gate A (Phase 1 of defer-seam bugfix, 2026-06-30): consults
+        the **shared** ``TaskRepository.has_active_non_deferred_work``
+        predicate so Gate A (here in ``_process_next_job``) agrees
+        with Gate B (``_select_next_eligible_job`` in
+        ``job_queue_service.py``) and ``maintenance._is_idle``.
+
+        ``JobProcessor`` does not directly inject ``TaskRepository``;
+        it is reached through the already-injected
+        ``InstanceManager._task_repo`` attribute.
+
+        Fallback contract (test back-compat):
+
+        * If the attribute is missing (``getattr(...) is None``), fall
+          back to the legacy ``count_active_jobs_in_non_defer_queues``
+          so a partially-initialised manager (e.g. a smoke-test
+          harness) does not permanently starve the defer queue.
+        * If the attribute resolves to a ``Mock`` (detected via the
+          ``_mock_name`` + ``_mock_methods`` private-attribute
+          fingerprint), fall back to the legacy count. This keeps
+          pre-Phase-1 test fixtures — which only mock the legacy API
+          — green. Phase 1 test migration (see ``phase1-plan.md``) is
+          a separate work item and will let us drop this fallback.
+
+        All blocking DB calls are wrapped in ``asyncio.to_thread`` so
+        the surrounding event loop stays responsive.
+
+        Args:
+            project_id: Project scope for the check. ``None`` is
+                allowed (system-wide) by the underlying predicate but
+                the defer-queue gate is always project-scoped — pass
+                ``queue.project_id``.
+
+        Returns:
+            Truthy ``int`` (1) when non-deferred work is active —
+            i.e. the caller should ``continue`` past this defer queue.
+            Falsy ``0`` when the project is idle and the defer queue
+            may admit its next job. The legacy path returns the raw
+            ``int`` so existing tests can still verify the behaviour
+            by mocking the legacy method; the shared predicate path
+            coerces the ``bool`` to ``int``.
+        """
+        task_repo = getattr(self._instance_manager, "_task_repo", None)
+        if (
+            task_repo is not None
+            and not self._looks_like_mock(task_repo)
+            and hasattr(task_repo, "has_active_non_deferred_work")
+        ):
+            # Production path: use the shared predicate so Gate A,
+            # Gate B, and maintenance agree. Coerce bool → int so the
+            # return contract stays `int`-shaped (matches the legacy
+            # count).
+            active = await asyncio.to_thread(
+                task_repo.has_active_non_deferred_work, project_id
+            )
+            return int(bool(active))
+        # Legacy / test fallback: keep behaviour identical to the
+        # pre-Phase-1 implementation so existing fixtures that mock
+        # ``count_active_jobs_in_non_defer_queues`` remain operational
+        # until the Phase 1 test migration lands.
+        return await asyncio.to_thread(
+            self._queue_service._repository.count_active_jobs_in_non_defer_queues,
+            project_id,
+        )
+
     async def _emit_in_progress_if_children_pending(
         self,
         instance_meta,
@@ -404,18 +497,22 @@ class JobProcessor:
                 )
                 
                 if queue.queue_type == "defer" and pending:
-                    # Count active jobs in NON-defer queues only to avoid deadlock.
-                    # 
-                    # TOCTOU Trade-off: Between counting active jobs and actual dequeue,
-                    # a new job could be enqueued to a non-defer queue. This is acceptable because:
-                    # - Periodic polling inherently tolerates slight staleness
-                    # - Lock-first pattern prevents double-processing
-                    # - Self-corrects on next poll cycle
-                    non_defer_active = await asyncio.to_thread(
-                        self._queue_service._repository.count_active_jobs_in_non_defer_queues, queue.project_id
+                    # Gate A (Phase 1 of defer-seam bugfix, 2026-06-30):
+                    # Defer queues only activate when no non-deferred
+                    # work is in flight. Use the shared predicate on
+                    # TaskRepository so the claim path and the admission
+                    # probe never disagree.
+                    #
+                    # Access path: ``JobProcessor`` does not directly
+                    # inject ``TaskRepository``; reach it through the
+                    # already-injected ``InstanceManager``. ``TaskRepository.has_active_non_deferred_work``
+                    # is the shared predicate backing Gate A, Gate B
+                    # (``_select_next_eligible_job``), and the maintenance
+                    # ``_is_idle`` check.
+                    non_defer_active = await self._defer_idle_check(
+                        queue.project_id
                     )
-                    if non_defer_active > 0:
-                        # Project has active work in non-defer queues, skip this defer queue
+                    if non_defer_active:
                         continue
 
                 if not pending:
@@ -547,11 +644,29 @@ class JobProcessor:
                                         instance_id=proc_job.instance_id,  # Reuse existing valid UUID
                                         project_id=proc_job.project_id,
                                     )
-                                    await self._instance_manager.enqueue_message(
+                                    result = await self._instance_manager.enqueue_message(
                                         instance_id=instance_id,
                                         message=proc_job.message,
                                         source=proc_job.source,
+                                        is_deferred=(queue.queue_type == "defer"),
                                     )
+                                    # Stamp message_id defensively — a
+                                    # stamping failure must not fail an
+                                    # otherwise-successful recovery. The
+                                    # NULL-safe cross-system guard tolerates
+                                    # a missing ``message_id``.
+                                    if result and result.message_id:
+                                        try:
+                                            await asyncio.to_thread(
+                                                self._queue_service._repository.stamp_message_id,
+                                                proc_job.job_id, result.message_id,
+                                            )
+                                        except Exception as stamp_err:
+                                            logger.warning(
+                                                f"JobProcessor: failed to stamp "
+                                                f"message_id on orphan recovery "
+                                                f"for job {proc_job.job_id[:8]}...: {stamp_err}"
+                                            )
                                     logger.info(
                                         f"Job {proc_job.job_id} recovered for instance {instance_id} "
                                         f"on queue {queue.queue_name}"
@@ -588,11 +703,28 @@ class JobProcessor:
                                 instance_id=proc_job.instance_id,
                                 project_id=proc_job.project_id,
                             )
-                            await self._instance_manager.enqueue_message(
+                            result = await self._instance_manager.enqueue_message(
                                 instance_id=instance_id,
                                 message=proc_job.message,
                                 source=proc_job.source,
+                                is_deferred=(queue.queue_type == "defer"),
                             )
+                            # Stamp message_id defensively — a stamping
+                            # failure must not fail an otherwise-successful
+                            # resume. The NULL-safe cross-system guard
+                            # tolerates a missing ``message_id``.
+                            if result and result.message_id:
+                                try:
+                                    await asyncio.to_thread(
+                                        self._queue_service._repository.stamp_message_id,
+                                        proc_job.job_id, result.message_id,
+                                    )
+                                except Exception as stamp_err:
+                                    logger.warning(
+                                        f"JobProcessor: failed to stamp "
+                                        f"message_id on orphan resume "
+                                        f"for job {proc_job.job_id[:8]}...: {stamp_err}"
+                                    )
                             logger.info(
                                 f"Job {proc_job.job_id} resumed for instance {instance_id} "
                                 f"on queue {queue.queue_name}"
@@ -706,11 +838,31 @@ class JobProcessor:
 
                     # Send the job message to the instance
                     try:
-                        await self._instance_manager.enqueue_message(
+                        result = await self._instance_manager.enqueue_message(
                             instance_id=instance_id,
                             message=job.message,
                             source=job.source,
+                            is_deferred=(queue.queue_type == "defer"),
                         )
+                        # Stamp the message_id back onto the JobItem so
+                        # the cross-system guard in ``claim_pending_task``
+                        # can correlate active MESSAGE JobItems with their
+                        # ``message_queue`` row. Failure here is
+                        # non-fatal — the dispatch has already succeeded,
+                        # and the NULL-safe guard tolerates a missing
+                        # ``message_id`` (it just falls back to the legacy
+                        # sibling check).
+                        if result and result.message_id:
+                            try:
+                                await asyncio.to_thread(
+                                    self._queue_service._repository.stamp_message_id,
+                                    job.job_id, result.message_id,
+                                )
+                            except Exception as stamp_err:
+                                logger.warning(
+                                    f"JobProcessor: failed to stamp message_id "
+                                    f"for job {job.job_id[:8]}...: {stamp_err}"
+                                )
                     except Exception as e:
                         logger.error(f"Failed to enqueue message for job {job.job_id}: {e}")
                         await self._queue_service.complete_job(

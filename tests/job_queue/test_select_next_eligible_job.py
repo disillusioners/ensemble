@@ -8,7 +8,18 @@ The fix ensures that when a job completes and triggers the observer path:
 Observer path: JobFeedbackObserver._process_event() -> _get_next_job(project_id) -> _select_next_eligible_job()
 
 Non-defer jobs (FIFO, PARALLEL) are always returned immediately.
-Defer jobs are only returned when count_active_jobs_in_non_defer_queues == 0.
+Defer jobs are only returned when the project has no non-deferred
+in-flight task — consulted via the shared
+``TaskRepository.has_active_non_deferred_work`` predicate (Phase 1
+of the defer-seam bugfix, 2026-06-30).
+
+Pre-Phase-1 the defer idle check went through
+``JobRepository.count_active_jobs_in_non_defer_queues`` which could
+diverge from the ``task``-table probe used by the claim path.
+Phase 1 unified the two on ``has_active_non_deferred_work`` so the
+claim path and the admission probe never disagree. These tests were
+updated to mock the new predicate path (via
+``_instance_manager._task_repo.has_active_non_deferred_work``).
 """
 
 import pytest
@@ -75,10 +86,50 @@ def create_mock_queue_repo():
 
 
 def create_mock_repository():
-    """Create mock job repository."""
+    """Create mock job repository (JobRepository).
+
+    Phase 1 update: defer-idle check is no longer
+    ``count_active_jobs_in_non_defer_queues`` on this repo; it is
+    ``TaskRepository.has_active_non_deferred_work`` reached via the
+    ``_instance_manager._task_repo`` chain. Tests wire the predicate
+    via :func:`wire_task_repo_has_active_non_deferred_work` instead
+    of stubbing this method.
+    """
     mock_repo = MagicMock()
-    mock_repo.count_active_jobs_in_non_defer_queues = MagicMock(return_value=0)
     return mock_repo
+
+
+def wire_task_repo_has_active_non_deferred_work(
+    service: JobQueueService,
+    return_value: bool,
+) -> MagicMock:
+    """Wire ``_instance_manager._task_repo.has_active_non_deferred_work``
+    on a ``JobQueueService`` instance to return the given bool.
+
+    Phase 1 of the defer-seam bugfix (2026-06-30): the defer idle
+    check in ``_select_next_eligible_job`` consults the shared
+    ``TaskRepository.has_active_non_deferred_work`` predicate. The
+    predicate is reached via
+    ``self._instance_manager._task_repo.has_active_non_deferred_work``
+    (mirrors ``_instance_manager._instance_repository`` pattern). This
+    helper wires the predicate path so tests can assert on the
+    defer-idle semantics without standing up a real TaskRepository.
+
+    Args:
+        service: ``JobQueueService`` instance under test.
+        return_value: The bool ``has_active_non_deferred_work`` should
+            return when called.
+
+    Returns:
+        The mock predicate (useful for ``assert_called_once_with``).
+    """
+    predicate = MagicMock(return_value=return_value)
+    task_repo = MagicMock()
+    task_repo.has_active_non_deferred_work = predicate
+    instance_manager = MagicMock()
+    instance_manager._task_repo = task_repo
+    service.set_instance_manager(instance_manager)
+    return predicate
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -124,13 +175,17 @@ class TestSelectNextEligibleJobBasic:
         queue_repo._queue_map["fifo-queue"] = MockQueue("fifo-queue", "project-1", queue_type="fifo")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1  # Non-defer work active
+        # Non-defer active count doesn't matter for non-defer jobs
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Wire the has_active_non_deferred_work predicate — should be
+        # called zero times for the FIFO-only case (the loop breaks on
+        # the first job only when it is defer-type).
+        predicate = wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         pending = [
             MockJob("job-1", queue_id="fifo-queue", priority=5),
@@ -142,8 +197,8 @@ class TestSelectNextEligibleJobBasic:
         # Assert
         assert result is not None
         assert result.job_id == "job-1"
-        # count_active_jobs_in_non_defer_queues should NOT be called for non-defer jobs
-        mock_repo.count_active_jobs_in_non_defer_queues.assert_not_called()
+        # has_active_non_deferred_work should NOT be called for non-defer jobs
+        predicate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_defer_job_skipped_when_non_defer_active(self):
@@ -153,13 +208,15 @@ class TestSelectNextEligibleJobBasic:
         queue_repo._queue_map["defer-queue"] = MockQueue("defer-queue", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1  # Non-defer work IS active
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Wire shared predicate — non-defer work IS active, so
+        # the defer job must be held back.
+        predicate = wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         pending = [
             MockJob("job-defer", queue_id="defer-queue", priority=5),
@@ -170,8 +227,9 @@ class TestSelectNextEligibleJobBasic:
 
         # Assert
         assert result is None  # Defer job should be skipped
-        # count_active_jobs_in_non_defer_queues SHOULD be called for defer jobs
-        mock_repo.count_active_jobs_in_non_defer_queues.assert_called_once_with("project-1")
+        # has_active_non_deferred_work SHOULD be called once for the defer
+        # job with the project_id from the method call.
+        predicate.assert_called_once_with("project-1")
 
     @pytest.mark.asyncio
     async def test_defer_job_returned_when_project_idle(self):
@@ -181,13 +239,15 @@ class TestSelectNextEligibleJobBasic:
         queue_repo._queue_map["defer-queue"] = MockQueue("defer-queue", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 0  # Project is idle
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Wire shared predicate — project is idle, defer job
+        # returned.
+        wire_task_repo_has_active_non_deferred_work(service, return_value=False)
 
         pending = [
             MockJob("job-defer", queue_id="defer-queue", priority=5),
@@ -216,13 +276,14 @@ class TestSelectNextEligibleJobPriority:
         queue_repo._queue_map["defer-queue"] = MockQueue("defer-queue", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1  # Non-defer work active
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Non-defer work active — defer job held back.
+        wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         pending = [
             MockJob("job-defer-high", queue_id="defer-queue", priority=10),  # High priority
@@ -248,13 +309,13 @@ class TestSelectNextEligibleJobPriority:
         queue_repo._queue_map["fifo-queue"] = MockQueue("fifo-queue", "project-1", queue_type="fifo")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1  # Non-defer work active
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         # FIFO job is second in the pending list
         pending = [
@@ -287,13 +348,14 @@ class TestSelectNextEligibleJobMultipleQueues:
         queue_repo._queue_map["defer-queue-2"] = MockQueue("defer-queue-2", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 0  # Project idle
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Project idle — first defer job returned.
+        wire_task_repo_has_active_non_deferred_work(service, return_value=False)
 
         pending = [
             MockJob("job-defer-1", queue_id="defer-queue-1", priority=5),
@@ -321,13 +383,15 @@ class TestSelectNextEligibleJobMultipleQueues:
         queue_repo._queue_map["defer-queue"] = MockQueue("defer-queue", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 0  # Project idle
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Project idle — defer first returned even though other
+        # queues are present.
+        wire_task_repo_has_active_non_deferred_work(service, return_value=False)
 
         pending = [
             MockJob("job-defer", queue_id="defer-queue", priority=10),       # High priority defer first
@@ -380,13 +444,14 @@ class TestSelectNextEligibleJobEdgeCases:
         queue_repo._queue_map["defer-queue"] = MockQueue("defer-queue", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 0  # Project idle
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Project idle — first defer job returned.
+        wire_task_repo_has_active_non_deferred_work(service, return_value=False)
 
         pending = [
             MockJob("job-defer-1", queue_id="defer-queue", priority=5),
@@ -408,13 +473,14 @@ class TestSelectNextEligibleJobEdgeCases:
         queue_repo._queue_map["defer-queue"] = MockQueue("defer-queue", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1  # Non-defer work active
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Non-defer work active — all defer jobs held back.
+        wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         pending = [
             MockJob("job-defer-1", queue_id="defer-queue", priority=5),
@@ -433,13 +499,16 @@ class TestSelectNextEligibleJobEdgeCases:
         # Arrange
         queue_repo = create_mock_queue_repo()
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1  # Non-defer work active
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Even when non-defer work is active, a job with queue_id=None
+        # is treated as non-defer and returned without consulting the
+        # defer-idle predicate.
+        predicate = wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         pending = [
             MockJob("job-no-queue", queue_id=None, priority=5),  # No queue_id
@@ -451,7 +520,8 @@ class TestSelectNextEligibleJobEdgeCases:
         # Assert
         assert result is not None
         assert result.job_id == "job-no-queue"
-        # count_active_jobs_in_non_defer_queues should NOT be called (treated as non-defer)
+        # has_active_non_deferred_work should NOT be called (treated as non-defer)
+        predicate.assert_not_called()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -469,7 +539,6 @@ class TestGetNextJobIntegration:
         queue_repo._queue_map["defer-queue"] = MockQueue("defer-queue", "project-1", queue_type="defer")
 
         mock_repo = create_mock_repository()
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1  # Non-defer work active
         mock_repo.list_pending_by_project.return_value = [
             MockJob("job-defer", queue_id="defer-queue", priority=5),
         ]
@@ -479,6 +548,7 @@ class TestGetNextJobIntegration:
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         # Act
         result = await service._get_next_job(project_id="project-1")
@@ -525,14 +595,18 @@ class TestGetNextJobIntegration:
         mock_repo.list_pending_by_queue.return_value = [
             MockJob("job-defer", queue_id="defer-queue", priority=5),
         ]
-        # count_active_jobs should NOT be called when queue_id is specified
-        mock_repo.count_active_jobs_in_non_defer_queues.return_value = 1
 
         service = JobQueueService(
             repository=mock_repo,
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # The defer-idle predicate should NOT be consulted when
+        # queue_id is specified (queue_id takes precedence over the
+        # project-scoped defer check). Wire the predicate so the
+        # NOT-called assertion is meaningful; without wiring, a
+        # MagicMock auto-attr on the chain would always succeed.
+        predicate = wire_task_repo_has_active_non_deferred_work(service, return_value=True)
 
         # Act
         result = await service._get_next_job(queue_id="defer-queue")
@@ -541,7 +615,7 @@ class TestGetNextJobIntegration:
         assert result is not None
         assert result.job_id == "job-defer"
         # Should NOT check for active non-defer jobs (queue_id takes precedence)
-        mock_repo.count_active_jobs_in_non_defer_queues.assert_not_called()
+        predicate.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_get_next_job_integration_mixed_queues(self):
@@ -565,11 +639,14 @@ class TestGetNextJobIntegration:
             lock_manager=MagicMock(),
             queue_repo=queue_repo,
         )
+        # Project is idle — defer job returned (highest priority).
+        wire_task_repo_has_active_non_deferred_work(service, return_value=False)
 
         # Act
         result = await service._get_next_job(project_id="project-1")
 
         # Assert
         assert result is not None
-        # Defer is first in pending list and project is idle (count returns 0), so defer is returned
+        # Defer is first in pending list and project is idle (has_active_non_deferred_work
+        # returns False), so defer is returned.
         assert result.job_id == "job-defer"
