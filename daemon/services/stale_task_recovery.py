@@ -384,6 +384,89 @@ class StaleTaskRecovery:
         
         return recovered_count
     
+    def force_complete_task(self, task_id: int, reason: str) -> "Any | None":
+        """Force-complete a RUNNING task whose JobItem is already terminal.
+
+        Used by the F10 drift reconciler (see
+        ``JobRecoveryService.reconcile_drift_states``) to clean up
+        zombie RUNNING tasks whose backing JobItem has already
+        finalized to ``admission_state='done'``. The reconciler
+        guarantees the JobItem is terminal before calling — this
+        method's safety contract is documented here as a discipline
+        rule for callers.
+
+        **CRITICAL**: ``force_complete_task`` must ONLY be called when
+        the JobItem is confirmed terminal (``done``). Never
+        force-complete a Task whose JobItem is still ``active`` —
+        doing so races against the worker that is legitimately
+        driving the JobItem, producing a double-completion that
+        observability tools cannot distinguish from a real completion.
+
+        Implementation: reuses ``TaskRepository.complete_task`` (atomic
+        RUNNING → COMPLETED with the ``WHERE status = 'running'``
+        guard) and annotates the result payload with a reconciliation
+        marker so downstream observers can distinguish
+        reconciler-completed tasks from naturally-completed ones.
+        The reason string is preserved in the result payload for
+        postmortem analysis.
+
+        Does NOT fire ``notify_work_watchers`` — the watcher
+        notification fires from the JobItem's terminal-write path
+        (``_finalize_job_db_sync`` in ``job_feedback_observer.py``),
+        which has already executed by the time the reconciler
+        observes the F10 drift. The reconciler only cleans up the
+        residual Task row; the watcher chain is unaffected.
+
+        Does NOT retry — F10 is a terminal cleanup, not a recovery.
+
+        Args:
+            task_id: The task ID to force-complete.
+            reason: Human-readable reason (stored in result payload).
+
+        Returns:
+            Updated Task object, or None if the task was not found OR
+            was no longer in RUNNING status (already transitioned by
+            another actor — natural completion wins).
+        """
+        result_payload = {
+            "reconciled": True,
+            "completed_by": "drift_reconciler_f10",
+            "reason": reason,
+        }
+        updated = self._task_repo.complete_task(task_id, result_payload)
+        if updated is not None:
+            logger.warning(
+                f"force_complete_task: task {task_id} force-completed "
+                f"by F10 drift reconciler — reason: {reason}"
+            )
+        else:
+            logger.debug(
+                f"force_complete_task: task {task_id} no-op "
+                f"(already terminal or not found)"
+            )
+        return updated
+
+    def fail_task(
+        self, task_id: int, error: str
+    ) -> "Any | None":
+        """Force-fail a RUNNING task with the given error.
+
+        Convenience wrapper around ``TaskRepository.fail_task`` so the
+        F5 reconciler (``JobRecoveryService.reconcile_drift_states``)
+        can call this through the same ``StaleTaskRecovery`` facade
+        that owns the cancellation/retry semantics — keeps the
+        reconciler from having to know about both repositories.
+
+        Args:
+            task_id: The task ID to fail.
+            error: Error message to attach to the task.
+
+        Returns:
+            Updated Task object, or None if the task was not found OR
+            was no longer in RUNNING status.
+        """
+        return self._task_repo.fail_task(task_id, error)
+
     def recover_on_startup(self) -> int:
         """Run recovery immediately on startup (skip grace period).
         

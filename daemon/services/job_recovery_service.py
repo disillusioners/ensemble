@@ -1,14 +1,28 @@
-"""Startup recovery service for orphaned jobs."""
+"""Startup + periodic drift recovery service for orphaned jobs/tasks.
+
+The dual work-tracking tables (``job_queue_items`` and ``task``) drift
+out of sync when:
+- A job is admitted but its driving Task is never claimed (P1 pattern).
+- A job's Task is force-completed but the JobItem stays ``active`` (F10).
+- An instance is paused/terminated but its JobItem stays ``active`` (C2).
+
+``JobRecoveryService.recover_on_startup`` handles the post-crash
+cleanup at daemon startup. ``reconcile_drift_states`` is the periodic
+counterpart (60s default, bypasses ``_is_idle``) that catches drift
+*during* active work — exactly the case ``MaintenanceService._loop``
+skips because it gates on ``_is_idle``.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import Decision
+from daemon.repositories.job_queue.models import AdmissionState, Decision
+from daemon.repositories.task.models import TaskStatus
 from daemon.services.job_state_machine import InvalidTransitionError
 
 if TYPE_CHECKING:
@@ -18,7 +32,9 @@ if TYPE_CHECKING:
     from daemon.repositories.job_queue.lock_repository import LockRepository
     from daemon.repositories.job_queue.models import JobItem
     from daemon.repositories.job_queue.repository import JobRepository
+    from daemon.repositories.task.repository import TaskRepository
     from daemon.services.job_queue_service import JobQueueService
+    from daemon.services.stale_task_recovery import StaleTaskRecovery
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +57,33 @@ _ALIVE_INSTANCE_STATUSES: set[str] = {
 
 
 class JobRecoveryService:
-    """Service for recovering orphaned jobs on startup.
-    
-    Handles the case where jobs were left in PROCESSING state after
-    a crash or unexpected shutdown, ensuring they are either
-    re-assigned to a running instance or marked as FAILED.
+    """Service for recovering orphaned jobs (startup + periodic drift).
+
+    Two recovery surfaces:
+
+    - ``recover_on_startup`` — runs once at daemon startup to clean
+      up PROCESSING jobs whose instance was terminal at the moment
+      of crash. Iterates every active JobItem and reconciles against
+      its instance's liveness.
+
+    - ``reconcile_drift_states`` — periodic (60s default) drift
+      reconciler. Catches four classes of dual-table drift that
+      ``recover_on_startup`` cannot see because they arise at
+      runtime (post-startup):
+
+        (a) ``active`` JobItem + ``pending`` Task with NULL heartbeat
+            → P1-pattern deadlock (task never claimed).
+        (b) ``done`` JobItem + ``running`` Task → F10 zombie task.
+        (c) ``active`` JobItem + instance not alive for extended
+            period → stuck processing.
+        (d) ``pending`` Task on terminal JobItem → orphan PENDING
+            cleanup (safety net for PENDING tasks whose JobItem
+            closed but the Task row was never cancelled).
+
+      Schedules independently of ``MaintenanceService._loop`` —
+      which is gated on ``_is_idle`` and skips during active work
+      — so it runs *precisely* during active work, which is when
+      drift appears.
     """
 
     def __init__(
@@ -54,19 +92,39 @@ class JobRecoveryService:
         lock_repository: "LockRepository",
         instance_repository: "SQLModelInstanceRepository",
         job_queue_service: "JobQueueService | None" = None,
+        task_repository: "TaskRepository | None" = None,
+        stale_task_recovery: "StaleTaskRecovery | None" = None,
     ) -> None:
         """Initialize the recovery service.
-        
+
         Args:
             job_repository: Repository for job operations.
             lock_repository: Repository for lock operations.
             instance_repository: Repository for instance operations.
             job_queue_service: Optional JobQueueService for watcher notifications.
+            task_repository: Optional TaskRepository for drift queries
+                (``list_running_tasks``, ``list_pending_tasks_older_than``).
+                When ``None``, drift patterns that require Task-side
+                inspection are skipped with a DEBUG log.
+            stale_task_recovery: Optional ``StaleTaskRecovery`` for the
+                F10 force-complete path (``force_complete_task``) and
+                the F5 force-fail path (``fail_task``). When ``None``,
+                drift corrections that need Task-side writes are
+                skipped with a DEBUG log. Both refs are independent —
+                tests can construct the recovery service with only
+                ``task_repository`` (F5-only), only ``stale_task_recovery``
+                (F10-only), or both (full drift detection).
         """
         self._job_repository = job_repository
         self._lock_repository = lock_repository
         self._instance_repository = instance_repository
         self._job_queue_service = job_queue_service
+        # Phase 3 (F5/F10 drift reconciler) — late-wired by the
+        # lifespan in ``daemon/api.py`` after both ``TaskRepository``
+        # and ``StaleTaskRecovery`` are constructed. ``None`` means
+        # "skip drift correction" — production always wires both.
+        self._task_repository = task_repository
+        self._stale_task_recovery = stale_task_recovery
 
     def _is_instance_alive(self, instance_status: str | None) -> bool:
         """Check if an instance status indicates the instance is still alive.
@@ -345,3 +403,544 @@ class JobRecoveryService:
         # There is no path through this method that still needs an
         # instance-wide lock release — and any such path would be the
         # exact bug we are fixing.
+
+    # ─────────────────────────────────────────────────────────────
+    # Phase 3 (defer-seam bugfix, F5/F10): periodic drift reconciler
+    # ─────────────────────────────────────────────────────────────
+
+    async def reconcile_drift_states(
+        self,
+        min_pending_age_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Detect and repair drift between ``job_queue_items`` and ``task``.
+
+        Runs on a 60s loop (default, configurable via
+        ``DaemonConfig.services.drift_reconcile_interval_seconds``) and
+        bypasses the ``MaintenanceService._is_idle`` gate — drift
+        appears *during* active work, which is precisely the case the
+        idle-gated maintenance loop skips. Wired by the lifespan in
+        ``daemon/api.py``.
+
+        Three drift patterns detected:
+
+        **(a)** ``active`` JobItem + ``pending`` Task with NULL
+        heartbeat → P1-pattern deadlock (task never claimed).
+        - If the instance is dead → cancel the task and finalize
+          the job as FAILED (force-fail + terminal-write boundary).
+          The F5 fix adds an explicit
+          ``cancel_pending_tasks_for_instance`` call after the
+          JobItem finalization so the orphan PENDING does not leak
+          (the pre-fix comment claiming "next reconciler tick will
+          clean it" was incorrect — F10 only inspects RUNNING
+          tasks, PENDING tasks are invisible to it).
+        - If the instance is alive → log only (the task may be
+          claimable soon — premature cancellation would race with
+          a worker about to claim it).
+
+        **(b)** ``done`` JobItem + ``running`` Task → F10 zombie
+        task. Force-complete the Task via
+        ``StaleTaskRecovery.force_complete_task`` (JobItem already
+        terminal). Log at WARNING. Do NOT retry — F10 is a
+        terminal cleanup, not a recovery.
+
+        **(c)** ``active`` JobItem + instance not ``running``/
+        ``idle`` for extended period → stuck processing.
+        Log-only mode (conservative). No automatic correction —
+        the operator can investigate via the drift log.
+
+        **(d)** ``pending`` Task on terminal JobItem (any instance
+        state) → orphan PENDING cleanup. Safety net for PENDING
+        tasks whose JobItem is ``done``/``dead_letter`` but were
+        not cancelled by Pattern (a) (e.g. pre-F5 deployments or
+        retry paths that skip the F5 path). Cancels via
+        ``cancel_pending_tasks_for_instance`` (atomic
+        ``status='pending'`` UPDATE — RUNNING siblings are not
+        touched). Log at WARNING.
+
+        Args:
+            min_pending_age_seconds: Minimum age (seconds) for a
+                PENDING task to be considered drift-eligible. Tasks
+                younger than this are left alone to avoid racing
+                with a freshly-enqueued worker (default 300s = 5
+                minutes — long enough to absorb a normal claim
+                cycle, short enough to surface a genuine stuck
+                task within one reconciliation tick).
+
+        Returns:
+            Dict summary of the form::
+
+                {
+                    "reconciled": int,         # number of corrections applied
+                    "details": [                # per-correction records
+                        {
+                            "pattern": "P1_dead_instance"
+                                  | "P1_alive_instance_log"
+                                  | "F10_zombie_task"
+                                  | "stuck_instance_log"
+                                  | "orphan_pending_terminal_job",
+                            "job_id": str | None,
+                            "task_id": int | None,
+                            "instance_id": str | None,
+                            "reason": str,
+                        },
+                        ...
+                    ],
+                }
+        """
+        details: list[dict[str, Any]] = []
+        reconciled = 0
+
+        # Bail early if the required dependencies aren't wired. This
+        # happens in legacy test paths that construct
+        # ``JobRecoveryService`` with only the original three args.
+        # The drift reconciler is opt-in via dependency wiring — we
+        # don't crash if a test only cares about ``recover_on_startup``.
+        if self._task_repository is None:
+            logger.debug(
+                "reconcile_drift_states: task_repository not wired; "
+                "drift reconciliation skipped."
+            )
+            return {"reconciled": 0, "details": details}
+
+        # ── Pattern (b): F10 — done JobItem + running Task ────────
+        # Iterate the (small) RUNNING task set first — F10 is the
+        # most observable drift (workers see the zombie task but
+        # can't transition it because the JobItem is already DONE).
+        running_tasks = await asyncio.to_thread(
+            self._task_repository.list_running_tasks
+        )
+        for task in running_tasks:
+            try:
+                # F10 detection: the most-recent JobItem for the
+                # instance is already terminal (``done``).
+                job = await asyncio.to_thread(
+                    self._job_repository.get_by_instance, task.instance_id
+                )
+                if job is None:
+                    # No JobItem at all — virtual-job case; not F10.
+                    continue
+                if job.admission_state != AdmissionState.DONE.value:
+                    continue
+
+                # Pattern (b) confirmed. Force-complete the task.
+                # Caller contract (per ``force_complete_task`` docs):
+                # the JobItem must already be terminal — verified
+                # by the ``admission_state == 'done'`` check above.
+                if self._stale_task_recovery is None:
+                    logger.debug(
+                        f"reconcile_drift_states: F10 zombie task "
+                        f"{task.id} on instance "
+                        f"{task.instance_id[:8]}... detected, but "
+                        f"stale_task_recovery is not wired — skipping "
+                        f"force-complete."
+                    )
+                    details.append({
+                        "pattern": "F10_zombie_task",
+                        "job_id": job.job_id,
+                        "task_id": task.id,
+                        "instance_id": task.instance_id,
+                        "reason": (
+                            "done JobItem + running Task — "
+                            "force_complete skipped (no "
+                            "stale_task_recovery wired)"
+                        ),
+                    })
+                    continue
+
+                reason = (
+                    f"F10 drift: JobItem {job.job_id[:8]}... is "
+                    f"done but task {task.id} is still running"
+                )
+                updated = await asyncio.to_thread(
+                    self._stale_task_recovery.force_complete_task,
+                    task.id,
+                    reason,
+                )
+                if updated is not None:
+                    reconciled += 1
+                    details.append({
+                        "pattern": "F10_zombie_task",
+                        "job_id": job.job_id,
+                        "task_id": task.id,
+                        "instance_id": task.instance_id,
+                        "reason": reason,
+                    })
+            except Exception as e:
+                logger.error(
+                    f"reconcile_drift_states: F10 check failed for "
+                    f"task {task.id}: {e}",
+                    exc_info=True,
+                )
+
+        # ── Pattern (a): P1 — active JobItem + old PENDING Task ──
+        # Detect P1-pattern deadlocks: JobItem ``active`` but
+        # driving Task has been PENDING without a heartbeat for
+        # longer than the threshold. The Task never transitioned to
+        # RUNNING because the cross-system guard in
+        # ``claim_pending_task`` blocked it (e.g. NULL ``message_id``
+        # stamp pre-Phase-1, or a worker pool restart between
+        # enqueue and claim). Without reconciliation this drift
+        # wedges forever — the JobItem never sees a terminal write.
+        try:
+            stuck_pending = await asyncio.to_thread(
+                self._task_repository.list_pending_tasks_older_than,
+                min_pending_age_seconds,
+            )
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: failed to list pending "
+                f"tasks older than {min_pending_age_seconds}s: {e}",
+                exc_info=True,
+            )
+            stuck_pending = []
+
+        for task in stuck_pending:
+            try:
+                job = await asyncio.to_thread(
+                    self._job_repository.get_by_instance, task.instance_id
+                )
+                if job is None or job.admission_state != AdmissionState.ACTIVE.value:
+                    # Not a P1 candidate — JobItem is either missing
+                    # (virtual-job case, not drift) or already
+                    # terminal (handled by F10 path above).
+                    continue
+
+                # Check instance liveness — the fork point for
+                # correction vs log-only.
+                instance = await asyncio.to_thread(
+                    self._instance_repository.get, task.instance_id
+                )
+
+                if instance is None or self._is_instance_terminal(
+                    instance.status
+                ):
+                    # Dead instance → cancel task + finalize job.
+                    if self._stale_task_recovery is None or self._job_queue_service is None:
+                        logger.debug(
+                            f"reconcile_drift_states: P1 stuck pending "
+                            f"task {task.id} on dead instance "
+                            f"{task.instance_id[:8]}... detected, but "
+                            f"recovery deps not wired — skipping."
+                        )
+                        details.append({
+                            "pattern": "P1_dead_instance",
+                            "job_id": job.job_id,
+                            "task_id": task.id,
+                            "instance_id": task.instance_id,
+                            "reason": (
+                                "dead instance + pending task — "
+                                "correction skipped (deps not wired)"
+                            ),
+                        })
+                        continue
+
+                    # Cancel the orphan PENDING Task on the dead
+                    # instance BEFORE returning. Without this step the
+                    # PENDING task survives forever — F10 only handles
+                    # RUNNING tasks on terminal JobItems (``done``),
+                    # and ``complete_task``'s ``status='running'`` guard
+                    # is a no-op for PENDING rows. The
+                    # ``cancel_pending_tasks_for_instance`` method
+                    # (F12, Phase 3) is the dedicated cleanup for
+                    # stale PENDING tasks: it issues an atomic SQL
+                    # UPDATE flipping ``status='pending'`` → 'cancelled'
+                    # for the target ``instance_id``, with the
+                    # ``status='pending'`` guard ensuring no sibling
+                    # RUNNING tasks are touched. The next
+                    # ``claim_pending_task`` will then ignore the row.
+                    #
+                    # (Pre-fix comment claimed "the next reconciler
+                    # tick will observe the orphan and clean it" — that
+                    # was incorrect; the orphan PENDING was invisible
+                    # to F10 until ``recover_on_startup`` ran on a
+                    # daemon restart.)
+                    try:
+                        await asyncio.to_thread(
+                            self._task_repository.cancel_pending_tasks_for_instance,
+                            task.instance_id,
+                        )
+                    except Exception as cancel_err:
+                        # Cancel failure must NOT mask the successful
+                        # JobItem finalization — the orphan PENDING
+                        # can be cleaned on a later reconciler tick
+                        # (Pattern (d)) or on daemon restart.
+                        logger.error(
+                            f"reconcile_drift_states: failed to cancel "
+                            f"orphan PENDING task {task.id} on dead "
+                            f"instance {task.instance_id[:8]}...: "
+                            f"{cancel_err}",
+                            exc_info=True,
+                        )
+                    try:
+                        canonical_job_id, _ = await self._job_queue_service._finalize_terminal(
+                            instance_id=task.instance_id,
+                            decision=Decision.NO_RETRY,
+                            job_id=job.job_id,
+                            error_message=(
+                                f"Drift reconciler: instance "
+                                f"{instance.status if instance else 'missing'} "
+                                f"while task {task.id} PENDING > "
+                                f"{min_pending_age_seconds}s without heartbeat"
+                            ),
+                            target_status="failed",
+                        )
+                        if canonical_job_id is not None:
+                            reconciled += 1
+                            details.append({
+                                "pattern": "P1_dead_instance",
+                                "job_id": job.job_id,
+                                "task_id": task.id,
+                                "instance_id": task.instance_id,
+                                "reason": (
+                                    f"instance is "
+                                    f"{instance.status if instance else 'missing'}; "
+                                    f"task was PENDING > "
+                                    f"{min_pending_age_seconds}s — "
+                                    f"job finalized as failed"
+                                ),
+                            })
+                            try:
+                                await self._job_queue_service.notify_watchers(
+                                    job.job_id,
+                                    "failed",
+                                    f"Drift reconciler: stuck on dead "
+                                    f"instance {instance.status if instance else 'missing'}",
+                                )
+                            except Exception as notify_err:
+                                logger.warning(
+                                    f"reconcile_drift_states: "
+                                    f"notify_watchers failed for "
+                                    f"{job.job_id[:8]}...: {notify_err}"
+                                )
+                    except InvalidTransitionError:
+                        logger.info(
+                            f"reconcile_drift_states: P1 finalization "
+                            f"for {job.job_id[:8]}... already done by "
+                            f"another actor — skipping"
+                        )
+                    except Exception as final_err:
+                        logger.error(
+                            f"reconcile_drift_states: failed to "
+                            f"finalize P1 stuck job {job.job_id[:8]}...: "
+                            f"{final_err}",
+                            exc_info=True,
+                        )
+                else:
+                    # Instance alive — log only. The P1 wedge
+                    # shouldn't happen with the post-Phase-1 NULL-
+                    # safe cross-system guard, but a worker pool
+                    # restart between enqueue and claim can
+                    # legitimately produce a stuck PENDING task
+                    # while the instance is alive. The natural
+                    # claim path will pick it up; we just log so
+                    # the operator has visibility.
+                    logger.warning(
+                        f"reconcile_drift_states: P1 candidate "
+                        f"(task {task.id} PENDING > "
+                        f"{min_pending_age_seconds}s, JobItem "
+                        f"{job.job_id[:8]}... active, instance "
+                        f"{instance.status if instance else 'unknown'}) "
+                        f"— alive instance, log only"
+                    )
+                    details.append({
+                        "pattern": "P1_alive_instance_log",
+                        "job_id": job.job_id,
+                        "task_id": task.id,
+                        "instance_id": task.instance_id,
+                        "reason": (
+                            f"alive instance ({instance.status}); "
+                            f"task PENDING > {min_pending_age_seconds}s "
+                            f"without heartbeat — awaiting natural claim"
+                        ),
+                    })
+            except Exception as e:
+                logger.error(
+                    f"reconcile_drift_states: P1 check failed for "
+                    f"task {task.id}: {e}",
+                    exc_info=True,
+                )
+
+        # ── Pattern (c): stuck instance — log only ───────────────
+        # ``active`` JobItem + instance in a non-alive status
+        # (PAUSED/WAITING_CHILDREN are alive by definition —
+        # excluded via ``_ALIVE_INSTANCE_STATUSES``). Detect
+        # non-PAUSED, non-terminal stuck states and log for
+        # operator visibility. The recovery service's
+        # ``recover_on_startup`` handles the terminal-instance
+        # case at startup; this handles the
+        # mid-runtime-stuck case (e.g. an instance crashed mid-
+        # update without transitioning to TERMINATED).
+        try:
+            active_jobs = await asyncio.to_thread(
+                self._job_repository.find_processing_jobs
+            )
+            for job in active_jobs:
+                if not job.instance_id:
+                    continue
+                instance = await asyncio.to_thread(
+                    self._instance_repository.get, job.instance_id
+                )
+                if instance is None:
+                    # Orphan — covered by recover_on_startup;
+                    # log for visibility.
+                    details.append({
+                        "pattern": "stuck_instance_log",
+                        "job_id": job.job_id,
+                        "task_id": None,
+                        "instance_id": job.instance_id,
+                        "reason": (
+                            "active JobItem but instance row "
+                            "missing — covered by startup recovery"
+                        ),
+                    })
+                    continue
+                if (
+                    self._is_instance_alive(instance.status)
+                    or self._is_instance_terminal(instance.status)
+                ):
+                    continue
+                # Non-alive, non-terminal status — log only.
+                logger.warning(
+                    f"reconcile_drift_states: stuck instance — "
+                    f"job {job.job_id[:8]}... active, instance "
+                    f"{job.instance_id[:8]}... in unexpected status "
+                    f"{instance.status}"
+                )
+                details.append({
+                    "pattern": "stuck_instance_log",
+                    "job_id": job.job_id,
+                    "task_id": None,
+                    "instance_id": job.instance_id,
+                    "reason": (
+                        f"active JobItem but instance is in "
+                        f"unexpected status '{instance.status}'"
+                    ),
+                })
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: stuck-instance check "
+                f"failed: {e}",
+                exc_info=True,
+            )
+
+        # ── Pattern (d): orphan PENDING Task on terminal JobItem ──
+        # Safety net for the general case: a PENDING Task whose
+        # associated JobItem is already terminal (``done`` /
+        # ``dead_letter``) on ANY instance state (alive or dead).
+        # The JobItem side is closed, but the Task row can still be
+        # PENDING (NULL heartbeat) — for example, a retry path that
+        # flipped the JobItem to ``done``/``dead`` but the
+        # ``cancel_pending_tasks_for_instance`` call (F12) was
+        # skipped, or a recovery path that finalized the JobItem
+        # before the F5 fix landed (this very patch adds the cancel
+        # to Pattern (a); pre-fix reconcilers left the orphan
+        # behind). F10 only inspects RUNNING tasks — PENDING tasks
+        # are invisible to it — so this is the only periodic path
+        # that catches the PENDING orphan specifically.
+        #
+        # Query: PENDING tasks older than the threshold whose
+        # ``get_by_instance`` JobItem is in admission_state='done'
+        # (which covers ``completed``, ``failed``, ``cancelled``,
+        # ``dead_letter`` per the admission_state mapping in
+        # ``job_state_machine.py``).
+        # Action: cancel the PENDING task via
+        # ``cancel_pending_tasks_for_instance`` (same atomic
+        # WHERE status='pending' guard F12 uses — does NOT touch
+        # sibling RUNNING tasks). Log at WARNING.
+        #
+        # This pattern is a pure safety net — Pattern (a) already
+        # cancels the PENDING Task in the dead-instance branch.
+        # Without Pattern (d), pre-fix deployments (or future drift
+        # paths that skip Pattern (a)) would leak PENDING tasks
+        # until ``recover_on_startup`` on the next daemon restart.
+        try:
+            orphan_pending = await asyncio.to_thread(
+                self._task_repository.list_pending_tasks_older_than,
+                min_pending_age_seconds,
+            )
+        except Exception as e:
+            logger.error(
+                f"reconcile_drift_states: Pattern (d) failed to list "
+                f"pending tasks older than {min_pending_age_seconds}s: "
+                f"{e}",
+                exc_info=True,
+            )
+            orphan_pending = []
+
+        for task in orphan_pending:
+            try:
+                job = await asyncio.to_thread(
+                    self._job_repository.get_by_instance, task.instance_id
+                )
+                # Only catch the case where the JobItem is terminal.
+                # ``active`` JobItems are P1 candidates (handled by
+                # Pattern (a) above); ``None`` JobItems are virtual-
+                # job cases (not drift).
+                if job is None or job.admission_state != AdmissionState.DONE.value:
+                    continue
+
+                # Cancel the orphan PENDING task. The atomic UPDATE
+                # uses the ``status='pending'`` guard — sibling
+                # RUNNING tasks on the same instance are NOT
+                # touched.
+                try:
+                    cancelled = await asyncio.to_thread(
+                        self._task_repository.cancel_pending_tasks_for_instance,
+                        task.instance_id,
+                    )
+                except Exception as cancel_err:
+                    logger.error(
+                        f"reconcile_drift_states: Pattern (d) cancel "
+                        f"failed for instance "
+                        f"{task.instance_id[:8]}... task {task.id}: "
+                        f"{cancel_err}",
+                        exc_info=True,
+                    )
+                    details.append({
+                        "pattern": "orphan_pending_terminal_job",
+                        "job_id": job.job_id,
+                        "task_id": task.id,
+                        "instance_id": task.instance_id,
+                        "reason": (
+                            f"PENDING task on terminal JobItem "
+                            f"(admission_state={job.admission_state}) "
+                            f"— cancel failed: {cancel_err}"
+                        ),
+                    })
+                    continue
+
+                if cancelled > 0:
+                    logger.warning(
+                        f"reconcile_drift_states: orphan PENDING "
+                        f"task {task.id} on terminal JobItem "
+                        f"{job.job_id[:8]}... (admission_state="
+                        f"{job.admission_state}) — cancelled "
+                        f"{cancelled} task row(s) on instance "
+                        f"{task.instance_id[:8]}..."
+                    )
+                    reconciled += 1
+                    details.append({
+                        "pattern": "orphan_pending_terminal_job",
+                        "job_id": job.job_id,
+                        "task_id": task.id,
+                        "instance_id": task.instance_id,
+                        "reason": (
+                            f"PENDING task older than "
+                            f"{min_pending_age_seconds}s on terminal "
+                            f"JobItem (admission_state="
+                            f"{job.admission_state}) — cancelled"
+                        ),
+                    })
+            except Exception as e:
+                logger.error(
+                    f"reconcile_drift_states: Pattern (d) check "
+                    f"failed for task {task.id}: {e}",
+                    exc_info=True,
+                )
+
+        logger.info(
+            f"reconcile_drift_states: complete — "
+            f"reconciled={reconciled}, "
+            f"details={len(details)}"
+        )
+        return {"reconciled": reconciled, "details": details}

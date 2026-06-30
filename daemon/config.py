@@ -343,6 +343,29 @@ class ServicesConfig(BaseSettings):
             "live task's heartbeat is at most one interval old."
         ),
     )
+    # Phase 3 (defer-seam bugfix, F5/F10) — periodic drift
+    # reconciler interval. The reconciler detects and repairs
+    # ``job_queue_items`` ↔ ``task`` drift states that arise at
+    # runtime (P1 stuck pending, F10 zombie task). Bypasses the
+    # ``MaintenanceService._is_idle`` gate — drift appears *during*
+    # active work, which is precisely when the idle-gated loop skips.
+    drift_reconcile_interval_seconds: int = Field(
+        default=60,
+        description=(
+            "Interval (seconds) for the periodic dual-table drift "
+            "reconciler (F5/F10). Default 60s — same cadence as "
+            "stale_task_recovery_interval."
+        ),
+    )
+    drift_reconcile_min_pending_age_seconds: int = Field(
+        default=300,
+        description=(
+            "Minimum age (seconds) for a PENDING task to be "
+            "considered drift-eligible by the reconciler. Tasks "
+            "younger than this are left alone to avoid racing with "
+            "a freshly-enqueued worker. Default 300s = 5 minutes."
+        ),
+    )
     task_heartbeat_interval_seconds: int = Field(
         default=30,
         description=(

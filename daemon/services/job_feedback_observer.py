@@ -406,6 +406,81 @@ class JobFeedbackObserver:
             )
             return 0
 
+    def _count_pending_tasks_for_instance_sync(
+        self, instance_id: str
+    ) -> int:
+        """Sync helper: count PENDING ``task`` rows for ``instance_id``.
+
+        F14 (defer-seam bugfix Phase 3, 2026-07-01). The premature-
+        finalization gate used to count ``dependency_watchers`` rows
+        only — but a child Task whose ``send_message`` failed before
+        ``bus.watch`` ran never registers a watcher row, leaving the
+        parent invisible to the gate. The parent JobItem then
+        finalizes to ``done`` prematurely, while the orphan Task is
+        later force-cancelled + retried against a terminal instance
+        (F10 / P1 root cause family).
+
+        This helper closes that seam by ALSO counting non-bus-registered
+        PENDING Tasks for the instance. The gate that consumes this
+        helper (see :meth:`_finalize_job_db_sync`) defers finalization
+        if EITHER the bus has PENDING watchers OR the ``task`` table
+        has PENDING rows for the instance — so a child whose
+        ``bus.watch`` hasn't fired yet still keeps the parent alive.
+
+        **Fail-OPEN semantics**: this helper catches all exceptions
+        and returns ``0`` (treated as "no pending tasks"). This is
+        fail-OPEN — a transient DB failure passes the gate and may
+        allow premature finalization. Callers that use this helper
+        at the finalization decision point MUST have a separate
+        safety net (the in-session ``task``-table inline query that
+        shares a transaction with the JobItem UPDATE).
+
+        Implementation: opens a fresh ``SQLModelSession`` against the
+        same engine the ``InstanceManager`` uses, runs the parameterized
+        COUNT against the indexed ``ix_task_instance_id`` and
+        ``ix_task_status`` columns. The parameterized ``IN`` clause
+        with named binds is dialect-portable (works on SQLite and
+        PostgreSQL).
+
+        Args:
+            instance_id: The instance ID whose PENDING ``task`` count
+                is being queried.
+
+        Returns:
+            Non-negative integer count of PENDING tasks for the
+            given instance. Returns 0 when the DB query fails.
+        """
+        from sqlmodel import Session as _SQLModelSession, select as _select
+        from daemon.repositories.task.models import Task, TaskStatus
+
+        engine = getattr(self._instance_manager, "engine", None)
+        if engine is None:
+            return 0
+        try:
+            with _SQLModelSession(engine) as db_session:
+                stmt = (
+                    _select(func.count())
+                    .select_from(Task)
+                    .where(Task.instance_id == instance_id)
+                    .where(Task.status == TaskStatus.PENDING.value)
+                )
+                return int(db_session.scalar(stmt) or 0)
+        except Exception as e:
+            # FAIL-OPEN (see method docstring): a DB failure here
+            # returns 0 and PASSES the gate. The in-session inline
+            # query below is the authoritative safety net — exceptions
+            # there propagate to the W3 fail-safe path in
+            # ``_finalize_job`` (which transitions the job to FAILED).
+            # Logged at WARNING so persistent failures surface in
+            # observability without taking down the finalization path.
+            logger.warning(
+                f"_count_pending_tasks_for_instance_sync failed for "
+                f"{instance_id[:8]}...: {e} — treating as 0 "
+                f"(FAIL-OPEN: task pending-children check skipped, "
+                f"may cause premature job finalization if persistent)"
+            )
+            return 0
+
     async def start(self) -> None:
         """Start the observer.
 
@@ -538,7 +613,7 @@ class JobFeedbackObserver:
         logger.info(f"JobFeedbackObserver stopped after processing {events_processed} events")
 
     async def _get_processing_job_for_instance(
-        self, instance_id: str
+        self, instance_id: str, job_id: str | None = None
     ) -> _ProcessingJobContext | None:
         """Return the finalize context for ``instance_id``, or ``None``.
 
@@ -547,6 +622,16 @@ class JobFeedbackObserver:
         :class:`_ProcessingJobContext` — a lightweight NamedTuple
         carrying ``instance_id`` and ``job_id`` (``None`` when no
         JobItem exists for the instance).
+
+        F13 (defer-seam bugfix Phase 3, 2026-07-01): the helper now
+        accepts an optional ``job_id`` parameter. When provided, the
+        defense-in-depth ``get_active_by_instance`` re-query resolves
+        by exact ``JobItem.job_id`` instead of the freshest-by-
+        ``created_at`` ordering. This prevents finalizing the WRONG
+        sibling when two ACTIVE JobItems exist for the same instance
+        (e.g. from a `job_continue`/`watch_job` race during the
+        deferred-finalize sleep window — see F15 — or from manual DB
+        operations / synthetic test mocks).
 
         Behavior:
 
@@ -579,6 +664,13 @@ class JobFeedbackObserver:
         JobItem, because the Task row drives the instance's
         lifecycle post-D13.
 
+        F13 (2026-07-01): when ``job_id`` is supplied (typically by the
+        caller when the event payload carries a ``job_id`` field, or by
+        the deferred-finalize TOCTOU guard that captured the job_id at
+        scheduling time), the ``get_active_by_instance`` re-query
+        resolves by exact ID. When ``job_id`` is ``None``, the legacy
+        freshest-by-``created_at`` ordering is preserved.
+
         Phase 2 audit (2026-06-25, pause/resume redesign) carries
         forward: PAUSED jobs (introduced in Phase 1) are excluded by
         construction — the ``status == 'processing'`` checks in this
@@ -589,6 +681,10 @@ class JobFeedbackObserver:
 
         Args:
             instance_id: The instance ID to look up.
+            job_id: Optional exact ``JobItem.job_id`` to resolve.
+                When provided, the ``get_active_by_instance`` re-query
+                filters on this exact ID (F13). When ``None``, falls
+                back to the freshest-by-``created_at`` ordering.
 
         Returns:
             A :class:`_ProcessingJobContext` carrying ``instance_id``
@@ -617,9 +713,16 @@ class JobFeedbackObserver:
         # JobRepository.get_by_instance — created_at is immutable post-insert,
         # so the revived PROCESSING row always sorts after the stale
         # CANCELLED row.
+        #
+        # F13 (2026-07-01): when ``job_id`` is supplied, the re-query
+        # resolves by exact ID. This prevents the wrong-sibling bug
+        # when two ACTIVE JobItems exist for the same instance
+        # (e.g. a freshly-created JobItem from ``job_continue`` plus
+        # a stale leftover). Without the exact-ID filter, the
+        # freshest-by-created_at ordering could return the wrong row.
         if job is not None:
             active_job = await asyncio.to_thread(
-                self._job_repo.get_active_by_instance, instance_id
+                self._job_repo.get_active_by_instance, instance_id, job_id
             )
             if (
                 active_job is not None
@@ -681,6 +784,15 @@ class JobFeedbackObserver:
         instance_id = data.get("instance_id")
         status = data.get("status")
         error = data.get("error")
+        # F13 (defer-seam bugfix Phase 3, 2026-07-01): when the event
+        # payload carries a ``job_id``, pass it through to the lookup
+        # helper so the ``get_active_by_instance`` re-query resolves by
+        # exact ID instead of freshest-by-``created_at``. Prevents
+        # finalizing the WRONG sibling when two ACTIVE JobItems exist
+        # for the same instance. The field is optional — legacy event
+        # payloads that omit ``job_id`` continue to use the freshest
+        # ordering (backward-compatible).
+        event_job_id: str | None = data.get("job_id") if isinstance(data, dict) else None
 
         if not instance_id or not status:
             return
@@ -706,7 +818,13 @@ class JobFeedbackObserver:
         # instance status transition + lock release are critical).
         # The helper ONLY returns ``None`` when the lookup itself
         # raises; callers treat ``None`` as "skip silently".
-        ctx = await self._get_processing_job_for_instance(instance_id)
+        #
+        # F13 (2026-07-01): thread ``event_job_id`` (when present)
+        # through to the helper so the ``get_active_by_instance``
+        # re-query resolves by exact ID.
+        ctx = await self._get_processing_job_for_instance(
+            instance_id, event_job_id
+        )
         if ctx is None:
             return  # Lookup raised; skip silently.
 
@@ -764,9 +882,25 @@ class JobFeedbackObserver:
                         # removes the entry when the task completes;
                         # ``stop()`` (B2 fix) cancels any in-flight
                         # deferred tasks at observer shutdown.
+                        # F15 (defer-seam bugfix Phase 3,
+                        # 2026-07-01): capture the JobItem id at
+                        # scheduling time. After the 5s sleep, the
+                        # deferred check verifies the SAME job_id is
+                        # still the active job; if a ``job_continue``
+                        # or ``watch_job`` created a new JobItem on
+                        # this instance during the sleep window, the
+                        # deferred check skips finalization so the
+                        # fresh job is not finalized prematurely.
+                        # When ``ctx.job_id is None`` (post-D13
+                        # MESSAGE path — no JobItem exists), we pass
+                        # ``None`` and the guard short-circuits to
+                        # the legacy freshest-by-``created_at``
+                        # behavior.
                         task = asyncio.create_task(
                             self._deferred_finalize_check(
-                                instance_id, delay=5.0
+                                instance_id,
+                                delay=5.0,
+                                expected_job_id=ctx.job_id,
                             )
                         )
                         self._deferred_finalize_tasks.add(task)
@@ -1609,8 +1743,24 @@ class JobFeedbackObserver:
                 # alive; ``add_done_callback`` auto-removes the entry
                 # when the task finishes so the set does not grow
                 # unbounded.
+                #
+                # F15 (defer-seam bugfix Phase 3,
+                # 2026-07-01): capture ``ctx.job_id`` at scheduling time
+                # so the deferred check can verify, after the 5s sleep,
+                # that the SAME job_id is still the active JobItem.
+                # Without this guard, a ``job_continue`` or ``watch_job``
+                # that created a new JobItem on this instance during the
+                # sleep window would be finalized prematurely by the
+                # deferred check (TOCTOU bug). When ``ctx.job_id is None``
+                # (post-D13 MESSAGE path — no JobItem exists), we pass
+                # ``None`` and the guard short-circuits to the legacy
+                # freshest-by-``created_at`` behavior.
                 task = asyncio.create_task(
-                    self._deferred_finalize_check(instance_id, delay=5.0)
+                    self._deferred_finalize_check(
+                        instance_id,
+                        delay=5.0,
+                        expected_job_id=ctx.job_id,
+                    )
                 )
                 self._deferred_finalize_tasks.add(task)
                 task.add_done_callback(self._deferred_finalize_tasks.discard)
@@ -1637,6 +1787,7 @@ class JobFeedbackObserver:
         self,
         instance_id: str,
         delay: float = 5.0,
+        expected_job_id: str | None = None,
     ) -> None:
         """Deferred safety net for resume finalize when ``ctx.job_id is None``.
 
@@ -1662,6 +1813,28 @@ class JobFeedbackObserver:
         re-check inside :meth:`_finalize_job_db_sync`) make this
         safe to call multiple times — a duplicate fire is a no-op.
 
+        F15 (defer-seam bugfix Phase 3, 2026-07-01): the deferred
+        check previously re-queried ``_get_processing_job_for_instance``
+        after the sleep window without remembering which job_id was
+        active at scheduling time. A ``job_continue`` or ``watch_job``
+        that created a new JobItem on this instance during the sleep
+        window would be finalized prematurely by this safety net — a
+        classic TOCTOU bug.
+
+        To close the gap, callers now pass ``expected_job_id`` (the
+        ``ctx.job_id`` captured when the deferred task was scheduled).
+        After the sleep, we re-query with the exact-ID lookup (F13
+        helper) and verify the same job_id is still the active job.
+        If a new job was created during the sleep window, we skip
+        finalization and let the new job's natural lifecycle-event
+        path drive its own finalize.
+
+        When ``expected_job_id is None`` (legacy / post-D13 MESSAGE
+        path — no JobItem existed at scheduling time), the TOCTOU
+        guard short-circuits: we fall back to the legacy
+        freshest-by-``created_at`` lookup, preserving backward
+        compatibility for callers that cannot supply a job_id.
+
         The method is a background safety net: every code path is
         wrapped in try/except so an exception here can never
         propagate into the observer's main loop or wedge the daemon.
@@ -1671,6 +1844,12 @@ class JobFeedbackObserver:
         Args:
             instance_id: The instance to re-check.
             delay: Seconds to wait before the re-check (default 5.0).
+            expected_job_id: The job_id that was active when the
+                deferred check was scheduled. When provided, the
+                post-sleep re-query verifies the same job_id is
+                still the active JobItem before driving finalize
+                (F15 TOCTOU guard). When ``None``, falls back to
+                the legacy freshest-by-``created_at`` lookup.
         """
         try:
             await asyncio.sleep(delay)
@@ -1706,12 +1885,56 @@ class JobFeedbackObserver:
                 )
                 return
 
-            ctx = await self._get_processing_job_for_instance(instance_id)
+            # F15 (defer-seam bugfix Phase 3, 2026-07-01): resolve the
+            # processing context by the EXACT ``expected_job_id`` (when
+            # provided). The helper now accepts an optional ``job_id``
+            # parameter (F13) that filters ``get_active_by_instance``
+            # by exact ID. This closes the TOCTOU window: if a
+            # ``job_continue``/``watch_job`` created a new JobItem on
+            # this instance during the sleep, the new JobItem has a
+            # different ``job_id`` and the helper returns either
+            # ``None`` (no exact match) or a context with the new
+            # job_id. Either way, the mismatch below catches it and
+            # skips finalization for the OLD job.
+            #
+            # When ``expected_job_id is None`` (legacy / post-D13
+            # MESSAGE path — no JobItem at scheduling time), the
+            # ``job_id`` argument is ``None`` and the helper falls
+            # back to the legacy freshest-by-``created_at`` lookup.
+            ctx = await self._get_processing_job_for_instance(
+                instance_id, expected_job_id
+            )
             if ctx is None:
                 logger.debug(
                     f"Observer: deferred finalize for "
                     f"{instance_id[:8]}... — no processing context "
                     f"available, skipping"
+                )
+                return
+
+            # F15 TOCTOU guard: verify the active job_id at
+            # re-query time matches the one captured at scheduling
+            # time. A mismatch means a new JobItem was created on
+            # this instance during the sleep window — defer to the
+            # new job's natural lifecycle-event path and skip our
+            # finalize.
+            #
+            # Conservative: when ``expected_job_id is None`` (legacy
+            # post-D13 MESSAGE path), the guard short-circuits — we
+            # cannot verify against an unknown ID, so we proceed with
+            # the legacy behavior.
+            if (
+                expected_job_id is not None
+                and ctx.job_id is not None
+                and ctx.job_id != expected_job_id
+            ):
+                logger.info(
+                    f"Observer: deferred finalize for "
+                    f"{instance_id[:8]}... — expected_job_id="
+                    f"{expected_job_id[:8]}... no longer matches "
+                    f"active job_id={ctx.job_id[:8]}... (new JobItem "
+                    f"created during sleep window, F15 TOCTOU guard), "
+                    f"skipping finalize"
                 )
                 return
 
@@ -2276,6 +2499,49 @@ class JobFeedbackObserver:
                 gate_deferred=True,
             )
 
+        # ─── F14: pending tasks gate (premature-finalization fix) ───
+        # F14 (defer-seam bugfix Phase 3, 2026-07-01): the bus gate
+        # above counts ``dependency_watchers`` rows only — but a child
+        # Task whose ``send_message`` failed before ``bus.watch`` ran
+        # never registers a watcher row, leaving the parent invisible
+        # to the bus gate. The parent JobItem would then finalize to
+        # ``done`` prematurely, while the orphan Task is later
+        # force-cancelled + retried against a terminal instance.
+        #
+        # Close that seam by ALSO counting non-bus-registered PENDING
+        # Tasks for the instance. Defer finalization if EITHER the bus
+        # has PENDING watchers OR the ``task`` table has PENDING rows
+        # for the instance. Conservative: when in doubt, defer rather
+        # than prematurely finalize.
+        #
+        # This is the early / defense-in-depth check; the
+        # authoritative in-session check is below (inside
+        # WriteGuardSession) and shares the same transaction as the
+        # JobItem UPDATE.
+        _pending_tasks = self._count_pending_tasks_for_instance_sync(
+            instance_id
+        )
+        if _pending_tasks > 0:
+            logger.info(
+                f"Observer: aborting terminal transition for "
+                f"{instance_id[:8]}... — instance has {_pending_tasks} "
+                f"PENDING task(s) not registered in the bus (F14), "
+                f"deferring finalization"
+            )
+            return _FinalizeJobResult(
+                skip=True,
+                terminal_status=None,
+                job_id=None,
+                instance_id=None,
+                parent_id=None,
+                agent_id=None,
+                result_summary=None,
+                error_message=None,
+                locks_released=0,
+                instance_was_terminal=False,
+                gate_deferred=True,
+            )
+
         # ─── Single WriteGuardSession for ALL three DB writes ───
         with WriteGuardSession(
             Session(self._instance_manager.engine),
@@ -2391,6 +2657,63 @@ class JobFeedbackObserver:
                     f"{instance_id[:8]}... — instance marked complete but "
                     f"bus has {_bus_pending} PENDING watchers "
                     f"(in-session gate), "
+                    f"deferring finalization"
+                )
+                return _FinalizeJobResult(
+                    skip=True,
+                    terminal_status=None,
+                    job_id=None,
+                    instance_id=None,
+                    parent_id=None,
+                    agent_id=None,
+                    result_summary=None,
+                    error_message=None,
+                    locks_released=0,
+                    instance_was_terminal=False,
+                    gate_deferred=True,
+                )
+
+            # ─── F14: in-session pending tasks gate ─────────────
+            # F14 (defer-seam bugfix Phase 3, 2026-07-01): the bus
+            # gate above is the SOLE completion authority for
+            # bus-tracked children, but it is blind to child Tasks
+            # whose ``bus.watch`` failed (or never ran) before the
+            # lifecycle event fired. Such Tasks still have a
+            # ``status='pending'`` row in the ``task`` table that
+            # the parent JobItem must NOT finalize past.
+            #
+            # Authoritative check: inline the COUNT on the
+            # WriteGuardSession's ``session`` so the read and the
+            # JobItem UPDATE share ONE transaction (atomic at the
+            # DB level — SQLite full write lock; PostgreSQL
+            # READ COMMITTED within one transaction). A concurrent
+            # ``task`` INSERT on a different connection commits
+            # only between transactions; here the read is fresh.
+            #
+            # The ``Task`` import is deferred to this scope (it
+            # would be a circular import at module load time — the
+            # task package pulls in JobItem transitively for the
+            # cross-system guard, which pulls in
+            # ``job_feedback_observer``).
+            from daemon.repositories.task.models import (
+                Task as _Task,
+                TaskStatus as _TaskStatus,
+            )
+            _pending_tasks_stmt = (
+                select(func.count())
+                .select_from(_Task)
+                .where(_Task.instance_id == instance_id)
+                .where(_Task.status == _TaskStatus.PENDING.value)
+            )
+            _pending_tasks = int(
+                session.scalar(_pending_tasks_stmt) or 0
+            )
+            if _pending_tasks > 0:
+                logger.info(
+                    f"Observer: aborting terminal transition for "
+                    f"{instance_id[:8]}... — instance has "
+                    f"{_pending_tasks} PENDING task(s) not registered "
+                    f"in the bus (F14, in-session gate), "
                     f"deferring finalization"
                 )
                 return _FinalizeJobResult(

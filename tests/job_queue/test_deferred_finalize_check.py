@@ -129,9 +129,13 @@ class TestDeferredDrivesFinalizeWhenBusClears:
         bus_mock.count_pending_for_target.assert_awaited_once_with(
             "inst-defer-1"
         )
-        # The processing context was looked up.
+        # The processing context was looked up. F15 (2026-07-01): the helper
+        # now accepts an optional ``job_id`` parameter. The deferred
+        # check threads ``expected_job_id=None`` (legacy post-D13
+        # MESSAGE path — no JobItem at scheduling time) through the
+        # second positional arg.
         observer._get_processing_job_for_instance.assert_awaited_once_with(
-            "inst-defer-1"
+            "inst-defer-1", None
         )
         # Finalize was driven — exactly once, with the deferred
         # path's default status "completed" (the bus's
@@ -231,9 +235,11 @@ class TestDeferredNoopsWhenInstanceTerminal:
             "inst-defer-terminal"
         )
         # The processing-context lookup WAS reached (it precedes the
-        # terminal-status check), but...
+        # terminal-status check), but... F15 (2026-07-01): the helper
+        # now accepts an optional ``job_id`` parameter; the deferred
+        # check threads ``expected_job_id=None`` (legacy path) through.
         observer._get_processing_job_for_instance.assert_awaited_once_with(
-            "inst-defer-terminal"
+            "inst-defer-terminal", None
         )
         # ...finalize was NOT driven because the instance was already
         # terminal — the second early-return guard inside the method

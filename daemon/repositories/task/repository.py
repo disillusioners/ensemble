@@ -300,6 +300,65 @@ class TaskRepository:
             }).fetchone()
             return row is not None
 
+    def list_running_tasks(self) -> list[Task]:
+        """Return every RUNNING ``task`` row.
+
+        Used by the periodic drift reconciler (F5/F10, Phase 3 of
+        defer-seam bugfix) to find RUNNING tasks whose backing JobItem
+        already terminated (F10 zombie) or whose heartbeat is NULL (P1
+        pattern deadlock candidate). Unlike ``find_stale_running_tasks``,
+        this query is NOT filtered by a heartbeat age threshold — the
+        reconciler needs the full set so it can apply its own age
+        predicates (``min_pending_age_seconds`` etc.) per case.
+
+        Ordered by ``created_at`` ascending so the oldest RUNNING
+        tasks are reconciled first — they are most likely to be the
+        drift victims.
+
+        Returns:
+            List of RUNNING ``Task`` rows.
+        """
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.status == TaskStatus.RUNNING.value)
+                .order_by(col(Task.created_at).asc())
+            )
+            return list(db_session.exec(stmt))
+
+    def list_pending_tasks_older_than(self, age_seconds: int) -> list[Task]:
+        """Return PENDING ``task`` rows whose ``created_at`` is older than
+        ``age_seconds`` ago AND whose ``last_heartbeat_at`` IS NULL.
+
+        Used by the periodic drift reconciler (F5, P1-pattern deadlock
+        detection) to find tasks that have been PENDING without a
+        heartbeat for a long time — the canonical signature of a
+        task that was never claimed by a worker (P1 self-deadlock).
+        The NULL-heartbeat filter ensures freshly-enqueued tasks that
+        haven't been picked up yet are NOT considered drift
+        (heartbeat for PENDING tasks is NULL by design — only RUNNING
+        tasks heart-beat; a PENDING+NULL-heartbeat is only stale if
+        it's been waiting longer than the threshold).
+
+        Args:
+            age_seconds: Minimum age in seconds for a task to be
+                considered drift-eligible.
+
+        Returns:
+            List of PENDING ``Task`` rows older than ``age_seconds``
+            with a NULL ``last_heartbeat_at``.
+        """
+        threshold = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+        with SQLModelSession(self.engine) as db_session:
+            stmt = (
+                select(Task)
+                .where(Task.status == TaskStatus.PENDING.value)
+                .where(Task.last_heartbeat_at.is_(None))
+                .where(Task.created_at < threshold)
+                .order_by(col(Task.created_at).asc())
+            )
+            return list(db_session.exec(stmt))
+
     # --------------------------------------------------------
     # CLAIM (Atomic)
     # --------------------------------------------------------
@@ -939,6 +998,71 @@ class TaskRepository:
 
         return updated
 
+    def cancel_pending_tasks_for_instance(self, instance_id: str) -> int:
+        """Cancel every PENDING ``task`` row for ``instance_id``.
+
+        F12 fix (Phase 3, 2026-07-01): on retry, ``atomic_retry`` flips the
+        JobItem back to ``queued`` and the orchestrator will call
+        ``start_job`` to spawn a fresh instance/Task. A leftover PENDING
+        retry child on the same ``instance_id`` from a previous
+        failed-start path would otherwise survive — ``claim_pending_task``'s
+        per-instance guard blocks only RUNNING tasks, not PENDING ones, so
+        the stale PENDING and the fresh retry Task can both become
+        claimable and contest the same LangGraph checkpoint (the
+        ``graph.astream`` call drives writes to the Postgres checkpointer
+        keyed on ``thread_id`` which is the ``instance_id``; two
+        concurrent streams shadow each other's channel writes).
+
+        The cancellation here is **best-effort** — it transitions stale
+        PENDING tasks to CANCELLED so the next ``claim_pending_task`` will
+        ignore them, but does NOT touch RUNNING tasks (those are protected
+        by ``claim_pending_task``'s per-instance guard already, and a
+        concurrent RUNNING task is by definition a sibling that's
+        legitimately executing — killing it would be a regression). The
+        RUNNING case is handled separately by F10 / recovery paths.
+
+        Atomic SQL UPDATE with a row-count return: the WHERE clause
+        matches ``status = 'pending'`` only, so a RUNNING task on the
+        same instance (which would be a sibling still executing) is
+        never touched. The UPDATE is a single-statement transaction so
+        the transition is race-free against concurrent
+        ``claim_pending_task`` calls — the row-level write lock on the
+        candidate row (acquired by the candidate's UPDATE … SET
+        status='running') serialises with this bulk UPDATE.
+
+        Args:
+            instance_id: The instance whose stale PENDING tasks should
+                be cancelled before retry re-admission.
+
+        Returns:
+            Number of PENDING task rows transitioned to CANCELLED. Zero
+            is a valid no-op (instance had no PENDING tasks, or they
+            were already claimed/cancelled by a concurrent caller).
+        """
+        now = datetime.now(timezone.utc)
+        with self.engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE task
+                    SET status = :status_cancelled,
+                        cancel_requested = :cancel_requested_true,
+                        cancel_requested_at = :now,
+                        completed_at = :now
+                    WHERE instance_id = :instance_id
+                      AND status = :status_pending
+                    """
+                ),
+                {
+                    "instance_id": instance_id,
+                    "status_cancelled": TaskStatus.CANCELLED.value,
+                    "status_pending": TaskStatus.PENDING.value,
+                    "cancel_requested_true": True,
+                    "now": now,
+                },
+            )
+            return result.rowcount
+
     # --------------------------------------------------------
     # RECOVERY
     # --------------------------------------------------------
@@ -1450,6 +1574,47 @@ class TaskRepository:
             ).fetchone()
 
             retry_task = self._row_to_task(result)
+
+            # F6 fix (Phase 3, 2026-07-01): migrate watcher rows from
+            # the parent's ``work_id`` to the child's fresh ``work_id``.
+            # ``schedule_retry`` must hand out a new UUID4 ``work_id`` for
+            # the retry child (the parent row is only cancelled, not
+            # deleted, so reusing the parent's work_id would violate the
+            # UNIQUE constraint on ``task.work_id``). But ``notify_work_watchers``
+            # looks up watchers via ``get_watchers_for_job(work_id)``
+            # which exact-matches ``WHERE job_id = :work_id`` on the
+            # ``job_watchers`` table — a watcher registered against the
+            # parent's work_id would never match the retry child's
+            # work_id, so the notification would be silently lost.
+            #
+            # The fix moves every watcher row whose ``job_id`` equals
+            # the parent's ``work_id`` to the child's ``work_id`` IN
+            # THE SAME TRANSACTION as the retry INSERT. Atomicity
+            # matters: a watcher-migration-only commit without the
+            # retry-INSERT-or-rollback is not safe (the child's
+            # ``work_id`` wouldn't exist yet, so ``get_watchers_for_job``
+            # would still return zero rows). Done inside the existing
+            # ``with self.engine.begin() as conn:`` block so the two
+            # statements commit together.
+            #
+            # Orphaned parent watchers (e.g. from a previous retry whose
+            # retry Task was itself orphaned before this fix landed) are
+            # cleaned up by the existing ``reconcile_terminal_watches``
+            # mechanism at daemon restart. No additional cleanup is
+            # needed inside ``schedule_retry``.
+            conn.execute(
+                text(
+                    """
+                    UPDATE job_watchers
+                    SET job_id = :child_work_id
+                    WHERE job_id = :parent_work_id
+                    """
+                ),
+                {
+                    "child_work_id": retry_task.work_id,
+                    "parent_work_id": parent_row.work_id,
+                },
+            )
 
         # AFTER commit — safe to notify workers
         if retry_task is not None:

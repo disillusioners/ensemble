@@ -329,6 +329,13 @@ async def lifespan(app: FastAPI):
         queue_repo=queue_repo,
         dlq_service=None,  # Will be set after dead_letter_service is created
         config=config.job_system,
+        # F12 fix (Phase 3, 2026-07-01): wire TaskRepository into the
+        # retry engine so ``maybe_retry`` can cancel stale PENDING
+        # tasks on the retried instance before re-admission. Without
+        # this, the retry flow leaves a leftover PENDING retry child
+        # alive and the new Task and stale PENDING Task can contest
+        # the same LangGraph checkpoint.
+        task_repo=getattr(manager, "_task_repo", None),
     )
     job_queue_service.set_retry_engine(retry_engine)
     
@@ -367,9 +374,44 @@ async def lifespan(app: FastAPI):
         lock_repository=lock_repo,
         instance_repository=instance_repo,
         job_queue_service=job_queue_service,  # For notify_watchers on Path 7
+        # Phase 3 (F5/F10) — wire the TaskRepository and
+        # StaleTaskRecovery so ``reconcile_drift_states`` can detect
+        # and repair the dual-table drift patterns (P1 stuck pending,
+        # F10 zombie task). Both are constructed in
+        # ``manager.setup_worker_pool`` which runs earlier in this
+        # lifespan, so the refs are guaranteed available here.
+        task_repository=getattr(manager, "_task_repo", None),
+        stale_task_recovery=getattr(manager, "_stale_recovery", None),
     )
     recovery_stats = await job_recovery.recover_on_startup()
     logger.info(f"Job recovery: {recovery_stats}")
+
+    # ─────────────────────────────────────────────────────────────
+    # Phase 3 (defer-seam bugfix, F5/F10): start the periodic
+    # dual-table drift reconciler. The reconciler runs on its own
+    # asyncio task (NOT gated on MaintenanceService._is_idle) because
+    # drift states appear *during* active work — exactly the case
+    # the idle-gated maintenance loop skips. StaleTaskRecovery's
+    # thread is plain ``threading.Thread`` (not asyncio), so we
+    # cannot piggyback on its loop without a thread→asyncio bridge.
+    # A dedicated ``asyncio.create_task`` is simpler and gives us
+    # configurable interval (default 60s) + clean shutdown.
+    # ─────────────────────────────────────────────────────────────
+    drift_interval = config.services.drift_reconcile_interval_seconds
+    min_pending_age = config.services.drift_reconcile_min_pending_age_seconds
+    drift_reconciler_task = asyncio.create_task(
+        _periodic_drift_reconcile_loop(
+            job_recovery=job_recovery,
+            interval_seconds=drift_interval,
+            min_pending_age_seconds=min_pending_age,
+        ),
+        name="drift-reconciler",
+    )
+    app.state.drift_reconciler_task = drift_reconciler_task
+    logger.info(
+        f"Drift reconciler started: interval={drift_interval}s, "
+        f"min_pending_age={min_pending_age}s"
+    )
 
     # Reconcile terminal watches — notify watchers for jobs that already reached terminal state
     reconciled = await job_queue_service.reconcile_terminal_watches()
@@ -566,8 +608,93 @@ async def lifespan(app: FastAPI):
     if notification_broadcaster is not None:
         await notification_broadcaster.shutdown()
     
+    # Stop the periodic drift reconciler (Phase 3 F5/F10). The
+    # task is fire-and-forget under the lifespan; cancel and await
+    # so the event loop drains cleanly. Mirrors the cancel/await
+    # pattern used by ``MaintenanceService.stop``.
+    if hasattr(app.state, "drift_reconciler_task"):
+        drift_task = app.state.drift_reconciler_task
+        if drift_task is not None and not drift_task.done():
+            drift_task.cancel()
+            try:
+                await drift_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"Drift reconciler shutdown error: {e}")
+        app.state.drift_reconciler_task = None
+
     # Call manager shutdown for graceful shutdown
     await manager.shutdown()
+
+
+async def _periodic_drift_reconcile_loop(
+    job_recovery: "JobRecoveryService",
+    interval_seconds: int,
+    min_pending_age_seconds: int,
+) -> None:
+    """Periodic asyncio loop driving ``JobRecoveryService.reconcile_drift_states``.
+
+    Runs every ``interval_seconds`` (default 60s) until cancelled. The
+    initial tick fires after a small startup delay so the very first
+    reconcile happens AFTER the system has had a chance to register
+    active work — running it at t=0 would just produce empty results
+    (no drift to find yet).
+
+    Cancellation contract: ``asyncio.CancelledError`` is the
+    shutdown signal. The ``except asyncio.CancelledError`` clause
+    propagates it so the asyncio runtime knows the task is done.
+
+    The loop body is wrapped in a broad ``try/except Exception`` so a
+    one-cycle failure (e.g. DB connection blip) doesn't kill the
+    periodic loop — drift correction is best-effort and a missed
+    cycle is recovered on the next tick.
+
+    Args:
+        job_recovery: The JobRecoveryService whose
+            ``reconcile_drift_states`` method is invoked.
+        interval_seconds: Sleep between ticks. Configurable via
+            ``SERVICES_DRIFT_RECONCILE_INTERVAL_SECONDS``.
+        min_pending_age_seconds: Forwarded to
+            ``reconcile_drift_states``. Configurable via
+            ``SERVICES_DRIFT_RECONCILE_MIN_PENDING_AGE_SECONDS``.
+    """
+    # Small startup delay so the first tick fires after the system
+    # has stabilized (mirrors MaintenanceService._loop's 60s initial
+    # delay). Without this, the first tick would always be a no-op
+    # because no drift has had time to accumulate.
+    try:
+        await asyncio.sleep(min(30, interval_seconds))
+    except asyncio.CancelledError:
+        return
+
+    while True:
+        try:
+            stats = await job_recovery.reconcile_drift_states(
+                min_pending_age_seconds=min_pending_age_seconds,
+            )
+            reconciled = stats.get("reconciled", 0)
+            if reconciled > 0:
+                logger.info(
+                    f"Drift reconciler: applied {reconciled} corrections "
+                    f"(details={len(stats.get('details', []))})"
+                )
+        except asyncio.CancelledError:
+            # Shutdown — propagate so the runtime knows the task is done.
+            raise
+        except Exception as e:
+            # Best-effort: a single failed cycle is not fatal. The
+            # next tick will retry. Log at ERROR so the operator has
+            # visibility.
+            logger.error(
+                f"Drift reconciler cycle failed: {e}",
+                exc_info=True,
+            )
+
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            return
 
 
 async def init_dependency_bus(app, manager) -> None:

@@ -32,7 +32,7 @@ import threading
 import logging
 import pytest
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 from sqlalchemy import text
@@ -49,6 +49,8 @@ from daemon.repositories.job_queue.models import (
 )
 from daemon.repositories.job_queue.repository import JobRepository
 from daemon.repositories.job_queue.queue_repository import JobQueueRepository
+from daemon.repositories.job_queue.watcher_models import JobWatcher
+from daemon.repositories.job_queue.watcher_repository import JobWatcherRepository
 from daemon.repositories.instance.models import Instance, InstanceStatus
 from daemon.repositories.instance.repository import SQLModelInstanceRepository
 from daemon.repositories.task.models import Task, TaskStatus, TaskType
@@ -57,6 +59,7 @@ from daemon.services.job_processor import JobProcessor
 from daemon.services.job_recovery_service import JobRecoveryService
 from daemon.services.maintenance import MaintenanceService
 from daemon.services.job_queue_service import JobQueueService
+from daemon.services.stale_task_recovery import StaleTaskRecovery
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,6 +130,18 @@ def task_repository(engine):
     against the same engine so inserts in one are visible in the other.
     """
     return TaskRepository(engine)
+
+
+@pytest.fixture
+def watcher_repo(engine):
+    """JobWatcherRepository over the same in-memory engine as the
+    conftest's JobRepository. Used by F6 tests to seed and inspect
+    ``job_watchers`` rows directly (the production ``watch_job`` tool
+    path goes through resolver-aware JobQueueService, which is overkill
+    for a seam-invariant test that only needs to verify the
+    ``schedule_retry`` migration SQL).
+    """
+    return JobWatcherRepository(engine)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1647,4 +1662,1480 @@ class TestRetryThenCancelNoStaleLock:
         assert refetched_post_cancel.admission_state == AdmissionState.DONE.value, (
             f"cancel_job should move the queued JobA to DONE. "
             f"admission_state={refetched_post_cancel.admission_state}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 11: F6 — Watcher survives task retry via migration
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestF6WatcherMigratesOnRetry:
+    """F6 fix (Phase 3, 2026-07-01): when a task is retried, the retry
+    child gets a fresh ``work_id`` (UUID4), so a watcher registered
+    against the parent's ``work_id`` would otherwise be orphaned — the
+    ``notify_work_watchers`` exact-match lookup
+    (``WHERE job_id = :work_id``) would never find it, and the
+    notification would be silently dropped until the next daemon
+    restart's ``reconcile_terminal_watches`` sweep.
+
+    The fix migrates every ``job_watchers`` row whose ``job_id`` equals
+    the parent's ``work_id`` to the child's ``work_id`` INSIDE the
+    same transaction as the retry INSERT. This test pins that contract
+    end-to-end:
+
+      1. Seed a Task with a stable ``work_id`` (the parent's).
+      2. Register a watcher via ``watcher_repo.add_watch(parent_work_id, …)``.
+      3. Call ``task_repository.schedule_retry`` — this produces a new
+         Task with a fresh ``work_id`` AND migrates the watcher row.
+      4. Assert:
+         a. The retry child's ``work_id`` is different from the parent's.
+         b. ``get_watchers_for_job(parent_work_id)`` returns [] (no
+            orphaned watchers on the parent's old id).
+         c. ``get_watchers_for_job(child_work_id)`` returns the
+            original watcher row (migration worked).
+
+    Without the fix, step 4b would still find the watcher on the
+    parent's id (orphaned) and step 4c would return [] (the child's id
+    has no watchers). With the fix, the migration is atomic with the
+    retry INSERT inside ``schedule_retry``'s transaction, so both rows
+    exist or neither does.
+    """
+
+    def test_f6_watcher_row_migrates_from_parent_work_id_to_child_work_id(
+        self, engine, task_repository, watcher_repo
+    ):
+        """End-to-end: schedule_retry migrates the watcher row's
+        ``job_id`` from the parent's ``work_id`` to the child's fresh
+        ``work_id`` in the same transaction.
+        """
+        # Arrange — an instance + a parent Task with a known work_id.
+        # The task must be in 'running' status so schedule_retry's
+        # status guard passes (eligible set is
+        # IN ('running','failed','cancelled')).
+        _insert_instance(engine, "inst-f6-1", project_id="test-project")
+        parent_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f6-1",
+            status=TaskStatus.RUNNING.value,
+        )
+        # Fetch the parent's work_id (the helper above generates a random UUID).
+        with engine.begin() as conn:
+            parent_work_id = conn.execute(
+                text("SELECT work_id FROM task WHERE id = :id"),
+                {"id": parent_id},
+            ).scalar()
+        assert parent_work_id is not None
+
+        # Register a watcher against the parent's work_id — this is
+        # what ``watch_job`` does at the application layer (it
+        # inserts a row with ``job_id=work_id``, ``instance_id`` =
+        # the watcher's instance).
+        watcher = watcher_repo.add_watch(parent_work_id, "watcher-f6-inst-1")
+        assert watcher.job_id == parent_work_id, (
+            f"Sanity check: add_watch should store the parent's work_id as "
+            f"job_id. Got {watcher.job_id!r}"
+        )
+
+        # Sanity — the watcher is findable on the parent's work_id and
+        # there are no watchers on any other id.
+        watchers_on_parent = watcher_repo.get_watchers_for_job(parent_work_id)
+        assert len(watchers_on_parent) == 1
+        assert watchers_on_parent[0].watch_id == watcher.watch_id
+
+        # Act — schedule_retry. The parent transitions to 'cancelled'
+        # + retry_scheduled=True, and a new Task with a fresh work_id
+        # is INSERTed. The F6 fix migrates the watcher row's job_id
+        # to the new work_id inside the same transaction.
+        retry_task = task_repository.schedule_retry(
+            task_id=parent_id,
+            max_retries=3,
+            backoff_base=60,
+            backoff_max=3600,
+        )
+
+        # Assert — retry_task is the new Task with a fresh work_id.
+        assert retry_task is not None, "schedule_retry should return the retry Task"
+        child_work_id = retry_task.work_id
+        assert child_work_id != parent_work_id, (
+            f"F6 invariant: the retry child must have a fresh work_id "
+            f"(parent was {parent_work_id!r}, child is {child_work_id!r})"
+        )
+
+        # Assert — the watcher row's job_id is now the child's
+        # work_id (migration worked). get_watchers_for_job on the
+        # parent's old id returns nothing (no orphan watcher), and
+        # the same watcher is findable on the child's id.
+        watchers_on_parent_after = watcher_repo.get_watchers_for_job(parent_work_id)
+        assert watchers_on_parent_after == [], (
+            f"F6 fix: after schedule_retry, no watcher row should remain "
+            f"on the parent's work_id {parent_work_id!r} — the row must "
+            f"have migrated to the child's work_id. "
+            f"Found: {[w.watch_id for w in watchers_on_parent_after]}"
+        )
+
+        watchers_on_child = watcher_repo.get_watchers_for_job(child_work_id)
+        assert len(watchers_on_child) == 1, (
+            f"F6 fix: after schedule_retry, exactly one watcher should be "
+            f"findable on the child's work_id {child_work_id!r}. "
+            f"Found: {len(watchers_on_child)}"
+        )
+        migrated = watchers_on_child[0]
+        assert migrated.watch_id == watcher.watch_id, (
+            f"F6 fix: the migrated watcher must be the SAME row as the "
+            f"original (same watch_id). Original={watcher.watch_id!r}, "
+            f"migrated={migrated.watch_id!r}"
+        )
+        assert migrated.instance_id == "watcher-f6-inst-1", (
+            f"F6 fix: the migrated watcher must preserve the watcher's "
+            f"instance_id (the (job_id, instance_id) UNIQUE constraint "
+            f"key changes only on job_id). "
+            f"Original instance_id={watcher.instance_id!r}, "
+            f"migrated={migrated.instance_id!r}"
+        )
+        assert migrated.job_id == child_work_id, (
+            f"F6 fix: the migrated watcher's job_id must equal the "
+            f"child's work_id. Got {migrated.job_id!r}, "
+            f"expected {child_work_id!r}"
+        )
+
+    def test_f6_watcher_migration_is_atomic_with_retry_insert(
+        self, engine, task_repository, watcher_repo
+    ):
+        """F6 atomicity: the watcher migration and the retry Task
+        INSERT must commit together. If the retry INSERT fails (e.g.
+        the parent's status changed concurrently), the migration must
+        NOT have happened — the watcher must remain on the parent's
+        work_id.
+
+        Simulated by calling ``schedule_retry`` twice on the same
+        parent: the first call succeeds (parent → cancelled, child
+        inserted, watcher migrated to child); the second call must
+        return ``None`` because the parent's ``retry_scheduled=True``
+        guard blocks it (the double-retry guard is the same predicate
+        that prevents duplicate retry children). The watcher must
+        remain on the FIRST child's work_id (not get re-migrated to
+        a phantom second child).
+        """
+        # Arrange — parent + watcher.
+        _insert_instance(engine, "inst-f6-atomic", project_id="test-project")
+        parent_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f6-atomic",
+            status=TaskStatus.RUNNING.value,
+        )
+        with engine.begin() as conn:
+            parent_work_id = conn.execute(
+                text("SELECT work_id FROM task WHERE id = :id"),
+                {"id": parent_id},
+            ).scalar()
+        watcher_repo.add_watch(parent_work_id, "watcher-f6-atomic-inst")
+
+        # Act 1 — first schedule_retry succeeds.
+        first_retry = task_repository.schedule_retry(
+            task_id=parent_id,
+            max_retries=3,
+        )
+        assert first_retry is not None
+        first_child_work_id = first_retry.work_id
+
+        # Sanity — watcher migrated to the first child.
+        assert (
+            len(watcher_repo.get_watchers_for_job(first_child_work_id)) == 1
+        )
+
+        # Act 2 — second schedule_retry on the same parent must
+        # return None (the parent is now cancelled with
+        # retry_scheduled=True, which the UPDATE's WHERE
+        # ``retry_scheduled = false`` guard rejects).
+        second_retry = task_repository.schedule_retry(
+            task_id=parent_id,
+            max_retries=3,
+        )
+        assert second_retry is None, (
+            "schedule_retry must return None on a parent whose "
+            "retry_scheduled=True (double-retry guard). The atomic "
+            "transaction means the second call's UPDATE matches zero "
+            "rows and the watcher migration block is skipped."
+        )
+
+        # Assert — the watcher remains on the FIRST child's work_id.
+        # No phantom migration to a non-existent second child.
+        watchers_on_first_child = watcher_repo.get_watchers_for_job(first_child_work_id)
+        assert len(watchers_on_first_child) == 1, (
+            "F6 atomicity: after a failed second schedule_retry, the "
+            "watcher must still be on the first child's work_id "
+            "(no migration to a phantom child). "
+            f"Found {len(watchers_on_first_child)} watchers on "
+            f"{first_child_work_id!r}"
+        )
+        # And there must not be watchers on any other work_id.
+        all_watchers = watcher_repo.get_all_active_watches()
+        assert len(all_watchers) == 1, (
+            f"F6 atomicity: only one watcher row should exist across "
+            f"the entire job_watchers table (no duplicates, no "
+            f"orphans). Found: {len(all_watchers)}"
+        )
+        assert all_watchers[0].job_id == first_child_work_id
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 12: F12 — Stale PENDING task cancelled on retry re-admission
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestF12StalePendingCancelledOnRetry:
+    """F12 fix (Phase 3, 2026-07-01): on ``atomic_retry`` (JobItem
+    ``done → queued``), the retry engine must cancel every leftover
+    PENDING Task on the same ``instance_id`` BEFORE the downstream
+    caller invokes ``start_job`` to spawn a fresh instance/Task.
+
+    Without the fix: a leftover PENDING retry child survives the
+    ``atomic_retry`` transition. ``claim_pending_task``'s per-instance
+    guard blocks only RUNNING tasks (not PENDING ones), so the stale
+    PENDING and the fresh retry Task can both become claimable
+    concurrently. Two ``graph.astream`` calls on the same LangGraph
+    thread_id race on the Postgres checkpointer and shadow each
+    other's channel writes — the produced AIMessages get lost, and
+    ``invoke_agent_and_wait`` hangs until ``reconcile_terminal_watches``
+    runs at next daemon restart.
+
+    The fix is two-part:
+
+      1. New ``TaskRepository.cancel_pending_tasks_for_instance``
+         method — atomic UPDATE transitioning stale PENDING tasks to
+         CANCELLED for the given ``instance_id`` (does NOT touch
+         RUNNING tasks, which are legitimate siblings).
+      2. ``JobRetryEngine.maybe_retry`` calls
+         ``cancel_pending_tasks_for_instance`` immediately after
+         ``atomic_retry`` succeeds, BEFORE the orchestrator's
+         ``start_job`` call. The wiring is ``task_repo`` on the
+         retry engine (set in ``daemon/api.py``); when unwired, the
+         cancel is logged-and-skipped (older wirings pre-F12).
+
+    This test pins both parts:
+
+      * Direct test of ``cancel_pending_tasks_for_instance`` —
+        confirms the method only touches PENDING tasks on the
+        target instance_id (RUNNING/COMPLETED/FAILED siblings are
+        left alone).
+      * Integration test of ``maybe_retry`` with a wired
+        ``task_repo`` — confirms the cancel is invoked after
+        ``atomic_retry`` and BEFORE the orchestrator's
+        ``start_job`` (here represented by post-condition assertions
+        on the task table).
+    """
+
+    def test_f12_cancel_pending_tasks_for_instance_only_cancels_pending(
+        self, engine, task_repository
+    ):
+        """Direct test: cancel_pending_tasks_for_instance transitions
+        PENDING tasks on the instance to CANCELLED but leaves RUNNING
+        / COMPLETED / FAILED / already-CANCELLED rows alone.
+        """
+        # Arrange — one instance with one task in each status.
+        _insert_instance(engine, "inst-f12-status", project_id="test-project")
+
+        pending_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f12-status",
+            status=TaskStatus.PENDING.value,
+        )
+        running_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f12-status",
+            status=TaskStatus.RUNNING.value,
+        )
+        completed_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f12-status",
+            status=TaskStatus.COMPLETED.value,
+        )
+        failed_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f12-status",
+            status=TaskStatus.FAILED.value,
+        )
+        already_cancelled_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f12-status",
+            status=TaskStatus.CANCELLED.value,
+        )
+        # Plus a PENDING task on a DIFFERENT instance — must NOT be
+        # cancelled (proves the WHERE clause is instance-scoped).
+        _insert_instance(engine, "inst-f12-other", project_id="test-project")
+        other_pending_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f12-other",
+            status=TaskStatus.PENDING.value,
+        )
+
+        # Act
+        cancelled_count = task_repository.cancel_pending_tasks_for_instance(
+            "inst-f12-status"
+        )
+
+        # Assert — exactly the one PENDING task on the target instance
+        # was cancelled. RUNNING / COMPLETED / FAILED / already-CANCELLED
+        # rows on the same instance are untouched. The other-instance
+        # PENDING is untouched.
+        assert cancelled_count == 1, (
+            f"cancel_pending_tasks_for_instance must cancel ONLY the "
+            f"PENDING task on the target instance (1 row). Got "
+            f"cancelled_count={cancelled_count}"
+        )
+
+        with engine.begin() as conn:
+            statuses = dict(
+                conn.execute(
+                    text("SELECT id, status FROM task"),
+                ).all()
+            )
+
+        assert statuses[pending_id] == TaskStatus.CANCELLED.value, (
+            f"The PENDING task on the target instance must be CANCELLED. "
+            f"Got status={statuses[pending_id]!r}"
+        )
+        assert statuses[running_id] == TaskStatus.RUNNING.value, (
+            f"A RUNNING task on the same instance must NOT be cancelled "
+            f"(it's a legitimate sibling). Got status={statuses[running_id]!r}"
+        )
+        assert statuses[completed_id] == TaskStatus.COMPLETED.value, (
+            f"A COMPLETED task on the same instance must NOT be touched. "
+            f"Got status={statuses[completed_id]!r}"
+        )
+        assert statuses[failed_id] == TaskStatus.FAILED.value, (
+            f"A FAILED task on the same instance must NOT be touched. "
+            f"Got status={statuses[failed_id]!r}"
+        )
+        assert statuses[already_cancelled_id] == TaskStatus.CANCELLED.value, (
+            f"An already-CANCELLED task on the same instance must NOT be "
+            f"re-cancelled. Got status={statuses[already_cancelled_id]!r}"
+        )
+        assert statuses[other_pending_id] == TaskStatus.PENDING.value, (
+            f"A PENDING task on a DIFFERENT instance must NOT be "
+            f"cancelled (instance-scoped WHERE clause). "
+            f"Got status={statuses[other_pending_id]!r}"
+        )
+
+    def test_f12_maybe_retry_cancels_stale_pending_before_re_admission(
+        self, engine, task_repository, repository
+    ):
+        """Integration: after ``maybe_retry`` runs on a failed job
+        whose instance has a leftover PENDING retry child, the
+        PENDING child is CANCELLED BEFORE the test can observe the
+        JobItem as ``queued`` (which is the precondition for the
+        downstream ``start_job`` call).
+
+        Without F12: the PENDING child survives ``atomic_retry`` and
+        is still in the task table when the orchestrator's
+        ``start_job`` fires — two PENDING tasks for the same instance
+        can then both become claimable.
+
+        With F12: ``maybe_retry`` calls
+        ``cancel_pending_tasks_for_instance`` immediately after the
+        ``atomic_retry`` UPDATE returns the refreshed JobItem, so by
+        the time ``maybe_retry`` returns to its caller the stale
+        PENDING is already CANCELLED.
+        """
+        # Arrange — build a complete maybe_retry wiring:
+        #   * JobRepository (the conftest's `repository` fixture)
+        #   * TaskRepository (cancel_pending_tasks_for_instance)
+        #   * JobQueueRepository (system queues for the config)
+        #   * DeadLetterService (stub — we'll make sure retries
+        #     don't reach the DLQ branch)
+        #   * Config (real JobSystemConfig with retry enabled)
+        #   * task_repo wired (the F12 plumbing)
+        from daemon.config import JobSystemConfig
+        from daemon.services.job_retry_engine import JobRetryEngine
+        from daemon.services.dead_letter_service import DeadLetterService
+
+        # A system queue (the queue's ``default_max_retries`` is consulted
+        # by ``get_max_retries`` when the JobItem has no ``max_retries``
+        # set; we use the config-level default instead, which avoids
+        # the ``default_max_retries`` parameter (not exposed on
+        # ``JobQueueRepository.create``). Use the repository's create
+        # helper so the NOT-NULL ``queue_name_lower`` column is
+        # populated correctly (the helper normalises ``queue_name``
+        # to its lowercased form).
+        queue_id = "queue-f12-retry"
+        JobQueueRepository(engine).create(
+            project_id="test-project",
+            queue_name="queue-f12-retry",
+            queue_type="fifo",
+            concurrency_limit=1,
+            is_system=True,
+        )
+
+        # Instance + DONE JobItem with instance_id set (so the cancel targets
+        # the right instance). Phase 4 cleanup: ``should_retry`` requires
+        # ``admission_state='done'`` + ``failed_at`` to fire the retry
+        # branch — this is the post-failure state reached via
+        # ``_finalize_terminal`` / ``fail_job``.
+        instance_id = "inst-f12-retry"
+        job_id = "job-f12-retry"
+        _insert_instance(engine, instance_id, project_id="test-project")
+        _insert_job_item(
+            engine,
+            job_id=job_id,
+            instance_id=instance_id,
+            project_id="test-project",
+            queue_id=queue_id,
+            admission_state=AdmissionState.DONE.value,
+            job_metadata={"message_id": "msg-f12-retry"},
+        )
+        # Stamp failed_at so should_retry accepts the row (Phase 4
+        # eligibility check).
+        from datetime import timedelta
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE job_queue_items SET failed_at = :failed_at "
+                    "WHERE job_id = :job_id"
+                ),
+                {
+                    "failed_at": (
+                        datetime.now(timezone.utc) - timedelta(minutes=5)
+                    ).isoformat(),
+                    "job_id": job_id,
+                },
+            )
+
+        # Stale PENDING retry child on the same instance — the F12
+        # bug condition.
+        stale_pending_id = _create_task_with_status(
+            engine,
+            instance_id=instance_id,
+            status=TaskStatus.PENDING.value,
+        )
+
+        # Wire a minimal JobQueueRepository pointing at the engine.
+        queue_repo = JobQueueRepository(engine)
+        config = JobSystemConfig()
+        # Make sure retry is enabled and not immediately exhausted.
+        config.dlq_enabled = True
+        config.default_max_retries = 5
+        config.retry_backoff_base_seconds = 1
+        config.retry_backoff_max_seconds = 10
+
+        # DeadLetterService stub — should never be called in this
+        # test because retry_count (0) < max_retries (5), so the
+        # ``should_retry`` branch returns True and the DLQ branch
+        # is skipped. Use a MagicMock so any unexpected DLQ call is
+        # immediately visible.
+        from unittest.mock import MagicMock
+        dlq_service = MagicMock(spec=DeadLetterService)
+
+        retry_engine = JobRetryEngine(
+            job_repo=repository,
+            queue_repo=queue_repo,
+            dlq_service=dlq_service,
+            config=config,
+            task_repo=task_repository,  # F12 wiring
+        )
+
+        # Sanity — the stale PENDING is still PENDING before the retry.
+        with engine.begin() as conn:
+            pre_status = conn.execute(
+                text("SELECT status FROM task WHERE id = :id"),
+                {"id": stale_pending_id},
+            ).scalar()
+        assert pre_status == TaskStatus.PENDING.value, (
+            f"Pre-condition: the stale retry child must be PENDING. "
+            f"Got status={pre_status!r}"
+        )
+
+        # Act — call maybe_retry synchronously (matches the
+        # production call site in ``_finalize_terminal``).
+        updated_job = retry_engine.maybe_retry(job_id)
+
+        # Assert — maybe_retry succeeded (job is now QUEUED).
+        assert updated_job is not None, (
+            "maybe_retry should transition the JobItem to QUEUED "
+            "(retry_count < max_retries, so the retry branch fires)."
+        )
+        assert updated_job.admission_state == AdmissionState.QUEUED.value, (
+            f"After maybe_retry, the JobItem must be QUEUED (the "
+            f"downstream start_job will spawn a fresh instance/Task). "
+            f"Got admission_state={updated_job.admission_state!r}"
+        )
+        # And the DLQ branch was NOT taken (retry wasn't exhausted).
+        dlq_service.move_to_dlq.assert_not_called()
+
+        # Assert — F12 invariant: the stale PENDING task was cancelled
+        # by the time maybe_retry returned. The downstream start_job
+        # would observe NO PENDING tasks for this instance, so the
+        # fresh retry Task has no sibling to contest the LangGraph
+        # checkpoint with.
+        with engine.begin() as conn:
+            post_status = conn.execute(
+                text("SELECT status FROM task WHERE id = :id"),
+                {"id": stale_pending_id},
+            ).scalar()
+        assert post_status == TaskStatus.CANCELLED.value, (
+            f"F12 invariant: by the time maybe_retry returns, the "
+            f"stale PENDING task on the retried instance must be "
+            f"CANCELLED — otherwise the downstream start_job would "
+            f"race against it on the LangGraph checkpoint. "
+            f"Got status={post_status!r}"
+        )
+
+        # Assert — and no NEW PENDING task was created on the same
+        # instance (the F12 cancel is targeted, not a global wipe).
+        with engine.begin() as conn:
+            remaining_pending_count = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM task "
+                    "WHERE instance_id = :iid AND status = :pending"
+                ),
+                {"iid": instance_id, "pending": TaskStatus.PENDING.value},
+            ).scalar()
+        assert remaining_pending_count == 0, (
+            f"F12 invariant: no PENDING task must remain on the "
+            f"retried instance after maybe_retry (the stale PENDING "
+            f"was cancelled, and the orchestrator's start_job hasn't "
+            f"run yet). Got {remaining_pending_count} pending row(s)."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — F8 second defer idle-gate (observer path)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestF8SecondDeferIdleGateObserverPath:
+    """Phase 3 F8 (defer-seam bugfix, 2026-07-01): the second defer
+    idle-gate consumer — ``_select_next_eligible_job`` in
+    ``daemon/services/job_queue_service.py`` — must consult the shared
+    ``TaskRepository.has_active_non_deferred_work`` predicate so a defer
+    JobItem cannot be selected while the project has any non-deferred
+    in-flight work.
+
+    This gate is hit on the **observer admission path**:
+    ``JobFeedbackObserver._process_event`` →
+    ``JobQueueService._get_next_job(project_id)`` →
+    ``_select_next_eligible_job(pending, project_id)``
+    (``daemon/services/job_feedback_observer.py:2670``).
+
+    The Phase 1 fix routed both defer idle-gates (Gate A in
+    ``JobProcessor._process_next_job`` and Gate B in
+    ``JobQueueService._select_next_eligible_job``) through the same
+    task-table predicate. Phase 3 verifies the Gate B wiring on the
+    observer path with a real ``TaskRepository`` so the seam
+    invariant — "a defer queue JobItem is held back whenever the
+    project has any non-deferred PENDING/RUNNING Task" — survives a
+    future refactor of the queue/Task boundary.
+    """
+
+    @pytest.mark.asyncio
+    async def test_f8_select_next_eligible_job_blocks_defer_during_active_task(
+        self, engine, task_repository, repository, lock_manager,
+        queue_repository_with_system_queues,
+    ):
+        """F8 invariant: seed a project with (a) a non-deferred RUNNING
+        Task and (b) a defer-queue JobItem; ``_select_next_eligible_job``
+        MUST return None for the defer JobItem.
+
+        Pre-fix (count_active_jobs_in_non_defer_queues blind spot):
+        count of JobItem rows = 0 (no JobItems other than the defer
+        one) → defer job selected → observer path would admit it.
+
+        Post-fix (Phase 1 shared predicate): the same path consults
+        ``TaskRepository.has_active_non_deferred_work(project_id)``
+        which sees the non-deferred RUNNING Task and returns True →
+        defer job is held back.
+        """
+        # Arrange
+        # (a) Create a defer queue in the project
+        project_id = "project-f8"
+        defer_queue = queue_repository_with_system_queues.create(
+            project_id=project_id,
+            queue_name="system_defer_queue",
+            queue_type="defer",
+            concurrency_limit=1,
+            is_system=True,
+        )
+
+        # Wire a JobQueueService with the real ``_task_repo`` so the
+        # gate runs the actual ``has_active_non_deferred_work`` SQL.
+        # This mirrors the production wiring path (JobQueueService is
+        # constructed with a real ``TaskRepository`` via
+        # ``InstanceManager._task_repo`` in ``InstanceManager.initialize``).
+        queue_repo = queue_repository_with_system_queues
+        service = JobQueueService(repository, lock_manager, queue_repo)
+        instance_manager_stub = MagicMock()
+        instance_manager_stub._task_repo = task_repository
+        service.set_instance_manager(instance_manager_stub)
+
+        # (b) Seed the project: an Instance + a non-deferred RUNNING Task
+        _insert_instance(engine, "inst-f8-1", project_id=project_id)
+        _create_task_with_status(
+            engine,
+            instance_id="inst-f8-1",
+            message_id="m-f8-nd",
+            status=TaskStatus.RUNNING.value,
+            is_deferred=False,
+        )
+
+        # Sanity — the predicate agrees the project has non-deferred
+        # work (the real SQL, not a mock). If this fails the rest of
+        # the test is meaningless.
+        assert task_repository.has_active_non_deferred_work(project_id) is True
+
+        # (c) The defer JobItem — created via SQL because we want to
+        # control admission_state + queue_id without running the
+        # full ``create`` path's defaults.
+        _insert_job_item(
+            engine,
+            job_id="job-f8-defer",
+            instance_id="inst-f8-1",
+            project_id=project_id,
+            queue_id=defer_queue.queue_id,
+            admission_state=AdmissionState.QUEUED.value,
+            job_metadata={"message_id": "m-f8-defer"},
+        )
+
+        # Act — invoke the gate exactly as the observer path does
+        # (``_get_next_job(project_id)`` → ``_select_next_eligible_job``).
+        defer_job = repository.get("job-f8-defer")
+        assert defer_job is not None
+        result = await service._select_next_eligible_job(
+            [defer_job], project_id
+        )
+
+        # Assert — the defer JobItem is held back. The observer path
+        # would see ``next_job is None`` and not start it.
+        assert result is None, (
+            "F8 invariant: _select_next_eligible_job must return None "
+            "for a defer JobItem while the project has a non-deferred "
+            "RUNNING Task (shared has_active_non_deferred_work "
+            "predicate on the observer admission path)."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3 — F2 maintenance _is_idle (JobItem gate)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestF2MaintenanceIsIdleJobItemGate:
+    """Phase 3 F2 (defer-seam bugfix, 2026-07-01):
+    ``MaintenanceService._is_idle`` (``daemon/services/maintenance.py:240``)
+    must return False whenever there is active queue-policy work —
+    specifically when ANY JobItem row has ``admission_state IN
+    ('queued','active')`` — so the maintenance cycle never runs
+    while a job is in the queue.
+
+    Phase 1 routed the task-side probe through the shared
+    ``TaskRepository.has_active_non_deferred_work(None)`` predicate.
+    The JobItem-side probe (``list_all_pending`` /
+    ``find_processing_jobs``) is the F2 second leg — both halves of
+    the dual-table work-tracking model must keep the maintenance
+    cycle dormant. This file pins the Task-side probe in
+    ``TestMaintenanceIsIdle``; this class pins the JobItem-side probe
+    so a future regression that reverts either half (e.g. removing
+    the ``find_processing_jobs`` branch or switching it back to a
+    queued-only check) is caught immediately.
+    """
+
+    @pytest.mark.asyncio
+    async def test_f2_is_idle_false_when_queued_jobitem_present(
+        self, engine, repository, task_repository, lock_manager,
+        queue_repository_with_system_queues,
+    ):
+        """F2 invariant: with an ACTIVE JobItem (admission_state='active')
+        in the project and no Task rows, ``_is_idle`` returns False —
+        the maintenance cycle must hold off while a job holds the
+        queue lock.
+        """
+        # Arrange — Instance + ACTIVE JobItem (no Task row — the
+        # "virtual job" case where the task table is empty but the
+        # admission lifecycle is mid-flight).
+        project_id = "test-project"
+        _insert_instance(engine, "inst-f2-1", project_id=project_id)
+
+        # ACTIVE JobItem (in-flight, holds the queue lock). We seed
+        # this via SQL because ``list_all_pending`` only sees QUEUED
+        # — for the ``active`` leg we need an ACTIVE row.
+        now = datetime.now(timezone.utc).isoformat()
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO job_queue_items
+                        (job_id, agent_id, agent_dir, message, source,
+                         project_id, queue_id, priority, admission_state,
+                         created_at, instance_id, job_type, retry_count,
+                         metadata)
+                    VALUES
+                        (:job_id, :agent_id, :agent_dir, :message, :source,
+                         :project_id, :queue_id, :priority, :admission_state,
+                         :created_at, :instance_id, :job_type, :retry_count,
+                         :metadata)
+                    """
+                ),
+                {
+                    "job_id": "job-f2-active-1",
+                    "agent_id": "developer",
+                    "agent_dir": "agents/developer",
+                    "message": "active job",
+                    "source": "api",
+                    "project_id": project_id,
+                    "queue_id": None,
+                    "priority": 0,
+                    "admission_state": AdmissionState.ACTIVE.value,
+                    "created_at": now,
+                    "instance_id": "inst-f2-1",
+                    "job_type": "task",
+                    "retry_count": 0,
+                    "metadata": json.dumps({"message_id": "m-f2-active-1"}),
+                },
+            )
+
+        # Sanity — the JobRepository's ``find_processing_jobs`` agrees
+        # the JobItem is mid-flight. The conftest's ``repository``
+        # fixture is already a JobRepository instance.
+        assert len(repository.find_processing_jobs()) == 1, (
+            "Sanity: ACTIVE JobItem should be visible to "
+            "find_processing_jobs"
+        )
+
+        # Wire MaintenanceService with both halves of the dual-table
+        # probe (TaskRepository + a real JobQueueService).
+        job_queue_service = JobQueueService(
+            repository, lock_manager, queue_repository_with_system_queues
+        )
+        service = MaintenanceService(check_interval_minutes=15)
+        service.set_task_repository(task_repository)
+        service.set_job_queue_service(job_queue_service)
+
+        # Act
+        idle = await service._is_idle()
+
+        # Assert — the JobItem gate fires even though no Task rows
+        # exist (the TaskRepository probe would return False, but the
+        # JobItem probe catches the work).
+        assert idle is False, (
+            "F2 invariant: _is_idle must return False while a JobItem "
+            "is in 'active' admission_state, regardless of whether "
+            "the project has any Task rows (covered by "
+            "find_processing_jobs). Pre-fix: list_all_pending-only "
+            "probe missed the 'active' bucket, returning True "
+            "silently and running the maintenance cycle mid-flight."
+        )
+
+    @pytest.mark.asyncio
+    async def test_f2_is_idle_false_when_queued_jobitem_only_present(
+        self, engine, repository, task_repository, lock_manager,
+        queue_repository_with_system_queues,
+    ):
+        """F2 invariant: with a QUEUED JobItem (admission_state='queued')
+        — pre-flight, no lock held — ``_is_idle`` still returns False
+        because ``list_all_pending`` catches the queued bucket.
+
+        This pins the OTHER leg of F2: when only the queued bucket
+        has rows (no Task, no 'active' JobItem), the maintenance
+        cycle must still hold off.
+        """
+        # Arrange — Instance + QUEUED JobItem only.
+        project_id = "test-project"
+        _insert_instance(engine, "inst-f2-2", project_id=project_id)
+        _insert_job_item(
+            engine,
+            job_id="job-f2-queued-1",
+            instance_id="inst-f2-2",
+            project_id=project_id,
+            admission_state=AdmissionState.QUEUED.value,
+            job_metadata={},
+        )
+
+        assert len(repository.list_all_pending()) == 1, (
+            "Sanity: QUEUED JobItem should be visible to list_all_pending"
+        )
+
+        # Wire — same as the previous test.
+        job_queue_service = JobQueueService(
+            repository, lock_manager, queue_repository_with_system_queues
+        )
+        service = MaintenanceService(check_interval_minutes=15)
+        service.set_task_repository(task_repository)
+        service.set_job_queue_service(job_queue_service)
+
+        # Act
+        idle = await service._is_idle()
+
+        # Assert
+        assert idle is False, (
+            "F2 invariant: _is_idle must return False while a JobItem "
+            "is in 'queued' admission_state (list_all_pending leg). "
+            "Pre-fix: also caught by list_all_pending, but this test "
+            "pins the queued-only case distinctly from the active case."
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 11: F5/F10 — periodic drift reconciler (Phase 3)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestPeriodicDriftReconciler:
+    """Phase 3 (defer-seam bugfix, F5/F10) — periodic dual-table drift
+    reconciler.
+
+    The reconciler lives in ``JobRecoveryService.reconcile_drift_states``
+    and is run on a 60s asyncio loop by ``daemon/api.py``. It bypasses
+    the ``MaintenanceService._is_idle`` gate because drift states
+    appear *during* active work, which is precisely when the idle-gated
+    maintenance loop skips.
+
+    Three patterns are detected (see the docstring of
+    ``reconcile_drift_states``). The two required tests cover (a)
+    P1-pattern deadlock (active JobItem + stuck PENDING Task with NULL
+    heartbeat) and (b) F10 done+running mismatch (done JobItem +
+    RUNNING zombie Task).
+
+    Both tests construct ``JobRecoveryService`` with the full dep
+    triple (``task_repository``, ``stale_task_recovery``,
+    ``job_queue_service``) so the active path runs end-to-end against
+    the real in-memory engine. They use ``min_pending_age_seconds=0``
+    so the PENDING task is considered drift-eligible immediately
+    without waiting for the production 300s default.
+    """
+
+    @pytest.mark.asyncio
+    async def test_reconciler_catches_p1_pattern_deadlock(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """Pattern (a): ``active`` JobItem + ``pending`` Task with NULL
+        heartbeat (older than the threshold) → reconciler detects and
+        corrects by finalizing the JobItem as FAILED.
+
+        Pre-fix: P1 wedges forever — the JobItem stays ``active``
+        forever because the cross-system guard blocks the Task from
+        claiming (NULL ``message_id`` stamp). No recovery path sweeps
+        the dual-table drift, so the system stays in the broken
+        state across daemon restarts.
+
+        Post-fix: the periodic reconciler runs every 60s and detects
+        the drift via ``TaskRepository.list_pending_tasks_older_than``
+        — a PENDING task whose ``last_heartbeat_at IS NULL`` AND whose
+        ``created_at`` is older than ``min_pending_age_seconds`` is
+        considered drift-eligible. When the JobItem is ``active`` AND
+        the instance is dead (terminal status), the reconciler
+        finalizes the JobItem as FAILED via the single
+        terminal-write boundary (``_finalize_terminal``).
+        """
+        # Arrange — instance terminal, JobItem active, PENDING task
+        # older than the threshold with NULL heartbeat (canonical
+        # P1-pattern deadlock signature).
+        _insert_instance(engine, "inst-f5-p1", project_id="test-project")
+        # Mark instance as terminal so the P1 detection branch
+        # ("dead instance") fires (vs the alive-instance log-only
+        # branch).
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'terminated' "
+                    "WHERE instance_id = 'inst-f5-p1'"
+                )
+            )
+
+        _insert_job_item(
+            engine,
+            job_id="job-f5-p1",
+            instance_id="inst-f5-p1",
+            project_id="test-project",
+            queue_id="queue-f5-p1",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-f5-p1"},
+        )
+
+        # Seed a PENDING task OLDER than the threshold with NULL
+        # heartbeat. We backdate ``created_at`` via direct SQL because
+        # ``_create_task_with_status`` uses ``datetime.now()`` which
+        # would make the task fresh (not drift-eligible).
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f5-p1",
+            message_id="msg-f5-p1",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        # Backdate created_at so the task is drift-eligible even with
+        # ``min_pending_age_seconds=0`` (the threshold is checked
+        # against ``created_at < (now - age_seconds)``; with age=0
+        # this only fires when ``created_at < now``, which is
+        # trivially true — but explicit backdating makes the test
+        # intention clear and survives accidental threshold bumps).
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :old_time WHERE id = :id"
+                ),
+                {"old_time": old_time, "id": task_id},
+            )
+
+        # Wire the recovery service with the full dep triple so the
+        # F5 active path runs end-to-end (P1 detection → instance
+        # liveness check → terminal-write boundary).
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        # StaleTaskRecovery takes both repos and we wire ``None`` for
+        # the message/event/notifier deps the recovery flow doesn't
+        # touch — only ``task_repo`` is required for the reconciler's
+        # active path.
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # Sanity — the drift signature is observable pre-reconcile.
+        pre_drift = task_repository.list_pending_tasks_older_than(0)
+        assert any(t.id == task_id for t in pre_drift), (
+            f"Sanity: PENDING task with NULL heartbeat older than 0s "
+            f"should appear in the drift list. Found: "
+            f"{[(t.id, t.status, t.last_heartbeat_at) for t in pre_drift]}"
+        )
+
+        # Act — run the reconciler with ``min_pending_age_seconds=0``
+        # so the freshly-created-then-backdated task qualifies.
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # Assert — drift was detected.
+        assert stats["reconciled"] >= 1, (
+            f"Reconciler must apply at least one correction for P1 "
+            f"drift (active JobItem + stuck PENDING Task + dead "
+            f"instance). Got stats: {stats}"
+        )
+
+        # Assert — JobItem is now FAILED (terminal).
+        job_after = repository.get("job-f5-p1")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DONE.value, (
+            f"P1 dead-instance correction must finalize the JobItem "
+            f"to DONE. Got admission_state={job_after.admission_state}"
+        )
+        assert job_after.terminal_reason == "failed", (
+            f"P1 dead-instance correction must set "
+            f"terminal_reason='failed'. Got {job_after.terminal_reason!r}"
+        )
+
+        # Assert — a P1_dead_instance detail record was added.
+        dead_instance_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "P1_dead_instance"
+            and d.get("job_id") == "job-f5-p1"
+        ]
+        assert dead_instance_records, (
+            f"Reconciler must record a P1_dead_instance detail for "
+            f"job-f5-p1. Got details: {stats['details']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconciler_catches_f10_done_running_mismatch(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """Pattern (b) F10: ``done`` JobItem + ``running`` Task → the
+        reconciler detects the zombie task and force-completes it
+        (NOT cancels/retries).
+
+        Pre-fix: the JobItem is finalized to ``done`` but the
+        ``task`` row stays ``running`` (the ``notify_work_watchers``
+        fire-and-forget raised and was swallowed). The next
+        ``StaleTaskRecovery`` cycle then sees the running task as
+        stale, force-cancels it, and schedules a retry against the
+        already-terminal JobItem — DOUBLE EXECUTION of the same work.
+
+        Post-fix: the periodic reconciler detects the F10 drift and
+        force-completes the task (atomic RUNNING → COMPLETED via
+        ``StaleTaskRecovery.force_complete_task``) BEFORE
+        ``StaleTaskRecovery``'s threshold can fire. The JobItem is
+        not retried (no new task spawned). The result payload on the
+        Task row carries a ``reconciled=True`` marker so postmortem
+        analysis can distinguish reconciler-completed tasks from
+        naturally-completed ones.
+        """
+        # Arrange — instance alive, JobItem DONE, RUNNING task on the
+        # same instance. Classic F10 zombie signature.
+        _insert_instance(engine, "inst-f10-1", project_id="test-project")
+
+        _insert_job_item(
+            engine,
+            job_id="job-f10-1",
+            instance_id="inst-f10-1",
+            project_id="test-project",
+            queue_id="queue-f10-1",
+            admission_state=AdmissionState.DONE.value,  # terminal!
+            job_metadata={"message_id": "msg-f10-1"},
+        )
+        # A RUNNING task with a fresh heartbeat. The F10 detection
+        # does NOT depend on heartbeat age — any RUNNING task whose
+        # instance's JobItem is DONE is drift-eligible.
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f10-1",
+            message_id="msg-f10-1",
+            status=TaskStatus.RUNNING.value,
+            is_deferred=False,
+        )
+
+        # Wire the recovery service with the full dep triple.
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # Sanity — the drift signature is observable pre-reconcile.
+        pre_running = task_repository.list_running_tasks()
+        assert any(t.id == task_id for t in pre_running), (
+            f"Sanity: RUNNING task must appear in list_running_tasks. "
+            f"Found: {[(t.id, t.status) for t in pre_running]}"
+        )
+
+        # Act
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=300,  # unused for F10 path
+        )
+
+        # Assert — drift was detected and corrected.
+        assert stats["reconciled"] >= 1, (
+            f"Reconciler must apply at least one F10 correction. "
+            f"Got stats: {stats}"
+        )
+
+        # Assert — task was force-completed (NOT cancelled).
+        task_after = task_repository.get(task_id)
+        assert task_after is not None
+        assert task_after.status == TaskStatus.COMPLETED.value, (
+            f"F10 correction must force-complete the task (running → "
+            f"completed), not cancel or fail it. Got status="
+            f"{task_after.status!r}"
+        )
+
+        # Assert — result payload carries the reconciler marker.
+        assert task_after.result is not None, (
+            "F10 force-completion must persist the result payload "
+            "with the reconciler marker."
+        )
+        result_payload = json.loads(task_after.result)
+        assert result_payload.get("reconciled") is True, (
+            f"F10 result payload must carry reconciled=True marker. "
+            f"Got: {result_payload}"
+        )
+        assert result_payload.get("completed_by") == "drift_reconciler_f10", (
+            f"F10 result payload must identify the reconciler. "
+            f"Got: {result_payload}"
+        )
+
+        # Assert — an F10 detail record was added.
+        f10_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "F10_zombie_task"
+            and d.get("task_id") == task_id
+        ]
+        assert f10_records, (
+            f"Reconciler must record an F10_zombie_task detail for "
+            f"task {task_id}. Got details: {stats['details']}"
+        )
+
+        # Assert — JobItem is unchanged (F10 is task-side only; the
+        # JobItem was already terminal when the reconciler observed
+        # the drift). The fix must NOT touch the JobItem.
+        job_after = repository.get("job-f10-1")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DONE.value, (
+            f"F10 correction must NOT modify the JobItem (it's "
+            f"already DONE). Got admission_state="
+            f"{job_after.admission_state}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconciler_cancels_orphan_pending_on_dead_instance(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """F5 fix — Pattern (a) P1 dead-instance branch must cancel
+        the orphan PENDING Task AFTER finalizing the JobItem.
+
+        Pre-fix (verified by code review of
+        ``daemon/services/job_recovery_service.py`` pre-Issue-1):
+        the dead-instance branch finalized the JobItem via
+        ``_finalize_terminal`` but never cancelled the stuck
+        PENDING Task. The pre-fix inline comment claimed
+        "the next reconciler tick will observe the orphan and clean
+        it" — that was incorrect: F10 (Pattern (b)) only inspects
+        RUNNING tasks (``list_running_tasks`` + ``WHERE
+        status='running'`` guard in ``complete_task``), so the
+        orphan PENDING Task was invisible to the reconciler until
+        ``recover_on_startup`` swept it on the next daemon restart.
+
+        Post-fix: Pattern (a) calls
+        ``cancel_pending_tasks_for_instance`` immediately after
+        finalization, transitioning the orphan PENDING to CANCELLED.
+        This test pins the fix — without the new cancel call, the
+        PENDING Task would still be ``pending`` after the reconciler
+        runs and the test would fail.
+        """
+        # Arrange — instance terminal, JobItem active, PENDING task
+        # with NULL heartbeat. Classic P1 dead-instance signature.
+        _insert_instance(engine, "inst-f5-fix", project_id="test-project")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'terminated' "
+                    "WHERE instance_id = 'inst-f5-fix'"
+                )
+            )
+
+        _insert_job_item(
+            engine,
+            job_id="job-f5-fix",
+            instance_id="inst-f5-fix",
+            project_id="test-project",
+            queue_id="queue-f5-fix",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-f5-fix"},
+        )
+
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f5-fix",
+            message_id="msg-f5-fix",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        # Backdate so the task is drift-eligible with age=0.
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :old_time WHERE id = :id"
+                ),
+                {"old_time": old_time, "id": task_id},
+            )
+
+        # Wire the recovery service with the full dep triple.
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # Sanity — task is PENDING before reconciler.
+        pre_task = task_repository.get(task_id)
+        assert pre_task is not None
+        assert pre_task.status == TaskStatus.PENDING.value
+
+        # Act
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # Assert — the JobItem was finalized as FAILED (terminal).
+        job_after = repository.get("job-f5-fix")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DONE.value, (
+            f"F5 dead-instance correction must finalize the JobItem "
+            f"to DONE. Got admission_state={job_after.admission_state}"
+        )
+        assert job_after.terminal_reason == "failed"
+
+        # Assert — the orphan PENDING Task is now CANCELLED (NOT
+        # left PENDING — this is the F5 fix's whole point). F10 only
+        # handles RUNNING tasks, so without the
+        # ``cancel_pending_tasks_for_instance`` call in Pattern (a)
+        # the task would still be PENDING here.
+        post_task = task_repository.get(task_id)
+        assert post_task is not None
+        assert post_task.status == TaskStatus.CANCELLED.value, (
+            f"F5 dead-instance correction MUST cancel the orphan "
+            f"PENDING Task on the dead instance. Pre-fix the task "
+            f"stayed PENDING because F10 only inspects RUNNING tasks "
+            f"and the inline comment claiming 'next reconciler tick "
+            f"will clean it' was incorrect. Got status="
+            f"{post_task.status!r}"
+        )
+
+        # Assert — a P1_dead_instance detail record was added.
+        dead_instance_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "P1_dead_instance"
+            and d.get("job_id") == "job-f5-fix"
+        ]
+        assert dead_instance_records, (
+            f"Reconciler must record a P1_dead_instance detail for "
+            f"job-f5-fix. Got details: {stats['details']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconciler_catches_orphan_pending_with_terminal_jobitem(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """Pattern (d) — orphan PENDING Task on terminal JobItem.
+
+        Scenario: the JobItem has already been finalized to
+        ``done`` (e.g. via the retry engine flipping the JobItem
+        to ``done``/``dead``) but a PENDING Task row survives on
+        the same instance. This can occur in:
+
+          * Pre-F5 deployments (Pattern (a) skipped the cancel).
+          * Drift scenarios where the JobItem closed without the
+            ``cancel_pending_tasks_for_instance`` (F12) path firing.
+          * Test / migration paths that finalize the JobItem but
+            leave a stray PENDING behind.
+
+        F10 only inspects RUNNING tasks (``list_running_tasks`` +
+        ``WHERE status='running'`` guard in ``complete_task``) — a
+        PENDING task is invisible to it. Without Pattern (d), this
+        orphan would leak until ``recover_on_startup`` on the next
+        daemon restart.
+
+        Pattern (d) catches the orphan PENDING whose JobItem is
+        ``done`` (any instance state — alive or dead) and cancels
+        it via ``cancel_pending_tasks_for_instance`` (the atomic
+        ``WHERE status='pending'`` UPDATE used by F12).
+
+        Setup: instance RUNNING (alive), JobItem DONE (terminal),
+        PENDING Task with NULL heartbeat on the instance. The
+        instance is alive — this distinguishes Pattern (d) from
+        Pattern (a), which only fires on dead instances.
+        """
+        # Arrange — instance alive, JobItem terminal (done), PENDING
+        # task on the instance.
+        _insert_instance(engine, "inst-f5-orphan", project_id="test-project")
+        # Default status is 'running' (alive) — leaves Pattern (a)
+        # alone (alive-instance log-only branch). Pattern (d) is
+        # the only path that catches this orphan.
+
+        _insert_job_item(
+            engine,
+            job_id="job-f5-orphan",
+            instance_id="inst-f5-orphan",
+            project_id="test-project",
+            queue_id="queue-f5-orphan",
+            admission_state=AdmissionState.DONE.value,
+            job_metadata={"message_id": "msg-f5-orphan"},
+        )
+
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f5-orphan",
+            message_id="msg-f5-orphan",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        # Backdate so the task is drift-eligible with age=0.
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :old_time WHERE id = :id"
+                ),
+                {"old_time": old_time, "id": task_id},
+            )
+
+        # Wire the recovery service with the full dep triple.
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # Sanity — task is PENDING, JobItem is terminal.
+        pre_task = task_repository.get(task_id)
+        assert pre_task is not None
+        assert pre_task.status == TaskStatus.PENDING.value
+        pre_job = repository.get("job-f5-orphan")
+        assert pre_job is not None
+        assert pre_job.admission_state == AdmissionState.DONE.value
+
+        # Act
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # Assert — the orphan PENDING Task is now CANCELLED.
+        post_task = task_repository.get(task_id)
+        assert post_task is not None
+        assert post_task.status == TaskStatus.CANCELLED.value, (
+            f"Pattern (d) MUST cancel the orphan PENDING Task whose "
+            f"JobItem is terminal. Pre-fix the task stayed PENDING "
+            f"indefinitely (F10 only handles RUNNING tasks). Got "
+            f"status={post_task.status!r}"
+        )
+
+        # Assert — a Pattern (d) detail record was added.
+        orphan_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_pending_terminal_job"
+            and d.get("job_id") == "job-f5-orphan"
+            and d.get("task_id") == task_id
+        ]
+        assert orphan_records, (
+            f"Reconciler must record an orphan_pending_terminal_job "
+            f"detail for task {task_id}. Got details: {stats['details']}"
+        )
+
+        # Assert — the JobItem is NOT touched by Pattern (d)
+        # (it was already terminal — Pattern (d) is task-side only).
+        job_after = repository.get("job-f5-orphan")
+        assert job_after is not None
+        assert job_after.admission_state == AdmissionState.DONE.value, (
+            f"Pattern (d) must NOT modify the JobItem (it's already "
+            f"DONE). Got admission_state={job_after.admission_state}"
+        )
+
+        # Assert — at least one Pattern (d) correction was applied.
+        pattern_d_corrections = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_pending_terminal_job"
+        ]
+        assert len(pattern_d_corrections) >= 1, (
+            f"Reconciler must apply at least one Pattern (d) "
+            f"correction for the orphan PENDING task. Got stats: "
+            f"{stats}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reconciler_pattern_d_leaves_alive_instance_pending_alone(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """Pattern (d) negative case: PENDING Task on a LIVE
+        JobItem (``active``) MUST NOT be cancelled by Pattern (d).
+
+        ``admission_state='active'`` is the canonical P1 candidate
+        — Pattern (a) handles it (alive-instance log-only branch).
+        Pattern (d) requires ``admission_state='done'``. This test
+        confirms the two patterns don't double-handle / step on
+        each other: an alive-instance active JobItem with a stuck
+        PENDING Task gets a ``P1_alive_instance_log`` record, no
+        ``orphan_pending_terminal_job`` record, and the PENDING
+        Task survives (awaiting natural claim).
+        """
+        # Arrange — instance alive (default 'running'), JobItem
+        # active (P1 candidate), PENDING task.
+        _insert_instance(engine, "inst-f5-active-pending", project_id="test-project")
+
+        _insert_job_item(
+            engine,
+            job_id="job-f5-active-pending",
+            instance_id="inst-f5-active-pending",
+            project_id="test-project",
+            queue_id="queue-f5-active-pending",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-f5-active-pending"},
+        )
+
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-f5-active-pending",
+            message_id="msg-f5-active-pending",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        # Backdate so the task is drift-eligible with age=0.
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :old_time WHERE id = :id"
+                ),
+                {"old_time": old_time, "id": task_id},
+            )
+
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # Act
+        stats = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # Assert — Pattern (a) alive-instance log-only branch fired.
+        alive_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "P1_alive_instance_log"
+            and d.get("job_id") == "job-f5-active-pending"
+        ]
+        assert alive_records, (
+            f"Pattern (a) alive-instance branch must record a "
+            f"P1_alive_instance_log for the active JobItem + stuck "
+            f"PENDING. Got details: {stats['details']}"
+        )
+
+        # Assert — Pattern (d) did NOT cancel the task (JobItem is
+        # active, not done).
+        post_task = task_repository.get(task_id)
+        assert post_task is not None
+        assert post_task.status == TaskStatus.PENDING.value, (
+            f"Pattern (d) must NOT cancel a PENDING Task on an "
+            f"active JobItem (alive instance awaiting natural "
+            f"claim). Got status={post_task.status!r}"
+        )
+
+        # Assert — no orphan_pending_terminal_job record for this
+        # job (Pattern d only fires on terminal JobItems).
+        orphan_records = [
+            d for d in stats["details"]
+            if d.get("pattern") == "orphan_pending_terminal_job"
+            and d.get("job_id") == "job-f5-active-pending"
+        ]
+        assert not orphan_records, (
+            f"Pattern (d) must NOT fire on an active JobItem. Got "
+            f"orphan_pending_terminal_job records: {orphan_records}"
         )

@@ -403,8 +403,10 @@ class JobRepository:
             job = db_session.exec(stmt).first()
             return job
 
-    def get_active_by_instance(self, instance_id: str) -> JobItem | None:
-        """Get the most recent active (QUEUED or ACTIVE) job for an instance.
+    def get_active_by_instance(
+        self, instance_id: str, job_id: str | None = None
+    ) -> JobItem | None:
+        """Get the active (QUEUED or ACTIVE) job for an instance.
 
         Filters on ``admission_state`` (not ``status``) so callers see jobs in
         any admission-active state regardless of status mirror value. Excludes
@@ -412,12 +414,30 @@ class JobRepository:
         ``DEAD_LETTER``) and soft-deleted rows. Used by callers that need to
         find the current live job — never a historical one.
 
+        F13 (defer-seam bugfix Phase 3): when ``job_id`` is provided, resolve
+        by exact ``JobItem.job_id`` rather than the freshest-by-``created_at``
+        ordering. This prevents the observer from finalizing the WRONG
+        sibling when two ACTIVE JobItems exist for the same instance (a
+        legitimate state from manual DB ops, mock writes, or revive races
+        where the freshly-created ACTIVE JobItem is the live one and the
+        older JobItem is a leftover).
+
+        When ``job_id`` is ``None`` (the legacy path), the freshest-by-
+        ``created_at`` ordering is preserved for backward compatibility —
+        callers that do not know the exact ID continue to get the most
+        recently created ACTIVE JobItem.
+
         Args:
             instance_id: Instance identifier.
+            job_id: Optional exact ``JobItem.job_id`` to resolve. When
+                provided, the query filters on this exact ID (in addition
+                to the active-state filters). When ``None``, falls back
+                to the freshest-by-``created_at`` ordering.
 
         Returns:
-            Most recent active non-deleted JobItem matching ``instance_id``, or
-            ``None`` if none exists.
+            Active non-deleted JobItem matching ``instance_id`` (and, when
+            ``job_id`` is provided, matching the exact ``job_id``). Returns
+            ``None`` when no such row exists.
         """
         with SQLModelSession(self.engine) as db_session:
             stmt = (
@@ -427,8 +447,18 @@ class JobRepository:
                 .where(JobItem.admission_state.in_(
                     [AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]
                 ))
-                .order_by(JobItem.created_at.desc(), JobItem.job_id)
             )
+            if job_id is not None:
+                # F13: resolve by exact ID — the queried JobItem is
+                # the only candidate, so created_at ordering is
+                # irrelevant. This avoids the wrong-sibling bug
+                # where a freshest-by-created_at lookup would
+                # shadow a freshly-created ACTIVE JobItem with an
+                # older sibling.
+                stmt = stmt.where(JobItem.job_id == job_id)
+                return db_session.exec(stmt).first()
+            # Legacy path: freshest-by-created_at ordering preserved.
+            stmt = stmt.order_by(JobItem.created_at.desc(), JobItem.job_id)
             return db_session.exec(stmt).first()
 
     def find_by_idempotency_key(self, idempotency_key: str) -> JobItem | None:

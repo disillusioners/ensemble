@@ -44,9 +44,10 @@ class JobRetryEngine:
         config: JobSystemConfig,
         job_queue_service: Any = None,
         loop: asyncio.AbstractEventLoop | None = None,
+        task_repo: Any = None,
     ):
         """Initialize the JobRetryEngine.
-        
+
         Args:
             job_repo: Repository for job persistence.
             queue_repo: Repository for queue metadata.
@@ -54,6 +55,12 @@ class JobRetryEngine:
             config: Job system configuration.
             job_queue_service: Optional JobQueueService for watcher notifications.
             loop: Optional event loop for async notifications.
+            task_repo: Optional TaskRepository used by the F12 fix to
+                cancel stale PENDING tasks on the retried instance
+                before re-admission. Defaults to ``None`` (F12 cancel
+                becomes a no-op for older wirings — the test suite
+                wires the real repo, and ``daemon/api.py`` is updated
+                to pass it).
         """
         self._job_repo = job_repo
         self._queue_repo = queue_repo
@@ -61,6 +68,7 @@ class JobRetryEngine:
         self._config = config
         self._job_queue_service = job_queue_service
         self._loop = loop
+        self._task_repo = task_repo
     
     def calculate_backoff(self, retry_count: int, config: JobSystemConfig = None) -> float:
         """Calculate backoff delay in seconds using exponential backoff + jitter.
@@ -334,6 +342,73 @@ class JobRetryEngine:
                     job_id,
                 )
                 return None
+
+            # F12 fix (Phase 3, 2026-07-01): cancel stale PENDING
+            # tasks on the retried instance BEFORE the orchestrator
+            # calls ``start_job`` to spawn a fresh instance/Task.
+            # ``atomic_retry`` above flipped the JobItem back to
+            # ``queued``; the downstream caller will then call
+            # ``start_job`` to mint a new Task and drive
+            # ``graph.astream`` for this instance. A leftover
+            # PENDING retry child on the same ``instance_id`` would
+            # otherwise survive — ``claim_pending_task``'s
+            # per-instance guard blocks only RUNNING tasks, not
+            # PENDING ones, so the stale PENDING and the fresh retry
+            # Task can both become claimable and contest the same
+            # LangGraph checkpoint (``thread_id`` = ``instance_id``
+            # in the Postgres checkpointer; two concurrent
+            # ``astream`` calls shadow each other's channel writes).
+            #
+            # Ordering: this cancel MUST happen between
+            # ``atomic_retry`` (which unblocks the queue entry) and
+            # ``start_job`` (which creates the new Task). Doing the
+            # cancel AFTER ``start_job`` is too late — the new Task
+            # is already claimable. Doing it BEFORE ``atomic_retry``
+            # is also wrong — the stale PENDING is still in the
+            # same instance's task table as the previous retry's
+            # child, and the cancel would race against
+            # ``claim_pending_task``'s read of that row.
+            #
+            # ``task_repo`` is optional in the constructor (older
+            # wirings pre-F12 leave it ``None``); when absent we log
+            # a WARNING and skip the cancel — better than crashing,
+            # but the F12 invariant is unenforced until the wiring
+            # is updated (see ``daemon/api.py``).
+            if self._task_repo is not None and updated_job.instance_id:
+                try:
+                    cancelled_count = self._task_repo.cancel_pending_tasks_for_instance(
+                        updated_job.instance_id
+                    )
+                    if cancelled_count > 0:
+                        logger.info(
+                            "F12 fix: cancelled %d stale PENDING task(s) "
+                            "on instance %s before retry re-admission of job %s",
+                            cancelled_count,
+                            updated_job.instance_id,
+                            job_id,
+                        )
+                except Exception as e:
+                    # Best-effort — log and continue. The retry
+                    # transition already committed; a failed
+                    # cancel here leaves the stale PENDING Task in
+                    # place (the F12 invariant is unenforced for
+                    # this one retry), but the JobItem is in a
+                    # valid queued state and the next
+                    # ``_process_next_job`` tick will resolve the
+                    # orphan via the existing recovery paths.
+                    logger.warning(
+                        "F12 fix: cancel_pending_tasks_for_instance "
+                        "failed for instance %s on job %s: %s",
+                        updated_job.instance_id,
+                        job_id,
+                        e,
+                    )
+            elif self._task_repo is None:
+                logger.debug(
+                    "JobRetryEngine.maybe_retry: task_repo not wired; "
+                    "F12 stale-PENDING cancel is a no-op for job %s",
+                    job_id,
+                )
 
             logger.info(
                 f"Job {job_id} scheduled for retry (attempt {updated_job.retry_count}), "
