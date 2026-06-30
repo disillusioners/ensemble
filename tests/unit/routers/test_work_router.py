@@ -519,6 +519,12 @@ class TestSerialization:
         as ``None`` for Task-backed rows (the timing data lives on the
         Instance, which the Task-side view-model doesn't model in
         Phase 1).
+
+        Phase 1 (F1, defer-seam bugfix): ``message_id`` was added to
+        the :class:`WorkRecord` and surfaces on the wire as the
+        cross-system correlation key. ``None`` for legacy rows that
+        pre-date the F1 fix; UUID strings for rows stamped at
+        enqueue time.
         """
         # Result is a JSON object — WorkResolverService's
         # ``_parse_task_result_summary`` re-serialises non-string JSON
@@ -541,6 +547,10 @@ class TestSerialization:
             # sourced from the joined Instance. ``None`` on Task rows.
             "started_at",
             "completed_at",
+            # Phase 1 F1 (defer-seam bugfix): cross-system correlation
+            # key. ``None`` on legacy rows that pre-date the F1 fix;
+            # UUID strings on rows stamped at enqueue time.
+            "message_id",
         }
         assert item["kind"] == "turn"
         assert item["result_summary"] == '{"output": "hello"}'

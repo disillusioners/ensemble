@@ -799,3 +799,181 @@ class TestLockReleaseScopedPerJob:
             "release_by_job with no matching job_id must not release "
             "any lock."
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 8: F4/F7 — _finalize_terminal scopes lock release per job (Phase 2)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestFinalizeTerminalLockIsolation:
+    """Phase 2 F4/F7 fix (2026-07-01): ``JobQueueService._finalize_terminal``
+    must scope lock release to the specific ``(project_id, queue_id,
+    job_id)`` triple, NOT the entire instance. The previous implementation
+    called ``release_by_instance`` unconditionally in its ``finally``
+    block, deleting locks belonging to ALL jobs on the instance — a
+    sibling job (different queue, different job_id) lost its lock every
+    time any job's terminalization ran on the same instance, causing
+    over-admission past concurrency limits.
+
+    The unit-level ``TestLockReleaseScopedPerJob`` (above) pins the
+    ``LockRepository.release_by_job`` primitive. This test class pins
+    the end-to-end behaviour: when ``_finalize_terminal`` runs with
+    ``_dispatch_skipped=True`` (the queued-but-never-dispatched path)
+    OR with a fully-populated ``(project_id, queue_id, job_id)`` triple
+    (the active-job path), the only lock that gets deleted is the
+    target job's lock. Sibling-job locks survive.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cancel_queued_job_does_not_release_sibling_lock(
+        self, engine, repository, lock_manager, job_queue_service, lock_repo
+    ):
+        """Cancelling a QUEUED JobB (never dispatched, holds no lock)
+        on the same instance as ACTIVE JobA (holds a lock) must NOT
+        delete JobA's lock.
+
+        Pre-fix: ``_finalize_terminal``'s ``finally`` block called
+        ``release_by_instance(canonical_instance_id)`` unconditionally.
+        With JobB's instance_id matching JobA's, the bug deleted
+        JobA's lock — opening the slot for over-admission.
+
+        Post-fix: when ``_dispatch_skipped=True`` (queued job, never
+        acquired a lock), the ``finally`` block is a no-op. JobA's
+        lock survives.
+        """
+        # Arrange — instance shared by JobA and JobB
+        _insert_instance(engine, "inst-f47-1", project_id="test-project")
+
+        # JobA: ACTIVE state, holds a lock via lock_manager
+        _insert_job_item(
+            engine,
+            job_id="job-A",
+            instance_id="inst-f47-1",
+            project_id="test-project",
+            queue_id="queue-A",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-A"},
+        )
+        acquired = await lock_manager.acquire_queue_lock(
+            project_id="test-project",
+            queue_id="queue-A",
+            job_id="job-A",
+            instance_id="inst-f47-1",
+            concurrency_limit=1,
+        )
+        assert acquired is True, "JobA must have acquired its lock"
+
+        # JobB: QUEUED state, no lock, same instance as JobA
+        _insert_job_item(
+            engine,
+            job_id="job-B",
+            instance_id="inst-f47-1",
+            project_id="test-project",
+            queue_id="queue-B",
+            admission_state=AdmissionState.QUEUED.value,
+            job_metadata={"message_id": "msg-B"},
+        )
+
+        # Sanity — only JobA's lock is in the DB
+        locks_before = lock_repo.get_locks_by_instance("inst-f47-1")
+        assert len(locks_before) == 1
+        assert locks_before[0].job_id == "job-A"
+
+        # Act — cancel JobB (queued). This routes through
+        # ``_finalize_terminal`` with ``_dispatch_skipped=True``.
+        result = await job_queue_service.cancel_job("job-B")
+        assert result is True, "cancel_job should return True for queued job"
+
+        # Assert — JobA's lock MUST survive.
+        # Pre-fix this would be empty (the bug).
+        locks_after = lock_repo.get_locks_by_instance("inst-f47-1")
+        remaining_job_ids = {lk.job_id for lk in locks_after}
+        assert remaining_job_ids == {"job-A"}, (
+            "cancel_job(JobB) must not delete JobA's lock — "
+            f"_finalize_terminal's finally block must be a no-op when "
+            f"_dispatch_skipped=True. Locks remaining: {remaining_job_ids}"
+        )
+
+        # Assert — JobB transitioned to terminal (cancellation succeeded)
+        job_b_after = repository.get("job-B")
+        assert job_b_after is not None
+        assert job_b_after.admission_state == AdmissionState.DONE.value
+
+    @pytest.mark.asyncio
+    async def test_cancel_active_job_releases_only_its_own_lock(
+        self, engine, repository, lock_manager, job_queue_service, lock_repo
+    ):
+        """Cancelling ACTIVE JobA releases ONLY JobA's lock, not
+        JobB's lock (different queue, different job_id).
+
+        Pre-fix: ``_finalize_terminal``'s ``finally`` block called
+        ``release_by_instance(canonical_instance_id)``, deleting
+        JobB's lock too.
+
+        Post-fix: ``_finalize_terminal`` calls
+        ``release_queue_lock(canonical_project_id, canonical_queue_id,
+        canonical_job_id)`` (which delegates to
+        ``LockRepository.release_by_job``). The DELETE is scoped to the
+        ``(project_id, queue_id, job_id)`` triple; JobB's lock (same
+        instance, different queue+job_id) is untouched.
+        """
+        # Arrange — single instance, two queues, both active jobs
+        _insert_instance(engine, "inst-f47-2", project_id="test-project")
+
+        # JobA: ACTIVE state, queue-A, holds a lock
+        _insert_job_item(
+            engine,
+            job_id="job-A2",
+            instance_id="inst-f47-2",
+            project_id="test-project",
+            queue_id="queue-A2",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-A2"},
+        )
+        acquired_a = await lock_manager.acquire_queue_lock(
+            project_id="test-project",
+            queue_id="queue-A2",
+            job_id="job-A2",
+            instance_id="inst-f47-2",
+            concurrency_limit=1,
+        )
+        assert acquired_a is True
+
+        # JobB: ACTIVE state, queue-B (different queue!), holds a lock
+        _insert_job_item(
+            engine,
+            job_id="job-B2",
+            instance_id="inst-f47-2",
+            project_id="test-project",
+            queue_id="queue-B2",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-B2"},
+        )
+        acquired_b = await lock_manager.acquire_queue_lock(
+            project_id="test-project",
+            queue_id="queue-B2",
+            job_id="job-B2",
+            instance_id="inst-f47-2",
+            concurrency_limit=1,
+        )
+        assert acquired_b is True
+
+        # Sanity — both locks exist
+        locks_before = lock_repo.get_locks_by_instance("inst-f47-2")
+        assert {lk.job_id for lk in locks_before} == {"job-A2", "job-B2"}
+
+        # Act — cancel JobA. This routes through ``_finalize_terminal``
+        # with the canonical ``(project_id, queue_id, job_id)`` triple
+        # all populated. The ``finally`` block must use scoped release.
+        await job_queue_service.cancel_job("job-A2")
+
+        # Assert — only JobA's lock is gone; JobB's lock survives.
+        # Pre-fix this would be empty (both locks deleted).
+        locks_after = lock_repo.get_locks_by_instance("inst-f47-2")
+        remaining = {lk.job_id for lk in locks_after}
+        assert remaining == {"job-B2"}, (
+            "cancel_job(JobA) must delete only JobA's lock via scoped "
+            "release_by_job — JobB's lock must survive. "
+            f"Locks remaining: {remaining}"
+        )

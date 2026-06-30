@@ -2214,6 +2214,97 @@ class InstanceManager:
                 else:
                     raise
 
+        # ── Phase 7c (continued) / Bug F3: backfill NULL terminal_reason ──
+        # Bug F3 fix (Phase 2 of defer-seam bugfix, 2026-06-30): the
+        # ``list_work(status="completed")`` / ``"failed"`` / ``"cancelled"``
+        # filters now consult ``terminal_reason`` on the
+        # ``admission_state='done'`` path. Rows that pre-date the F3
+        # fix may still have ``terminal_reason IS NULL`` even though
+        # they are in a terminal state — those rows would silently
+        # vanish from the F3 status filter (only ``completed`` would
+        # see them via the ``OR terminal_reason IS NULL`` clause; the
+        # ``failed`` and ``cancelled`` filters would drop them
+        # entirely).
+        #
+        # Backfill rule (per F3 spec):
+        #   * If ``error_message IS NOT NULL AND error_message != ''``:
+        #     set ``terminal_reason = 'failed'`` (the row had a
+        #     non-empty legacy error message, so it almost certainly
+        #     terminated via the FAILED path).
+        #   * Otherwise: set ``terminal_reason = 'completed'`` (the
+        #     default for NULL ``terminal_reason`` rows per the legacy
+        #     ``done → completed`` map in
+        #     ``_ADMISSION_TO_LEGACY_STATUS``).
+        #
+        # Both statements are gated on ``admission_state='done' AND
+        # terminal_reason IS NULL`` so re-runs are idempotent — once a
+        # row has its ``terminal_reason`` populated, subsequent runs
+        # skip it.
+        #
+        # On Phase 5+ databases ``error_message`` was DROPPED — the
+        # first UPDATE would raise ``UndefinedColumn``. The same
+        # try/except pattern used for the ``legacy_status_backfill``
+        # above catches that and silently skips the statement so
+        # Phase 5+ databases still backfill NULLs to ``completed``
+        # (the safe default — better to surface under ``completed``
+        # than to vanish entirely). On pre-Phase-5 databases the
+        # error-message-aware UPDATE runs and stamps ``failed`` where
+        # the legacy error_message was non-empty.
+        terminal_reason_backfill = [
+            # Pre-Phase-5 legacy backfill: rows with a non-empty
+            # legacy ``error_message`` are stamped as 'failed'. The
+            # ``error_message`` column is dropped by Phase 5; the
+            # try/except below silently skips this UPDATE on Phase 5+
+            # databases so the second UPDATE (default to 'completed')
+            # is the sole backfill.
+            "UPDATE job_queue_items SET terminal_reason = 'failed' "
+            "WHERE admission_state = 'done' AND terminal_reason IS NULL "
+            "AND error_message IS NOT NULL AND error_message != ''",
+            # Phase 5+ safe-default backfill: any remaining NULLs
+            # (rows that survived the Phase 5 drop without ever having
+            # ``terminal_reason`` populated) are stamped as
+            # 'completed'. This matches the lossy legacy ``done →
+            # completed`` mapping the resolver uses for rows that
+            # don't have ``terminal_reason`` set.
+            "UPDATE job_queue_items SET terminal_reason = 'completed' "
+            "WHERE admission_state = 'done' AND terminal_reason IS NULL",
+        ]
+        for stmt in terminal_reason_backfill:
+            try:
+                with self._engine.begin() as conn:
+                    conn.execute(text(stmt))
+            except sqlalchemy.exc.ProgrammingError as tr_err:
+                err_msg = str(tr_err).lower()
+                if "does not exist" in err_msg or "undefinedcolumn" in err_msg:
+                    logger.debug(
+                        "Legacy `error_message` column already dropped "
+                        "(Phase 5+); skipping terminal_reason backfill "
+                        "statement: %s",
+                        stmt[:80],
+                    )
+                else:
+                    raise
+            except sqlalchemy.exc.InternalError as tr_err:
+                # ``InFailedSqlTransaction`` from psycopg arrives as
+                # ``InternalError`` (not ``ProgrammingError``) when a
+                # prior statement in this batch aborted the
+                # transaction. Treat the same as ``UndefinedColumn``.
+                err_msg = str(tr_err).lower()
+                if (
+                    "does not exist" in err_msg
+                    or "undefinedcolumn" in err_msg
+                    or "infailedsqltransaction" in err_msg
+                    or "current transaction is aborted" in err_msg
+                ):
+                    logger.debug(
+                        "Legacy `error_message` column already dropped "
+                        "(Phase 5+); skipping terminal_reason backfill "
+                        "statement: %s",
+                        stmt[:80],
+                    )
+                else:
+                    raise
+
     def _ensure_postgres_drop_legacy_columns(self) -> None:
         """Drop the legacy completion-state columns on PostgreSQL.
 

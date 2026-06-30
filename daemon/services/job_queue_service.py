@@ -1419,20 +1419,77 @@ class JobQueueService:
                     final_status = "dead_letter"
         finally:
             # ── Step 3: release lock (always, even on error) ────────
-            # Use release_by_instance to clean up regardless of whether
-            # the lock was acquired via the queue_id path or the
-            # synthesized project:{project_id} path — both write
-            # ``job_locks`` rows keyed by instance_id.
-            if canonical_instance_id:
+            # F4/F7 fix: scope lock release to the specific
+            # ``(project_id, queue_id, job_id)`` triple, NOT the whole
+            # instance. The previous ``release_by_instance`` call
+            # deleted EVERY lock for the instance — including locks
+            # held by sibling jobs (other queues, other jobs) — which
+            # caused over-admission past concurrency limits when a
+            # job's terminalization on the instance coincided with
+            # other in-flight jobs.
+            #
+            # Three paths:
+            #
+            # 1. ``_dispatch_skipped=True``: job never held a lock
+            #    (e.g. queued-but-not-dispatched). No lock to release.
+            # 2. ``canonical_project_id`` AND ``canonical_queue_id``
+            #    AND ``canonical_job_id`` populated: scoped release
+            #    via ``release_queue_lock`` (which delegates to
+            #    ``LockRepository.release_by_job``).
+            # 3. Virtual job (``canonical_job_id is None``) OR
+            #    JobItem missing ``project_id``/``queue_id``: fall
+            #    back to ``release_by_instance`` with a WARNING.
+            #    Virtual jobs (post-D13, dispatched directly via the
+            #    Task table) never hold a per-queue lock, so a
+            #    per-instance sweep is harmless for them; the
+            #    fallback exists for defense-in-depth and the
+            #    JobItem-corrupt edge case.
+            if _dispatch_skipped:
+                # Path 1: queued / never-dispatched. Nothing to release.
+                pass
+            elif (
+                canonical_job_id is not None
+                and canonical_project_id
+                and canonical_queue_id
+            ):
+                # Path 2: scoped release — only THIS job's lock is
+                # deleted; sibling jobs' locks survive.
                 try:
-                    await self._lock_manager.release_by_instance(
-                        canonical_instance_id
+                    await self._lock_manager.release_queue_lock(
+                        canonical_project_id,
+                        canonical_queue_id,
+                        canonical_job_id,
                     )
                 except Exception as e:
                     logger.warning(
                         f"_finalize_terminal: failed to release lock "
-                        f"for instance {canonical_instance_id[:8]}...: {e}"
+                        f"for job {canonical_job_id[:8]}...: {e}"
                     )
+            else:
+                # Path 3: virtual job OR JobItem missing
+                # project_id/queue_id. Fall back to instance-wide
+                # release — this preserves the legacy
+                # ``release_by_instance`` semantics for callers that
+                # supply no concrete ``(project_id, queue_id,
+                # job_id)`` triple.
+                if canonical_instance_id:
+                    logger.warning(
+                        f"_finalize_terminal: falling back to "
+                        f"release_by_instance (canonical_job_id="
+                        f"{canonical_job_id!r}, "
+                        f"project_id={canonical_project_id!r}, "
+                        f"queue_id={canonical_queue_id!r})"
+                    )
+                    try:
+                        await self._lock_manager.release_by_instance(
+                            canonical_instance_id
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"_finalize_terminal: failed to release "
+                            f"lock for instance "
+                            f"{canonical_instance_id[:8]}...: {e}"
+                        )
 
         if _dispatch_skipped:
             # Return the no-op signal so the caller falls back to
@@ -2348,12 +2405,16 @@ class JobQueueService:
         """
         # Locate the job (same logic as the async version).
         canonical_job_id: str | None = None
+        canonical_project_id: str | None = None
+        canonical_queue_id: str | None = None
         canonical_instance_id: str | None = instance_id
 
         if job_id is not None:
             job = self._repository.get(job_id)
             if job is not None:
                 canonical_job_id = job.job_id
+                canonical_project_id = job.project_id
+                canonical_queue_id = job.queue_id
                 if job.instance_id:
                     canonical_instance_id = job.instance_id
         else:
@@ -2361,6 +2422,8 @@ class JobQueueService:
             for candidate in jobs:
                 if candidate.admission_state == AdmissionState.ACTIVE.value:
                     canonical_job_id = candidate.job_id
+                    canonical_project_id = candidate.project_id
+                    canonical_queue_id = candidate.queue_id
                     if candidate.instance_id:
                         canonical_instance_id = candidate.instance_id
                     break
@@ -2453,22 +2516,66 @@ class JobQueueService:
                     )
                     final_status = "dead_letter"
         finally:
-            if canonical_instance_id and self._loop and self._loop.is_running():
-                try:
-                    future = asyncio.run_coroutine_threadsafe(
-                        self._lock_manager.release_by_instance(
-                            canonical_instance_id,
-                        ),
-                        self._loop,
-                    )
-                    future.result(timeout=5)
-                except Exception as e:
+            # F4/F7 fix (mirrors the async twin): scope lock release
+            # to the specific ``(project_id, queue_id, job_id)``
+            # triple. Three paths — see the async ``_finalize_terminal``
+            # for full rationale.
+            if _dispatch_skipped:
+                # Path 1: never dispatched. Nothing to release.
+                pass
+            elif (
+                canonical_job_id is not None
+                and canonical_project_id
+                and canonical_queue_id
+            ):
+                # Path 2: scoped release via the manager's
+                # ``release_queue_lock`` (delegates to
+                # ``LockRepository.release_by_job``).
+                if self._loop and self._loop.is_running():
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._lock_manager.release_queue_lock(
+                                canonical_project_id,
+                                canonical_queue_id,
+                                canonical_job_id,
+                            ),
+                            self._loop,
+                        )
+                        future.result(timeout=5)
+                    except Exception as e:
+                        logger.warning(
+                            "_finalize_terminal_sync: lock release "
+                            "failed for job %s: %s",
+                            canonical_job_id[:8],
+                            e,
+                        )
+            else:
+                # Path 3: virtual job OR JobItem missing
+                # project_id/queue_id. Fall back to instance-wide
+                # release (legacy semantics).
+                if canonical_instance_id and self._loop and self._loop.is_running():
                     logger.warning(
-                        "_finalize_terminal_sync: lock release failed for "
-                        "%s: %s",
-                        canonical_instance_id[:8],
-                        e,
+                        "_finalize_terminal_sync: falling back to "
+                        "release_by_instance (canonical_job_id="
+                        f"{canonical_job_id!r}, "
+                        f"project_id={canonical_project_id!r}, "
+                        f"queue_id={canonical_queue_id!r})"
                     )
+                    try:
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._lock_manager.release_by_instance(
+                                canonical_instance_id,
+                            ),
+                            self._loop,
+                        )
+                        future.result(timeout=5)
+                    except Exception as e:
+                        logger.warning(
+                            "_finalize_terminal_sync: lock release failed "
+                            "for %s: %s",
+                            canonical_instance_id[:8],
+                            e,
+                        )
 
         if _dispatch_skipped:
             return canonical_job_id, ""

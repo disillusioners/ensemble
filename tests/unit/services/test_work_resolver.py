@@ -189,6 +189,7 @@ def _seed_task(
     seed_instance: bool = True,
     task_type: str = "process_message",
     is_deferred: bool = False,
+    message_id: str | None = None,
 ) -> str:
     """Insert a ``Task`` row. Returns the ``work_id`` (auto-generated if None).
 
@@ -203,6 +204,12 @@ def _seed_task(
     defer-queue task (Phase 3 Part B1, 2026-06-27): the worker pool's idle
     gate only claims a deferred task once every non-defer queue is empty.
     The default (False) preserves every prior caller's expectations.
+
+    ``message_id`` defaults to ``None`` (the pre-Phase-1-F1 behaviour).
+    Pass an explicit UUID string to exercise the F1 dedup-by-(instance_id,
+    message_id) path — a Task with ``message_id=None`` is NEVER suppressed
+    by the F1 dedup (matches the "Task turns with ``message_id=None`` are
+    NEVER suppressed" spec).
     """
     if seed_instance:
         # Match the resolver's lookup: ``_lookup_instance(task.instance_id)``
@@ -227,7 +234,7 @@ def _seed_task(
             work_id=wid,
             task_type=task_type,
             instance_id=instance_id,
-            message_id=None,
+            message_id=message_id,
             status=status,
             result=result,
             error=error,
@@ -251,6 +258,8 @@ def _seed_job(
     project_id: str | None = "test-project",
     created_at: str | None = None,
     deleted_at: str | None = None,
+    metadata_message_id: str | None = None,
+    terminal_reason: str | None = None,
 ) -> str:
     """Insert a ``JobItem`` row. Returns the ``job_id`` (auto-generated if None).
 
@@ -271,6 +280,21 @@ def _seed_job(
     silently dropped because those columns were removed from the
     JobItem model in Phase B (the resolver surfaces ``None`` for
     these fields; see ``work_resolver._job_to_record``).
+
+    Phase 1 F1: ``metadata_message_id`` stamps ``message_id`` into
+    ``job.job_metadata`` so the resolver's F1 dedup-by-(instance_id,
+    message_id) can match the JobItem against its driving Task turn.
+    Defaults to ``None`` (the pre-Phase-1-F1 behaviour). When ``None``,
+    the JobItem carries an empty metadata dict — equivalent to the
+    pre-Phase-1 state.
+
+    Phase 7c / Bug F3: ``terminal_reason`` sets the
+    ``JobItem.terminal_reason`` discriminator. Defaults to ``None``
+    (the pre-7c / pre-F3 state). Pass ``"completed"`` / ``"failed"``
+    / ``"cancelled"`` to exercise the F3 SQL filter discrimination;
+    pre-7c backfilled rows have ``None`` here (which surfaces under
+    ``status="completed"`` per the F3 ``OR terminal_reason IS NULL``
+    rule).
     """
     admission_tokens = {
         AdmissionState.QUEUED.value,
@@ -284,6 +308,12 @@ def _seed_job(
         admission = status_to_admission(status)
     jid = job_id or str(uuid.uuid4())
     created = created_at or datetime.now(timezone.utc).isoformat()
+    # Build the metadata dict — Phase 1 F1 stamps ``message_id`` here
+    # so the resolver's dedup set picks it up.
+    if metadata_message_id is not None:
+        job_metadata = {"message_id": metadata_message_id}
+    else:
+        job_metadata = {}
     with Session(engine) as s:
         job = JobItem(
             job_id=jid,
@@ -297,7 +327,8 @@ def _seed_job(
             instance_id=instance_id,
             created_at=created,
             deleted_at=deleted_at,
-            job_metadata={},
+            job_metadata=job_metadata,
+            terminal_reason=terminal_reason,
         )
         s.add(job)
         s.commit()
@@ -1047,35 +1078,48 @@ class TestListWorkDedup:
         self, engine, resolver
     ):
         """A JobItem + Task (kind=turn) sharing the same
-        ``instance_id`` → ``list_work`` returns ONLY the JobItem.
+        ``(instance_id, message_id)`` → ``list_work`` returns ONLY
+        the JobItem.
 
         The ``job_create`` flow models this: it inserts a JobItem
         (the handle the orchestrator created and holds) AND a Task
         turn (the message that drove the job) on the same
-        ``instance_id``. Without dedup the virtual-job surface would
-        show two rows for one logical work unit; with P-C(i) it shows
+        ``instance_id``. The JobItem's ``metadata.message_id`` is
+        stamped (Phase 1) with the driving message's UUID4 — the
+        same UUID4 the Task carries on its native ``message_id``
+        column. Without dedup the virtual-job surface would show
+        two rows for one logical work unit; with F1 it shows
         one — the JobItem.
+
+        F1 spec: dedup key is ``(instance_id, message_id)``, NOT
+        just ``instance_id``. So the Task turn must carry the same
+        ``message_id`` as the JobItem's ``metadata.message_id`` for
+        the dedup to fire. A Task with ``message_id=None`` is
+        NEVER suppressed (matches the F1 spec).
         """
         # Seed a single root instance and the pair on it.
         _seed_instance(engine, instance_id="inst-job-pair")
+        driving_message_id = "msg-driving-1"
         jid = _seed_job(
             engine,
             instance_id="inst-job-pair",
             status=AdmissionState.QUEUED.value,
+            metadata_message_id=driving_message_id,
         )
-        # Task turn on the same instance — same logical work unit
-        # from the ``job_create`` flow.
+        # Task turn on the same instance AND same message_id — the
+        # driving message of the ``job_create`` flow.
         _seed_task(
             engine,
             instance_id="inst-job-pair",
             task_type="process_message",
             status=TaskStatus.PENDING.value,
+            message_id=driving_message_id,
         )
 
         records = resolver.list_work()
 
         # Exactly one record back — the JobItem wins, the Task turn
-        # is deduped.
+        # is deduped (matching ``(instance_id, message_id)``).
         assert len(records) == 1
         assert records[0].work_id == jid
         assert records[0].kind == "job"
@@ -1147,13 +1191,14 @@ class TestListWorkDedup:
 
     def test_dedup_works_across_statuses(self, engine, resolver):
         """Dedup holds for BOTH terminal AND non-terminal JobItem
-        statuses.
+        statuses (F1 spec).
 
-        The P-C(i) dedup is keyed only on ``instance_id`` matching —
-        it does not gate on JobItem status. So a JobItem in any
+        The F1 dedup is keyed on the ``(instance_id, message_id)``
+        tuple — NOT on JobItem status alone. So a JobItem in any
         state (pending, processing, paused, completed, failed,
-        cancelled, dead_letter) still shadows a same-instance Task
-        turn. This test exercises the two ends of the terminal /
+        cancelled, dead_letter) still shadows a Task turn whose
+        ``message_id`` matches its ``metadata.message_id``. This
+        test exercises the two ends of the terminal /
         non-terminal spectrum to pin the contract.
         """
         # ── Case A: non-terminal JobItem (processing).
@@ -1162,12 +1207,14 @@ class TestListWorkDedup:
             engine,
             instance_id="inst-processing",
             status=AdmissionState.ACTIVE.value,
+            metadata_message_id="msg-proc",
         )
         _seed_task(
             engine,
             instance_id="inst-processing",
             task_type="process_message",
             status=TaskStatus.RUNNING.value,
+            message_id="msg-proc",
         )
 
         # ── Case B: terminal JobItem (completed).
@@ -1176,12 +1223,15 @@ class TestListWorkDedup:
             engine,
             instance_id="inst-completed",
             status=AdmissionState.DONE.value,
+            metadata_message_id="msg-comp",
+            terminal_reason="completed",
         )
         _seed_task(
             engine,
             instance_id="inst-completed",
             task_type="process_message",
             status=TaskStatus.COMPLETED.value,
+            message_id="msg-comp",
         )
 
         # ── Case C: pending JobItem (also non-terminal).
@@ -1190,18 +1240,21 @@ class TestListWorkDedup:
             engine,
             instance_id="inst-pending",
             status=AdmissionState.QUEUED.value,
+            metadata_message_id="msg-pend",
         )
         _seed_task(
             engine,
             instance_id="inst-pending",
             task_type="process_message",
             status=TaskStatus.PENDING.value,
+            message_id="msg-pend",
         )
 
         records = resolver.list_work()
 
         # One row per instance — the three JobItems won, the three
-        # Task turns were deduped.
+        # Task turns were deduped (matching ``(instance_id,
+        # message_id)`` tuples).
         assert len(records) == 3
         work_ids = {r.work_id for r in records}
         assert work_ids == {jid_processing, jid_completed, jid_pending}
@@ -1227,6 +1280,10 @@ class TestListWorkDedup:
         Instance in ``completed`` state — the WorkRecord surfaces
         ``status="completed"`` (matching the JobItem mirror) and the
         Task's ``running`` status is the one that drifts.
+
+        F1 spec: dedup key is ``(instance_id, message_id)``, so both
+        rows must share the same message_id for the dedup to fire
+        (Task with ``message_id=None`` is never suppressed).
         """
         import logging
         # Phase 1: set the Instance to ``completed`` so the JobItem's
@@ -1235,16 +1292,21 @@ class TestListWorkDedup:
         _seed_instance(engine, instance_id="inst-drift", status="completed")
         # JobItem in COMPLETED (canonical: "completed"). Task turn in
         # RUNNING (canonical: "processing"). The two disagree — drift.
+        # F1: shared message_id so the dedup fires.
+        shared_msg = "msg-drift"
         jid = _seed_job(
             engine,
             instance_id="inst-drift",
             status=AdmissionState.DONE.value,
+            metadata_message_id=shared_msg,
+            terminal_reason="completed",
         )
         wid = _seed_task(
             engine,
             instance_id="inst-drift",
             task_type="process_message",
             status=TaskStatus.RUNNING.value,
+            message_id=shared_msg,
         )
 
         # Capture log records from the resolver's logger.
@@ -1262,8 +1324,9 @@ class TestListWorkDedup:
         assert all(r.work_id != wid for r in records)
 
         # The status drift warning was logged with all three
-        # identifying fields (instance_id, job_status, task_status)
-        # so an operator can pinpoint the offending pair.
+        # identifying fields (instance_id, message_id, job_status,
+        # task_status) so an operator can pinpoint the offending
+        # pair.
         drift_records = [
             rec for rec in caplog.records
             if "status drift detected" in rec.getMessage()
@@ -1274,11 +1337,616 @@ class TestListWorkDedup:
         )
         message = drift_records[0].getMessage()
         assert "instance_id=inst-drift" in message
+        assert f"message_id={shared_msg}" in message
         assert "JobItem status=completed" in message
         # Task RUNNING canonicalises to "processing" — assert the
         # canonical value (what ``list_work`` actually compares), not
         # the source Task.status string.
         assert "Task status=processing" in message
+
+
+# ─── F1: list_work dedup-by-message_id (Phase 1 of defer-seam bugfix) ──────
+# Bug F1: pre-F1 ``list_work`` matched Task turns to JobItems by
+# ``instance_id`` ONLY. A standalone message Task (T2) on an instance
+# that also has a JobItem (J) caused BOTH the driving Task (T1) AND
+# T2 to be dropped from the work surface — the JobItem's instance_id
+# shadowed T2 even though T2 was a different logical message.
+#
+# F1 fix: dedup key is ``(instance_id, message_id)``. Task turns with
+# ``message_id=None`` are NEVER suppressed (they can't match). The
+# spec test seeds:
+#   * JobItem J (with metadata.message_id = msg1)
+#   * Task T1 (message_id = msg1, driving message of the job_create)
+#   * Task T2 (message_id = msg2, standalone follow-up POST /messages)
+# And verifies both T1 (suppressed by J) and T2 (kept) appear in
+# ``list_work(instance_id=I)``.
+
+
+class TestListWorkDedupByMessageId:
+    """F1: ``list_work`` dedupes Task turns whose ``(instance_id,
+    message_id)`` tuple matches a JobItem's. Task turns with
+    ``message_id=None`` are NEVER suppressed.
+
+    The seed model is the production ``job_create`` + ``POST /messages``
+    sequence:
+
+    1. ``job_create(project)`` creates instance I, JobItem J (the
+       orchestrator's handle), and the driving message Task T1 with
+       ``message_id = msg1``. J's ``metadata.message_id`` is also
+       stamped to ``msg1`` (``stamp_message_id`` in Phase 1).
+    2. Later, ``POST /messages`` on I creates Task T2 with
+       ``message_id = msg2``. There is NO JobItem for T2 — it's
+       a standalone message on the same instance.
+
+    Pre-F1, ``list_work(instance_id=I)`` returned ONLY the JobItem
+    (T1 suppressed by ``instance_id`` match; T2 wrongly suppressed
+    too because it shared the same ``instance_id``). F1 must return
+    BOTH the JobItem (T1 may be suppressed by J but is also fine to
+    surface via J) AND T2.
+    """
+
+    def test_f1_job_create_with_standalone_followup_message(
+        self, engine, resolver
+    ):
+        """The F1 spec test: ``list_work(instance_id=I)`` returns BOTH
+        the JobItem J AND the standalone Task T2.
+
+        Seed:
+          * Instance I
+          * JobItem J (metadata.message_id = msg1)
+          * Task T1 (message_id = msg1, driving message of job_create)
+          * Task T2 (message_id = msg2, standalone POST /messages)
+
+        Expected result: 2 records — J (kind=job) and T2 (kind=turn).
+        T1 is suppressed (its ``(instance_id, message_id)`` matches
+        J's tuple), T2 is kept (different message_id).
+        """
+        _seed_instance(engine, instance_id="inst-f1")
+        msg1 = "msg-driving"
+        msg2 = "msg-followup"
+
+        # JobItem J with metadata.message_id = msg1 (stamped at
+        # job_create end-of-enqueue).
+        jid = _seed_job(
+            engine,
+            instance_id="inst-f1",
+            status=AdmissionState.QUEUED.value,
+            metadata_message_id=msg1,
+        )
+
+        # Task T1 — the driving message of the job_create, with
+        # matching message_id (so it gets deduped by J).
+        _seed_task(
+            engine,
+            instance_id="inst-f1",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+            message_id=msg1,
+        )
+
+        # Task T2 — the standalone follow-up POST /messages with
+        # a DIFFERENT message_id (so it survives the F1 dedup).
+        t2_wid = _seed_task(
+            engine,
+            instance_id="inst-f1",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+            message_id=msg2,
+        )
+
+        records = resolver.list_work(instance_id="inst-f1")
+
+        # Two records: JobItem J + standalone Task T2.
+        assert len(records) == 2
+        work_ids = {r.work_id for r in records}
+        assert work_ids == {jid, t2_wid}
+        # The standalone Task must surface (the F1 spec requirement).
+        assert any(r.kind == "turn" and r.work_id == t2_wid for r in records)
+        # The JobItem must surface.
+        assert any(r.kind == "job" and r.work_id == jid for r in records)
+
+    def test_f1_standalone_task_with_none_message_id_never_suppressed(
+        self, engine, resolver
+    ):
+        """A Task turn with ``message_id=None`` is NEVER suppressed by
+        a JobItem on the same instance (F1 spec).
+
+        Pre-F1 this would have wrongly dropped the Task. Under F1 the
+        Task with ``message_id=None`` can never match a JobItem's
+        ``(instance_id, message_id)`` tuple (JobItem-derived tuples
+        only carry non-None message_ids via the F1 dedup set insert
+        guard), so the Task is always kept.
+        """
+        _seed_instance(engine, instance_id="inst-f1-none")
+        msg1 = "msg-only-job"
+
+        jid = _seed_job(
+            engine,
+            instance_id="inst-f1-none",
+            status=AdmissionState.QUEUED.value,
+            metadata_message_id=msg1,
+        )
+
+        # Task turn with NO message_id (legacy / pre-Phase-1 state).
+        t_wid = _seed_task(
+            engine,
+            instance_id="inst-f1-none",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+            message_id=None,
+        )
+
+        records = resolver.list_work(instance_id="inst-f1-none")
+
+        # Both rows surface — the Task with None message_id is not
+        # suppressed by the JobItem's message_id match.
+        assert len(records) == 2
+        assert {r.work_id for r in records} == {jid, t_wid}
+        assert {r.kind for r in records} == {"job", "turn"}
+
+    def test_f1_task_with_mismatched_message_id_not_suppressed(
+        self, engine, resolver
+    ):
+        """A Task turn whose ``message_id`` DIFFERS from the JobItem's
+        ``metadata.message_id`` is not suppressed (F1 spec).
+
+        The (instance_id, message_id) tuple of the Task does NOT
+        match the JobItem's tuple, so the F1 dedup leaves the Task
+        visible.
+        """
+        _seed_instance(engine, instance_id="inst-f1-mismatch")
+        j_msg = "msg-job-msg"
+        t_msg = "msg-task-msg"  # different message_id
+
+        jid = _seed_job(
+            engine,
+            instance_id="inst-f1-mismatch",
+            status=AdmissionState.QUEUED.value,
+            metadata_message_id=j_msg,
+        )
+        t_wid = _seed_task(
+            engine,
+            instance_id="inst-f1-mismatch",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+            message_id=t_msg,
+        )
+
+        records = resolver.list_work(instance_id="inst-f1-mismatch")
+
+        # Both rows surface.
+        assert len(records) == 2
+        assert {r.work_id for r in records} == {jid, t_wid}
+
+    def test_f1_workrecord_carries_message_id(self, engine, resolver):
+        """Both Task- and JobItem-backed ``WorkRecord``s surface their
+        ``message_id`` (F1 fix exposes the cross-system correlation
+        key on the public view-model).
+
+        Asserts:
+          * ``Task.message_id`` propagates to ``WorkRecord.message_id``
+            (kind="turn" / "report").
+          * ``JobItem.job_metadata['message_id']`` propagates to
+            ``WorkRecord.message_id`` (kind="job").
+        """
+        _seed_instance(engine, instance_id="inst-f1-surf")
+        msg = "msg-shared"
+
+        _seed_job(
+            engine,
+            instance_id="inst-f1-surf",
+            status=AdmissionState.QUEUED.value,
+            metadata_message_id=msg,
+        )
+        _seed_task(
+            engine,
+            instance_id="inst-f1-surf",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+            message_id=msg,
+        )
+        # A second standalone Task with a different message_id so we
+        # have two turns to inspect (the F1 dedup set only has the
+        # JobItem tuple, so the driving Task gets deduped and the
+        # standalone Task survives).
+        t2_wid = _seed_task(
+            engine,
+            instance_id="inst-f1-surf",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+            message_id="msg-standalone",
+        )
+
+        records = resolver.list_work(instance_id="inst-f1-surf")
+
+        # Build a per-work_id map for assertion.
+        by_work_id = {r.work_id: r for r in records}
+        # The JobItem surfaces — its WorkRecord carries the
+        # metadata-derived message_id.
+        job_record = next(r for r in records if r.kind == "job")
+        assert job_record.message_id == msg
+        # The standalone Task surfaces with its native message_id.
+        assert by_work_id[t2_wid].message_id == "msg-standalone"
+        # ``to_dict()`` exposes message_id on the JSON-friendly shape.
+        d = job_record.to_dict()
+        assert d["message_id"] == msg
+
+    def test_f1_dedup_works_with_no_message_id_on_either_side(
+        self, engine, resolver
+    ):
+        """Pre-Phase-1 JobItem (no metadata.message_id) + Task with
+        ``message_id=None`` → F1 keeps both visible (no dedup fires
+        because the JobItem-derived dedup set excludes ``None``
+        tuples and Task-side None tuples never match).
+        """
+        _seed_instance(engine, instance_id="inst-f1-legacy")
+        jid = _seed_job(
+            engine,
+            instance_id="inst-f1-legacy",
+            status=AdmissionState.QUEUED.value,
+            # metadata_message_id defaults to None — pre-Phase-1
+            # JobItem state.
+        )
+        t_wid = _seed_task(
+            engine,
+            instance_id="inst-f1-legacy",
+            task_type="process_message",
+            status=TaskStatus.PENDING.value,
+            message_id=None,
+        )
+
+        records = resolver.list_work(instance_id="inst-f1-legacy")
+
+        # Both surface — neither has a message_id, so no (I, M)
+        # tuple match can fire on the F1 dedup set.
+        assert len(records) == 2
+        assert {r.work_id for r in records} == {jid, t_wid}
+
+
+# ─── F3: Lossy status map fix (Phase 2 of defer-seam bugfix) ───────────────
+# Bug F3: pre-F3 ``_JOB_CANONICAL_TO_ADMISSION`` collapsed
+# ``completed`` / ``failed`` / ``cancelled`` onto ``{done}``, so
+# ``list_work(status="failed")`` returned zero rows (no further
+# discriminator) and ``status="completed"`` leaked failed/cancelled
+# rows.
+#
+# F3 fix: the JobItem-side query now consults ``terminal_reason`` on
+# the ``admission_state='done'`` filter path:
+#   * ``completed``  → ``admission_state='done' AND (terminal_reason='completed' OR terminal_reason IS NULL)``
+#   * ``failed``     → ``admission_state='done' AND terminal_reason='failed'``
+#   * ``cancelled``  → ``admission_state='done' AND terminal_reason='cancelled'``
+#
+# The ``OR terminal_reason IS NULL`` clause ONLY applies to
+# ``completed`` (NULL pre-7c backfilled rows default to completed).
+# ``failed`` and ``cancelled`` are strict — they only match rows
+# whose ``terminal_reason`` was explicitly written.
+
+
+class TestListWorkStatusFilterTerminalReason:
+    """F3: ``list_work(status=...)`` discriminates ``completed`` /
+    ``failed`` / ``cancelled`` by ``JobItem.terminal_reason``.
+
+    Pre-F3, the JobItem-side SQL filter mapped all three to
+    ``admission_state='done'`` so a status filter for any of them
+    returned ZERO rows (or all rows depending on what the caller
+    expected). F3 disambiguates via ``terminal_reason`` at SQL level
+    and the test seeds rows with explicit terminal_reason values
+    matching each semantic.
+    """
+
+    def test_f3_filter_status_failed_returns_only_failed(
+        self, engine, resolver
+    ):
+        """``list_work(status="failed")`` returns ONLY the JobItem
+        with ``terminal_reason='failed'``.
+
+        Seeds: one completed + one failed + one cancelled JobItem.
+        Filter by ``status="failed"`` → only the failed one.
+        """
+        _seed_instance(engine, instance_id="inst-f3-failed-a")
+        _seed_instance(engine, instance_id="inst-f3-failed-b")
+        _seed_instance(engine, instance_id="inst-f3-failed-c")
+
+        completed_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-failed-a",
+            status=AdmissionState.DONE.value,
+            terminal_reason="completed",
+        )
+        failed_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-failed-b",
+            status=AdmissionState.DONE.value,
+            terminal_reason="failed",
+        )
+        cancelled_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-failed-c",
+            status=AdmissionState.DONE.value,
+            terminal_reason="cancelled",
+        )
+
+        records = resolver.list_work(status="failed")
+
+        # Only the failed JobItem surfaces.
+        assert len(records) == 1
+        assert records[0].work_id == failed_jid
+        assert records[0].kind == "job"
+        assert records[0].status == "failed"
+        # The completed and cancelled jobs MUST NOT leak through.
+        assert all(r.work_id != completed_jid for r in records)
+        assert all(r.work_id != cancelled_jid for r in records)
+
+    def test_f3_filter_status_completed_returns_only_completed(
+        self, engine, resolver
+    ):
+        """``list_work(status="completed")`` returns ONLY the JobItem
+        with ``terminal_reason='completed'`` (F3 spec)."""
+        _seed_instance(engine, instance_id="inst-f3-completed-a")
+        _seed_instance(engine, instance_id="inst-f3-completed-b")
+        _seed_instance(engine, instance_id="inst-f3-completed-c")
+
+        completed_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-completed-a",
+            status=AdmissionState.DONE.value,
+            terminal_reason="completed",
+        )
+        _seed_job(
+            engine,
+            instance_id="inst-f3-completed-b",
+            status=AdmissionState.DONE.value,
+            terminal_reason="failed",
+        )
+        _seed_job(
+            engine,
+            instance_id="inst-f3-completed-c",
+            status=AdmissionState.DONE.value,
+            terminal_reason="cancelled",
+        )
+
+        records = resolver.list_work(status="completed")
+
+        assert len(records) == 1
+        assert records[0].work_id == completed_jid
+        assert records[0].status == "completed"
+
+    def test_f3_filter_status_cancelled_returns_only_cancelled(
+        self, engine, resolver
+    ):
+        """``list_work(status="cancelled")`` returns ONLY the JobItem
+        with ``terminal_reason='cancelled'`` (F3 spec)."""
+        _seed_instance(engine, instance_id="inst-f3-cancelled-a")
+        _seed_instance(engine, instance_id="inst-f3-cancelled-b")
+        _seed_instance(engine, instance_id="inst-f3-cancelled-c")
+
+        _seed_job(
+            engine,
+            instance_id="inst-f3-cancelled-a",
+            status=AdmissionState.DONE.value,
+            terminal_reason="completed",
+        )
+        _seed_job(
+            engine,
+            instance_id="inst-f3-cancelled-b",
+            status=AdmissionState.DONE.value,
+            terminal_reason="failed",
+        )
+        cancelled_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-cancelled-c",
+            status=AdmissionState.DONE.value,
+            terminal_reason="cancelled",
+        )
+
+        records = resolver.list_work(status="cancelled")
+
+        assert len(records) == 1
+        assert records[0].work_id == cancelled_jid
+        assert records[0].status == "cancelled"
+
+    def test_f3_done_row_with_null_terminal_reason_surfaces_under_completed(
+        self, engine, resolver
+    ):
+        """A ``done`` JobItem with NULL ``terminal_reason`` surfaces
+        under ``status="completed"`` (F3 spec) — the
+        ``OR terminal_reason IS NULL`` clause is reserved for the
+        ``completed`` semantic.
+
+        Pre-7c rows (or rows from migrations that did not backfill
+        ``terminal_reason``) fall under the legacy ``done → completed``
+        map per ``_ADMISSION_TO_LEGACY_STATUS``. The test seeds a
+        ``done`` row with ``terminal_reason=None`` explicitly and
+        asserts it shows up under ``completed`` but NOT under
+        ``failed`` / ``cancelled``.
+        """
+        _seed_instance(engine, instance_id="inst-f3-null-tr")
+
+        # Seed two NULL-``terminal_reason`` rows plus one completed
+        # row (so the test proves the F3 SQL filter discriminates
+        # by ``terminal_reason`` and not just by ``admission_state``).
+        null_jid_1 = _seed_job(
+            engine,
+            instance_id="inst-f3-null-tr",
+            status=AdmissionState.DONE.value,
+            # terminal_reason defaults to None
+        )
+        null_jid_2 = _seed_job(
+            engine,
+            instance_id="inst-f3-null-tr",
+            status=AdmissionState.DONE.value,
+            # terminal_reason defaults to None
+        )
+        # Distinct instance for the completed row so we can keep
+        # the count clean across the assertion.
+        _seed_instance(engine, instance_id="inst-f3-null-tr-comp")
+        completed_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-null-tr-comp",
+            status=AdmissionState.DONE.value,
+            terminal_reason="completed",
+        )
+
+        # Filter by ``completed`` — both NULL ``terminal_reason``
+        # rows AND the explicit completed row surface.
+        completed_records = resolver.list_work(status="completed")
+        completed_wids = {r.work_id for r in completed_records}
+        assert null_jid_1 in completed_wids
+        assert null_jid_2 in completed_wids
+        assert completed_jid in completed_wids
+        assert len(completed_records) == 3
+
+        # Filter by ``failed`` — NEITHER NULL row nor the completed
+        # row should leak through (the F3 ``failed`` filter is
+        # strict, no NULL allowed).
+        failed_records = resolver.list_work(status="failed")
+        assert len(failed_records) == 0
+
+        # Filter by ``cancelled`` — same strictness.
+        cancelled_records = resolver.list_work(status="cancelled")
+        assert len(cancelled_records) == 0
+
+    def test_f3_backward_compat_raw_admission_state_still_works(
+        self, engine, resolver
+    ):
+        """Callers passing a raw ``admission_state`` value (e.g.
+        ``"active"``) continue to work — backward-compat for the
+        pre-F3 callers.
+
+        ``_canonical_to_job_filters`` builds a
+        ``JobStatusFilter(admission_state=<value>)`` with NO
+        ``terminal_reason`` predicate for non-canonical tokens, so
+        the JobItem-side query resolves to a plain
+        ``WHERE admission_state = :value`` — matching the pre-F3
+        behaviour.
+        """
+        _seed_instance(engine, instance_id="inst-f3-backcompat-a")
+        _seed_instance(engine, instance_id="inst-f3-backcompat-b")
+        _seed_instance(engine, instance_id="inst-f3-backcompat-c")
+
+        active_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-backcompat-a",
+            status=AdmissionState.ACTIVE.value,
+        )
+        queued_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-backcompat-b",
+            status=AdmissionState.QUEUED.value,
+        )
+        # ``done`` is also a raw admission_state value — must
+        # surface under ``status="done"`` (no terminal_reason
+        # filter applied in backward-compat mode).
+        done_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-backcompat-c",
+            status=AdmissionState.DONE.value,
+            terminal_reason="failed",  # non-completed terminal_reason
+        )
+
+        # Raw admission_state — backward compat.
+        active_records = resolver.list_work(status="active")
+        assert len(active_records) == 1
+        assert active_records[0].work_id == active_jid
+
+        queued_records = resolver.list_work(status="queued")
+        assert len(queued_records) == 1
+        assert queued_records[0].work_id == queued_jid
+
+        # ``done`` raw admission_state — surfaces the failed job
+        # even though ``terminal_reason='failed'``. This matches the
+        # pre-F3 behaviour (no terminal_reason filter applied for
+        # backward-compat raw admission_state callers).
+        done_records = resolver.list_work(status="done")
+        assert len(done_records) == 1
+        assert done_records[0].work_id == done_jid
+
+    def test_f3_combined_terminal_status_filter(self, engine, resolver):
+        """The legacy ``GET /api/jobs`` comma-separated status filter
+        (``"completed,failed"``) still works under F3 — each token
+        produces its own ``JobStatusFilter`` and the OR-of-ANDs
+        predicate matches rows matching any token.
+        """
+        _seed_instance(engine, instance_id="inst-f3-combo-a")
+        _seed_instance(engine, instance_id="inst-f3-combo-b")
+        _seed_instance(engine, instance_id="inst-f3-combo-c")
+        _seed_instance(engine, instance_id="inst-f3-combo-d")
+
+        completed_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-combo-a",
+            status=AdmissionState.DONE.value,
+            terminal_reason="completed",
+        )
+        failed_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-combo-b",
+            status=AdmissionState.DONE.value,
+            terminal_reason="failed",
+        )
+        cancelled_jid = _seed_job(
+            engine,
+            instance_id="inst-f3-combo-c",
+            status=AdmissionState.DONE.value,
+            terminal_reason="cancelled",
+        )
+        # ``active`` (non-terminal) — should NOT appear in the
+        # ``completed,failed,cancelled`` filter.
+        _seed_job(
+            engine,
+            instance_id="inst-f3-combo-d",
+            status=AdmissionState.ACTIVE.value,
+        )
+
+        records = resolver.list_work(status="completed,failed,cancelled")
+        work_ids = {r.work_id for r in records}
+
+        assert completed_jid in work_ids
+        assert failed_jid in work_ids
+        assert cancelled_jid in work_ids
+        # 3 terminal-state rows total (the active one is filtered
+        # out).
+        assert len(records) == 3
+
+    def test_f3_terminal_reason_filter_does_not_leak_to_tasks(
+        self, engine, resolver
+    ):
+        """The F3 terminal_reason filter applies to the JobItem
+        side ONLY. Tasks use the existing ``Task.status`` column
+        (no ``terminal_reason`` equivalent), so a ``status="failed"``
+        filter on the Task side resolves via
+        ``_CANONICAL_TO_SOURCES["failed"] = {"failed"}`` and matches
+        only Task rows with ``Task.status='failed'``.
+        """
+        _seed_instance(engine, instance_id="inst-f3-taskside")
+
+        # Seed three Tasks: one failed, one completed, one cancelled.
+        # Only the failed one should surface under ``status="failed"``.
+        failed_t_wid = _seed_task(
+            engine,
+            instance_id="inst-f3-taskside",
+            status=TaskStatus.FAILED.value,
+        )
+        _seed_task(
+            engine,
+            instance_id="inst-f3-taskside",
+            status=TaskStatus.COMPLETED.value,
+        )
+        _seed_task(
+            engine,
+            instance_id="inst-f3-taskside",
+            status=TaskStatus.CANCELLED.value,
+        )
+
+        records = resolver.list_work(status="failed")
+        # Only the Task with TaskStatus.FAILED surfaces (the
+        # JobItem-side filter is gated by terminal_reason so it
+        # does not pull in any JobItem row that happens to be
+        # 'done' — but no JobItems were seeded so the result is
+        # just the failed Task).
+        assert len(records) == 1
+        assert records[0].work_id == failed_t_wid
+        assert records[0].kind == "turn"
 
 
 # ─── Phase 2 (Batch 3): JobQueueService.get_work and reconcile_terminal_watches ─

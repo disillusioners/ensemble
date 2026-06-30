@@ -57,6 +57,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from sqlmodel import col, select
+from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from daemon.repositories.instance.models import Instance
@@ -200,6 +201,16 @@ class WorkRecord:
     created_at: datetime | None
     started_at: str | None = None
     completed_at: str | None = None
+    # Cross-system correlation key (Bug F1 fix, Phase 1, 2026-06-30).
+    # JobItems populate this from ``metadata.message_id`` (stamped by
+    # ``JobRepository.stamp_message_id`` in Phase 1 of the defer-seam
+    # bugfix); Tasks populate this from the native ``task.message_id``
+    # column. Both sides are string UUIDs assigned by ``MessageQueue``
+    # at message-send time. Used as the second half of the
+    # ``(instance_id, message_id)`` dedup key so a standalone Task turn
+    # on an instance that also has a JobItem is no longer incorrectly
+    # dropped by the ``list_work`` dedup (Bug F1).
+    message_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize this :class:`WorkRecord` to a JSON-friendly dict.
@@ -238,6 +249,12 @@ class WorkRecord:
             "created_at": _serialize_created_at(self.created_at),
             "started_at": self.started_at,
             "completed_at": self.completed_at,
+            # Phase 1 F1: ``message_id`` is the cross-system correlation
+            # key (JobItem → Task matching). Surface it so callers can
+            # correlate a WorkRecord back to the original message that
+            # drove it (matches the ``message_id`` field on
+            # ``MessageQueue`` / ``Task`` / ``JobItem.job_metadata``).
+            "message_id": self.message_id,
         }
 
 
@@ -345,6 +362,139 @@ _JOB_CANONICAL_TO_ADMISSION: Final[dict[str, set[str]]] = {
     "cancelled": {AdmissionState.DONE.value},
     "dead_letter": {AdmissionState.DEAD.value},
 }
+
+
+# ── Per-token JobItem status filter (Bug F3 fix) ──────────────────────────
+# Phase 2 of the defer-seam bugfix (F3): the canonical→admission map
+# above is lossy (``completed`` / ``failed`` / ``cancelled`` all collapse
+# onto ``admission_state='done'``), so a ``list_work(status="failed")``
+# filter currently returns ZERO rows (the SQL ``WHERE admission_state IN
+# ('done')`` matches done rows but the resolver has no further way to
+# disambiguate the cause). The :class:`JobStatusFilter` dataclass carries
+# the admission_state + an OPTIONAL ``terminal_reason`` discriminator so
+# the JobItem query can build a precise ``WHERE admission_state = ? AND
+# terminal_reason = ?`` (or ``... OR terminal_reason IS NULL`` for the
+# completed-semantics default) per canonical status token.
+#
+# ``terminal_reason_null_allowed=True`` is reserved for the
+# ``completed`` semantic: pre-7c rows with NULL ``terminal_reason`` are
+# treated as completed per the lossy ``done → completed`` legacy map.
+# ``failed`` / ``cancelled`` filters are strict — only rows whose
+# ``terminal_reason`` was explicitly written by the terminal-write
+# boundary match (a NULL ``terminal_reason`` on a done row is no longer
+# ambiguous once the backfill has run; pre-backfill rows simply surface
+# under completed and that is acceptable).
+#
+# Callers passing raw ``admission_state`` strings (e.g. ``"active"``)
+# fall through to the backward-compat branch which builds a
+# ``JobStatusFilter(admission_state=<value>)`` with NO ``terminal_reason``
+# predicate — preserving the pre-F3 behaviour for those callers.
+@dataclass(frozen=True)
+class JobStatusFilter:
+    """A single predicate on the JobItem side of ``list_work``.
+
+    Carries the ``admission_state`` value to filter on and an optional
+    ``terminal_reason`` discriminator for the disambiguation done in
+    F3 (see module docstring). Multiple filters are combined with OR
+    semantics; each filter's two clauses are ANDed.
+
+    Attributes:
+        admission_state: The ``JobItem.admission_state`` value to
+            filter on (one of ``"queued"``, ``"active"``, ``"done"``,
+            ``"dead"``).
+        terminal_reason: Optional ``JobItem.terminal_reason`` value to
+            AND with ``admission_state``. ``None`` means "no
+            terminal_reason filter" — used for non-terminal canonical
+            statuses (``pending`` / ``processing`` / ``paused`` /
+            ``dead_letter``) and for the backward-compat raw
+            ``admission_state`` fallback.
+        terminal_reason_null_allowed: When True, a NULL
+            ``terminal_reason`` on the row also satisfies this filter
+            (used only for the ``completed`` semantic so pre-7c
+            backfill rows with NULL ``terminal_reason`` still surface
+            under ``status="completed"``).
+    """
+
+    admission_state: str
+    terminal_reason: str | None = None
+    terminal_reason_null_allowed: bool = False
+
+
+def _canonical_to_job_filters(canonical_statuses: list[str]) -> list[JobStatusFilter]:
+    """Translate canonical-status tokens into :class:`JobStatusFilter` rows.
+
+    Each canonical token maps to one (or more, for ``paused``) filter
+    rows. The result is what :meth:`_query_jobs` consumes — replacing
+    the pre-F3 plain ``admission_state`` set with a structured
+    per-token predicate that carries the ``terminal_reason``
+    discriminator.
+
+    Backward compatibility: tokens that are NOT canonical statuses
+    (e.g. a caller passing ``"active"`` or ``"done"`` directly) are
+    treated as raw ``admission_state`` values and produce a filter
+    row WITHOUT a ``terminal_reason`` predicate — matching the pre-F3
+    behaviour for those call sites. This is the
+    "Maintain backward compatibility: Callers that pass raw
+    ``admission_state`` strings must continue to work." contract
+    from the F3 spec.
+
+    Args:
+        canonical_statuses: The deduplicated, lowercased tokens from
+            the caller-supplied ``status`` filter (already split on
+            ``,`` and stripped by the caller in :meth:`list_work`).
+
+    Returns:
+        A list of :class:`JobStatusFilter` — empty when the input is
+        empty (caller did not pass a status filter).
+    """
+    filters: list[JobStatusFilter] = []
+    for token in canonical_statuses:
+        if token == "completed":
+            # F3: completed semantics — admission_state='done' AND
+            # (terminal_reason='completed' OR terminal_reason IS NULL).
+            # The OR-NULL branch is the legacy compatibility hedge:
+            # pre-7c rows have NULL ``terminal_reason`` and are
+            # treated as completed per the lossy ``done → completed``
+            # mapping in ``_ADMISSION_TO_LEGACY_STATUS``.
+            filters.append(JobStatusFilter(
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="completed",
+                terminal_reason_null_allowed=True,
+            ))
+        elif token == "failed":
+            # F3: failed semantics — admission_state='done' AND
+            # terminal_reason='failed' (strict, no NULL).
+            filters.append(JobStatusFilter(
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="failed",
+                terminal_reason_null_allowed=False,
+            ))
+        elif token == "cancelled":
+            # F3: cancelled semantics — admission_state='done' AND
+            # terminal_reason='cancelled' (strict, no NULL).
+            filters.append(JobStatusFilter(
+                admission_state=AdmissionState.DONE.value,
+                terminal_reason="cancelled",
+                terminal_reason_null_allowed=False,
+            ))
+        elif token in _JOB_CANONICAL_TO_ADMISSION:
+            # pending / processing / paused / dead_letter — no
+            # terminal_reason filter (non-terminal canonical statuses).
+            for adm in _JOB_CANONICAL_TO_ADMISSION[token]:
+                filters.append(JobStatusFilter(admission_state=adm))
+        elif token in {s.value for s in AdmissionState}:
+            # Backward-compat: caller passed a raw admission_state
+            # value (e.g. ``"active"``). No terminal_reason filter —
+            # matches the pre-F3 behaviour for these callers.
+            filters.append(JobStatusFilter(admission_state=token))
+        else:
+            # Unknown token — defensive fallback. Pre-F3 this was
+            # passed straight through as an admission_state value
+            # (which produced zero matches on a strict schema). Keep
+            # the same behaviour here so unknown tokens don't silently
+            # start matching more rows after the F3 fix.
+            filters.append(JobStatusFilter(admission_state=token))
+    return filters
 
 
 def _parse_iso_datetime(value: Any) -> datetime | None:
@@ -782,16 +932,17 @@ class WorkResolverService:
             descending (newest first). Empty list if nothing matches.
         """
         source_statuses: set[str] | None = None
-        # Phase 4 cleanup (Job as Queue Proxy): the JobItem-side
-        # query is now keyed on ``admission_state``, not the legacy
-        # ``status`` column. We precompute the parallel set of
-        # ``AdmissionState`` values from the same canonical status
-        # tokens the Task-side query uses, so a single
-        # ``status="processing"`` URL parameter produces both
-        # ``Task.status IN ('running')`` AND
-        # ``JobItem.admission_state IN ('active')`` — neither table
-        # sees the other table's column spelling.
-        job_admission_states: set[str] | None = None
+        # Bug F3 fix (Phase 2 of defer-seam bugfix, 2026-06-30): the
+        # JobItem-side query now uses a structured per-token filter
+        # (``_canonical_to_job_filters`` → ``JobStatusFilter``) instead
+        # of a plain admission_state set. This lets ``completed`` /
+        # ``failed`` / ``cancelled`` (which all collapse onto
+        # ``admission_state='done'``) be disambiguated by
+        # ``terminal_reason`` at SQL level. The pre-F3 lossy behaviour
+        # is preserved for raw ``admission_state`` callers via the
+        # ``JobStatusFilter(admission_state=<value>)`` backward-compat
+        # branch in ``_canonical_to_job_filters``.
+        job_status_filters: list[JobStatusFilter] | None = None
         if status is not None:
             # Split comma-separated canonical statuses (matches the
             # legacy ``GET /api/jobs`` behaviour in
@@ -817,24 +968,13 @@ class WorkResolverService:
             for canonical in canonical_statuses:
                 unioned.update(_CANONICAL_TO_SOURCES.get(canonical, {canonical}))
             source_statuses = unioned
-            # JobItem-side: build the parallel admission_state set
-            # via ``_JOB_CANONICAL_TO_ADMISSION``. Unknown canonical
-            # values fall back to ``{canonical}`` — defensive rule
-            # matching the source-side fallback. If a future caller
-            # passes an admission_state value directly (e.g. ``"active"``)
-            # and that value is a valid ``AdmissionState``, it
-            # short-circuits via the membership check below to avoid
-            # the canonical reverse-lookup miss.
-            admission_states: set[str] = set()
-            for canonical in canonical_statuses:
-                mapped = _JOB_CANONICAL_TO_ADMISSION.get(canonical)
-                if mapped is not None:
-                    admission_states.update(mapped)
-                elif canonical in {s.value for s in AdmissionState}:
-                    admission_states.add(canonical)
-                else:
-                    admission_states.add(canonical)
-            job_admission_states = admission_states
+            # F3: build the parallel per-token JobStatusFilter list.
+            # Each token produces one filter row (or more for
+            # ``paused`` which spans ``active``). The Task-side query
+            # still uses the unioned ``source_statuses`` set above —
+            # Task keeps its native ``status`` column so the
+            # canonical-vocabulary filter is exact there.
+            job_status_filters = _canonical_to_job_filters(canonical_statuses)
 
         records: list[WorkRecord] = []
 
@@ -885,7 +1025,7 @@ class WorkResolverService:
                 records.append(record)
 
         if query_jobs_table:
-            jobs = self._query_jobs(project_id, instance_id, job_admission_states)
+            jobs = self._query_jobs(project_id, instance_id, job_status_filters)
             if jobs:
                 # Phase 1 (Job as Queue Proxy): batch-fetch Instance rows
                 # for all distinct ``job.instance_id`` values so
@@ -923,17 +1063,38 @@ class WorkResolverService:
                     for j in jobs
                 )
 
-        # P-C(i) (2026-06-27): Task-turn deduplication. When the
-        # ``job_create`` flow runs, it emits BOTH a JobItem (the
-        # handle the orchestrator holds) AND a Task turn on the
-        # same ``instance_id`` (the message that drives the job).
-        # The virtual-job surface wants one row per logical work
-        # unit — the JobItem is that handle — so we drop the
-        # duplicate Task turn here. Standalone turns (no matching
-        # JobItem) stay visible; report tasks (parent-bound, never
-        # paired with a JobItem) are NEVER deduped because they
-        # carry the child's completion payload that the JobItem
-        # itself does not.
+        # Bug F1 fix (Phase 1 of defer-seam bugfix, 2026-06-30): Task-turn
+        # deduplication is now keyed on ``(instance_id, message_id)``
+        # tuples — NOT just ``instance_id``. The pre-F1 instance-only
+        # key caused a standalone Task turn (e.g. ``POST /messages`` on
+        # an instance that also has a JobItem) to be incorrectly
+        # dropped because the JobItem was already shadowing the
+        # ``instance_id`` even though the Task turn belonged to a
+        # different message.
+        #
+        # The new dedup set is built from JobItem records as a set of
+        # ``(instance_id, message_id)`` tuples — ``message_id`` is
+        # sourced from ``job.job_metadata['message_id']`` (stamped by
+        # ``JobRepository.stamp_message_id`` at the end of the
+        # ``job_create`` enqueue flow). A Task turn is suppressed ONLY
+        # if its ``(instance_id, message_id)`` tuple matches a tuple
+        # already in the set AND its ``message_id`` is not None
+        # (a ``message_id=None`` Task can never match because we
+        # never insert ``None`` tuples into the JobItem-side set —
+        # see the ``message_id is not None`` guard in the loop).
+        # This matches the F1 spec: "Task turns with ``message_id=None``
+        # are NEVER suppressed (they can't match)".
+        #
+        # Pre-F1 behaviour for the report-tasks-never-deduped contract
+        # is preserved: only ``kind="turn"`` rows are eligible for
+        # dedup, ``kind="job"`` / ``kind="report"`` rows stay
+        # unconditionally.
+        #
+        # The status-drift warning (JobFeedbackObserver should keep
+        # the JobItem status in sync with the driving Task turn) is
+        # also preserved — we still compare canonical status strings
+        # so the warning fires on the same condition the pre-F1 code
+        # detected.
         #
         # Applied AFTER root-scoping (so we don't waste effort
         # deduping child rows that the ``root_only`` guard already
@@ -943,20 +1104,33 @@ class WorkResolverService:
         # filter-before-pagination contract reviewer W1 nailed down
         # for P-A).
         if records:
-            job_status_by_instance_id: dict[str, str] = {
-                r.instance_id: r.status
-                for r in records
-                if r.kind == "job" and r.instance_id is not None
-            }
-            if job_status_by_instance_id:
+            job_status_by_pair: dict[tuple[str, str | None], str] = {}
+            for r in records:
+                if r.kind == "job" and r.instance_id is not None:
+                    # Only insert tuples where the JobItem carries a
+                    # non-None ``message_id`` — a tuple with a None
+                    # second component could never be matched by a
+                    # Task turn (whose ``message_id`` is always
+                    # either a real UUID or None, and the F1 rule
+                    # forbids matching ``None``-message_id Tasks at
+                    # all). Skipping the insert here is purely an
+                    # optimisation; the same result obtains if we
+                    # insert and then never match against it.
+                    if r.message_id is not None:
+                        job_status_by_pair[(r.instance_id, r.message_id)] = r.status
+            if job_status_by_pair:
                 kept: list[WorkRecord] = []
                 for r in records:
                     # Only Task turns are eligible for dedup. Jobs
                     # and report tasks are kept unconditionally.
+                    # ``message_id is not None`` is the F1 explicit
+                    # rule: Task turns with None message_id are
+                    # NEVER suppressed.
                     if (
                         r.kind == "turn"
                         and r.instance_id is not None
-                        and r.instance_id in job_status_by_instance_id
+                        and r.message_id is not None
+                        and (r.instance_id, r.message_id) in job_status_by_pair
                     ):
                         # Status drift guard: the JobFeedbackObserver
                         # is supposed to keep the JobItem status in
@@ -965,14 +1139,15 @@ class WorkResolverService:
                         # investigate — the dedup itself still
                         # proceeds (JobItem wins) so the user-facing
                         # surface stays consistent.
-                        job_status = job_status_by_instance_id[r.instance_id]
+                        job_status = job_status_by_pair[(r.instance_id, r.message_id)]
                         if r.status != job_status:
                             logger.warning(
                                 "work_resolver: status drift detected for "
-                                "instance_id=%s: JobItem status=%s, "
+                                "instance_id=%s message_id=%s: JobItem status=%s, "
                                 "Task status=%s. "
                                 "JobFeedbackObserver should have synced these.",
                                 r.instance_id,
+                                r.message_id,
                                 job_status,
                                 r.status,
                             )
@@ -1032,6 +1207,11 @@ class WorkResolverService:
             result_summary=_parse_task_result_summary(task),
             error=task.error,
             created_at=task.created_at,
+            # Phase 1 F1: surface ``task.message_id`` so the WorkRecord
+            # carries the same correlation key as JobItem-backed records.
+            # Tasks have a native ``message_id`` column populated at
+            # message-send time (``worker_pool`` enqueue flow).
+            message_id=task.message_id,
         )
 
     def _job_to_record(
@@ -1192,6 +1372,22 @@ class WorkResolverService:
             result_summary=None,
             error=None,
             created_at=_parse_iso_datetime(job.created_at),
+            # Phase 1 F1: surface ``message_id`` from
+            # ``job.job_metadata['message_id']`` (stamped by
+            # ``JobRepository.stamp_message_id`` at the end of the
+            # ``job_create`` enqueue flow). The metadata dict is
+            # accessed defensively — pre-Phase-1 rows may have an empty
+            # ``metadata`` dict and we surface ``None`` instead of
+            # raising ``KeyError``. JobItems created before Phase 1
+            # will have ``message_id=None`` on the WorkRecord; the F1
+            # dedup rule "Task turns with ``message_id=None`` are never
+            # suppressed" means a Task turn on a pre-Phase-1 JobItem
+            # instance is never deduped, which matches the
+            # "never-orphan" intent of the F1 fix.
+            message_id=(
+                (job.job_metadata or {}).get("message_id")
+                if isinstance(job.job_metadata, dict) else None
+            ),
             # Timing: prefer the Instance columns when an Instance row
             # was provided (or just looked up above). ``last_activity_at``
             # is the worker's first heartbeat, which is the closest
@@ -1293,7 +1489,7 @@ class WorkResolverService:
         self,
         project_id: str | None,
         instance_id: str | None,
-        admission_states: set[str] | None,
+        status_filters: list[JobStatusFilter] | None,
     ) -> list[JobItem]:
         """Run the JobItem SELECT for ``list_work`` and return the rows.
 
@@ -1310,9 +1506,25 @@ class WorkResolverService:
         canonical status filter (``"processing"`` / ``"dead_letter"``
         / ...) into the corresponding ``AdmissionState`` value(s) via
         ``_JOB_CANONICAL_TO_ADMISSION`` and feeds the result here as
-        ``admission_states``. The Task-side query path is unchanged
-        (Task keeps its ``status`` column).
+        ``status_filters``.
+
+        Bug F3 fix (Phase 2 of defer-seam bugfix, 2026-06-30): the
+        ``status_filters`` parameter is now a list of
+        :class:`JobStatusFilter` rows instead of a plain
+        ``admission_state`` set. Each filter row can carry an
+        OPTIONAL ``terminal_reason`` discriminator so the lossy
+        ``done → completed`` map can be disambiguated at SQL level
+        for the ``completed`` / ``failed`` / ``cancelled`` canonical
+        statuses. The Task-side query path is unchanged (Task keeps
+        its ``status`` column).
+
+        Each filter row is AND-combined (admission_state + optional
+        terminal_reason) and the rows themselves are OR-combined —
+        matching the ``list_work`` "match any of the requested
+        statuses" semantics. ``None`` (or empty list) means no status
+        filter — the SELECT returns all non-deleted rows.
         """
+        from sqlalchemy import and_ as sql_and
         from sqlmodel import Session as SQLModelSession
 
         with SQLModelSession(self._job_repo.engine) as session:
@@ -1321,8 +1533,40 @@ class WorkResolverService:
                 stmt = stmt.where(JobItem.project_id == project_id)
             if instance_id is not None:
                 stmt = stmt.where(JobItem.instance_id == instance_id)
-            if admission_states is not None:
-                stmt = stmt.where(JobItem.admission_state.in_(admission_states))
+            if status_filters:
+                # Build the OR-of-ANDs predicate. Each filter row is
+                # one branch of the outer OR; the row's clauses are
+                # ANDed internally. The ``terminal_reason_null_allowed``
+                # flag on a filter row expands the AND with an
+                # ``OR terminal_reason IS NULL`` clause so
+                # pre-7c rows (NULL ``terminal_reason``) still match
+                # the ``completed`` semantic.
+                branches = []
+                for f in status_filters:
+                    if f.terminal_reason is not None:
+                        if f.terminal_reason_null_allowed:
+                            branches.append(
+                                sql_and(
+                                    JobItem.admission_state == f.admission_state,
+                                    or_(
+                                        JobItem.terminal_reason == f.terminal_reason,
+                                        JobItem.terminal_reason.is_(None),
+                                    ),
+                                )
+                            )
+                        else:
+                            branches.append(
+                                sql_and(
+                                    JobItem.admission_state == f.admission_state,
+                                    JobItem.terminal_reason == f.terminal_reason,
+                                )
+                            )
+                    else:
+                        # No terminal_reason filter — just the
+                        # admission_state predicate.
+                        branches.append(JobItem.admission_state == f.admission_state)
+                if branches:
+                    stmt = stmt.where(or_(*branches))
             stmt = stmt.order_by(col(JobItem.created_at).desc())
             return list(session.exec(stmt))
 
@@ -1401,4 +1645,4 @@ class WorkResolverService:
             return {row.instance_id: row for row in session.exec(stmt)}
 
 
-__all__ = ["WorkRecord", "WorkResolverService"]
+__all__ = ["WorkRecord", "WorkResolverService", "JobStatusFilter"]
