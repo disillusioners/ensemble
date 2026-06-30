@@ -353,11 +353,10 @@ class JobRetryEngine:
             # PENDING retry child on the same ``instance_id`` would
             # otherwise survive — ``claim_pending_task``'s
             # per-instance guard blocks only RUNNING tasks, not
-            # PENDING ones, so the stale PENDING and the fresh retry
-            # Task can both become claimable and contest the same
-            # LangGraph checkpoint (``thread_id`` = ``instance_id``
-            # in the Postgres checkpointer; two concurrent
-            # ``astream`` calls shadow each other's channel writes).
+            # PENDING ones, so the stale PENDING on the abandoned
+            # instance could be claimed by a worker that has just
+            # been re-attached to a new retry cycle, producing
+            # duplicate output for the same user request.
             #
             # Ordering: this cancel MUST happen between
             # ``atomic_retry`` (which unblocks the queue entry) and

@@ -59,6 +59,7 @@ from daemon.services.job_feedback_observer import (
     _FinalizeJobResult,
     _ProcessingJobContext,
 )
+from daemon.write_pause_guard import WritePauseGuard
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -463,6 +464,143 @@ class TestF14BusGateSeesPendingTasks:
                 "inst-f14-4"
             )
         assert count == 0
+
+    def test_in_session_f14_gate_defers_finalization(self, engine):
+        """The authoritative in-session F14 gate inside
+        ``_finalize_job_db_sync``'s ``WriteGuardSession`` defers
+        finalization when it observes PENDING ``task`` rows for the
+        instance.
+
+        Pre-fix (W2 review finding): the only F14 check was the
+        early defense-in-depth helper
+        (``_count_pending_tasks_for_instance_sync``) which opens
+        its own session and runs the COUNT BEFORE the
+        ``WriteGuardSession`` is acquired. A concurrent ``task``
+        INSERT between the helper query and the JobItem UPDATE
+        could slip past the early check and finalize the parent
+        prematurely — the exact wedge F14 was designed to close.
+        The in-session inline ``SELECT COUNT(*)`` (which shares the
+        JobItem UPDATE transaction) had no test.
+
+        Post-fix: this test pins the in-session gate by seeding a
+        PENDING task that bypasses the early check (mocked to
+        return 0) and asserts the in-session inline query defers
+        finalization.
+        """
+        # ── Arrange — real DB rows ──
+        instance_id = "inst-f14-in-session"
+        job_id = "job-f14-in-session"
+
+        _insert_instance(engine, instance_id)
+        _insert_job_item(
+            engine,
+            job_id=job_id,
+            instance_id=instance_id,
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-f14-in-session"},
+        )
+        # PENDING task NOT registered in ``dependency_watchers`` —
+        # canonical F14 trigger (a child whose ``bus.watch``
+        # failed before the lifecycle event fired).
+        _create_pending_task(engine, instance_id=instance_id)
+
+        # ── Arrange — observer with real engine + write guard ──
+        observer, _ = _make_observer_with_engine(engine)
+        # ``WriteGuardSession`` needs a real write-guard instance;
+        # ``_make_observer_with_engine`` uses ``MagicMock`` for
+        # ``_instance_manager`` so ``.write_guard`` must be
+        # replaced with a real ``WritePauseGuard``.
+        observer._instance_manager.write_guard = WritePauseGuard()
+
+        # Bypass the EARLY F14 helper so we reach the in-session
+        # branch. The early helper uses its own session and runs
+        # BEFORE ``WriteGuardSession``; mocking it to return 0
+        # cleanly isolates the in-session gate.
+        observer._count_pending_tasks_for_instance_sync = MagicMock(
+            return_value=0
+        )
+
+        # Wire the bus singleton so the bus gate passes. Mirrors
+        # the F15 test teardown pattern (set + restore).
+        bus_mock = MagicMock()
+        bus_mock.count_pending_for_target_sync = MagicMock(return_value=0)
+        bus_mock.count_pending_for_target = AsyncMock(return_value=0)
+        bus_mock.had_parent_error = MagicMock(return_value=False)
+        set_dependency_bus(bus_mock)
+        try:
+            # ── Act — drive the sync helper directly ──
+            # ``_finalize_job_db_sync`` is a regular sync method
+            # (run on the event-loop's thread when invoked from
+            # ``asyncio.to_thread``). Calling it directly here
+            # exercises the in-session gate without the
+            # ``asyncio.to_thread`` wrapper.
+            result = observer._finalize_job_db_sync(
+                job_id=job_id,
+                instance_id=instance_id,
+                terminal_status="completed",
+                result_summary=None,
+                error_message=None,
+            )
+
+            # ── Assert #1 — in-session F14 gate fired ──
+            assert result.skip is True, (
+                f"In-session F14 gate must defer finalization when "
+                f"PENDING tasks exist for the instance. Got "
+                f"skip={result.skip!r} (expected True). Result: "
+                f"{result!r}"
+            )
+            assert result.gate_deferred is True, (
+                f"In-session F14 gate must set gate_deferred=True "
+                f"to signal deferral to the async caller. Got "
+                f"gate_deferred={result.gate_deferred!r}. Result: "
+                f"{result!r}"
+            )
+            # Deferral must not have populated terminal fields —
+            # the async caller uses those to drive post-commit
+            # side effects.
+            assert result.terminal_status is None, (
+                f"Deferred result must not carry terminal_status "
+                f"(no transition committed). Got "
+                f"terminal_status={result.terminal_status!r}"
+            )
+            assert result.job_id is None, (
+                f"Deferred result must not carry job_id (no "
+                f"transition committed). Got result.job_id="
+                f"{result.job_id!r}"
+            )
+            assert result.locks_released == 0, (
+                f"Deferred result must not have released any locks. "
+                f"Got locks_released={result.locks_released!r}"
+            )
+
+            # ── Assert #2 — JobItem is UNTOUCHED ──
+            # The deferral happened inside the ``WriteGuardSession``
+            # block, BEFORE the JobItem UPDATE ran, so the
+            # transaction rolled back cleanly. Query the DB
+            # directly to confirm.
+            with engine.begin() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT admission_state FROM job_queue_items "
+                        "WHERE job_id = :job_id"
+                    ),
+                    {"job_id": job_id},
+                ).first()
+            assert row is not None, (
+                f"JobItem must still exist after deferred "
+                f"finalization. Found no row for job_id={job_id!r}"
+            )
+            assert row[0] == AdmissionState.ACTIVE.value, (
+                f"In-session F14 gate must NOT have modified the "
+                f"JobItem (defers BEFORE the UPDATE). Got "
+                f"admission_state={row[0]!r}, expected "
+                f"{AdmissionState.ACTIVE.value!r}"
+            )
+        finally:
+            # Reset the bus singleton so other tests get a clean
+            # dependency-bus state (matches the F15 teardown
+            # pattern).
+            set_dependency_bus(None)
 
 
 # ─── F15 Tests ────────────────────────────────────────────────────────────────

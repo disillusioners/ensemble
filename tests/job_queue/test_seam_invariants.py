@@ -3139,3 +3139,212 @@ class TestPeriodicDriftReconciler:
             f"Pattern (d) must NOT fire on an active JobItem. Got "
             f"orphan_pending_terminal_job records: {orphan_records}"
         )
+
+    @pytest.mark.asyncio
+    async def test_reconciler_c1_ordering_survives_finalize_failure(
+        self, engine, repository, task_repository, lock_repo,
+        job_queue_service,
+    ):
+        """W4 regression test — C1 fix (Phase 3, 2026-07-01): the
+        Pattern (a) dead-instance branch MUST finalize the JobItem
+        BEFORE cancelling the orphan PENDING Task. Pre-fix ordering
+        (``cancel → finalize``) was an unrecoverable wedge when
+        finalization failed: the catch block would log and continue,
+        leaving ``JobItem=active`` + ``task=cancelled`` +
+        ``instance=terminal`` — a state invisible to all 4 periodic
+        reconciler patterns (a/b/c/d) and only recoverable by
+        ``recover_on_startup`` on the next daemon restart.
+
+        Post-fix ordering (``finalize → cancel``) is safe under
+        three failure modes:
+          * **Finalize fails**: cancel never runs, state unchanged.
+            Pattern (a) retries next cycle (canonical P1 signature:
+            active JobItem + stuck PENDING + dead instance).
+          * **Finalize succeeds, cancel fails**: JobItem is
+            ``done`` + task is ``pending`` → Pattern (d) catches
+            orphan PENDING on terminal JobItem.
+          * **Both succeed**: clean.
+
+        This test pins the first two failure modes by injecting a
+        transient ``RuntimeError`` from ``_finalize_terminal`` on
+        the first reconciler tick (state must remain recoverable)
+        and then running a second tick WITHOUT the failure
+        (Pattern (a) must finalize + cancel correctly).
+        """
+        # ── Arrange — instance terminal, JobItem active, PENDING task ──
+        # Mirrors the canonical P1 dead-instance signature used in
+        # ``test_reconciler_catches_p1_pattern_deadlock`` so the
+        # two tests exercise the same drift condition.
+        _insert_instance(engine, "inst-c1-1", project_id="test-project")
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE instances SET status = 'terminated' "
+                    "WHERE instance_id = 'inst-c1-1'"
+                )
+            )
+
+        _insert_job_item(
+            engine,
+            job_id="job-c1-1",
+            instance_id="inst-c1-1",
+            project_id="test-project",
+            queue_id="queue-c1-1",
+            admission_state=AdmissionState.ACTIVE.value,
+            job_metadata={"message_id": "msg-c1-1"},
+        )
+
+        task_id = _create_task_with_status(
+            engine,
+            instance_id="inst-c1-1",
+            message_id="msg-c1-1",
+            status=TaskStatus.PENDING.value,
+            is_deferred=False,
+        )
+        # Backdate so the task is drift-eligible with age=0
+        # (matches the convention in the other P1 tests).
+        old_time = datetime.now(timezone.utc) - timedelta(seconds=600)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE task SET created_at = :old_time WHERE id = :id"
+                ),
+                {"old_time": old_time, "id": task_id},
+            )
+
+        # ── Wire service with the full dep triple ──
+        instance_repo = SQLModelInstanceRepository(engine=engine)
+        stale_recovery = StaleTaskRecovery(
+            task_repository=task_repository,
+            message_repository=None,
+            event_repository=None,
+        )
+        service = JobRecoveryService(
+            job_repository=repository,
+            lock_repository=lock_repo,
+            instance_repository=instance_repo,
+            job_queue_service=job_queue_service,
+            task_repository=task_repository,
+            stale_task_recovery=stale_recovery,
+        )
+
+        # ── Patch ``_finalize_terminal`` to FAIL on the first tick ──
+        # Save the original so the second tick (post-failure) can
+        # delegate to it. The mock raises ONLY on the first call
+        # (simulating a transient DB failure), then transparently
+        # delegates on subsequent calls — so the retry tick
+        # exercises the real finalize path while we still know
+        # how many times the patch was invoked.
+        original_finalize = service._job_queue_service._finalize_terminal
+        call_count = {"n": 0}
+
+        async def flaky_finalize(*args, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Simulate SQLite WAL contention / disk I/O failure.
+                raise RuntimeError(
+                    "simulated WAL contention on _finalize_terminal"
+                )
+            # Subsequent calls delegate to the real method.
+            return await original_finalize(*args, **kwargs)
+
+        service._job_queue_service._finalize_terminal = flaky_finalize
+
+        # ── Act #1 — finalize RAISES, cancel must NOT have run ──
+        stats_fail = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # ── Assert #1 — state is UNCHANGED, recoverable by Pattern (a) ──
+        assert call_count["n"] == 1, (
+            f"Reconciler must have attempted exactly one finalize "
+            f"on the first pass. Got {call_count['n']} calls."
+        )
+        assert stats_fail["reconciled"] == 0, (
+            f"C1 fix: when ``_finalize_terminal`` raises, the "
+            f"reconciler must NOT count this as a successful "
+            f"reconciliation (Pattern (a) will retry next cycle). "
+            f"Got reconciled={stats_fail['reconciled']!r}"
+        )
+
+        # JobItem must still be ACTIVE — the failed finalize rolled
+        # back. This is the canonical P1 signature Pattern (a)
+        # expects to find on the next cycle.
+        job_after_fail = repository.get("job-c1-1")
+        assert job_after_fail is not None
+        assert job_after_fail.admission_state == AdmissionState.ACTIVE.value, (
+            f"C1 fix: when ``_finalize_terminal`` raises, the JobItem "
+            f"must stay ACTIVE (finalize rolled back, cancel never "
+            f"ran). Got admission_state="
+            f"{job_after_fail.admission_state!r}"
+        )
+
+        # Task must still be PENDING — the post-fix ordering puts
+        # the cancel block INSIDE the ``if canonical_job_id is not
+        # None`` success branch, so a failed finalize means the
+        # cancel block never ran. Pre-fix this would be
+        # ``CANCELLED`` and Pattern (a) could never retry.
+        task_after_fail = task_repository.get(task_id)
+        assert task_after_fail is not None
+        assert task_after_fail.status == TaskStatus.PENDING.value, (
+            f"C1 fix: when ``_finalize_terminal`` raises, the orphan "
+            f"PENDING task must NOT be cancelled (the cancel block "
+            f"runs only AFTER successful finalization). Pre-fix, "
+            f"the cancel-first ordering would have left the task "
+            f"CANCELLED — invisible to all 4 reconciler patterns "
+            f"and only recoverable on daemon restart. Got status="
+            f"{task_after_fail.status!r}"
+        )
+
+        # ── Act #2 — second reconciler pass: finalize SUCCEEDS ──
+        # ``flaky_finalize`` now delegates to ``original_finalize``
+        # (since ``call_count["n"] > 1``).
+        stats_ok = await service.reconcile_drift_states(
+            min_pending_age_seconds=0,
+        )
+
+        # ── Assert #2 — Pattern (a) catches the drift on retry ──
+        assert call_count["n"] == 2, (
+            f"Reconciler must have attempted a second finalize on "
+            f"the retry pass. Got {call_count['n']} calls."
+        )
+        assert stats_ok["reconciled"] >= 1, (
+            f"Pattern (a) must catch the P1 drift on the second "
+            f"pass once finalize succeeds. Got stats: {stats_ok}"
+        )
+
+        # JobItem is now DONE with terminal_reason='failed'.
+        job_after_ok = repository.get("job-c1-1")
+        assert job_after_ok is not None
+        assert job_after_ok.admission_state == AdmissionState.DONE.value, (
+            f"Second-pass Pattern (a) must finalize the JobItem to "
+            f"DONE. Got admission_state="
+            f"{job_after_ok.admission_state!r}"
+        )
+        assert job_after_ok.terminal_reason == "failed", (
+            f"Second-pass Pattern (a) must set terminal_reason="
+            f"'failed'. Got {job_after_ok.terminal_reason!r}"
+        )
+
+        # The orphan PENDING task is now CANCELLED (the cancel
+        # block ran after successful finalize).
+        task_after_ok = task_repository.get(task_id)
+        assert task_after_ok is not None
+        assert task_after_ok.status == TaskStatus.CANCELLED.value, (
+            f"Second-pass Pattern (a) must cancel the orphan PENDING "
+            f"task after successful finalization. Got status="
+            f"{task_after_ok.status!r}"
+        )
+
+        # A P1_dead_instance detail record was added on the second
+        # pass.
+        dead_instance_records = [
+            d for d in stats_ok["details"]
+            if d.get("pattern") == "P1_dead_instance"
+            and d.get("job_id") == "job-c1-1"
+        ]
+        assert dead_instance_records, (
+            f"Second-pass Pattern (a) must record a "
+            f"P1_dead_instance detail for job-c1-1. Got details: "
+            f"{stats_ok['details']}"
+        )

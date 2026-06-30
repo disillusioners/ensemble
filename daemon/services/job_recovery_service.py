@@ -654,23 +654,23 @@ class JobRecoveryService:
                     # was incorrect; the orphan PENDING was invisible
                     # to F10 until ``recover_on_startup`` ran on a
                     # daemon restart.)
-                    try:
-                        await asyncio.to_thread(
-                            self._task_repository.cancel_pending_tasks_for_instance,
-                            task.instance_id,
-                        )
-                    except Exception as cancel_err:
-                        # Cancel failure must NOT mask the successful
-                        # JobItem finalization — the orphan PENDING
-                        # can be cleaned on a later reconciler tick
-                        # (Pattern (d)) or on daemon restart.
-                        logger.error(
-                            f"reconcile_drift_states: failed to cancel "
-                            f"orphan PENDING task {task.id} on dead "
-                            f"instance {task.instance_id[:8]}...: "
-                            f"{cancel_err}",
-                            exc_info=True,
-                        )
+                    # F12/F4 ordering fix (Phase 3, 2026-07-01):
+                    # finalize FIRST, then cancel. The previous
+                    # order (cancel → finalize) was an unrecoverable
+                    # wedge when finalization failed: the catch
+                    # block would log and continue, leaving
+                    # JobItem=active + task=cancelled + instance=
+                    # terminal — invisible to all 4 periodic
+                    # reconciler patterns (a/b/c/d), only recoverable
+                    # by ``recover_on_startup`` on next daemon
+                    # restart. Post-fix ordering is safe:
+                    #   * Finalize fails → cancel never runs →
+                    #     state unchanged → Pattern (a) retries
+                    #     next cycle (canonical P1 signature).
+                    #   * Finalize succeeds, cancel fails →
+                    #     JobItem=done + task=pending → Pattern (d)
+                    #     catches orphan PENDING on terminal JobItem.
+                    #   * Both succeed → clean.
                     try:
                         canonical_job_id, _ = await self._job_queue_service._finalize_terminal(
                             instance_id=task.instance_id,
@@ -711,6 +711,30 @@ class JobRecoveryService:
                                     f"reconcile_drift_states: "
                                     f"notify_watchers failed for "
                                     f"{job.job_id[:8]}...: {notify_err}"
+                                )
+                            # Cancel the orphan PENDING task AFTER
+                            # successful finalization. Pattern (d)
+                            # handles the case where this cancel
+                            # fails — orphan PENDING on terminal
+                            # JobItem is exactly Pattern (d)'s
+                            # signature.
+                            try:
+                                await asyncio.to_thread(
+                                    self._task_repository.cancel_pending_tasks_for_instance,
+                                    task.instance_id,
+                                )
+                            except Exception as cancel_err:
+                                # Cancel failure is non-fatal — the
+                                # JobItem is already terminal, and
+                                # Pattern (d) will clean up the
+                                # orphan PENDING on the next cycle.
+                                logger.error(
+                                    f"reconcile_drift_states: failed "
+                                    f"to cancel orphan PENDING task "
+                                    f"{task.id} on dead instance "
+                                    f"{task.instance_id[:8]}...: "
+                                    f"{cancel_err}",
+                                    exc_info=True,
                                 )
                     except InvalidTransitionError:
                         logger.info(
