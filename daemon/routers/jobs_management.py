@@ -94,6 +94,36 @@ async def delete_job(
     job = await service.get_job(job_id)
 
     if job is None:
+        # Virtual-job write facade (Part B, revive-fix follow-up
+        # 2026-07-01): a Task-backed work_id has no JobItem row, so
+        # ``get_job`` misses and the legacy path 404'd (the UI cancel
+        # button hit this on a message-turn task). Fall through the
+        # resolver: if the work_id resolves to a Task, cancel it
+        # directly; only a genuine miss raises 404.
+        work = await service.get_work(job_id)
+        if work is not None and work.kind != "job":
+            from daemon.services.work_status import is_terminal
+            if is_terminal(work.status):
+                # Already terminal — nothing to cancel (tasks don't
+                # soft-delete like JobItems). Report success; the FE
+                # just needs the card gone.
+                resp = work.to_dict()
+                resp["message"] = "Work already in terminal state"
+                return resp
+            cancelled = await service.cancel_task_by_work_id(job_id)
+            if not cancelled:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Failed to cancel work",
+                        "message": "Task is not in a cancellable state",
+                        "work_id": job_id,
+                    },
+                )
+            updated_work = await service.get_work(job_id)
+            resp = (updated_work or work).to_dict()
+            resp["message"] = "Work cancelled successfully"
+            return resp
         raise HTTPException(
             status_code=404,
             detail=JobNotFoundResponse(
@@ -194,6 +224,36 @@ async def cancel_job_endpoint(
     job = await service.get_job(job_id)
 
     if job is None:
+        # Virtual-job write facade (Part B, revive-fix follow-up
+        # 2026-07-01): a Task-backed work_id has no JobItem row —
+        # fall through the resolver and cancel the Task directly so
+        # the explicit cancel endpoint matches the DELETE semantics.
+        work = await service.get_work(job_id)
+        if work is not None and work.kind != "job":
+            from daemon.services.work_status import is_terminal
+            if is_terminal(work.status):
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Work cannot be cancelled",
+                        "message": f"Work is already in terminal state: {work.status}",
+                        "current_status": work.status,
+                    },
+                )
+            cancelled = await service.cancel_task_by_work_id(job_id)
+            if not cancelled:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "Failed to cancel work",
+                        "message": "Task is not in a cancellable state",
+                        "work_id": job_id,
+                    },
+                )
+            updated_work = await service.get_work(job_id)
+            resp = (updated_work or work).to_dict()
+            resp["message"] = "Work cancelled successfully"
+            return resp
         raise HTTPException(
             status_code=404,
             detail=JobNotFoundResponse(

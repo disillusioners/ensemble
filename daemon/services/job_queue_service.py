@@ -27,6 +27,7 @@ from daemon.repositories.job_queue import (
 )
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.repositories.instance.models import InstanceStatus
+from daemon.repositories.task.models import TaskStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 from daemon.services.project_normalizer import normalize_project_id
@@ -792,6 +793,46 @@ class JobQueueService:
             # crashing on the attribute lookup.
             return None
         return await asyncio.to_thread(work_resolver.resolve_work, work_id)
+
+    async def cancel_task_by_work_id(self, work_id: str) -> bool:
+        """Cancel a Task-backed virtual job by its ``work_id``.
+
+        Write-side facade for the virtual-job surface (Part B,
+        revive-fix follow-up, 2026-07-01). The read side resolves a
+        ``work_id`` to either a JobItem or a Task, but the cancel path
+        was JobItem-only → a Task ``work_id`` returned 404 from
+        ``DELETE /api/jobs/{work_id}``. This helper closes that gap.
+
+        Semantics mirror the claim lifecycle so the cancel is always
+        safe:
+
+        * a **RUNNING** task is cancelled *cooperatively*
+          (:meth:`request_cancel`) — the worker observes the flag at
+          its next heartbeat and stops gracefully, so in-flight
+          LangGraph state isn't orphaned.
+        * a **PENDING** / **PAUSED** task (never claimed, no worker
+          holding it) is cancelled *directly and atomically*
+          (:meth:`cancel_task`).
+
+        Returns ``True`` if the task was cancelled (or cancel
+        requested), ``False`` if the ``work_id`` resolves to no Task,
+        the resolver/task-repo is unwired, or the task was already
+        terminal.
+        """
+        instance_manager = getattr(self, "_instance_manager", None)
+        task_repo = getattr(instance_manager, "_task_repo", None) if instance_manager else None
+        if task_repo is None:
+            return False
+        task = await asyncio.to_thread(task_repo.get_by_work_id, work_id)
+        if task is None:
+            return False
+        if task.status == TaskStatus.RUNNING.value:
+            return await asyncio.to_thread(task_repo.request_cancel, task.id)
+        # pending / paused — no worker holds it; direct atomic cancel.
+        cancelled = await asyncio.to_thread(
+            task_repo.cancel_task, task.id, "cancelled via virtual-job cancel"
+        )
+        return cancelled is not None
 
     async def list_work(
         self,
