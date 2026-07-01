@@ -10,7 +10,8 @@ What's verified:
 
   * MessageQueue row is created with the input fields.
   * Event row is created and links to the MessageQueue row by message_id.
-  * Status transitions (IDLE / WAITING_CHILDREN / COMPLETED → RUNNING)
+  * Status transitions (any non-RUNNING / non-PAUSED state → RUNNING,
+    incl. terminal COMPLETED / TERMINATED / ERROR / FAILED revival)
     and ``version`` + ``last_activity_at`` bumps.
   * PAUSED instances are NOT auto-resumed.
   * Title generation fires on IDLE → RUNNING and stays silent on
@@ -357,11 +358,24 @@ class TestStatusTransition:
         InstanceStatus.IDLE.value,
         InstanceStatus.WAITING_CHILDREN.value,
         InstanceStatus.COMPLETED.value,
+        InstanceStatus.TERMINATED.value,
+        InstanceStatus.ERROR.value,
+        InstanceStatus.FAILED.value,
     ])
     async def test_status_transitions_to_running(
         self, engine, manager, messaging_service, initial
     ):
-        """``IDLE`` / ``WAITING_CHILDREN`` / ``COMPLETED`` all become ``RUNNING``."""
+        """All non-RUNNING, non-PAUSED states become ``RUNNING``.
+
+        Terminal states (COMPLETED / TERMINATED / ERROR / FAILED) are
+        reactivated on a new message — "terminal" only records WHY the
+        last run stopped; the checkpoint + history persist and reload on
+        the next ``graph.astream``. Reviving a terminated instance is the
+        same machinery as reviving a completed one (revive-fix,
+        2026-07-01). Without this, a message to a terminated instance
+        creates a Task that ``claim_pending_task`` can never claim
+        (it excludes terminated instances) → stuck pending forever.
+        """
         instance_id = f"inst-{initial}"
         _seed_instance(engine, instance_id=instance_id, status=initial, version=3)
         with patch(
@@ -386,8 +400,10 @@ class TestStatusTransition:
     ):
         """``PAUSED`` is intentionally **not** auto-resumed.
 
-        The helper leaves PAUSED alone; only IDLE / WAITING_CHILDREN /
-        COMPLETED are auto-transitioned.
+        The helper leaves PAUSED alone; only non-RUNNING, non-PAUSED
+        states are auto-transitioned. PAUSED is routed through the
+        explicit resume path (see the messages endpoint) so the
+        cooperative pause gate and resume cascade stay in control.
         """
         _seed_instance(engine, instance_id="inst-paused", status=InstanceStatus.PAUSED.value)
         with patch(
@@ -399,8 +415,8 @@ class TestStatusTransition:
 
         inst = _load_instance(engine, "inst-paused")
         assert inst.status == InstanceStatus.PAUSED.value, (
-            "PAUSED instances must stay PAUSED — helper only resumes IDLE / "
-            "WAITING_CHILDREN / COMPLETED"
+            "PAUSED instances must stay PAUSED — helper only resumes "
+            "non-RUNNING, non-PAUSED states via the explicit resume path."
         )
         # No status_change SSE emitted.
         manager._live_hub.stream_status_change.assert_not_awaited()

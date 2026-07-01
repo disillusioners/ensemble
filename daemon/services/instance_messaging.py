@@ -890,27 +890,41 @@ class InstanceMessagingService:
             # back from the DB. See feature/virtual-job-management-surface.
             work_id = task.work_id
 
-            # 3. Update instance status if IDLE, WAITING_CHILDREN, or COMPLETED.
-            #    COMPLETED instances are reactivated on new messages (conversation continues).
-            #    PAUSED instances are NOT auto-resumed — only IDLE/WAITING_CHILDREN/COMPLETED
-            #    transition; PAUSED stays PAUSED until explicitly unpaused.
+            # 3. Update instance status to RUNNING for any state that is
+            #    NOT already RUNNING and NOT PAUSED. A terminal instance
+            #    (COMPLETED / TERMINATED / ERROR / FAILED) is reactivated on
+            #    a new message — "terminal" only records WHY the last run
+            #    stopped; the checkpoint, message history, and LangGraph
+            #    thread all persist in the DB and reload on the next
+            #    graph.astream, so reviving a terminated instance is the
+            #    same machinery as reviving a completed one (revive-fix,
+            #    2026-07-01). PAUSED is intentionally excluded here — the
+            #    messages endpoint routes pause through the explicit resume
+            #    path; enqueue itself must not flip PAUSED so the
+            #    cooperative pause gate (claim_pending_task excludes paused
+            #    instances) and the resume cascade stay in control.
             instance = session.get(Instance, instance_id)
             if instance:
                 instance_agent_id = instance.agent_id
                 previous_status = instance.status
+                is_terminal_revival = previous_status in (
+                    InstanceStatus.COMPLETED.value,
+                    InstanceStatus.TERMINATED.value,
+                    InstanceStatus.ERROR.value,
+                    InstanceStatus.FAILED.value,
+                )
                 if instance.status in (
                     InstanceStatus.IDLE.value,
                     InstanceStatus.WAITING_CHILDREN.value,
-                    InstanceStatus.COMPLETED.value,
-                ):
+                ) or is_terminal_revival:
                     instance.status = InstanceStatus.RUNNING.value
                     status_changed_to_running = True
                     is_idle_to_running = previous_status == InstanceStatus.IDLE.value
-                    if previous_status == InstanceStatus.COMPLETED.value:
+                    if is_terminal_revival:
                         suffix = f" ({path_label})" if path_label else ""
                         logger.info(
-                            f"Reactivating completed instance {instance_id[:8]}... "
-                            f"for new message{suffix}"
+                            f"Reactivating terminal instance {instance_id[:8]}... "
+                            f"(was {previous_status}) for new message{suffix}"
                         )
                 instance.last_activity_at = datetime.now(timezone.utc)
                 instance.version = (instance.version or 1) + 1
