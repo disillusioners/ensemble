@@ -1301,6 +1301,33 @@ class JobFeedbackObserver:
                         # there is no lock leak. Log and continue — the
                         # post-commit outbox below is still valid for
                         # whatever state the job is actually in.
+                        #
+                        # NOTE: this catch is deliberately broad.
+                        # ``rearm_with_lock`` raises ``ValueError`` for
+                        # the expected concurrent-race case (the guard
+                        # in ``repository.py`` matches 0 rows because
+                        # ``admission_state`` flipped off ``done``
+                        # between the SELECT and the UPDATE), but the
+                        # same handler will also swallow any
+                        # ``ValueError`` raised deeper in the call
+                        # chain — for example, a ``ValueError`` from
+                        # coercing ``job_queues.concurrency_limit`` if
+                        # that row was corrupted mid-re-arm. That
+                        # breadth is intentional: the follow-up
+                        # ``except Exception`` below is the last-resort
+                        # defensive handler, and this block is simply
+                        # the expected-race fast-path that logs at INFO
+                        # rather than WARNING. A re-arm failure always
+                        # leaves the JobItem in its current state — the
+                        # late child may be orphaned regardless of
+                        # which exception type fires, and the periodic
+                        # orphan-reconciliation sweep handles that
+                        # case. Narrowing the catch here would risk
+                        # masking a genuine ``ValueError`` that should
+                        # bubble up; leaving it broad keeps the
+                        # observer resilient to data-corruption
+                        # surprises without losing the WARN-level
+                        # signal for unrelated failures.
                         logger.info(
                             f"Observer: re-arm skipped — job "
                             f"{ctx.job_id[:8]} no longer COMPLETED "

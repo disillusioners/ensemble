@@ -66,7 +66,7 @@ import uuid
 from typing import Any
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session as SQLModelSession, select
 
@@ -727,6 +727,156 @@ def test_rearm_with_lock_invalid_state_raises(pg_engine, pg_repository_factory) 
         assert _get_admission_state(conn, target_job_id) == "queued", (
             "rearm_with_lock must leave admission_state unchanged when "
             "admission_state is not 'done'"
+        )
+
+
+# =============================================================================
+# Section D-race — Race-lost ValueError: state flips between SELECT and UPDATE
+# =============================================================================
+#
+# The previous Section D test exercises the pre-flight SELECT guard
+# (current_admission != 'done' → return (None, False) without raising).
+# This section exercises the OTHER ValueError path: the pre-flight SELECT
+# saw ``admission_state='done'``, the lock INSERT succeeded, but a
+# concurrent actor committed a state change BEFORE our guarded UPDATE
+# landed — so the UPDATE matches 0 rows and the function raises
+# ``ValueError``. The transaction must roll back atomically: the lock
+# INSERT that already succeeded must NOT persist (the whole point of the
+# single-transaction shape is that lock + UPDATE live or die together).
+#
+# The race window is widened deterministically with a SQLAlchemy
+# ``before_cursor_execute`` event listener that flips
+# ``admission_state`` on a separate connection right before the
+# guarded UPDATE fires. Under READ COMMITTED, the re-arm's UPDATE then
+# sees the post-flip state and matches 0 rows → ValueError → rollback.
+
+
+def test_rearm_with_lock_race_lost_raises_value_error(
+    pg_engine, pg_repository_factory
+) -> None:
+    """Race-lost branch: a concurrent actor flips ``admission_state``
+    off ``done`` between the pre-flight SELECT and the guarded UPDATE,
+    causing ``rearm_with_lock`` to raise ``ValueError`` and roll back
+    atomically (no lock leak).
+
+    Setup:
+      * JobItem in ``done`` (the CORRECT pre-flight state for re-arm)
+        with no ``job_locks`` row.
+
+    Act:
+      * Attach a ``before_cursor_execute`` event listener that, on
+        the first guarded UPDATE statement against ``job_queue_items``
+        (the re-arm's step 4), opens a separate connection and flips
+        ``admission_state`` from ``done`` to ``queued``. This mimics
+        a concurrent actor committing a state change after our
+        pre-flight SELECT but before our UPDATE.
+      * Call ``rearm_with_lock``.
+
+    Asserts:
+      1. ``ValueError`` is raised with a message explaining the race.
+      2. No ``job_locks`` row persists for the instance (the lock
+         INSERT was undone by the atomic rollback).
+      3. ``admission_state`` reflects the post-race value (``queued``),
+         confirming the race actually fired and the rollback did NOT
+         silently re-flip the state.
+    """
+    queue_repo = pg_repository_factory(JobQueueRepository)
+    job_repo = pg_repository_factory(JobRepository)
+
+    project_id = f"f9Dr-project-{uuid.uuid4().hex[:8]}"
+    queue = queue_repo.create(
+        project_id=project_id,
+        queue_name=f"f9Dr-queue-{uuid.uuid4().hex[:8]}",
+        queue_type=QueueType.FIFO.value,
+        concurrency_limit=1,
+    )
+
+    # Seed a job in 'done' — the CORRECT pre-flight state for re-arm.
+    # The race will flip it to 'queued' between SELECT and UPDATE.
+    target_job_id = f"f9Dr-target-{uuid.uuid4().hex[:8]}"
+    target_instance_id = f"f9Dr-target-instance-{uuid.uuid4().hex[:8]}"
+    with pg_engine.begin() as conn:
+        _insert_job_queue_item(
+            conn,
+            job_id=target_job_id,
+            instance_id=target_instance_id,
+            admission_state="done",
+            project_id=project_id,
+            queue_id=queue.queue_id,
+        )
+
+    # ── Inject the race via a before_cursor_execute event listener ────
+    # We match the guarded UPDATE by its parameters dict: only the
+    # re-arm's step-4 UPDATE binds an ``admission_state_guard`` key (the
+    # old ``done`` value used for the ``WHERE`` clause guard). Setup
+    # INSERTs and UPDATEs in this test module bind different keys
+    # (``admission_state``, ``done``, ``new_state``, ``job_id``), so
+    # the ``admission_state_guard`` key is unambiguous.
+    #
+    # SQLAlchemy renders the SQL string with ``%(name)s`` placeholders
+    # for psycopg3, so substring-matching the raw text() string for
+    # ``:admission_state`` is unreliable — matching the params dict is
+    # both more precise and dialect-agnostic.
+    flip_state = {"fired": False}
+
+    def before_cursor_execute(
+        conn, cursor, statement, parameters, context, executemany
+    ):
+        if flip_state["fired"]:
+            return
+        params = parameters if isinstance(parameters, dict) else {}
+        if "admission_state_guard" in params:
+            # Guarded UPDATE in rearm_with_lock step 4. Fire the race:
+            # flip the state to 'queued' on a SEPARATE connection so
+            # the flip's COMMIT is visible to the re-arm's UPDATE under
+            # READ COMMITTED.
+            flip_state["fired"] = True
+            with pg_engine.begin() as flip_conn:
+                flip_conn.execute(
+                    text(
+                        "UPDATE job_queue_items "
+                        "SET admission_state = :new_state "
+                        "WHERE job_id = :job_id"
+                    ),
+                    {"new_state": "queued", "job_id": target_job_id},
+                )
+
+    event.listen(pg_engine, "before_cursor_execute", before_cursor_execute)
+    try:
+        raised: ValueError | None = None
+        try:
+            job_repo.rearm_with_lock(
+                job_id=target_job_id,
+                instance_id=target_instance_id,
+            )
+        except ValueError as exc:
+            raised = exc
+
+        # ── Assert 1: ValueError raised with race explanation ────────
+        assert raised is not None, (
+            "rearm_with_lock MUST raise ValueError when admission_state "
+            "flips off 'done' between the pre-flight SELECT and the "
+            "guarded UPDATE — the guard matched 0 rows"
+        )
+        msg = str(raised).lower()
+        assert "race lost" in msg or "between pre-flight" in msg, (
+            f"ValueError should explain the race condition; got: {raised!r}"
+        )
+    finally:
+        event.remove(pg_engine, "before_cursor_execute", before_cursor_execute)
+
+    # ── Assert 2: rollback — no lock leaked ───────────────────────────
+    with pg_engine.connect() as conn:
+        assert _count_locks_for_instance(conn, target_instance_id) == 0, (
+            "Lock INSERT must be rolled back with the transaction when "
+            "ValueError is raised — the lock INSERT and admission_state "
+            "UPDATE share one engine.begin() block (F9 atomicity contract)"
+        )
+        # ── Assert 3: race actually fired (state was flipped to 'queued')
+        assert _get_admission_state(conn, target_job_id) == "queued", (
+            "admission_state should reflect the post-race value ('queued') — "
+            "if this fails the event listener didn't fire and the test "
+            "didn't actually exercise the race-lost branch"
         )
 
 

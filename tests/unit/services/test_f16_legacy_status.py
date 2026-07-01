@@ -683,3 +683,16 @@ class TestHelperExport:
             getattr(getattr(mod, name, None), "__name__", "") == "_derive_legacy_status"
             for name in dir(mod)
         )
+
+    def test_helper_used_by_job_queue_service_module(self):
+        """``daemon.services.job_queue_service`` is the 5th F16 migration
+        site — it imports ``_derive_legacy_status`` at module load and
+        uses it as the legacy-status fallback in the service layer
+        response shaping. Catches accidental removal of the import in
+        a future refactor of the service module.
+        """
+        import daemon.services.job_queue_service as mod
+        assert any(
+            getattr(getattr(mod, name, None), "__name__", "") == "_derive_legacy_status"
+            for name in dir(mod)
+        )
