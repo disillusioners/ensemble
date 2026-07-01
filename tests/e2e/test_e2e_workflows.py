@@ -2073,6 +2073,8 @@ def test_wave_spawn_with_defer_queue():
         status_timeline: list[tuple[str, str, str]] = []
         premature_completion = False
         premature_detail = ""
+        premature_defer_admission = False
+        defer_violation_detail = ""
         completed_observed = False
 
         logger.info(
@@ -2100,6 +2102,43 @@ def test_wave_spawn_with_defer_queue():
             all_children_terminal = bool(child_statuses) and all(
                 st in TERMINAL_STATUSES for st in child_statuses.values()
             )
+
+            # ── P2 defer-isolation invariant ──────────────────────────────
+            # While leader/children are non-terminal, the deferred job MUST
+            # stay 'pending'. The defer queue only dequeues when no non-defer
+            # jobs are active; the per-instance concurrency gate also
+            # enforces this when the defer queue is unavailable. Sample once
+            # per loop iteration and assert — if the defer job advances past
+            # 'pending' during a non-terminal wave, that's the P2 bug.
+            if (
+                status not in TERMINAL_STATUSES
+                and not all_children_terminal
+            ):
+                try:
+                    defer_job = _get_job(job_id)
+                    defer_status = str(
+                        defer_job.get("status", "unknown")
+                    ).lower()
+                except requests.exceptions.RequestException as exc:
+                    logger.warning(
+                        f"[STEP5] defer-job GET failed (will retry): {exc}"
+                    )
+                    defer_status = None
+                if defer_status is not None and defer_status != "pending":
+                    defer_violation_detail = (
+                        f"defer job prematurely admitted at {ts}: "
+                        f"status={defer_status!r} while "
+                        f"leader={status!r} and children=[{child_summary}]"
+                    )
+                    logger.error(
+                        f"[STEP5] ❌ DEFER PREMATURE ADMISSION: "
+                        f"{defer_violation_detail}"
+                    )
+                    status_timeline.append(
+                        (ts, f"defer={defer_status}", child_summary)
+                    )
+                    premature_defer_admission = True
+                    break
 
             # CRITICAL invariant: leader terminal while ANY child is
             # still non-terminal = premature completion bug.
@@ -2138,6 +2177,12 @@ def test_wave_spawn_with_defer_queue():
             "The leader reached a terminal status while at least one child "
             "was still non-terminal. See timeline above."
         )
+        assert not premature_defer_admission, (
+            f"DEFER-QUEUE PREMATURE ADMISSION (P2): {defer_violation_detail}. "
+            "The deferred job advanced past 'pending' while the leader "
+            "and/or its children were still non-terminal. The defer queue "
+            "must hold the job until no non-defer work is active."
+        )
         assert completed_observed, (
             f"Leader did not reach a terminal status within "
             f"{WAVE_COMPLETION_TIMEOUT}s (last status: "
@@ -2174,26 +2219,42 @@ def test_wave_spawn_with_defer_queue():
 
         if job_status == "pending":
             logger.info(
-                "[STEP6] job still pending — waiting for it to start..."
+                "[STEP6] job still pending — waiting for it to reach terminal..."
             )
+            # P1 invariant: the defer job MUST actually run and reach a
+            # terminal state. 'processing' alone is NOT acceptable — that's
+            # the P1 bug symptom (job admitted but never runs). We require
+            # a truly-terminal status: 'completed' (success) or 'failed'
+            # (surfaced explicitly below as an unexpected failure).
             started, job_status = _wait_for_job_status(
-                job_id, {"processing", "completed", "failed"}, timeout=120
+                job_id, {"completed", "failed"}, timeout=120
             )
             if started:
-                logger.info(f"[STEP6] job transitioned to: {job_status}")
+                logger.info(f"[STEP6] job reached terminal: {job_status}")
             else:
-                logger.warning(
-                    f"[STEP6] job did not progress within 120s "
-                    f"(status={job_status})"
+                logger.error(
+                    f"[STEP6] ❌ job stuck in non-terminal status="
+                    f"{job_status!r} after 120s — likely P1 "
+                    f"('processing' admitted but never ran)"
                 )
 
-        # Acceptable end-states: progressed past pending, OR still pending
-        # with a documented reason. We assert it did not fail catastrophically.
-        assert job_status not in {"failed"}, (
+        # With the P1 fix, the defer job must actually run to completion.
+        # 'processing' (admitted but never ran) is the P1 bug symptom and
+        # is no longer tolerated — that's why this test no longer accepts
+        # 'processing' as an end-state.
+        assert job_status == "completed", (
+            f"Deferred job did not reach 'completed' (got {job_status!r}). "
+            f"Acceptable end-state is 'completed' (success). Anything else "
+            f"(including 'processing' or 'pending' after timeout) indicates "
+            f"the P1 bug: the job was admitted but never ran to completion."
+        )
+        # Surface 'failed' explicitly so a failure isn't masked by the
+        # 'completed' check above.
+        assert job_status != "failed", (
             f"Deferred job failed unexpectedly: status={job_status}"
         )
         logger.info(
-            f"[STEP6] ✅ deferred job ended in acceptable state: {job_status}"
+            f"[STEP6] ✅ deferred job completed: {job_status}"
         )
 
         # ── Step 7: Verify cross-system correctness ───────────────────────
