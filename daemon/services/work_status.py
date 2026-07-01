@@ -245,14 +245,18 @@ def _derive_legacy_status(
         to ``"pending"`` for unknown ``admission_state`` values
         (matches the pre-F16 behaviour).
     """
-    if admission_state == "done" and terminal_reason:
+    if admission_state == "done" and terminal_reason in _STATUS_CANONICAL_MAP:
         # Phase 7c: terminal_reason is the discriminator for done rows.
-        # canonicalize_status handles the ``"aborted"`` → ``"cancelled"``
-        # mapping and is a no-op for ``"completed"`` / ``"failed"`` /
-        # ``"cancelled"``. Unknown terminal_reason values (a future
-        # discriminator the canonical map has not been taught about)
-        # pass through unchanged, matching the resolver's defensive
-        # behaviour.
+        # Gate on ``_STATUS_CANONICAL_MAP`` membership (not just truthy)
+        # so non-string truthy values — e.g. a ``MagicMock`` attribute
+        # on a test double, or a future discriminator the canonical map
+        # has not been taught about — fall through to the lossy
+        # ``done → completed`` map value rather than surfacing a
+        # non-string (which breaks downstream ``status in watch_events``
+        # checks in the watcher-notify path).
+        # ``canonicalize_status`` handles the ``"aborted"`` →
+        # ``"cancelled"`` mapping and is a no-op for
+        # ``"completed"`` / ``"failed"`` / ``"cancelled"``.
         return canonicalize_status(terminal_reason)
     # Backward-compat: pre-7c rows (NULL ``terminal_reason``) and all
     # non-done states fall through the lossy map. ``"pending"`` is the
