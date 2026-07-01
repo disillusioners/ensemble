@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select
 
-from .models import JobLock
+from .models import JobLock, active_admission_states_sql
 
 logger = logging.getLogger(__name__)
 
@@ -25,9 +25,11 @@ logger = logging.getLogger(__name__)
 # acquired its lock (but hasn't yet transitioned to 'active' in the same
 # transaction — the B1 single-transaction window) would have its lock
 # race-deleted. Including both states protects the entire admission window.
+# The IN-list is built from the shared ``ACTIVE_ADMISSION_STATES``
+# constant so the membership set is spelled exactly once.
 _ACTIVE_JOB_IDS_SUBQUERY = (
     "SELECT job_id FROM job_queue_items "
-    "WHERE admission_state IN ('queued', 'active') "
+    f"WHERE admission_state IN {active_admission_states_sql()} "
     "  AND deleted_at IS NULL"
 )
 

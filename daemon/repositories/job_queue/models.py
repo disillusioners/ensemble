@@ -9,7 +9,7 @@ from __future__ import annotations
 import enum
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy import CheckConstraint, Column, Index, Integer, Text, UniqueConstraint, text
@@ -46,6 +46,27 @@ class AdmissionState(str, enum.Enum):
     def is_valid(cls, value: str) -> bool:
         """Check if an admission_state value is valid."""
         return value in cls._value2member_map_
+
+
+# Admission states that count as "in-flight". A job is queued (awaiting
+# dispatch, holds no lock) OR active (dispatched, lock held); both block
+# defer admission and count toward concurrency. Every membership filter
+# — ORM ``.in_(...)`` sites AND raw-SQL ``IN (...)`` literals — MUST
+# route through this constant so the set is spelled exactly once.
+ACTIVE_ADMISSION_STATES: Final[frozenset[str]] = frozenset(
+    {AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value}
+)
+
+
+def active_admission_states_sql() -> str:
+    """SQL IN-list literal for ``ACTIVE_ADMISSION_STATES``.
+
+    Returns e.g. ``('active','queued')`` (sorted for stable output).
+    Raw-SQL sites that previously hardcoded ``('queued','active')``
+    interpolate this so the constant stays the single source of truth
+    even inside string-built ``text()`` statements.
+    """
+    return "(" + ",".join(f"'{s}'" for s in sorted(ACTIVE_ADMISSION_STATES)) + ")"
 
 
 # Reverse map: admission_state → representative legacy status string.

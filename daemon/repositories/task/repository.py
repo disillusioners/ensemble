@@ -13,6 +13,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col
 
 from ..instance.models import Instance, InstanceStatus
+from ..job_queue.models import active_admission_states_sql
 from .models import Task, TaskStatus, TaskType
 
 logger = logging.getLogger(__name__)
@@ -473,9 +474,9 @@ class TaskRepository:
         #
         # A missing/NULL ``job_metadata`` produces NULL on both backends
         # and ``NOT EXISTS`` correctly defaults to TRUE (blocker fires).
-        json_extract_message_id = self._json_extract_text_sql(
-            column="j.metadata", key="message_id"
-        )
+        # The cross-system guard fragment itself is built once by
+        # :meth:`_admitted_task_carve_out_sql` (shared with the
+        # busy-instance probe so P1 and F11 can never diverge).
 
         # Cross-system guard scope: the report lane (PROCESS_REPORT)
         # bypasses the job-coordination exclusion entirely — reports
@@ -618,7 +619,7 @@ class TaskRepository:
                             -- admission_state='queued' while its lock is held
                             -- (mirrors ``_ACTIVE_JOB_IDS_SUBQUERY`` in
                             -- lock_repository.py).
-                            WHERE j.admission_state IN ('queued', 'active')
+                            WHERE j.admission_state IN {active_admission_states_sql()}
                               AND j.instance_id IS NOT NULL
                               AND j.deleted_at IS NULL
                               AND (i.status IS NULL OR i.status != :status_waiting_children)
@@ -638,12 +639,10 @@ class TaskRepository:
                               -- dual-path / dispatch-only case and
                               -- never participates in the
                               -- message-coordination carve-out.
-                              AND {json_extract_message_id} IS NOT NULL
-                              AND NOT EXISTS (
-                                  SELECT 1 FROM task t
-                                  WHERE t.message_id = {json_extract_message_id}
-                                    AND t.status IN (:status_pending, :status_running)
-                              )
+                              -- The fragment is shared with the
+                              -- busy-instance probe via
+                              -- :meth:`_admitted_task_carve_out_sql`.
+                              AND {self._admitted_task_carve_out_sql("j")}
                         )
                     )
                   ORDER BY created_at ASC LIMIT 1
@@ -711,6 +710,40 @@ class TaskRepository:
         if self.engine.dialect.name == "postgresql":
             return f"{column}->>'{key}'"
         return f"CAST(json_extract({column}, '$.{key}') AS TEXT)"
+
+    def _admitted_task_carve_out_sql(self, job_alias: str) -> str:
+        """Return the NULL-safe unified-dispatcher admission carve-out.
+
+        Single source of truth for the "a JobItem is NOT actively
+        blocking its instance's task when a matching Task row exists"
+        predicate. :meth:`claim_pending_task` (P1) and
+        :meth:`has_pending_tasks_blocked_by_busy_instance` (F11) both
+        interpolate this fragment, so the two execution gates cannot
+        disagree — the "MUST stay in sync" comment that used to sit
+        between them is now enforced by sharing one string.
+
+        Args:
+            job_alias: The outer query's alias for ``job_queue_items``
+                (``"j"`` for the claim path, ``"j_running"`` for the
+                busy-instance probe).
+
+        Returns:
+            SQL text with no leading ``AND``; the caller prefixes
+            ``AND``. References bind params ``:status_pending`` and
+            ``:status_running`` which the caller MUST supply in its
+            execute params.
+        """
+        json_extract = self._json_extract_text_sql(
+            column=f"{job_alias}.metadata", key="message_id"
+        )
+        return (
+            f"{json_extract} IS NOT NULL\n"
+            f"                AND NOT EXISTS (\n"
+            f"                    SELECT 1 FROM task _admitted\n"
+            f"                    WHERE _admitted.message_id = {json_extract}\n"
+            f"                      AND _admitted.status IN (:status_pending, :status_running)\n"
+            f"                )"
+        )
 
     def requeue_task_with_backoff(
         self, task_id: int, min_delay_seconds: float = 0.5, max_delay_seconds: float = 2.0
@@ -1201,9 +1234,9 @@ class TaskRepository:
             True if any pending task is blocked by Fix B's per-instance guard
             (task-level or job-queue-level).
         """
-        json_extract_message_id = self._json_extract_text_sql(
-            column="j_running.metadata", key="message_id"
-        )
+        # The cross-system guard fragment is shared with the claim path
+        # via :meth:`_admitted_task_carve_out_sql` so this probe and
+        # ``claim_pending_task`` can never disagree (the P1/F11 class).
         with self.engine.begin() as conn:
             stmt = text(f"""
                 SELECT 1
@@ -1228,7 +1261,7 @@ class TaskRepository:
                             -- covers the B1 single-transaction window.
                             -- See ``_ACTIVE_JOB_IDS_SUBQUERY`` in
                             -- lock_repository.py for the canonical form.
-                            WHERE j_running.admission_state IN ('queued', 'active')
+                            WHERE j_running.admission_state IN {active_admission_states_sql()}
                               AND j_running.instance_id = t_pending.instance_id
                               AND j_running.deleted_at IS NULL
                               -- FIFO carve-out (mirrors claim_pending_task).
@@ -1247,23 +1280,11 @@ class TaskRepository:
                             -- now checks ALL processing ``JobItem``
                             -- rows (TASK-type dispatch-queue jobs).
                             --
-                            -- Phase 3 F11 fix (2026-06-30): NULL-safe
-                            -- cross-system guard. Without this check,
-                            -- a JobItem whose metadata has no
-                            -- ``message_id`` (legacy / dispatch-only
-                            -- JobItems) would compare
-                            -- ``t_admitted.message_id = NULL`` and
-                            -- the NOT EXISTS would default to TRUE,
-                            -- causing the JobItem to spuriously
-                            -- block — the same self-deadlock the P1
-                            -- fix addresses in ``claim_pending_task``.
-                            -- The two predicates MUST stay in sync.
-                            AND {json_extract_message_id} IS NOT NULL
-                            AND NOT EXISTS (
-                                SELECT 1 FROM task t_admitted
-                                WHERE t_admitted.message_id = {json_extract_message_id}
-                                AND t_admitted.status IN (:status_pending, :status_running)
-                            )
+                            -- The NULL-safe cross-system guard fragment
+                            -- is shared with the claim path via
+                            -- :meth:`_admitted_task_carve_out_sql` so
+                            -- the P1 and F11 sites can never diverge.
+                            AND {self._admitted_task_carve_out_sql("j_running")}
                         )
                     )
                 )

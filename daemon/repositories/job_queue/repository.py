@@ -12,7 +12,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as SQLModelSession, select, col, update as sqlmodel_update
 
-from .models import AdmissionState, JobItem, JobQueue, QueueType
+from .models import ACTIVE_ADMISSION_STATES, AdmissionState, JobItem, JobQueue, QueueType
 
 logger = logging.getLogger(__name__)
 
@@ -444,9 +444,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.instance_id == instance_id)
                 .where(JobItem.deleted_at.is_(None))
-                .where(JobItem.admission_state.in_(
-                    [AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]
-                ))
+                .where(JobItem.admission_state.in_(ACTIVE_ADMISSION_STATES))
             )
             if job_id is not None:
                 # F13: resolve by exact ID — the queried JobItem is
@@ -501,7 +499,7 @@ class JobRepository:
                 select(func.count())
                 .select_from(JobItem)
                 .where(JobItem.project_id == project_id)
-                .where(JobItem.admission_state.in_([AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]))
+                .where(JobItem.admission_state.in_(ACTIVE_ADMISSION_STATES))
                 .where(JobItem.deleted_at.is_(None))
             )
             return db_session.exec(stmt).one()
@@ -534,7 +532,7 @@ class JobRepository:
                 .select_from(JobItem)
                 .join(JobQueue, JobItem.queue_id == JobQueue.queue_id)
                 .where(JobItem.project_id == project_id)
-                .where(JobItem.admission_state.in_([AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]))
+                .where(JobItem.admission_state.in_(ACTIVE_ADMISSION_STATES))
                 .where(JobItem.deleted_at.is_(None))
                 .where(JobQueue.queue_type != QueueType.DEFER.value)
             )
@@ -689,7 +687,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.instance_id == instance_id)
                 .where(JobItem.deleted_at.is_(None))
-                .where(JobItem.admission_state.in_([AdmissionState.QUEUED.value, AdmissionState.ACTIVE.value]))
+                .where(JobItem.admission_state.in_(ACTIVE_ADMISSION_STATES))
             )
             stmt = stmt.order_by(JobItem.created_at.asc())
             if job_type:
