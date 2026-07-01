@@ -12,10 +12,16 @@ the three most frequent user workflows:
      actually reach ``paused``, hold for a few seconds without further
      processing, then resume to completion.
 
-  3. **Terminate after spawn, then revive** — same workflow, but the
-     leader is terminated after the child spawns. We document the actual
+  3. **Terminate after spawn, then revive** — same workflow, but the leader
+     is terminated after the child spawns. We document the actual
      behavior of sending a ``continue`` message to a terminated instance
      rather than asserting a specific outcome.
+
+  5. **Pause blocks defer queue** — a leader is paused mid-flight, then a
+     deferred job is created. The defer queue must hold the job while the
+     instance is paused (a paused instance counts as non-idle), then
+     release it after resume. Regression for the 2026-07-01 pause-fix
+     where ``has_active_non_deferred_work`` excluded ``paused``.
 
 Conventions (per ``tests/e2e/test_mcp_tools.py``):
 
@@ -2398,6 +2404,212 @@ def test_wave_spawn_with_defer_queue():
                 logger.warning(
                     f"[CLEANUP] could not check/cancel job {job_id[:8]}...: "
                     f"{exc}"
+                )
+        if leader_id:
+            _terminate_instance(leader_id)
+
+
+# --------------------------------------------------------------------------- #
+# Test 5 — Pause blocks defer queue (pause-fix, 2026-07-01)
+# --------------------------------------------------------------------------- #
+# Reproduces the dev_run.log bug:
+#   send_message → pause instance → create defer job
+#   → defer job was WRONGLY admitted while the instance was paused.
+# Root cause: ``has_active_non_deferred_work`` excluded ``paused`` from
+# its status membership set, so a paused (non-deferred) instance read as
+# "idle" and the defer idle-gate passed.
+# This e2e test exercises the FULL integration chain that the unit test
+# ``test_paused_non_deferred_task_blocks_defer_gate`` covers at the
+# predicate level: pause API → pause cascade writes task.status=paused
+# → shared predicate sees it → defer gate holds the job. It then resumes
+# to prove the job was correctly gated (not permanently stuck).
+def test_pause_blocks_defer_queue():
+    """E2E Test 5: a paused instance counts as non-idle — a deferred job
+    created while an instance is paused MUST stay ``pending`` until the
+    instance is resumed and reaches a terminal state.
+    """
+    logger.info("=" * 60)
+    logger.info("TEST 5: pause blocks defer queue (pause-fix, 2026-07-01)")
+    logger.info("=" * 60)
+
+    leader_id: str | None = None
+    job_id: str | None = None
+    premature_admission = False
+    premature_detail = ""
+
+    try:
+        # ── Setup: discover project + defer queue ─────────────────────────
+        project_id = _get_first_project_id()
+        assert project_id, (
+            "No project found via GET /api/projects — cannot test pause+defer"
+        )
+
+        defer_queue_id = _get_system_defer_queue_id(project_id)
+        if defer_queue_id:
+            logger.info(f"[SETUP] defer queue available: {defer_queue_id[:8]}...")
+        else:
+            logger.warning(
+                "[SETUP] no system_defer_queue for project — per-instance "
+                "concurrency gate will still apply, but defer semantics are "
+                "strongest with a real defer queue"
+            )
+
+        # ── Step 1: Spawn leader + start a long-running task ─────────────
+        # Ask the leader to spawn a developer that sleeps — this gives a
+        # window of active (running / waiting_children) work that we can
+        # pause mid-flight.
+        leader_id = _spawn_instance("leader", project_id=project_id)
+        assert leader_id, "Failed to spawn leader instance"
+        logger.info(f"[STEP1] leader spawned: {leader_id[:8]}...")
+
+        WAVE_MESSAGE = (
+            "Spawn 1 developer instance and ask it to sleep for 60 seconds "
+            "then say hello. Wait for the developer to complete before "
+            "reporting back."
+        )
+        _send_message(leader_id, WAVE_MESSAGE)
+        logger.info("[STEP2] long-running task message sent")
+
+        # Give the leader a moment to start processing / spawn the child.
+        time.sleep(10)
+
+        # ── Step 3: Pause the instance mid-flight ────────────────────────
+        _pause_instance(leader_id)
+        paused = _wait_for_status(leader_id, "paused", timeout=SPAWN_TIMEOUT)
+        assert paused, (
+            f"Leader {leader_id[:8]}... did not reach 'paused' within "
+            f"{SPAWN_TIMEOUT}s — cannot assert the defer invariant without "
+            f"a paused instance"
+        )
+        logger.info(f"[STEP3] leader confirmed paused: {leader_id[:8]}...")
+
+        # ── Step 4: Create a deferred job WHILE paused ───────────────────
+        JOB_MESSAGE = (
+            "hello, this is a paused+defer test — should wait for resume"
+        )
+        job_id = _create_job(
+            agent_id="leader",
+            message=JOB_MESSAGE,
+            project_id=project_id,
+            priority=5,
+            queue_id=defer_queue_id,
+        )
+        assert job_id, "Failed to create deferred job"
+        logger.info(f"[STEP4] deferred job created: {job_id[:8]}...")
+
+        # ── Step 5: Hold window — defer job MUST stay pending while paused
+        # This is the core invariant. A paused instance is suspended-but-
+        # occupying, so the defer idle-gate must treat it as non-idle and
+        # hold the job. We poll for PAUSE_HOLD_SECONDS and assert the job
+        # never advances past 'pending'.
+        PAUSE_HOLD_SECONDS = 25
+        hold_deadline = time.time() + PAUSE_HOLD_SECONDS
+        while time.time() < hold_deadline:
+            try:
+                defer_job = _get_job(job_id)
+                defer_status = str(defer_job.get("status", "unknown")).lower()
+            except requests.exceptions.RequestException as exc:
+                logger.warning(f"[STEP5] defer-job GET failed (will retry): {exc}")
+                time.sleep(POLL_INTERVAL)
+                continue
+
+            # Confirm the instance is STILL paused (not resumed by a stray
+            # event) so the invariant under test is actually held.
+            try:
+                info = _get_instance(leader_id)
+                inst_status = str(info.get("status", "")).lower()
+            except requests.exceptions.RequestException:
+                inst_status = "unknown"
+
+            if defer_status != "pending":
+                premature_admission = True
+                premature_detail = (
+                    f"defer job prematurely admitted while instance was "
+                    f"{inst_status!r}: defer status={defer_status!r}"
+                )
+                logger.error(f"[STEP5] ❌ {premature_detail}")
+                break
+
+            logger.info(
+                f"[STEP5] holding: defer={defer_status!r} "
+                f"instance={inst_status!r}"
+            )
+            time.sleep(POLL_INTERVAL)
+
+        assert not premature_admission, (
+            f"PAUSE+DEFER PREMATURE ADMISSION: {premature_detail}. "
+            "The deferred job advanced past 'pending' while a non-deferred "
+            "instance was paused. A paused instance must count as non-idle "
+            "(suspended-but-occupying), so the defer idle-gate must hold "
+            "the job. See has_active_non_deferred_work (pause-fix)."
+        )
+        logger.info(
+            f"[STEP5] ✓ defer job held 'pending' for {PAUSE_HOLD_SECONDS}s "
+            f"while instance was paused"
+        )
+
+        # ── Step 6: Resume — the job should eventually advance ───────────
+        # This proves the job was correctly GATED (held by the pause), not
+        # permanently stuck by some other defect. After resume the leader
+        # finishes its task → project goes idle → defer queue admits.
+        _resume_instance(leader_id)
+        logger.info(f"[STEP6] leader resumed: {leader_id[:8]}...")
+
+        # Give the resumed workflow time to reach a terminal state, then
+        # confirm the defer job eventually leaves 'pending'. We accept any
+        # non-pending status (processing/completed/failed) as proof the
+        # gate released. Generous timeout: resume + LLM completion + defer
+        # admission all take real time.
+        RESUME_TIMEOUT = COMPLETION_TIMEOUT * 2
+        released, final_status = _wait_for_job_status(
+            job_id,
+            {"processing", "completed", "failed", "cancelled"},
+            timeout=RESUME_TIMEOUT,
+        )
+        # We do NOT hard-assert release here (LLM timing is flaky and the
+        # core invariant — pause holds the job — is already proven in
+        # Step 5). Log the outcome for diagnostics.
+        if released:
+            logger.info(
+                f"[STEP6] ✓ defer job advanced to {final_status!r} after "
+                f"resume — gate released correctly"
+            )
+        else:
+            logger.warning(
+                f"[STEP6] defer job stayed {final_status!r} after resume "
+                f"within {RESUME_TIMEOUT}s (may be LLM timing — the pause "
+                f"hold invariant in Step 5 is the binding assertion)"
+            )
+
+        logger.info("=" * 60)
+        logger.info(
+            "TEST 5 PASSED: paused instance held the defer queue (pause-fix)"
+        )
+        logger.info("=" * 60)
+
+    finally:
+        # Cleanup: resume (in case still paused) → cancel job → terminate.
+        if leader_id:
+            try:
+                info = _get_instance(leader_id)
+                if str(info.get("status", "")).lower() == "paused":
+                    _resume_instance(leader_id)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(f"[CLEANUP] resume check failed: {exc}")
+        if job_id:
+            try:
+                job = _get_job(job_id)
+                cur = str(job.get("status", "")).lower()
+                if cur in {"pending", "processing"}:
+                    _cancel_job(job_id)
+                else:
+                    logger.info(
+                        f"[CLEANUP] job {job_id[:8]}... already terminal "
+                        f"({cur}); skipping cancel"
+                    )
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    f"[CLEANUP] could not check/cancel job {job_id[:8]}...: {exc}"
                 )
         if leader_id:
             _terminate_instance(leader_id)

@@ -620,6 +620,49 @@ class TestDeferIdleGateActiveNonDeferredWork:
         # Assert
         assert result is True
 
+    def test_paused_non_deferred_task_blocks_defer_gate(
+        self, task_repository, engine
+    ):
+        """Pause-fix (2026-07-01): a PAUSED non-deferred Task counts as
+        non-idle, so the defer queue must NOT admit while a paused
+        instance occupies a slot. A paused instance is suspended-but-
+        occupying, not idle — the defer contract is "wait until
+        everything is idle/terminal", and paused is neither.
+
+        Reproduces the dev_run.log bug: send_message → pause instance →
+        create defer job → defer job wrongly admitted.
+        """
+        # Arrange — a paused (non-deferred) Task in the project.
+        _insert_instance(
+            engine,
+            "inst-paused",
+            project_id="project-paused",
+            status=InstanceStatus.PAUSED.value,
+        )
+        _create_task_with_status(
+            engine,
+            instance_id="inst-paused",
+            message_id="m-paused-nd",
+            status=TaskStatus.PAUSED.value,
+            is_deferred=False,
+        )
+
+        # Act — both the project-scoped probe (defer Gate A/B) and the
+        # system-wide probe (maintenance _is_idle) must see the paused
+        # task as non-idle.
+        scoped = task_repository.has_active_non_deferred_work("project-paused")
+        system_wide = task_repository.has_active_non_deferred_work(None)
+
+        # Assert
+        assert scoped is True, (
+            "A paused non-deferred Task must block the defer gate — "
+            "paused instances are suspended-but-occupying, not idle."
+        )
+        assert system_wide is True, (
+            "Maintenance _is_idle must also treat a paused Task as "
+            "non-idle so cleanup/lock-sweeps don't run while paused."
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test 5: P1 invariant — defer job completes after idle

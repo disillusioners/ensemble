@@ -1303,8 +1303,11 @@ class TaskRepository:
         Phase 3 Part B2 (2026-06-30, defer-seam bugfix Phase 1). The
         shared predicate backing the defer-queue idle gate: returns
         True iff at least one row exists in ``task`` with status
-        ``pending`` or ``running`` and ``is_deferred = false``. The
-        gate is shared by:
+        ``pending``, ``running``, OR ``paused`` and ``is_deferred =
+        false``. ``paused`` counts as non-idle (the pause-fix,
+        2026-07-01): a paused instance is suspended-but-occupying, so
+        the defer queue and maintenance must treat it as still-active
+        work, not as a free admission slot. The gate is shared by:
 
         * :meth:`claim_pending_task` — folds the predicate into the
           atomic claim's inner SELECT so deferred candidates are held
@@ -1336,8 +1339,8 @@ class TaskRepository:
                 to NULL when no row exists).
 
         Returns:
-            True if at least one non-deferred PENDING or RUNNING task
-            exists (scoped per ``project_id``); False otherwise.
+            True if at least one non-deferred PENDING, RUNNING, or PAUSED
+            task exists (scoped per ``project_id``); False otherwise.
 
         Dialect notes:
             * ``t.is_deferred = :is_deferred_false`` with a Python
@@ -1349,10 +1352,14 @@ class TaskRepository:
             * ``SELECT EXISTS(...)`` returns a single boolean column
               (0/1 on both backends) and is wrapped in ``bool()`` so
               the return type is invariant across drivers.
-            * The status ``IN (:status_pending, :status_running)``
-              parameterised list mirrors the same pattern in
-              :meth:`has_inflight_task` / :meth:`has_pending_tasks_blocked_by_busy_instance`
-              — no dialect branching needed.
+            * The status ``IN (:status_pending, :status_running, :status_paused)``
+              parameterised list includes ``paused`` so a paused
+              instance counts as non-idle for the defer gate and
+              maintenance (pause-fix, 2026-07-01). Note this is
+              deliberately NARROWER than
+              :meth:`has_pending_tasks_blocked_by_busy_instance`, which
+              answers a different question (is a pending task blocked
+              by a *running* task) and must stay two-state.
         """
         with self.engine.begin() as conn:
             if project_id is None:
@@ -1360,13 +1367,14 @@ class TaskRepository:
                     SELECT EXISTS(
                         SELECT 1 FROM task t
                         JOIN instances i ON t.instance_id = i.instance_id
-                        WHERE t.status IN (:status_pending, :status_running)
+                        WHERE t.status IN (:status_pending, :status_running, :status_paused)
                           AND t.is_deferred = :is_deferred_false
                     )
                 """)
                 row = conn.execute(stmt, {
                     "status_pending": TaskStatus.PENDING.value,
                     "status_running": TaskStatus.RUNNING.value,
+                    "status_paused": TaskStatus.PAUSED.value,
                     "is_deferred_false": False,
                 }).fetchone()
             else:
@@ -1374,7 +1382,7 @@ class TaskRepository:
                     SELECT EXISTS(
                         SELECT 1 FROM task t
                         JOIN instances i ON t.instance_id = i.instance_id
-                        WHERE t.status IN (:status_pending, :status_running)
+                        WHERE t.status IN (:status_pending, :status_running, :status_paused)
                           AND t.is_deferred = :is_deferred_false
                           AND i.project_id = :project_id
                     )
@@ -1382,6 +1390,7 @@ class TaskRepository:
                 row = conn.execute(stmt, {
                     "status_pending": TaskStatus.PENDING.value,
                     "status_running": TaskStatus.RUNNING.value,
+                    "status_paused": TaskStatus.PAUSED.value,
                     "is_deferred_false": False,
                     "project_id": project_id,
                 }).fetchone()
