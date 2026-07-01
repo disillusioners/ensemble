@@ -12,10 +12,12 @@ the three most frequent user workflows:
      actually reach ``paused``, hold for a few seconds without further
      processing, then resume to completion.
 
-  3. **Terminate after spawn, then revive** — same workflow, but the leader
-     is terminated after the child spawns. We document the actual
-     behavior of sending a ``continue`` message to a terminated instance
-     rather than asserting a specific outcome.
+  3. **Terminate after spawn, then revive** — the leader is terminated
+     after the child spawns, then a new message REVIVES it: the instance
+     flips back to ``running`` and reaches a terminal state processing
+     the new message (terminal = terminal, just a different reason —
+     checkpoint/history persist and reload). Regression for the
+     2026-07-01 revive-fix where terminal instances couldn't be revived.
 
   5. **Pause blocks defer queue** — a leader is paused mid-flight, then a
      deferred job is created. The defer queue must hold the job while the
@@ -1783,22 +1785,28 @@ def test_pause_after_spawn_then_resume():
 
 
 # --------------------------------------------------------------------------- #
-# Test 3 — Terminate after spawn, then attempt to revive
+# Test 3 — Terminate after spawn, then revive (revive-fix, 2026-07-01)
 # --------------------------------------------------------------------------- #
 def test_terminate_after_spawn_then_revive():
-    """E2E Test 3: Terminate after spawn, then attempt to revive.
+    """E2E Test 3: Terminate after spawn, then revive.
 
     Same workflow as Test 1, but terminates the leader immediately after
     the developer child spawns. Verifies the leader reaches ``terminated``,
-    then documents the actual behavior of sending a ``continue`` message
-    to a terminated instance rather than asserting a specific outcome
-    (because the current API contract for reviving a terminated instance
-    is not clearly defined — see observations in the body).
+    then asserts that sending a new message REVIVES it: the instance
+    flips back to ``running`` (terminal = terminal, just a different
+    reason — checkpoint/history persist and reload) and reaches a
+    terminal state processing the new message.
+
+    Pre-revive-fix (2026-07-01) this only documented behavior — the
+    message created a Task stuck ``pending`` forever because
+    ``enqueue_message`` didn't reactivate terminal instances and
+    ``claim_pending_task`` excludes terminated instances. Now revive is
+    real, so this asserts it.
     """
     leader_id: str | None = None
     child_id: str | None = None
     logger.info("=" * 60)
-    logger.info("TEST 3: terminate after spawn, then attempt to revive")
+    logger.info("TEST 3: terminate after spawn, then revive")
     logger.info("=" * 60)
 
     try:
@@ -1843,54 +1851,58 @@ def test_terminate_after_spawn_then_revive():
             except requests.exceptions.RequestException as exc:
                 logger.warning(f"[WARN] could not check child status: {exc}")
 
-        # Step 6: try to revive by sending a 'continue' message to the
-        # terminated leader. This is a DOCUMENTATION step — we capture
-        # the actual behavior rather than asserting a particular outcome.
-        send_status_code: int | None = None
-        send_body: str = ""
-        try:
-            response = requests.post(
-                f"{API_BASE}/instances/{leader_id}/messages",
-                json={"content": "continue"},
-                timeout=30,
-            )
-            send_status_code = response.status_code
-            send_body = response.text[:500]
-            logger.info(
-                f"[DOC] POST /messages to terminated leader -> "
-                f"status={send_status_code} body={send_body!r}"
-            )
-        except requests.exceptions.RequestException as exc:
-            logger.info(
-                f"[DOC] POST /messages to terminated leader raised: {exc}"
-            )
-
-        # Step 7: poll the leader's status for ~30s and capture what
-        # actually happens. The current API contract for reviving a
-        # terminated instance is not clearly defined, so we just record.
-        observed_statuses: list[str] = []
-        deadline = time.time() + 30
-        while time.time() < deadline:
-            try:
-                info = _get_instance(leader_id)
-                status = str(info.get("status", "unknown"))
-                if status not in observed_statuses:
-                    observed_statuses.append(status)
-            except requests.exceptions.RequestException:
-                pass
-            time.sleep(POLL_INTERVAL)
-
+        # Step 6: REVIVE — send a new message to the terminated leader.
+        # The revive-fix reactivates terminal instances (completed /
+        # terminated / error / failed → running) on a new message, so
+        # the endpoint must ACCEPT the message (not 4xx) and the instance
+        # must leave 'terminated'.
+        REVIVE_MESSAGE = (
+            "continue our conversation — you were terminated, now revived"
+        )
+        response = requests.post(
+            f"{API_BASE}/instances/{leader_id}/messages",
+            json={"content": REVIVE_MESSAGE},
+            timeout=30,
+        )
+        assert response.status_code == 200, (
+            f"Revive message to terminated leader {leader_id[:8]}... was "
+            f"rejected: status={response.status_code} body={response.text[:300]!r}. "
+            "A terminal instance must accept a new message and revive."
+        )
         logger.info(
-            f"[DOC] terminated leader observed statuses over 30s: "
-            f"{observed_statuses}"
+            f"[STEP6] revive message accepted (status={response.status_code})"
         )
 
-        # Step 8: soft assertion — terminate must have succeeded (which
-        # we already asserted in step 4). Everything else is observed.
+        # Step 7: assert the instance revived — it must leave 'terminated'
+        # and flip to 'running' (proving enqueue_message reactivated it
+        # so the Task is claimable, not stuck pending).
+        revived = _wait_for_status(leader_id, "running", timeout=COMPLETION_TIMEOUT)
+        assert revived, (
+            f"Leader {leader_id[:8]}... did NOT revive to 'running' after a "
+            f"new message within {COMPLETION_TIMEOUT}s — the revive-fix "
+            f"(enqueue_message reactivates terminal states) is broken or the "
+            f"instance stayed 'terminated' / stuck 'pending'."
+        )
+        logger.info(f"[STEP7] ✓ leader revived to 'running': {leader_id[:8]}...")
+
+        # Step 8: the revived instance processes the new message and
+        # reaches a terminal state. Generous timeout — real LLM.
+        reached_terminal, final_status = _wait_for_completion(
+            leader_id, timeout=COMPLETION_TIMEOUT
+        )
+        assert reached_terminal, (
+            f"Revived leader {leader_id[:8]}... did not reach a terminal "
+            f"state within {COMPLETION_TIMEOUT}s (last status: {final_status!r}). "
+            "The revive accepted the message but the Task may be stuck "
+            "pending (claim guard still excluding the instance) — see "
+            "has_active_non_deferred_work / claim_pending_task."
+        )
+        assert final_status in TERMINAL_STATUSES, (
+            f"Revived leader reached unexpected status {final_status!r} "
+            f"(expected one of {TERMINAL_STATUSES})."
+        )
         logger.info(
-            "TEST 3 COMPLETED — documented behavior "
-            f"(revive_status_code={send_status_code}, "
-            f"observed_statuses={observed_statuses})"
+            f"[STEP8] ✓ revived leader reached terminal: {final_status}"
         )
 
         # ── Verify no bus message leaks ───────────────────────────────────
