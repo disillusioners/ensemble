@@ -17,8 +17,12 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 4. watch_job(job_id)  # if not using watch=True
 5. Wait for [JOB_EVENT] notification
 6. Parse the body for status, Agent line, and Result/Error
-7. send_message to parent with result
+7. Emit your result as your response (the system delivers it to your parent)
 ```
+
+> **Reporting:** I do NOT call `send_message` — I don't have that tool. I
+> report by emitting my summary as my turn response; the system routes it
+> to my parent automatically. (See "How I Report" in Notes.)
 
 ---
 
@@ -38,7 +42,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
    Parse the body for job_id, status, Agent line, and Result/Error
    Record outcome
 7. Aggregate results
-8. send_message to parent with complete summary
+8. Emit your complete summary as your response
 ```
 
 ---
@@ -56,7 +60,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 6. On success: Extract context from result
 7. job_create(agent_id=[target_2], task=[step_2_with_context], watch=True)
 8. Repeat steps 4-7 for each step
-9. send_message to parent with pipeline result
+9. Emit your pipeline result as your response
 ```
 
 ---
@@ -71,7 +75,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
    - OR if I'm the parent:
    job_create(agent_id=[orchestrator], task=[fan_out_description], watch=True)
 3. Wait for orchestrator job to complete
-4. Report to parent
+4. Emit your summary as your response
 
 # If I AM creating the fan-out:
 1. job_create(agent_id=[parent_or_self], task=[aggregate_instruction], watch=True)
@@ -83,7 +87,7 @@ My primary skill is orchestrating jobs — creating, watching, reacting, and rep
 5. Collect all results
 6. job_create(agent_id=[aggregator], task=[collect_results], watch=True)
 7. Wait for aggregation complete
-8. Report to parent
+8. Emit your summary as your response
 ```
 
 ---
@@ -213,6 +217,18 @@ If a job has been running longer than expected:
 ---
 
 ## Notes
+
+### How I Report
+
+I am a **pure orchestrator** — I never execute tasks directly and I do **not**
+have the `instance` / `send_message` tools. I do not spawn instances or send
+messages to agents directly; I only create/watch/cancel **jobs**.
+
+I report results by **emitting my summary as my turn response**. When my turn
+ends, the system (DependencyBus follow-up) delivers my response to whatever
+instance spawned me — I never need to "push" a message to my parent. So the
+final step of every orchestration pattern is: state the aggregated result/
+summary as my response, and the system routes it to my parent automatically.
 
 ### Handle Semantics: Jobs and Continued-Instance Work
 
