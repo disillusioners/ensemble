@@ -522,6 +522,38 @@ class JobRecoveryService:
                 if job.admission_state != AdmissionState.DONE.value:
                     continue
 
+                # Legitimately-waiting parent guard: a ``job_continue``-
+                # driven instance runs a NEW Task while the freshest
+                # JobItem (a DIFFERENT, earlier job) is already ``done``.
+                # If this instance has spawned child agents that are
+                # still running, the Task is NOT a zombie — it is
+                # legitimately waiting on the dependency bus.
+                # Force-completing here would short-circuit the natural
+                # terminal path and drop the watcher's ``completed ✓``
+                # notification (the orchestrator then hangs waiting for
+                # an event that never fires).
+                from daemon.services.dependency_bus import get_dependency_bus
+                _bus = get_dependency_bus()
+                if _bus is not None and hasattr(
+                    _bus, "count_pending_for_target_sync"
+                ):
+                    try:
+                        pending = _bus.count_pending_for_target_sync(
+                            task.instance_id
+                        )
+                    except Exception:
+                        pending = 0
+                    if pending > 0:
+                        logger.info(
+                            f"reconcile_drift_states: F10 skip for task "
+                            f"{task.id} on instance "
+                            f"{task.instance_id[:8]}... — {pending} pending "
+                            f"child agent(s) (legitimately waiting; the "
+                            f"done JobItem is a stale earlier job, not "
+                            f"this Task's work)"
+                        )
+                        continue
+
                 # Pattern (b) confirmed. Force-complete the task.
                 # Caller contract (per ``force_complete_task`` docs):
                 # the JobItem must already be terminal — verified

@@ -759,6 +759,23 @@ class MessageProcessingPipeline:
                 f"Parent instance {instance_id[:8]}... transitioned to "
                 f"WAITING_CHILDREN after graph turn (bus_pending={pending})"
             )
+            # Fire the ``in_progress`` job-event notification so an
+            # orchestrator that ``watch_job``-ed this parent's work sees
+            # the ``⟳`` event while children resolve. Before this hook,
+            # the parent's intermediate "spawned child, now waiting"
+            # state produced no ``instance_lifecycle`` event the
+            # observer consumed, so the ``in_progress`` branch was
+            # never reached and watchers never got the progress event.
+            observer = getattr(self._manager, "_job_feedback_observer", None)
+            if observer is not None and hasattr(observer, "emit_in_progress_if_job"):
+                try:
+                    await observer.emit_in_progress_if_job(instance_id)
+                except Exception as ip_err:
+                    logger.warning(
+                        f"MessageProcessingPipeline: in_progress notify "
+                        f"failed for {instance_id[:8]}... (non-fatal): "
+                        f"{ip_err}"
+                    )
         except Exception as e:
             logger.warning(
                 f"MessageProcessingPipeline: WAITING_CHILDREN transition "

@@ -113,6 +113,7 @@ async def notify_work_watchers(
     work_resolver: "WorkResolverService",
     watcher_repo: Any,
     progress: str | None = None,
+    result_summary: str | None = None,
 ) -> int:
     """Notify watchers that ``work_id`` has reached ``status``.
 
@@ -236,7 +237,18 @@ async def notify_work_watchers(
             return 0
 
         agent_id = work_record.agent_id or "unknown"
-        result_summary = work_record.result_summary
+        # Prefer the caller-supplied result_summary/error (the terminal
+        # writer — e.g. JobFeedbackObserver — already pre-fetched the
+        # instance's final assistant message via
+        # ``_get_last_assistant_message_raw``). The resolver returns
+        # ``None`` for job-kind WorkRecords (Phase 5 dropped the
+        # ``JobItem.result_summary`` mirror column and never replaced
+        # it with an Instance read), so without this override the
+        # ``[JOB_EVENT] completed`` body omits the ``Result:`` block.
+        effective_result = (
+            result_summary if result_summary is not None
+            else work_record.result_summary
+        )
         # Prefer the caller-supplied error for ``failed`` notifications
         # (this is the most-recent failure reason, including the
         # caller-context like "max retries exceeded"). Fall back to
@@ -264,8 +276,8 @@ async def notify_work_watchers(
                 if progress:
                     notification_parts.append(f"  Progress:\n{progress}")
             else:
-                if result_summary:
-                    notification_parts.append(f"  Result:\n{result_summary}")
+                if effective_result:
+                    notification_parts.append(f"  Result:\n{effective_result}")
                 if effective_error:
                     notification_parts.append(f"  Error: {effective_error}")
 

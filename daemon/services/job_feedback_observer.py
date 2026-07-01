@@ -1020,6 +1020,63 @@ class JobFeedbackObserver:
                 f"instance {instance_id[:8]}...: {e}"
             )
 
+    async def _resolve_watchable_work_id(self, instance_id: str) -> str | None:
+        """Resolve the instance's active watchable ``work_id``.
+
+        Post-D13, an instance's work may be a ``JobItem`` (``job_create``,
+        still carrying a row) OR a bare ``Task`` (``job_continue`` /
+        message-driven — no ``JobItem``). A watcher registered via
+        ``watch_job`` is keyed on a ``work_id`` that must match whichever
+        of these is the instance's current work, or the ``in_progress`` /
+        ``completed`` notifications never reach the orchestrator.
+
+        Returns the ``JobItem.job_id`` when one is active, otherwise the
+        freshest ``Task.work_id`` (the one whose turn most recently ran),
+        or ``None`` if neither resolves.
+        """
+        ctx = await self._get_processing_job_for_instance(instance_id)
+        work_id = ctx.job_id if ctx is not None else None
+        if not work_id:
+            task_repo = getattr(self._instance_manager, "_task_repo", None)
+            if task_repo is not None and hasattr(task_repo, "get_by_instance"):
+                tasks = await asyncio.to_thread(
+                    task_repo.get_by_instance, instance_id
+                )
+                if tasks:
+                    work_id = getattr(tasks[0], "work_id", None)
+        return work_id or None
+
+    async def emit_in_progress_if_job(self, instance_id: str) -> None:
+        """Emit an ``in_progress`` notification for an instance's active job.
+
+        Called by the message-processing pipeline when a parent instance
+        finishes a graph turn but still has pending children (transition
+        to ``WAITING_CHILDREN``). Resolves the instance's active
+        ``work_id`` (JobItem OR Task) and fires the ``in_progress``
+        watcher notification so an orchestrator that ``watch_job``-ed
+        this work sees the ``⟳`` event while children resolve.
+
+        Best-effort and idempotent: no-op when there is no watchable
+        work, when the instance has no watchers, or when resolution
+        fails. The terminal notification still fires via the normal
+        lifecycle path regardless.
+
+        Args:
+            instance_id: The parent instance that just transitioned to
+                ``WAITING_CHILDREN``.
+        """
+        try:
+            work_id = await self._resolve_watchable_work_id(instance_id)
+            if not work_id:
+                return
+            ctx = _ProcessingJobContext(instance_id=instance_id, job_id=work_id)
+            await self._emit_in_progress(ctx, instance_id)
+        except Exception as e:
+            logger.warning(
+                f"Observer: emit_in_progress_if_job failed for "
+                f"instance {instance_id[:8]}... (non-fatal): {e}"
+            )
+
     async def _finalize_job(
         self,
         ctx: _ProcessingJobContext,
@@ -1449,29 +1506,53 @@ class JobFeedbackObserver:
                     )
 
             # notify_watchers (terminal notification) — fires AFTER commit so
-            # watchers see a consistent state. Skipped when no JobItem
-            # exists (post-D13 MESSAGE path) — there are no watchers
-            # to notify.
-            if ctx.job_id is not None:
+            # watchers see a consistent state. A parent instance may carry
+            # MULTIPLE work_ids (a JobItem from ``job_create`` PLUS Task
+            # work_ids from ``job_continue`` / report-driven turns), and the
+            # orchestrator ``watch_job``-ed exactly one of them. We notify
+            # every candidate work_id for this instance —
+            # ``notify_work_watchers`` is a no-op where no watcher exists,
+            # so this is idempotent and still exactly-once (it claims
+            # watchers only on the work_id that actually has one).
+            # Without this, ``job_continue``-driven work (Task, no JobItem)
+            # never received its ``completed ✓`` and the orchestrator hung.
+            candidate_work_ids: set[str] = set()
+            if ctx.job_id:
+                candidate_work_ids.add(ctx.job_id)
+            try:
+                task_repo = getattr(self._instance_manager, "_task_repo", None)
+                if task_repo is not None and hasattr(task_repo, "get_by_instance"):
+                    inst_tasks = await asyncio.to_thread(
+                        task_repo.get_by_instance, instance_id
+                    )
+                    for _t in inst_tasks:
+                        _wid = getattr(_t, "work_id", None)
+                        if _wid:
+                            candidate_work_ids.add(_wid)
+            except Exception:
+                pass
+
+            for _work_id in candidate_work_ids:
                 if db_result.terminal_status == InstanceStatus.COMPLETED.value:
                     try:
                         await self._job_queue_service.notify_watchers(
-                            ctx.job_id, "completed"
+                            _work_id, "completed",
+                            result_summary=db_result.result_summary,
                         )
                     except Exception as e:
                         logger.warning(
                             f"Observer: notify_watchers failed for job "
-                            f"{ctx.job_id[:8]}...: {e}"
+                            f"{_work_id[:8]}...: {e}"
                         )
                 elif db_result.terminal_status == InstanceStatus.ERROR.value:
                     try:
                         await self._job_queue_service.notify_watchers(
-                            ctx.job_id, "failed", db_result.error_message
+                            _work_id, "failed", db_result.error_message
                         )
                     except Exception as e:
                         logger.warning(
                             f"Observer: notify_watchers failed for job "
-                            f"{ctx.job_id[:8]}...: {e}"
+                            f"{_work_id[:8]}...: {e}"
                         )
 
             # B4: Resolve watched jobs. The bus is task-keyed, not
@@ -2814,7 +2895,18 @@ class JobFeedbackObserver:
                     # (``Instance.status``) and surfaced to callers
                     # via the resolver's canonical mapping.
                     "admission_state": AdmissionState.DONE.value,
-                    "completed_at": now,
+                    # Phase 5 migration: ``completed_at`` /
+                    # ``result_summary`` / ``error_message`` were
+                    # dropped from ``JobItem`` (execution state now
+                    # lives on ``Instance`` + the resolver's Task
+                    # parse). Writing them here raised
+                    # ``CompileError: Unconsummed column names ...``,
+                    # crashing ``_finalize_job`` before
+                    # ``notify_watchers`` could fire and leaving
+                    # watchers (e.g. jober via ``watch_job``) hung.
+                    # ``result_summary`` / ``error_message`` are
+                    # still carried in-memory via ``_FinalizeJobResult``
+                    # for the notification payload below.
                 }
                 # Phase 7c: terminal_reason discriminator. Maps the
                 # observer's ``terminal_status`` (which already
@@ -2830,11 +2922,6 @@ class JobFeedbackObserver:
                 # terminate cascade; that path lives in
                 # ``instance_lifecycle._terminate_instance_db_sync``).
                 update_values["terminal_reason"] = to_status
-                if terminal_status == InstanceStatus.COMPLETED.value:
-                    summary = result_summary or "Job completed (no agent response captured)"
-                    update_values["result_summary"] = summary
-                else:
-                    update_values["error_message"] = error_message or "Unknown error"
 
                 stmt = (
                     sqlmodel_update(JobItem)

@@ -247,6 +247,7 @@ class JobQueueService:
         status: str,
         error: str | None = None,
         progress: str | None = None,
+        result_summary: str | None = None,
     ) -> int:
         """Notify ALL watchers for a job. Called from EVERY terminal path.
 
@@ -284,7 +285,7 @@ class JobQueueService:
             # whatever the JobItem carries. Phase 3 will tighten this
             # to a hard error once every wiring site sets the resolver.
             return await self._notify_watchers_legacy(
-                job_id, status, error, progress
+                job_id, status, error, progress, result_summary
             )
 
         # Delegate to the centralized helper. The helper atomically
@@ -293,6 +294,9 @@ class JobQueueService:
         # ``[JOB_EVENT]`` payload, and enqueues per-watcher. The
         # ``progress=`` kwarg is forwarded so the legacy
         # ``in_progress`` callers (job_feedback_observer) keep working.
+        # ``result_summary=`` overrides the resolver's value (the
+        # terminal writer already fetched the instance's final
+        # message — the resolver returns None for job-kind work).
         return await notify_work_watchers(
             job_id,
             status,
@@ -301,6 +305,7 @@ class JobQueueService:
             work_resolver=work_resolver,
             watcher_repo=self._watcher_repo,
             progress=progress,
+            result_summary=result_summary,
         )
 
     async def _notify_watchers_legacy(
@@ -309,6 +314,7 @@ class JobQueueService:
         status: str,
         error: str | None = None,
         progress: str | None = None,
+        result_summary: str | None = None,
     ) -> int:
         """Legacy JobItem-only notification path used when no resolver is wired.
 
@@ -348,7 +354,10 @@ class JobQueueService:
                         notification_parts.append(f"  Progress:\n{progress}")
                 else:
                     # Phase 7: result_summary column dropped; terminal result
-                    # detail is sourced from Instance/WorkRecord via the resolver.
+                    # detail is sourced from Instance/WorkRecord via the resolver,
+                    # or from the caller-supplied ``result_summary`` override.
+                    if result_summary:
+                        notification_parts.append(f"  Result:\n{result_summary}")
                     if error:
                         notification_parts.append(f"  Error: {error}")
 
