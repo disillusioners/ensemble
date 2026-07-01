@@ -7,11 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from daemon.services.job_queue_service import JobQueueService
 from daemon.services.dead_letter_service import DeadLetterService
-from daemon.services.work_status import is_terminal as _is_terminal_canonical
-from daemon.repositories.job_queue.models import (
-    AdmissionState,
-    _ADMISSION_TO_LEGACY_STATUS,
+from daemon.services.work_status import (
+    _derive_legacy_status,
+    is_terminal as _is_terminal_canonical,
 )
+from daemon.repositories.job_queue.models import AdmissionState
 from .schemas import (
     JobResponse,
     JobNotFoundResponse,
@@ -402,8 +402,13 @@ async def retry_job(
     # resolver reports it, the JobItem mirror must agree — fall
     # back to ``job.admission_state`` which carries the authoritative
     # ``dead_letter`` value (the resolver surfaces the same value).
-    status_for_branches = canonical_status or _ADMISSION_TO_LEGACY_STATUS.get(
-        job.admission_state, "pending"
+    #
+    # F16 fix: route the fallback through ``_derive_legacy_status``
+    # so a ``done`` job with ``terminal_reason='failed'`` reports
+    # ``"failed"`` instead of the lossy map's ``"completed"``.
+    status_for_branches = canonical_status or _derive_legacy_status(
+        job.admission_state,
+        getattr(job, "terminal_reason", None),
     )
 
     # Handle DEAD_LETTER jobs - replay from DLQ

@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field
 from ._tool_registry import register_tool_category
 from ._truncate import truncate_dict_result
 from daemon.repositories.instance.models import InstanceStatus
-from daemon.repositories.job_queue.models import AdmissionState, _ADMISSION_TO_LEGACY_STATUS
+from daemon.repositories.job_queue.models import AdmissionState
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.work_status import _derive_legacy_status
 
 if TYPE_CHECKING:
     from daemon.services.job_queue_service import JobQueueService
@@ -329,7 +330,19 @@ def create_job_tools(
             if watch and watcher_repo is not None and current_instance_id:
                 count = watcher_repo.count_watches_for_instance(current_instance_id)
                 if count >= 50:
-                    return {"error": "Maximum watch limit (50) reached for this instance", "job_id": job_item.job_id, "status": _ADMISSION_TO_LEGACY_STATUS.get(job_item.admission_state, "pending")}
+                    return {
+                        "error": "Maximum watch limit (50) reached for this instance",
+                        "job_id": job_item.job_id,
+                        # F16 fix: route through ``_derive_legacy_status``
+                        # so the watch-limit error response carries the
+                        # discriminator-aware status (a ``done`` job with
+                        # ``terminal_reason='failed'`` reports
+                        # ``"failed"`` instead of the lossy ``"completed"``).
+                        "status": _derive_legacy_status(
+                            job_item.admission_state,
+                            getattr(job_item, "terminal_reason", None),
+                        ),
+                    }
                 watcher_repo.add_watch(job_item.job_id, current_instance_id)
             return job_item.to_dict()
         except ValueError as e:

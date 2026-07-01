@@ -1626,6 +1626,201 @@ SET admission_state = 'queued',
                 return None, True
             return job, True
 
+    def rearm_with_lock(
+        self,
+        job_id: str,
+        instance_id: str,
+    ) -> tuple["JobItem | None", bool]:
+        """Atomically re-acquire a queue lock AND transition DONE -> ACTIVE
+        in a SINGLE transaction (F9 fix).
+
+        Mirrors the B1 fix pattern (:meth:`start_job_atomic_with_lock`) but for
+        the orphan-race post-commit re-arm path. The pre-fix flow in
+        :meth:`daemon.services.job_feedback_observer.JobFeedbackObserver._finalize_job`
+        ran in two SEPARATE transactions — the lock DELETE + admission_state
+        UPDATE landed in TX-A (committed cleanly because admission_state
+        was already 'done' before the DELETE), but the subsequent
+        ``atomic_transition(done -> active)`` in TX-B fired the
+        ``trg_job_queue_items_active_lock_guard`` constraint trigger with
+        no matching ``job_locks`` row, raising
+        ``integrity_constraint_violation`` on PostgreSQL.
+
+        The fix collapses both writes (lock INSERT + admission_state UPDATE)
+        into one ``engine.begin()`` block so the PG triggers see both
+        rows visible at COMMIT and accept the re-arm. ``concurrency_limit``
+        and ``(project_id, queue_id)`` are looked up from the JobItem and
+        JobQueue tables inside the transaction so callers (the observer)
+        only need to pass the job identity.
+
+        Args:
+            job_id: Job identifier (the JobItem to re-arm).
+            instance_id: Pre-existing instance_id — the re-arm keeps the
+                instance that previously ran the job (the post-commit
+                late-child re-check detected a generation change on this
+                instance). MUST match ``job.instance_id`` in the DB.
+
+        Returns:
+            Tuple ``(job, lock_acquired)``:
+
+            - ``(JobItem, True)`` — lock acquired AND admission_state
+              transitioned ``done`` -> ``active``. Both writes committed
+              atomically inside one transaction.
+            - ``(None, False)`` — no-op: missing job, ``admission_state``
+              is not ``done`` (concurrent transition raced ahead), or all
+              ``concurrency_limit`` slots are taken. Transaction is
+              rolled back / left empty — no rows persisted.
+
+        Raises:
+            ValueError: Lock acquired but the admission_state UPDATE
+                matched 0 rows — defensive catch-all for the race where
+                the in-method SELECT saw ``admission_state='done'`` but a
+                concurrent actor flipped it before our UPDATE landed.
+                The transaction — including the lock INSERT — is rolled
+                back atomically; callers do NOT need to release the lock
+                manually.
+        """
+        now_iso = datetime.now(timezone.utc).isoformat()
+        dialect = self.engine.dialect.name
+
+        with self.engine.begin() as conn:
+            # 1. Pre-flight: look up the JobItem to find (project_id,
+            # queue_id) and verify admission_state. Doing this inside
+            # the same transaction that holds the writes means we see a
+            # consistent snapshot. Returns (None, False) for the
+            # missing-job / wrong-state branches BEFORE any lock INSERT.
+            existing = conn.execute(
+                text(
+                    "SELECT project_id, queue_id, admission_state "
+                    "FROM job_queue_items WHERE job_id = :job_id"
+                ),
+                {"job_id": job_id},
+            ).first()
+            if existing is None:
+                # Missing job — commit empty transaction, return no-op.
+                return None, False
+            project_id, queue_id, current_admission = existing
+            if current_admission != AdmissionState.DONE.value:
+                # Not in 'done' — the post-finalize re-arm only applies
+                # to a completed job. Any other state means a concurrent
+                # actor moved the job; the re-arm should be a no-op.
+                return None, False
+
+            # 2. Look up the queue's concurrency_limit. Default to 1 if
+            # the queue row is missing (defensive — a 'done' JobItem
+            # without a queue row is a pre-F9 migration artefact).
+            concurrency_limit = 1
+            if queue_id is not None:
+                queue_row = conn.execute(
+                    text(
+                        "SELECT concurrency_limit FROM job_queues "
+                        "WHERE queue_id = :queue_id"
+                    ),
+                    {"queue_id": queue_id},
+                ).first()
+                if queue_row is not None and queue_row[0]:
+                    concurrency_limit = int(queue_row[0])
+
+            # 3. Atomically claim a slot. Same dialect-branching
+            # pattern as ``start_job_atomic_with_lock`` — raw
+            # ``text()`` SQL so we share the same transaction handle.
+            if dialect == "postgresql":
+                lock_insert_stmt = text(
+                    """
+                    INSERT INTO job_locks
+                        (lock_id, project_id, queue_id, job_id,
+                         instance_id, lock_slot, acquired_at)
+                    VALUES
+                        (:lock_id, :project_id, :queue_id, :job_id,
+                         :instance_id, :slot, :now)
+                    ON CONFLICT (project_id, queue_id, lock_slot) DO NOTHING
+                    """
+                )
+            else:
+                lock_insert_stmt = text(
+                    """
+                    INSERT OR IGNORE INTO job_locks
+                        (lock_id, project_id, queue_id, job_id,
+                         instance_id, lock_slot, acquired_at)
+                    VALUES
+                        (:lock_id, :project_id, :queue_id, :job_id,
+                         :instance_id, :slot, :now)
+                    """
+                )
+
+            lock_acquired = False
+            for slot in range(concurrency_limit):
+                lock_id = str(uuid.uuid4())
+                result = conn.execute(
+                    lock_insert_stmt,
+                    {
+                        "lock_id": lock_id,
+                        "project_id": project_id,
+                        "queue_id": queue_id,
+                        "job_id": job_id,
+                        "instance_id": instance_id,
+                        "slot": slot,
+                        "now": now_iso,
+                    },
+                )
+                if (result.rowcount or 0) == 1:
+                    lock_acquired = True
+                    break
+
+            if not lock_acquired:
+                # All slots taken — commit empty transaction, return
+                # ``(None, False)`` (matches ``start_job_atomic_with_lock``
+                # contract for the no-slot case).
+                return None, False
+
+            # 4. UPDATE job_queue_items in the SAME transaction. The
+            # PostgreSQL ``trg_job_queue_items_active_lock_guard``
+            # trigger fires at COMMIT; because both the lock INSERT
+            # and this UPDATE are staged in one transaction, the
+            # trigger sees both at COMMIT and accepts the new
+            # active state.
+            update_stmt = text(
+                """
+                UPDATE job_queue_items
+                SET admission_state = :admission_state,
+                    instance_id = :instance_id
+                WHERE job_id = :job_id
+                  AND admission_state = :admission_state_guard
+                  AND deleted_at IS NULL
+                """
+            )
+            update_result = conn.execute(
+                update_stmt,
+                {
+                    "admission_state": AdmissionState.ACTIVE.value,
+                    "instance_id": instance_id,
+                    "job_id": job_id,
+                    "admission_state_guard": AdmissionState.DONE.value,
+                },
+            )
+
+            if (update_result.rowcount or 0) == 0:
+                # admission_state guard matched 0 rows: a concurrent
+                # actor flipped the state between our pre-flight SELECT
+                # and this UPDATE. Rollback (raise) so the lock INSERT
+                # is undone atomically — caller never sees a
+                # half-committed lock row.
+                raise ValueError(
+                    f"Cannot re-arm job '{job_id}': admission_state "
+                    f"changed from 'done' between pre-flight SELECT and "
+                    f"UPDATE (race lost)"
+                )
+
+        # Transaction committed successfully — re-read the row to
+        # return a fully-populated ``JobItem``.
+        with SQLModelSession(self.engine) as session:
+            job = session.get(JobItem, job_id)
+            if job is None:
+                # Vanishingly unlikely race: row was deleted between the
+                # COMMIT and the SELECT. Preserve the "return None for
+                # missing job" contract rather than raising.
+                return None, True
+            return job, True
+
     def complete_job(
         self,
         job_id: str,

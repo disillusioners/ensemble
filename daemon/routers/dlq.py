@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from daemon.services.dead_letter_service import DeadLetterService, DLQItemNotFoundError
-from daemon.repositories.job_queue.models import DeadLetterItem as DLQModel, _ADMISSION_TO_LEGACY_STATUS
+from daemon.repositories.job_queue.models import DeadLetterItem as DLQModel
+from daemon.services.work_status import _derive_legacy_status
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT, MAX_SCHEDULE_EXECUTION_LIMIT
 
 logger = logging.getLogger(__name__)
@@ -495,7 +496,14 @@ async def replay_dlq_item(
         
         return DLQReplayResponse(
             job_id=job.job_id,
-            status=_ADMISSION_TO_LEGACY_STATUS.get(job.admission_state, "pending"),
+            # F16 fix: route through ``_derive_legacy_status`` so the
+            # post-replay status reflects ``terminal_reason`` (a
+            # ``done`` job with ``terminal_reason='failed'`` reports
+            # ``"failed"`` instead of the lossy ``"completed"``).
+            status=_derive_legacy_status(
+                job.admission_state,
+                getattr(job, "terminal_reason", None),
+            ),
             message="Job queued for replay"
         )
     except DLQItemNotFoundError:

@@ -1261,29 +1261,50 @@ class JobFeedbackObserver:
                         f"detected generation change for instance="
                         f"{instance_id[:8]} (pre_gen={pre_gen}, "
                         f"post_gen={post_gen}). Re-arming job "
-                        f"{ctx.job_id[:8]} from COMPLETED to PROCESSING."
+                        f"{ctx.job_id[:8]} from COMPLETED to PROCESSING "
+                        f"via rearm_with_lock (F9 trigger-safe)."
                     )
                     rearmed = False
                     try:
+                        # F9 fix: route the orphan-race re-arm through
+                        # ``rearm_with_lock`` (single-transaction lock
+                        # INSERT + admission_state UPDATE) instead of the
+                        # bare ``atomic_transition`` from the pre-fix
+                        # flow. The pre-fix code committed the
+                        # ``done → active`` UPDATE alone, which violates
+                        # the PostgreSQL
+                        # ``trg_job_queue_items_active_lock_guard``
+                        # trigger because the lock was already released
+                        # by ``_finalize_job_db_sync`` Step 3. The
+                        # exception was caught by the broad ``except
+                        # Exception`` and the late child was silently
+                        # orphaned. ``rearm_with_lock`` collapses both
+                        # writes into one ``engine.begin()`` so the
+                        # trigger sees the lock row AND the active
+                        # admission_state at COMMIT.
                         await asyncio.to_thread(
-                            self._job_repo.atomic_transition,
+                            self._job_repo.rearm_with_lock,
                             job_id=ctx.job_id,
-                            from_status="completed",
-                            to_status="processing",
+                            instance_id=instance_id,
                         )
                         rearmed = True
-                    except InvalidTransitionError as ite:
+                    except ValueError as rearm_exc:
                         # The job was transitioned by another actor
                         # (e.g. terminate_instance, a manual admin
-                        # operation) between our commit and this re-arm.
-                        # Log and continue — the post-commit outbox below
-                        # is still valid for whatever state the job is
-                        # actually in.
+                        # operation, or a concurrent terminal event)
+                        # between our commit and this re-arm, OR the
+                        # re-arm encountered a TOCTOU race (the SELECT
+                        # saw ``done`` but the UPDATE matched 0 rows
+                        # because the row flipped off ``done`` mid-
+                        # transaction). The transaction — including the
+                        # lock INSERT — is rolled back atomically so
+                        # there is no lock leak. Log and continue — the
+                        # post-commit outbox below is still valid for
+                        # whatever state the job is actually in.
                         logger.info(
                             f"Observer: re-arm skipped — job "
                             f"{ctx.job_id[:8]} no longer COMPLETED "
-                            f"(current: {ite.from_state} → "
-                            f"{ite.to_state})"
+                            f"(concurrent transition): {rearm_exc}"
                         )
                     except Exception as rearm_exc:
                         # Defensive: never let a re-arm failure crash the
@@ -1293,8 +1314,8 @@ class JobFeedbackObserver:
                         logger.warning(
                             f"Observer: re-arm failed for job "
                             f"{ctx.job_id[:8]} "
-                            f"(COMPLETED → PROCESSING): {rearm_exc}. "
-                            f"The late child may be orphaned."
+                            f"(COMPLETED → PROCESSING via rearm_with_lock): "
+                            f"{rearm_exc}. The late child may be orphaned."
                         )
 
                     if rearmed:

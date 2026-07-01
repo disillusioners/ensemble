@@ -11,9 +11,9 @@ from pydantic import ValidationError
 from daemon.services.job_queue_service import JobQueueService, normalize_statuses
 from daemon.services.dead_letter_service import DeadLetterService
 from daemon.services.project_normalizer import normalize_project_id
+from daemon.services.work_status import _derive_legacy_status
 from daemon.repositories.job_queue.models import (
     AdmissionState,
-    _ADMISSION_TO_LEGACY_STATUS,
     _VALID_LEGACY_STATUSES,
 )
 from daemon.constants import DEFAULT_JOB_LIST_LIMIT, MAX_JOB_LIST_LIMIT
@@ -137,8 +137,15 @@ def _job_to_response(
         # exit criterion is "execution-state reads resolve through
         # the instance/work layer"; this branch is the documented
         # exception for callers that haven't migrated yet.
-        status = _ADMISSION_TO_LEGACY_STATUS.get(
-            job.admission_state, "pending"
+        #
+        # F16 fix: route through ``_derive_legacy_status`` so a
+        # ``done`` job with ``terminal_reason='failed'`` /
+        # ``'cancelled'`` / ``'aborted'`` no longer mis-reports as
+        # ``"completed"`` (the lossy raw-map behaviour). Mirrors the
+        # F3 fix in ``WorkResolverService._job_to_record``.
+        status = _derive_legacy_status(
+            job.admission_state,
+            getattr(job, "terminal_reason", None),
         )
         instance_id = job.instance_id
         # Phase 5: JobItem mirror columns (``result_summary``,

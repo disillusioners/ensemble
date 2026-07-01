@@ -25,14 +25,16 @@ from daemon.repositories.job_queue import (
     JobQueueRepository,
     JobItem,
 )
-from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS
 from daemon.repositories.job_queue.watcher_models import ALL_TERMINAL_STATES
 from daemon.repositories.instance.models import InstanceStatus
 from daemon.services.job_lock_manager import JobLockManager
 from daemon.services.job_state_machine import job_state_machine, InvalidTransitionError
 from daemon.services.project_normalizer import normalize_project_id
 from daemon.services.work_notifier import _format_status_display, notify_work_watchers
-from daemon.services.work_status import is_terminal as _work_status_is_terminal
+from daemon.services.work_status import (
+    _derive_legacy_status,
+    is_terminal as _work_status_is_terminal,
+)
 from daemon.registry import get_registry
 
 logger = logging.getLogger(__name__)
@@ -461,8 +463,15 @@ class JobQueueService:
                 # string so the watcher filter (which checks against
                 # legacy ``watch_events`` like "completed",
                 # "dead_letter") matches.
-                legacy_status = _ADMISSION_TO_LEGACY_STATUS.get(
-                    job.admission_state, job.admission_state
+                # F16 fix: route through ``_derive_legacy_status`` so a
+                # ``done`` job with ``terminal_reason='failed'`` /
+                # ``'cancelled'`` / ``'aborted'`` no longer
+                # mis-reports as ``"completed"`` (the lossy raw-map
+                # behaviour). Mirrors the F3 fix in
+                # ``WorkResolverService._job_to_record``.
+                legacy_status = _derive_legacy_status(
+                    job.admission_state,
+                    getattr(job, "terminal_reason", None),
                 )
                 # Phase 7: error_message column dropped; error text lives on
                 # Instance/WorkRecord via the resolver.

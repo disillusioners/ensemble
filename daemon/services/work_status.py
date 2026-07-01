@@ -53,6 +53,8 @@ from __future__ import annotations
 
 from typing import Final
 
+from daemon.repositories.job_queue.models import _ADMISSION_TO_LEGACY_STATUS
+
 
 # ── Canonical status mapping ──────────────────────────────────────────────
 # Single dict merging Task-side and JobItem-side source values onto the
@@ -177,3 +179,82 @@ def is_terminal(status: str) -> bool:
         taught about.
     """
     return status in _TERMINAL_STATUSES
+
+
+# ── Legacy-status derivation (F16 fix) ────────────────────────────────────
+# The JobItem ``admission_state`` column collapses three terminal
+# outcomes (completed / failed / cancelled) plus the instance-cascade
+# ``aborted`` onto a single ``done`` value. The legacy API vocabulary
+# still distinguishes those outcomes, so read paths must consult
+# ``terminal_reason`` to recover the fine-grained status.
+#
+# The primary read path (``WorkResolverService._job_to_record``) already
+# does this via the F3 fix — but four production fallback paths (used
+# when the resolver is unwired / unreachable) historically derived
+# ``status`` straight from ``_ADMISSION_TO_LEGACY_STATUS`` without
+# consulting ``terminal_reason``, so a ``done`` job with
+# ``terminal_reason='failed'`` incorrectly surfaced as ``"completed"``.
+#
+# This helper centralises the derivation so all four sites use the
+# same priority chain:
+
+def _derive_legacy_status(
+    admission_state: str, terminal_reason: str | None
+) -> str:
+    """Resolve the legacy API status string for a JobItem row.
+
+    F16 fix: the lossy :data:`_ADMISSION_TO_LEGACY_STATUS` map
+    collapses ``done → completed`` regardless of ``terminal_reason``.
+    Four legacy fallback paths (used when ``WorkResolverService`` is
+    unwired / unreachable — see the F16 deferral note in the defer-seam
+    bugfix plan) historically called the map directly and so
+    mis-reported ``failed`` / ``cancelled`` jobs as ``"completed"``.
+
+    This helper implements the same priority chain as the F3 fix in
+    :meth:`WorkResolverService._job_to_record`, applied directly to
+    the JobItem row:
+
+    1. ``admission_state='done'`` AND ``terminal_reason`` set →
+       canonicalise the discriminator (``"failed"`` / ``"cancelled"``
+       pass through; ``"aborted"`` collapses onto ``"cancelled"``
+       because the work-record vocabulary has no distinct aborted
+       state).
+    2. ``admission_state='done'`` AND ``terminal_reason`` is ``None``
+       → the lossy ``done → completed`` map value. This preserves
+       backward compatibility for pre-Phase-7c rows where the
+       ``terminal_reason`` column did not exist.
+    3. Any other ``admission_state`` (``"queued"`` / ``"active"`` /
+       ``"dead"``) → the lossy map value. ``terminal_reason`` is not
+       consulted for non-terminal admission states because the
+       terminal-write boundary (``JobQueueService._finalize_terminal``)
+       always pairs an ``active → done`` transition with a
+       ``terminal_reason`` write, and ``dead`` rows have no
+       ``terminal_reason`` discriminator (they're a separate queue
+       endpoint).
+
+    Args:
+        admission_state: The JobItem ``admission_state`` column value
+            (``"queued"`` / ``"active"`` / ``"done"`` / ``"dead"``).
+        terminal_reason: The JobItem ``terminal_reason`` column value,
+            or ``None`` for pre-7c rows and non-terminal states.
+
+    Returns:
+        A valid legacy status string suitable for ``JobResponse.status``
+        — one of ``"pending"``, ``"processing"``, ``"completed"``,
+        ``"failed"``, ``"cancelled"``, ``"dead_letter"``. Falls back
+        to ``"pending"`` for unknown ``admission_state`` values
+        (matches the pre-F16 behaviour).
+    """
+    if admission_state == "done" and terminal_reason:
+        # Phase 7c: terminal_reason is the discriminator for done rows.
+        # canonicalize_status handles the ``"aborted"`` → ``"cancelled"``
+        # mapping and is a no-op for ``"completed"`` / ``"failed"`` /
+        # ``"cancelled"``. Unknown terminal_reason values (a future
+        # discriminator the canonical map has not been taught about)
+        # pass through unchanged, matching the resolver's defensive
+        # behaviour.
+        return canonicalize_status(terminal_reason)
+    # Backward-compat: pre-7c rows (NULL ``terminal_reason``) and all
+    # non-done states fall through the lossy map. ``"pending"`` is the
+    # default for unknown ``admission_state`` values.
+    return _ADMISSION_TO_LEGACY_STATUS.get(admission_state, "pending")
