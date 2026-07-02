@@ -1,5 +1,5 @@
-Current Plan: Defer Queue + Job/Task Seam Bugfix
-Tracking File: defer-seam-bugfix-tracking.md
-Iteration: 001
+Current Plan: Charter Agent + Mermaid Chart Support
+Tracking File: charter-mermaid-support-tracking.md
+Iteration: 002
 Status: APPROVED
-Last Updated: 2026-06-30 16:50
+Last Updated: 2026-07-02 11:20
