@@ -554,6 +554,45 @@ class JobRecoveryService:
                         )
                         continue
 
+                # Active-task guard: a freshly-running Task is NEVER a
+                # zombie, regardless of whether a (possibly unrelated,
+                # earlier) JobItem is ``done``. ``job_continue`` reuses
+                # an instance whose original JobItem is already done, so
+                # "done JobItem + running Task" is the NORMAL post-D13
+                # state for a continuation — not a zombie. Only force-
+                # complete when the Task's heartbeat is STALE (the worker
+                # is genuinely gone), mirroring the
+                # ``StaleTaskRecovery`` liveness rule. Without this, F10
+                # killed a 5-second-old ``job_continue`` Task, captured
+                # the drift JSON as the work result, and dropped the
+                # watcher's ``completed ✓`` notification.
+                threshold_minutes = 15
+                if self._stale_task_recovery is not None:
+                    threshold_minutes = getattr(
+                        self._stale_task_recovery,
+                        "_threshold_minutes",
+                        threshold_minutes,
+                    )
+                liveness_ts = getattr(task, "last_heartbeat_at", None)
+                if liveness_ts is None:
+                    liveness_ts = getattr(task, "started_at", None)
+                if liveness_ts is not None:
+                    now_ts = datetime.now(timezone.utc)
+                    if liveness_ts.tzinfo is None:
+                        liveness_ts = liveness_ts.replace(tzinfo=timezone.utc)
+                    age = (now_ts - liveness_ts).total_seconds() / 60.0
+                    if age < threshold_minutes:
+                        logger.info(
+                            f"reconcile_drift_states: F10 skip for task "
+                            f"{task.id} on instance "
+                            f"{task.instance_id[:8]}... — task is actively "
+                            f"running (age={age:.1f}min < "
+                            f"{threshold_minutes}min threshold); the done "
+                            f"JobItem is a stale earlier job, not this "
+                            f"Task's work"
+                        )
+                        continue
+
                 # Pattern (b) confirmed. Force-complete the task.
                 # Caller contract (per ``force_complete_task`` docs):
                 # the JobItem must already be terminal — verified
