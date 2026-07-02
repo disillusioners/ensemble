@@ -191,53 +191,71 @@ class TestTeamMembersAuthorization:
         # CRITICAL: the manager's spawn_instance must NOT have been called.
         manager.spawn_instance.assert_not_called()
 
-    async def test_invalid_spawn_leader_cannot_spawn_unlisted_agent(self):
-        """'leader' cannot spawn 'explorer' (not in team_members)."""
-        manager = _make_manager()
+    async def test_valid_spawn_leader_can_spawn_explorer(self):
+        """'leader' can now spawn 'explorer' (added in W1).
+
+        After the W1 fix, leader.team_members includes 'explorer' so that
+        the ``explore()`` knowledge tool's internal ``spawn_instance``
+        call is authorized. The deny mechanism for agents NOT in
+        leader's list is still covered by ``test_invalid_spawn_leader_cannot_spawn_leader``.
+        """
+        manager = _make_manager(spawn_result=("new-explorer-id", None))
         spawn = _get_spawn_instance_tool(manager, caller_agent_id="leader")
 
-        result = await spawn.coroutine(agent_id="explorer")
-
-        assert isinstance(result, str)
-        assert result.startswith("ERROR"), f"Expected ERROR; got: {result!r}"
-        assert "'explorer'" in result, f"Got: {result!r}"
-        # Show the allowed list so the calling agent knows its options.
-        assert "'developer'" in result or "developer" in result, (
-            f"Should list developer as allowed; got: {result!r}"
+        result = await spawn.coroutine(
+            agent_id="explorer", project_id="test-project-id"
         )
-        manager.spawn_instance.assert_not_called()
 
-    async def test_invalid_spawn_developer_cannot_spawn_anyone(self):
-        """'developer' has empty team_members — deny-by-default rejects all spawns.
+        # Success path returns a non-ERROR result containing the instance_id.
+        assert isinstance(result, str), f"Expected str, got {type(result)}"
+        assert not result.startswith("ERROR"), f"Should succeed; got: {result!r}"
+        assert "new-explorer-id" in result, (
+            f"Should include the new instance_id; got: {result!r}"
+        )
+        # Manager's spawn_instance was called exactly once.
+        manager.spawn_instance.assert_called_once()
+        call_kwargs = manager.spawn_instance.call_args.kwargs
+        assert call_kwargs["agent_id"] == "explorer"
+        assert call_kwargs["parent_id"] == "parent-instance-id"
 
-        This is the deny-by-default security guarantee: an agent that didn't
-        declare any team_members can spawn NOTHING, regardless of how 'trusted'
-        its other code paths might be.
+    async def test_invalid_spawn_developer_cannot_spawn_non_team_targets(self):
+        """'developer' has restricted team_members — deny non-team spawns.
+
+        After W1, developer.team_members = ["explorer"]. Any agent NOT in
+        that list must still be rejected. This test exercises targets
+        outside developer's team to verify the deny mechanism is intact
+        (NOTE: developer CAN spawn 'explorer' — covered separately).
         """
         manager = _make_manager()
         spawn = _get_spawn_instance_tool(manager, caller_agent_id="developer")
 
-        # Try spawning every plausible target — all should be rejected.
+        # Try spawning every plausible target that is NOT in
+        # developer.team_members — all should be rejected.
         for target in ["leader", "developer", "reviewer", "tester", "planner"]:
             manager2 = _make_manager()
             spawn2 = _get_spawn_instance_tool(manager2, caller_agent_id="developer")
             result = await spawn2.coroutine(agent_id=target)
             assert isinstance(result, str)
             assert result.startswith("ERROR"), (
-                f"developer (empty team_members) should reject spawn of "
-                f"'{target}'; got: {result!r}"
+                f"developer (team_members=['explorer']) should reject "
+                f"spawn of '{target}'; got: {result!r}"
             )
             assert "not allowed to spawn" in result
-            assert "Allowed team members: []" in result, (
-                f"Empty team_members must be shown as []; got: {result!r}"
+            assert "Allowed team members: ['explorer']" in result, (
+                f"developer.team_members must be shown as ['explorer']; "
+                f"got: {result!r}"
             )
             manager2.spawn_instance.assert_not_called()
 
-    async def test_empty_team_members_rejects_all_spawns(self):
-        """Explicit empty team_members list → reject all spawns.
+    async def test_restricted_team_members_rejects_non_team_spawns(self):
+        """Restricted team_members list → reject spawns outside the team.
 
-        Covers the case where an agent declares ``team_members: []`` in its
-        meta.json (rather than omitting it entirely).
+        After W1, tester.team_members = ["explorer"] (a NON-empty
+        restricted list). This test verifies that targets OUTSIDE that
+        restricted team are rejected. Note: this is NOT the
+        deny-by-default empty-list case — see
+        ``TestCheckTeamMembershipUnit::test_returns_error_for_truly_empty_team_members``
+        for the foundational [] security guarantee.
         """
         manager = _make_manager()
         spawn = _get_spawn_instance_tool(manager, caller_agent_id="tester")
@@ -247,7 +265,7 @@ class TestTeamMembersAuthorization:
         assert isinstance(result, str)
         assert result.startswith("ERROR")
         assert "not allowed to spawn" in result
-        assert "Allowed team members: []" in result
+        assert "Allowed team members: ['explorer']" in result
         manager.spawn_instance.assert_not_called()
 
     async def test_unknown_caller_agent_is_denied(self):
@@ -390,28 +408,38 @@ class TestTeamMembersRegistryParsing:
         expected = [
             "planner", "developer", "reviewer", "tidier",
             "approver", "tester", "giter", "devops",
+            "explorer",  # Added in W1 so leader can authorize explore()'s
+                         # internal spawn_instance of the "explorer" agent.
         ]
         assert set(leader.team_members) == set(expected), (
             f"leader.team_members mismatch: got {leader.team_members}"
         )
 
-    def test_developer_team_members_empty(self):
-        """developer.meta.json has team_members = [] (deny-by-default)."""
+    def test_developer_team_members_has_explorer(self):
+        """developer.meta.json has team_members = ["explorer"] (W1).
+
+        developer is knowledge-enabled, so it must be authorized to spawn
+        the 'explorer' agent that backs its ``explore()`` tool.
+        """
         from daemon.registry import get_registry
 
         dev = get_registry().get("developer")
         assert dev is not None
-        assert dev.team_members == [], (
-            f"developer.team_members should be []; got {dev.team_members}"
+        assert dev.team_members == ["explorer"], (
+            f"developer.team_members should be ['explorer']; got {dev.team_members}"
         )
 
-    def test_planner_team_members_empty(self):
-        """planner.meta.json has team_members = [] (deny-by-default)."""
+    def test_planner_team_members_has_explorer(self):
+        """planner.meta.json has team_members = ["explorer"] (W1).
+
+        planner is knowledge-enabled, so it must be authorized to spawn
+        the 'explorer' agent that backs its ``explore()`` tool.
+        """
         from daemon.registry import get_registry
 
         planner = get_registry().get("planner")
         assert planner is not None
-        assert planner.team_members == []
+        assert planner.team_members == ["explorer"]
 
     def test_all_agents_have_team_members_field(self):
         """Every registered agent exposes a team_members attribute (possibly empty)."""
@@ -448,12 +476,123 @@ class TestCheckTeamMembershipUnit:
         assert "not allowed to spawn" in err
         assert "leader" in err
 
-    def test_returns_error_for_empty_team_members(self):
+    def test_returns_error_when_requested_not_in_restricted_team(self):
+        """A caller with a NON-empty restricted team rejects non-team targets.
+
+        After W1, developer's team_members = ["explorer"] (a non-empty
+        restricted list). The helper must reject any requested agent_id
+        not in that list and render the allowed set explicitly. This
+        covers the "non-team target rejected by restricted team" branch;
+        the foundational empty-list deny-by-default is covered by
+        ``test_returns_error_for_truly_empty_team_members`` below.
+        """
         from daemon.tools.instance import _check_team_membership
 
         err = _check_team_membership("developer", "leader")
         assert err is not None
-        assert "Allowed team members: []" in err
+        assert "not allowed to spawn" in err
+        assert "Allowed team members: ['explorer']" in err, (
+            f"developer.team_members should be rendered as ['explorer']; "
+            f"got: {err!r}"
+        )
+
+    def test_returns_error_for_truly_empty_team_members(self, monkeypatch):
+        """A caller whose team_members is genuinely [] must reject ALL spawns.
+
+        After W1, no real agent fixture has an empty ``team_members`` list
+        (developer, planner, tester are all ``["explorer"]``). To exercise
+        the foundational deny-by-default contract on a truly empty list,
+        we inject a synthetic caller via the registry whose
+        ``team_members`` is ``[]`` (not None, not absent — the literal
+        empty list).
+
+        This is the most important security guarantee of
+        ``_check_team_membership``: a caller with an explicit empty list
+        must be rejected even when targeting known-valid agents.
+        """
+        from pathlib import Path
+
+        from daemon.registry import AgentMetadata, get_registry
+        from daemon.tools.instance import _check_team_membership
+
+        registry = get_registry()
+
+        # Synthetic caller with team_members = [] (literal empty list,
+        # NOT None, NOT missing).
+        synthetic_meta = AgentMetadata(
+            id="synthetic_empty_team_caller",
+            name="Synthetic Empty-Team Caller",
+            description="Test fixture for deny-by-default on team_members=[]",
+            path=Path("/tmp/synthetic_empty_team_caller"),
+            team_members=[],
+        )
+
+        # Patch get_resolved so the synthetic caller resolves to our
+        # metadata. Fall through to the original for everything else
+        # so resolve_pure_id etc. keep working normally.
+        original_get_resolved = registry.get_resolved
+
+        def patched_get_resolved(agent_id: str):
+            if agent_id == "synthetic_empty_team_caller":
+                return synthetic_meta
+            return original_get_resolved(agent_id)
+
+        monkeypatch.setattr(registry, "get_resolved", patched_get_resolved)
+
+        # Spawn against a known-valid target agent — must be rejected.
+        err = _check_team_membership("synthetic_empty_team_caller", "developer")
+
+        assert err is not None, "Empty team_members must produce an error"
+        assert "not allowed to spawn" in err, f"Got: {err!r}"
+        assert "Allowed team members: []" in err, (
+            f"Empty team_members must render as 'Allowed team members: []'; "
+            f"got: {err!r}"
+        )
+
+    def test_returns_error_for_missing_team_members_attribute(self, monkeypatch):
+        """A caller whose team_members attribute is None is treated like [].
+
+        The implementation uses ``caller_meta.team_members or []``, which
+        collapses ``None`` and ``[]`` into the same deny-everything path.
+        This test pins that contract: a caller with ``team_members=None``
+        must also be rejected with ``Allowed team members: []``.
+
+        NOTE: ``None`` and ``[]`` are intentionally treated identically
+        (defense-in-depth — both express "no authority to spawn anyone").
+        A single empty-list test would be sufficient for behavior, but we
+        keep this explicit test to document and protect the contract
+        against future regressions.
+        """
+        from daemon.registry import get_registry
+        from daemon.tools.instance import _check_team_membership
+
+        registry = get_registry()
+
+        # Mock with team_members=None explicitly. We use MagicMock because
+        # AgentMetadata's typed field rejects None at construction; the
+        # helper reads .id and .team_members only, so a minimal mock is
+        # sufficient.
+        mock_caller = MagicMock()
+        mock_caller.id = "synthetic_missing_team_caller"
+        mock_caller.team_members = None
+
+        original_get_resolved = registry.get_resolved
+
+        def patched_get_resolved(agent_id: str):
+            if agent_id == "synthetic_missing_team_caller":
+                return mock_caller
+            return original_get_resolved(agent_id)
+
+        monkeypatch.setattr(registry, "get_resolved", patched_get_resolved)
+
+        err = _check_team_membership("synthetic_missing_team_caller", "developer")
+
+        assert err is not None, "Missing (None) team_members must produce an error"
+        assert "not allowed to spawn" in err, f"Got: {err!r}"
+        assert "Allowed team members: []" in err, (
+            f"None team_members must render the same as []: "
+            f"'Allowed team members: []'; got: {err!r}"
+        )
 
     def test_alias_request_canonicalizes(self):
         """Request 'coder' canonicalizes to 'developer' (in leader's list)."""
