@@ -8,5 +8,6 @@
   "llm_model": "quick",
   "tools": {
     "allow": ["rag", "filesystem", "help", "time", "mcp", "context"]
-  }
+  },
+  "team_members": []
 }

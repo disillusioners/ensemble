@@ -9,5 +9,6 @@
   "no_force_explore": true,
   "tools": {
     "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp", "context"]
-  }
+  },
+  "team_members": []
 }

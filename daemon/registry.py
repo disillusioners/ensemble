@@ -82,6 +82,16 @@ class AgentMetadata(BaseModel):
         description="Tool filtering configuration. None means all tools allowed."
     )
     llm_model: str | None = Field(default=None, description="Override the global LLM model for this agent")
+    team_members: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Canonical agent_ids that THIS agent is allowed to spawn via "
+            "spawn_instance. Empty/missing means deny-by-default — the agent "
+            "cannot spawn any other agents. Enforced by the spawn_instance "
+            "tool layer before any DB transaction. Aliases (e.g. 'coder') are "
+            "resolved to canonical ids (e.g. 'developer') via the registry."
+        ),
+    )
 
     model_config = ConfigDict(
         extra="ignore",
@@ -193,6 +203,7 @@ class AgentRegistry:
                     tools=tools_filter,
                     innate_skills=meta.get("innate_skills", []),
                     llm_model=meta.get("llm_model"),
+                    team_members=meta.get("team_members", []) or [],
                 )
                 self._agents[agent_id] = agent_meta
             except Exception as e:

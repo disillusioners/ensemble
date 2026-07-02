@@ -12,5 +12,6 @@
   "tools": {
     "allow": ["bash", "filesystem", "help", "mcp", "context"]
   },
-  "llm_model": null
+  "llm_model": null,
+  "team_members": []
 }

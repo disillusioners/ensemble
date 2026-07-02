@@ -212,11 +212,11 @@ def resolve_tool_filter(
 
 def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> str | None:
     """Get the project_id from a parent instance's metadata.
-    
+
     Args:
         manager: The InstanceManager instance
         instance_id: The current instance ID
-    
+
     Returns:
         The project_id if found, None otherwise.
     """
@@ -226,6 +226,85 @@ def _get_instance_project_id(manager: "InstanceManager", instance_id: str) -> st
             return instance_meta.project_id
     except Exception:
         pass
+    return None
+
+
+def _check_team_membership(caller_agent_id: str, requested_agent_id: str) -> str | None:
+    """Verify the caller agent is allowed to spawn the requested agent.
+
+    Reads the caller's ``meta.json`` ``team_members`` list and checks that the
+    requested agent_id (resolved to its canonical id) is present. Returns
+    ``None`` when the spawn is permitted, or an error message describing the
+    rejection when it is not.
+
+    Both the caller's list entries AND the requested ``agent_id`` are
+    canonicalized via :func:`registry.resolve_pure_id` to prevent
+    alias-bypass attacks (e.g. ``"coder"`` for ``"developer"``).
+
+    Secure default: ``team_members`` missing OR empty → deny everything.
+
+    Args:
+        caller_agent_id: The agent_id of the instance invoking
+            ``spawn_instance`` (the parent instance's agent).
+        requested_agent_id: The agent_id the caller wants to spawn.
+
+    Returns:
+        ``None`` when the spawn is authorized, otherwise a human-readable
+        error string suitable for the tool's existing error path.
+    """
+    # Import here to avoid circular import (registry imports utils indirectly).
+    from ..registry import get_registry
+
+    registry = get_registry()
+
+    # Canonicalize the REQUESTED id first — unknown agent → reject (will be
+    # reported as "not allowed" rather than "not found" since this is a
+    # permissions check). The downstream lifecycle service still raises a
+    # "not found" ValueError for unresolvable ids, which is the right
+    # primary signal for callers; the membership check is purely an
+    # authorization filter on top.
+    requested_canonical = registry.resolve_pure_id(requested_agent_id)
+    if requested_canonical is None:
+        return (
+            f"Agent '{caller_agent_id}' is not allowed to spawn "
+            f"'{requested_agent_id}'. Requested agent does not exist. "
+            "Allowed team members: []"
+        )
+
+    # Look up the caller's metadata.
+    caller_meta = registry.get_resolved(caller_agent_id)
+    if caller_meta is None:
+        # Caller agent_id is unknown — this is a wiring/misconfiguration
+        # bug, but we fail closed (deny). The downstream lifecycle service
+        # will raise a "not found" ValueError for the caller as well.
+        return (
+            f"Agent '{caller_agent_id}' is not allowed to spawn "
+            f"'{requested_canonical}'. Caller agent not found. "
+            "Allowed team members: []"
+        )
+
+    # Resolve caller-canonical id (resolves aliases like 'coder' →
+    # 'developer'); the canonical id is what team_members entries should
+    # match against.
+    caller_canonical = caller_meta.id
+    raw_members = caller_meta.team_members or []
+
+    # Canonicalize each member so an attacker cannot bypass via aliases
+    # (e.g. caller = 'coder' with team_members = ['developer'] still
+    # works because 'developer' canonicalizes to itself).
+    allowed_canonical: set[str] = set()
+    for member in raw_members:
+        canonical = registry.resolve_pure_id(member)
+        if canonical is not None:
+            allowed_canonical.add(canonical)
+
+    if requested_canonical not in allowed_canonical:
+        allowed_display = sorted(allowed_canonical) if allowed_canonical else []
+        return (
+            f"Agent '{caller_canonical}' is not allowed to spawn "
+            f"'{requested_canonical}'. Allowed team members: {allowed_display}"
+        )
+
     return None
 
 
@@ -316,17 +395,17 @@ def _make_workdir_aware(
     get_default_workdir: Callable[[], str | None]
 ):
     """Wrap a tool to auto-populate workdir from project directory.
-    
+
     Args:
         tool: The tool to wrap (function or StructuredTool)
         get_default_workdir: Callable that returns the default workdir
-        
+
     Returns:
         Wrapped tool with auto workdir support
     """
     from functools import wraps
     from langchain_core.tools import StructuredTool
-    
+
     # Check if it's a StructuredTool
     if isinstance(tool, StructuredTool):
         # Get the underlying function - @tool uses 'coroutine', from_function uses 'func'
@@ -334,10 +413,10 @@ def _make_workdir_aware(
         if original_func is None:
             # Fallback - tool doesn't have a callable func, return as-is
             return tool
-        
+
         # Check if async
         is_async = asyncio.iscoroutinefunction(original_func)
-        
+
         if is_async:
             @wraps(original_func)
             async def wrapped_func(*args, **kwargs):
@@ -352,7 +431,7 @@ def _make_workdir_aware(
                 if _is_null_workdir(kwargs.get('workdir')):
                     kwargs['workdir'] = get_default_workdir()
                 return original_func(*args, **kwargs)
-        
+
         # Create a new StructuredTool with the wrapped function
         # Use coroutine for async tools, func for sync
         if asyncio.iscoroutinefunction(wrapped_func):
@@ -371,10 +450,10 @@ def _make_workdir_aware(
     else:
         # It's a plain function - wrap it directly
         func = tool
-        
+
         # Check if async
         is_async = asyncio.iscoroutinefunction(func)
-        
+
         if is_async:
             @wraps(func)
             async def wrapped_func(*args, **kwargs):
@@ -387,7 +466,7 @@ def _make_workdir_aware(
                 if _is_null_workdir(kwargs.get('workdir')):
                     kwargs['workdir'] = get_default_workdir()
                 return func(*args, **kwargs)
-        
+
         return wrapped_func
 
 
@@ -469,7 +548,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
     # Create a closure to get the current instance's project workdir
     def get_current_workdir() -> str | None:
         return _get_project_workdir(manager, current_instance_id)
-    
+
+    # Capture the caller's agent_id from the outer ``create_instance_tools``
+    # scope. The ``spawn_instance`` tool's parameter is named ``agent_id``
+    # too (it shadows the outer var), so we pin the caller's id here under
+    # a distinct name for the team_members authorization check.
+    caller_agent_id: str = agent_id or ""
+
     @register_tool_category("instance")
     @tool(args_schema=SpawnInstanceInput)
     async def spawn_instance(agent_id: Annotated[str, Field(description="Agent ID (e.g., 'developer', 'leader')")], project_id: Annotated[str | None, Field(default=None, description="Optional project ID for context injection. Pass None or 'null' if no project context is needed.")] = None, instance_name: Annotated[str | None, Field(default=None, description="Optional short name for the instance (e.g., 'create-feature-a', 'fix-bug-b').")] = None, model: Annotated[str | None, Field(default=None, description="Optional LLM model override for this instance (highest priority — overrides meta.json and env). If provided but not in config.llm.allowed_models, silently falls back to default.")] = None) -> str:
@@ -492,6 +577,28 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
         Returns:
             The instance_id of the newly spawned instance. Use this with send_message().
         """
+        # ─── Authorization gate (BEFORE any DB transaction) ───────────────
+        # The caller agent (the instance invoking this tool) is the closure
+        # variable ``caller_agent_id``. Check that the requested
+        # ``agent_id`` is in the caller's ``meta.json`` ``team_members`` list
+        # before doing any work. Deny-by-default: missing/empty team_members
+        # rejects all spawns. Both sides are canonicalized via the registry
+        # so legacy aliases (e.g. "coder") cannot bypass the check.
+        if not caller_agent_id:
+            return (
+                "ERROR: spawn_instance invoked without a caller agent_id. "
+                "This is a wiring/configuration bug — the instance tools were "
+                "created without an agent_id. Spawn is denied."
+            )
+        if not agent_id:
+            return (
+                "ERROR: agent_id is required to spawn_instance. "
+                "Pass a non-empty agent_id (e.g. 'developer', 'leader')."
+            )
+        membership_error = _check_team_membership(caller_agent_id, agent_id)
+        if membership_error is not None:
+            return f"ERROR: {membership_error}"
+
         try:
             # Auto-inherit project_id from parent if not explicitly provided
             if project_id is None:
