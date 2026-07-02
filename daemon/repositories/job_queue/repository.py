@@ -153,7 +153,13 @@ class JobRepository:
             ``text()`` statement.
         """
         if self.engine.dialect.name == "postgresql":
-            return f"{column} || jsonb_build_object('{key}', :{param})"
+            # ``jsonb_build_object`` accepts ``anyelement``, so an
+            # untyped bound param raises ``IndeterminateDatatype``; the
+            # explicit ``CAST`` anchors it.
+            return (
+                f"{column} || jsonb_build_object('{key}', "
+                f"CAST(:{param} AS text))"
+            )
         # SQLite: ``{{}}`` escapes to the literal ``{}`` default JSON
         # object in the f-string output.
         return f"json_set(COALESCE({column}, '{{}}'), '$.{key}', :{param})"
