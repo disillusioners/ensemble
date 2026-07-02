@@ -622,3 +622,37 @@ class TestCheckTeamMembershipUnit:
         err = _check_team_membership("leader", "ghost_agent")
         assert err is not None
         assert "not allowed to spawn" in err
+
+    def test_case_sensitive_agent_id_fails_closed(self):
+        """''Developer'' (capital D) is rejected by ``_check_team_membership``.
+
+        ``registry.resolve_pure_id`` is case-sensitive: only the exact
+        lowercase key in ``self._agents`` (or an explicit alias in
+        ``AGENT_ID_ALIASES``) resolves. Any other casING returns ``None``
+        and the gate treats it as an unknown agent → reject with the
+        usual deny-by-default error. This pins the SAFE fail-closed
+        behavior so a future switch to case-insensitive resolution is
+        an explicit, tested decision rather than silent.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        err = _check_team_membership("leader", "Developer")
+        assert err is not None
+        assert "not allowed to spawn" in err, f"Got: {err!r}"
+
+    def test_whitespace_in_agent_id_fails_closed(self):
+        """Whitespace in requested agent_id fails closed (reject).
+
+        ``registry.resolve_pure_id`` does NOT strip whitespace: the raw
+        string is looked up in ``self._agents`` directly. A trailing
+        space (e.g. ``"developer "``) does not match the registered
+        key and the gate treats it as unknown → reject with the
+        usual deny-by-default error. Pins the SAFE fail-closed
+        behavior so a future strip-and-retry is an explicit, tested
+        decision.
+        """
+        from daemon.tools.instance import _check_team_membership
+
+        err = _check_team_membership("leader", "developer ")
+        assert err is not None
+        assert "not allowed to spawn" in err, f"Got: {err!r}"
