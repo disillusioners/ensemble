@@ -1,20 +1,5 @@
 # Workflow
 
-## Step 0: Check Validation Tooling Availability
-
-Before drafting any diagram, verify that the validation toolchain is available in this environment:
-
-```bash
-command -v npx >/dev/null 2>&1 && echo "npx available" || echo "npx NOT available"
-```
-
-- If `npx` is available, proceed normally — every diagram will be validated before being returned.
-- If `npx` is **not** available, set a mental flag: diagrams will be returned with a `⚠️ Validation skipped — npx/mermaid-cli not available in this environment. Diagram may contain syntax errors.` warning prepended.
-
-This check happens once per request, not once per session — tools may appear or disappear between requests.
-
----
-
 ## Step 1: Understand the Request
 
 Identify what needs visualizing:
@@ -86,6 +71,8 @@ Write the syntax. Style conventions:
 
 ## Step 5: Validate Using Per-Instance Temp Files
 
+After drafting the Mermaid, validate it. Do **not** pre-check whether `npx`/`mermaid-cli` exists — just run the validation; the command result tells you. This avoids a wasted round-trip when the tool is (almost always) present.
+
 Validation script — adapted per environment, always with a fresh temp file:
 
 ```bash
@@ -125,8 +112,26 @@ fi
 | Outcome             | Action                                                                                          |
 |---------------------|------------------------------------------------------------------------------------------------|
 | Exit code 0         | Diagram is valid — proceed to Step 6.                                                          |
-| Non-zero exit code  | Read stderr, fix the syntax, write to a new `mktemp` file, re-run validation. **Max 3 attempts.** |
-| `npx` not available | Skip validation entirely, proceed to Step 6 with a `⚠️ Validation skipped` warning.            |
+| Non-zero exit code (syntax error) | Read stderr, fix the syntax, write to a new `mktemp` file, re-run validation. **Max 3 attempts.** |
+| `npx`/`mmdc` not found (command not found / no such file) | **Try to install it once** (see below). If install succeeds, retry validation. If install fails or the tool is still absent, skip validation and proceed to Step 6 with a `⚠️ Validation skipped` warning. |
+
+### Installing the tool when absent (once only)
+
+When the validation command reports the tool is not found (e.g. `npx: command not found`, `npm` missing, or `mmdc` fails to resolve), attempt a single install before giving up:
+
+```bash
+# Node/npm present but mermaid-cli not resolvable — let npx fetch it
+npx -y @mermaid-js/mermaid-cli --version 2>&1
+
+# If npm itself is missing, install the npm toolchain first (apt example):
+# sudo apt-get update && sudo apt-get install -y nodejs npm
+```
+
+Rules:
+
+- **Attempt at most once per request.** Whether it succeeds or fails, do not retry the install.
+- After a successful install, run the validation again (this counts as attempt 1 of the 3 syntax-retry budget, since it's the first real validation pass).
+- After a failed install, skip validation entirely — proceed to Step 6 with the `⚠️ Validation skipped` warning. Do not loop.
 
 ### Retry loop
 
@@ -189,8 +194,6 @@ The fenced block must use ` ```mermaid ` (no extra language tags, no extra wrapp
 ## Summary
 
 ```
-Step 0: Check npx availability
-  ↓
 Step 1: Understand what needs visualizing
   ↓
 Step 2: Gather context from codebase if needed
@@ -199,7 +202,7 @@ Step 3: Pick the diagram type
   ↓
 Step 4: Draft Mermaid syntax
   ↓
-Step 5: Validate via mktemp + mmdc (max 3 attempts, then warn)
+Step 5: Validate via mktemp + mmdc (max 3 attempts, then warn; skip if tool absent)
   ↓
 Step 6: Return fenced ```mermaid block + brief explanation
 ```
