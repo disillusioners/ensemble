@@ -58,6 +58,7 @@ from daemon.services.dependency_bus import (
 # seeds that derive ``admission_state`` from a ``status`` value.
 def status_to_admission(status):  # noqa: ANN001,ANN201
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -65,6 +66,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through),
+        # so callers passing ``AdmissionState.X.value`` resolve to
+        # themselves instead of the ``"queued"`` fallback.
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
 
 
@@ -1123,13 +1131,15 @@ class TestCrashRecovery:
 
         # Simulate the atomic transition (what _finalize_job_db_sync does).
         # The actual _finalize_job uses WriteGuardSession; here we verify
-        # the SQLite UPDATE is atomic with the status guard.
+        # the SQLite UPDATE is atomic with the admission_state guard.
+        # (Phase 5 dropped the legacy ``status`` column —
+        # ``admission_state`` is the sole write authority.)
         from sqlalchemy import text
         with engine.begin() as conn:
             result = conn.execute(text("""
                 UPDATE job_queue_items
-                SET status = :new_status
-                WHERE job_id = :job_id AND status = :expected_status
+                SET admission_state = :new_status
+                WHERE job_id = :job_id AND admission_state = :expected_status
             """), {
                 "new_status": AdmissionState.DONE.value,
                 "job_id": job_id,
@@ -1141,8 +1151,8 @@ class TestCrashRecovery:
         with engine.begin() as conn:
             result = conn.execute(text("""
                 UPDATE job_queue_items
-                SET status = :new_status
-                WHERE job_id = :job_id AND status = :expected_status
+                SET admission_state = :new_status
+                WHERE job_id = :job_id AND admission_state = :expected_status
             """), {
                 "new_status": AdmissionState.DONE.value,
                 "job_id": job_id,

@@ -76,6 +76,7 @@ from daemon.write_pause_guard import WritePauseGuard
 # seeds that derive ``admission_state`` from a ``status`` value.
 def status_to_admission(status):  # noqa: ANN001,ANN201
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -83,6 +84,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through),
+        # so callers passing ``AdmissionState.X.value`` resolve to
+        # themselves instead of the ``"queued"`` fallback.
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
 
 pytestmark = pytest.mark.integration

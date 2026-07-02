@@ -63,6 +63,7 @@ from daemon.write_pause_guard import WritePauseGuard
 # seeds that derive ``admission_state`` from a ``status`` value.
 def status_to_admission(status):  # noqa: ANN001,ANN201
     return {
+        # JobStatus source values
         "pending": "queued",
         "processing": "active",
         "paused": "active",
@@ -70,6 +71,13 @@ def status_to_admission(status):  # noqa: ANN001,ANN201
         "failed": "done",
         "cancelled": "done",
         "dead_letter": "dead",
+        # AdmissionState source values (identity map — pass-through),
+        # so callers passing ``AdmissionState.X.value`` resolve to
+        # themselves instead of the ``"queued"`` fallback.
+        "queued": "queued",
+        "active": "active",
+        "done": "done",
+        "dead": "dead",
     }.get(status, "queued")
 
 pytestmark = pytest.mark.integration
@@ -279,7 +287,7 @@ class TestColdResumeAfterTTLEviction:
             inst_after_first = s.get(Instance, instance_id)
             inst_status_1 = inst_after_first.status
             inst_paused_at_1 = inst_after_first.paused_at
-            job_status_1 = s.get(JobItem, job_id).status
+            job_status_1 = s.get(JobItem, job_id).admission_state
             task_status_1 = s.get(Task, task_id).status
 
         # Second resume — must not error, must leave state untouched.

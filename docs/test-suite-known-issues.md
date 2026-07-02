@@ -46,41 +46,74 @@ failure here is environmental and not necessarily a code defect.
 
 ---
 
-## Group 3 — Pre-existing, **possibly real code bugs** (NOT investigated)
+## Group 3 — RESOLVED (stale test fixtures, not code bugs)
 
-These fail on the previous commit too (confirmed), but the assertions look like
-they may reflect genuine defects — separate from the job-watch notification
-subsystem. Worth a dedicated investigation.
+**Investigated and fixed.** Both 3a and 3b traced to the same root cause:
+a stale test-local helper. **No production code was changed** — all fixes
+are in test fixtures.
 
-### 3a. `admission_state` `'queued'` vs `'active'` default mismatch
+### Root cause
 
-Recurring pattern across multiple tests:
+`status_to_admission(status)` expects a *legacy status* string
+(`"processing"`, `"paused"`, …). But the failing seeds call it with an
+*admission-state* value, e.g. `status_to_admission(AdmissionState.ACTIVE.value)`
+where `AdmissionState.ACTIVE.value == "active"`. Since `"active"` is not a
+key in the legacy-only dict, it falls through to the default `"queued"` —
+so every seeded "PROCESSING/PAUSED job" actually persisted with
+`admission_state='queued'`.
 
+The canonical helper (used in ~12 other test files, e.g.
+`tests/unit/services/test_jq_proxy_phase2_dualwrite.py:86`) already
+includes an `AdmissionState` identity map (`"active": "active"`, …). The
+broken files predated that addition.
+
+### 3a. `admission_state` `'queued'` vs `'active'` — FIXED
+
+Consequence of the root cause: seeded jobs were `'queued'`, so
+`assert admission_state == 'active'` failed and the atomic
+`UPDATE ... WHERE admission_state='active'` matched 0 rows.
+
+**Fix:** aligned the `status_to_admission` helper in
+`tests/integration/test_cold_resume_ttl.py`,
+`tests/integration/test_crash_recovery_paused.py`, and
+`tests/test_report_lane_phase2.py` with the canonical version
+(added the `AdmissionState` identity map).
+
+A second, previously-masked stale-fixture bug also surfaced once 3a
+cleared: two fixtures referenced the `status` column on `job_queue_items`,
+which was **dropped in Phase 5** (`admission_state` is the sole write
+authority). Fixed:
+- `tests/test_report_lane_phase2.py::test_finalize_is_idempotent_via_atomic_transition`
+  — raw SQL `SET status`/`WHERE status` → `admission_state`.
+- `tests/integration/test_cold_resume_ttl.py::test_resume_db_sync_is_idempotent`
+  — `.status` → `.admission_state`.
+
+### 3b. Crash-recovery sweep finds nothing to recover — FIXED
+
+`JobRecoveryService.recover_on_startup` sweeps for `admission_state='active'`,
+but the seed persisted `'queued'` (root cause) → `total: 0`. Fixed by the
+same `status_to_admission` alignment in
+`tests/integration/test_crash_recovery_paused.py`.
+
+### Verification
+
+All 17 tests across the three files now pass in isolation:
+
+```bash
+.venv/bin/pytest --override-ini="addopts=" \
+  tests/test_report_lane_phase2.py tests/integration/test_cold_resume_ttl.py \
+  tests/integration/test_crash_recovery_paused.py -v   # 17 passed
 ```
-AssertionError: Job must transition PAUSED → PROCESSING (re-armed)
-assert 'queued' == 'active'
-  tests/integration/test_cold_resume_ttl.py:238
-```
 
-The same mismatch also breaks the standalone
-`tests/test_report_lane_phase2.py::TestCrashRecovery::test_finalize_is_idempotent_via_atomic_transition`
-(which fails even in isolation, on every commit including pre-`7d38714e`).
+### Follow-up (not blocking)
 
-**Hypothesis:** a JobItem created in test fixtures (or by a real path) defaults
-to `admission_state='queued'` but the code/test expects it to have been admitted
-to `'active'`. Could be a stale test fixture, or a real admit-path regression.
-
-### 3b. Crash-recovery sweep finds nothing to recover
-
-```
-assert stats == {"recovered": 1, "alive": 0, "total": 1}
-AssertionError: assert {'recovered': 0, 'total': 0} == {'recovered': 1, 'total': 1}
-  tests/integration/test_crash_recovery_paused.py (4 tests)
-```
-
-The recovery sweep returns `total: 0` — it is not finding the PROCESSING jobs
-the fixture created. Could be a fixture issue (jobs not in the expected state)
-or a real recovery-query bug.
+Several *other* test files still ship the legacy-only `status_to_admission`
+and happen to call it only with legacy status strings, so they pass today.
+They will break the moment a caller passes an `AdmissionState` value
+(see `tests/message_queue_redesign/test_task_repository.py`, which already
+calls `status_to_admission(AdmissionState.ACTIVE.value)` 9× through the
+broken variant). Aligning the remaining ~25 copies to the canonical helper
+is recommended cleanup.
 
 ---
 
@@ -109,7 +142,8 @@ git checkout <prior-sha> -- daemon/services/<files>
 
 ## Open follow-ups
 
-1. **Group 3a/3b** — investigate whether the `queued`-vs-`active` default and the
-   `recovered: 0` recovery sweep are real bugs or stale fixtures.
+1. **Group 3** — RESOLVED (see above). Optional cleanup: align the remaining
+   ~25 legacy-only `status_to_admission` copies to the canonical helper
+   before another caller passes an `AdmissionState` value.
 2. **Group 1** — make the `sys.modules` polluters isolation-safe (or quarantine
    them) so the full suite is reliable.
