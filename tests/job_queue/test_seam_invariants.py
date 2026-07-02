@@ -195,6 +195,7 @@ def _create_task_with_status(
     status: str = TaskStatus.PENDING.value,
     is_deferred: bool = False,
     task_type: str = TaskType.PROCESS_MESSAGE.value,
+    work_id: str | None = None,
 ) -> int:
     """Insert a Task row directly via SQL and return its integer id.
 
@@ -204,6 +205,10 @@ def _create_task_with_status(
     path use this helper. The Python bool for ``is_deferred`` keeps the
     bind working on both SQLite (INTEGER 0/1) and PostgreSQL
     (BOOLEAN false/true).
+
+    ``work_id``: when provided, stamps the Task with an explicit
+    cross-system identifier (e.g. a JobItem's ``job_id`` for a job's
+    driving Task). Defaults to a fresh UUID4 (the model default).
     """
     now = datetime.now(timezone.utc)
     with engine.begin() as conn:
@@ -229,7 +234,7 @@ def _create_task_with_status(
                 "created_at": now,
                 "cancel_requested": False,
                 "retry_scheduled": False,
-                "work_id": str(uuid.uuid4()),
+                "work_id": work_id or str(uuid.uuid4()),
                 "is_deferred": is_deferred,
             },
         )
@@ -2725,14 +2730,19 @@ class TestPeriodicDriftReconciler:
             job_metadata={"message_id": "msg-f10-1"},
         )
         # A RUNNING task with a fresh heartbeat. The F10 detection
-        # does NOT depend on heartbeat age — any RUNNING task whose
-        # instance's JobItem is DONE is drift-eligible.
+        # matches the Task to its OWN JobItem via ``work_id == job_id``
+        # (the contract stamped at dispatch): a Task whose ``work_id``
+        # resolves to a ``done`` JobItem is the genuine zombie. So the
+        # seeded task carries ``work_id="job-f10-1"`` to model the
+        # JobItem's driving Task. A ``job_continue`` continuation Task
+        # would have a standalone ``work_id`` and would NOT be flagged.
         task_id = _create_task_with_status(
             engine,
             instance_id="inst-f10-1",
             message_id="msg-f10-1",
             status=TaskStatus.RUNNING.value,
             is_deferred=False,
+            work_id="job-f10-1",
         )
 
         # Wire the recovery service with the full dep triple.

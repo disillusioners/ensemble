@@ -2771,6 +2771,7 @@ class InstanceManager:
         metadata: dict[str, Any] | None = None,
         *,
         is_deferred: bool = False,
+        work_id: str | None = None,
     ) -> AsyncMessageResult:
         """Enqueue a message via the unified dispatcher.
 
@@ -2813,6 +2814,7 @@ class InstanceManager:
             images=images,
             metadata=metadata,
             is_deferred=is_deferred,
+            work_id=work_id,
         )
 
     async def _process_message_with_tracking(

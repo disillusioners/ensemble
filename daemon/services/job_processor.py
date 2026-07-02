@@ -843,6 +843,16 @@ class JobProcessor:
                             message=job.message,
                             source=job.source,
                             is_deferred=(queue.queue_type == "defer"),
+                            # Stamp the JobItem's ``job_id`` onto the
+                            # driving Task's ``work_id`` so the Task is
+                            # explicitly linked to its JobItem (the
+                            # documented ``work_id == job_id`` contract).
+                            # This gives drift detection (F10) and the
+                            # work resolver a precise Task↔JobItem key
+                            # instead of guessing via the instance's
+                            # "freshest" JobItem — which falsely flagged
+                            # ``job_continue`` continuation Tasks.
+                            work_id=job.job_id,
                         )
                         # Stamp the message_id back onto the JobItem so
                         # the cross-system guard in ``claim_pending_task``

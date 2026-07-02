@@ -766,6 +766,7 @@ class InstanceMessagingService:
         *,
         path_label: str = "",
         is_deferred: bool = False,
+        work_id: str | None = None,
     ) -> _PreparedEnqueueContext:
         """Shared prelude for ``enqueue_message``.
 
@@ -881,6 +882,14 @@ class InstanceMessagingService:
                 status=TaskStatus.PENDING.value,
                 created_at=datetime.now(timezone.utc),
                 is_deferred=is_deferred,
+                # Stamp a caller-supplied ``work_id`` when provided (the
+                # JobItem's ``job_id`` on the dispatch path) so the Task
+                # is explicitly linked to its driving JobItem. Without
+                # this the Task mints an unrelated UUID4 and drift
+                # detection (F10) has no way to tell a genuine zombie
+                # (the JobItem's own stuck Task) from a ``job_continue``
+                # continuation Task on the same instance.
+                **({"work_id": work_id} if work_id else {}),
             )
             session.add(task)
             # ``task.work_id`` is populated by the model's
@@ -992,6 +1001,7 @@ class InstanceMessagingService:
         metadata: dict[str, Any] | None = None,
         *,
         is_deferred: bool = False,
+        work_id: str | None = None,
     ) -> "AsyncMessageResult":
         """Enqueue a message via the unified dispatcher.
 
@@ -1049,6 +1059,7 @@ class InstanceMessagingService:
             images=images,
             metadata=metadata,
             is_deferred=is_deferred,
+            work_id=work_id,
         )
 
         # Emit status_change event if status was changed to running

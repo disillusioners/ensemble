@@ -511,27 +511,40 @@ class JobRecoveryService:
         )
         for task in running_tasks:
             try:
-                # F10 detection: the most-recent JobItem for the
-                # instance is already terminal (``done``).
-                job = await asyncio.to_thread(
-                    self._job_repository.get_by_instance, task.instance_id
-                )
+                # F10 detection: match the running Task to its OWN
+                # JobItem via ``work_id == job_id``. The JobItem's
+                # driving Task is stamped with ``work_id = job_id`` at
+                # dispatch (see ``job_processor``), so a Task whose
+                # ``work_id`` resolves to a ``done`` JobItem is the
+                # genuine zombie (the job finished but its Task is
+                # stuck running). A ``job_continue`` / message /
+                # report Task has a standalone ``work_id`` that
+                # matches NO JobItem → it is never an F10 zombie
+                # (stale_task_recovery handles crashed-worker tasks
+                # via heartbeat staleness, separately).
+                task_work_id = getattr(task, "work_id", None)
+                job: Any = None
+                if task_work_id:
+                    job = await asyncio.to_thread(
+                        self._job_repository.get, task_work_id
+                    )
                 if job is None:
-                    # No JobItem at all — virtual-job case; not F10.
+                    # No JobItem keyed by this Task's work_id — this
+                    # is a continuation / message Task, not a job's
+                    # driving Task. Not F10.
                     continue
                 if job.admission_state != AdmissionState.DONE.value:
+                    # This Task's own JobItem is not terminal yet —
+                    # legitimately running.
                     continue
 
-                # Legitimately-waiting parent guard: a ``job_continue``-
-                # driven instance runs a NEW Task while the freshest
-                # JobItem (a DIFFERENT, earlier job) is already ``done``.
-                # If this instance has spawned child agents that are
-                # still running, the Task is NOT a zombie — it is
-                # legitimately waiting on the dependency bus.
-                # Force-completing here would short-circuit the natural
-                # terminal path and drop the watcher's ``completed ✓``
-                # notification (the orchestrator then hangs waiting for
-                # an event that never fires).
+                # Legitimately-waiting parent guard: even a genuine
+                # job Task that has spawned child agents (and is
+                # waiting on the dependency bus) must not be force-
+                # completed — its JobItem being ``done`` here is
+                # unusual but force-completing would short-circuit the
+                # terminal path. Defense-in-depth; the work_id match
+                # above already eliminates the common false positive.
                 from daemon.services.dependency_bus import get_dependency_bus
                 _bus = get_dependency_bus()
                 if _bus is not None and hasattr(
@@ -548,48 +561,7 @@ class JobRecoveryService:
                             f"reconcile_drift_states: F10 skip for task "
                             f"{task.id} on instance "
                             f"{task.instance_id[:8]}... — {pending} pending "
-                            f"child agent(s) (legitimately waiting; the "
-                            f"done JobItem is a stale earlier job, not "
-                            f"this Task's work)"
-                        )
-                        continue
-
-                # Active-task guard: a freshly-running Task is NEVER a
-                # zombie, regardless of whether a (possibly unrelated,
-                # earlier) JobItem is ``done``. ``job_continue`` reuses
-                # an instance whose original JobItem is already done, so
-                # "done JobItem + running Task" is the NORMAL post-D13
-                # state for a continuation — not a zombie. Only force-
-                # complete when the Task's heartbeat is STALE (the worker
-                # is genuinely gone), mirroring the
-                # ``StaleTaskRecovery`` liveness rule. Without this, F10
-                # killed a 5-second-old ``job_continue`` Task, captured
-                # the drift JSON as the work result, and dropped the
-                # watcher's ``completed ✓`` notification.
-                threshold_minutes = 15
-                if self._stale_task_recovery is not None:
-                    threshold_minutes = getattr(
-                        self._stale_task_recovery,
-                        "_threshold_minutes",
-                        threshold_minutes,
-                    )
-                liveness_ts = getattr(task, "last_heartbeat_at", None)
-                if liveness_ts is None:
-                    liveness_ts = getattr(task, "started_at", None)
-                if liveness_ts is not None:
-                    now_ts = datetime.now(timezone.utc)
-                    if liveness_ts.tzinfo is None:
-                        liveness_ts = liveness_ts.replace(tzinfo=timezone.utc)
-                    age = (now_ts - liveness_ts).total_seconds() / 60.0
-                    if age < threshold_minutes:
-                        logger.info(
-                            f"reconcile_drift_states: F10 skip for task "
-                            f"{task.id} on instance "
-                            f"{task.instance_id[:8]}... — task is actively "
-                            f"running (age={age:.1f}min < "
-                            f"{threshold_minutes}min threshold); the done "
-                            f"JobItem is a stale earlier job, not this "
-                            f"Task's work"
+                            f"child agent(s) (legitimately waiting)"
                         )
                         continue
 
