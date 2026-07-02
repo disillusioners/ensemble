@@ -71,6 +71,7 @@ export class MessageInputComponent {
     'developer': '#10a7f7',
     'coder': '#10a7f7',  // backward compat for cached responses
     'reviewer': '#8b5cf6',
+    'charter': '#3b82f6',
   };
 
   readonly color = computed(() => {

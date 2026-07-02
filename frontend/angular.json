@@ -54,6 +54,9 @@
             ],
             "styles": [
               "src/styles.scss"
+            ],
+            "scripts": [
+              "node_modules/mermaid/dist/mermaid.min.js"
             ]
           },
           "configurations": {
@@ -62,7 +65,7 @@
                 {
                   "type": "initial",
                   "maximumWarning": "1MB",
-                  "maximumError": "2MB"
+                  "maximumError": "6MB"
                 },
                 {
                   "type": "anyComponentStyle",

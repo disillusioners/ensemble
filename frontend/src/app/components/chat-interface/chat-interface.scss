@@ -549,3 +549,31 @@ $cyan: #06b6d4;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   }
 }
+
+// Mermaid diagram styling for dark theme
+.mermaid {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+  max-width: 100%;
+
+  svg {
+    max-width: 100%;
+    height: auto;
+  }
+}
+
+.message-bubble {
+  .mermaid {
+    background: transparent;
+    border: none;
+    padding: 8px 0;
+
+    &[data-mermaid-error] {
+      color: #f43f5e;
+      font-family: 'Courier New', monospace;
+      font-size: 0.85em;
+      white-space: pre-wrap;
+    }
+  }
+}

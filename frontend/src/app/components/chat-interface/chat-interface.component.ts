@@ -31,6 +31,7 @@ export class ChatInterfaceComponent implements AfterViewChecked, OnChanges {
     'developer': '#10a7f7',
     'coder': '#10a7f7',  // backward compat for cached responses
     'reviewer': '#8b5cf6',
+    'charter': '#3b82f6',
   };
 
   ngOnChanges(changes: SimpleChanges): void {

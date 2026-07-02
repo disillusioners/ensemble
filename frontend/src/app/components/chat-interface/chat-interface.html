@@ -94,7 +94,7 @@
                   [style.borderTopLeftRadius]="message.role === 'assistant' ? '4px' : '12px'"
                   [style.borderTopRightRadius]="message.role === 'user' ? '4px' : '12px'"
                 >
-                  <markdown [data]="message.content || ''"></markdown>
+                  <markdown [data]="message.content || ''" mermaid></markdown>
                 </div>
               }
 
