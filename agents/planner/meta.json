@@ -5,9 +5,9 @@
   "icon": "📋",
   "color": "accent-indigo",
   "version": "1.0.0",
-  "innate_skills": ["opencode"],
+  "innate_skills": ["opencode", "chart"],
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
   },
-  "team_members": ["explorer"]
+  "team_members": ["explorer", "charter"]
 }

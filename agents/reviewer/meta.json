@@ -4,10 +4,10 @@
   "description": "Experienced solution architect reviewing plans, architecture, and code for quality, compliance, and risks",
   "icon": "🔍",
   "color": "accent-rose",
-  "innate_skills": ["opencode"],
+  "innate_skills": ["opencode", "chart"],
   "no_force_explore": true,
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
   },
-  "team_members": ["explorer"]
+  "team_members": ["explorer", "charter"]
 }

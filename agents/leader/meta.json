@@ -10,5 +10,5 @@
   "tools": {
     "allow": ["instance", "self", "project", "help", "knowledge", "mcp", "critical_notes", "project_history"]
   },
-  "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "tester", "giter", "devops", "explorer"]
+  "team_members": ["planner", "developer", "reviewer", "tidier", "approver", "tester", "giter", "devops", "explorer", "charter"]
 }

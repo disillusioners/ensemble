@@ -4,9 +4,9 @@
   "description": "Writes and runs tests, reports results",
   "icon": "🧪",
   "color": "accent-green",
-  "innate_skills": ["opencode", "test-pack"],
+  "innate_skills": ["opencode", "chart", "test-pack"],
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "db"]
   },
-  "team_members": ["explorer"]
+  "team_members": ["explorer", "charter"]
 }

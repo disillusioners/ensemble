@@ -1,0 +1,14 @@
+{
+  "id": "charter",
+  "name": "Charter",
+  "description": "Generates and validates Mermaid diagrams (flowcharts, sequence diagrams, class diagrams, etc.)",
+  "icon": "📊",
+  "color": "accent-blue",
+  "version": "1.0.0",
+  "no_force_explore": true,
+  "innate_skills": [],
+  "tools": {
+    "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context"]
+  },
+  "team_members": ["explorer"]
+}

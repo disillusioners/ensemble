@@ -51,6 +51,7 @@ After delegating, just wait. The system will report back.
 # loader; this map only governs tool access.
 INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
     "opencode": ["external_opencode"],
+    "chart": ["instance"],
 }
 
 

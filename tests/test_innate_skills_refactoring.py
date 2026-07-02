@@ -55,13 +55,13 @@ class TestInnateSkillsSystemPromptIdentity:
         # Test each agent
         # Stale test: skill header uses hyphen (OpenCode-Skill) not underscore
         test_cases = [
-            ("developer", ["opencode"], "OpenCode-Skill"),
-            ("reviewer", ["opencode"], "OpenCode-Skill"),
-            ("tester", ["opencode", "test-pack"], "OpenCode-Skill"),  # tester gets BOTH
-            ("tester", ["opencode", "test-pack"], "Test Pack Skill"),  # tester gets BOTH
-            ("planner", ["opencode"], "OpenCode-Skill"),
-            ("tidier", ["opencode"], "OpenCode-Skill"),
-            ("approver", ["opencode"], "OpenCode-Skill"),
+            ("developer", ["opencode", "chart"], "OpenCode-Skill"),
+            ("reviewer", ["opencode", "chart"], "OpenCode-Skill"),
+            ("tester", ["opencode", "chart", "test-pack"], "OpenCode-Skill"),  # tester gets BOTH
+            ("tester", ["opencode", "chart", "test-pack"], "Test Pack Skill"),  # tester gets BOTH
+            ("planner", ["opencode", "chart"], "OpenCode-Skill"),
+            ("tidier", ["opencode", "chart"], "OpenCode-Skill"),
+            ("approver", ["opencode", "chart"], "OpenCode-Skill"),
             ("leader", ["coordination"], "Coordination Skill"),
             ("jober", ["job-orchestration"], "Job Orchestration"),
             ("giter", [], None),  # giter has NO innate_skills
@@ -94,7 +94,7 @@ class TestInnateSkillsSystemPromptIdentity:
         cache = PromptCache()
         tester_meta = real_registry.get("tester")
         assert tester_meta is not None
-        assert tester_meta.innate_skills == ["opencode", "test-pack"]
+        assert tester_meta.innate_skills == ["opencode", "chart", "test-pack"]
         
         prompt, _ = load_and_cache_prompt("tester", tester_meta.path, cache)
         

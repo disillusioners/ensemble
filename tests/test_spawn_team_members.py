@@ -158,6 +158,7 @@ class TestTeamMembersAuthorization:
         expected_team = [
             "planner", "developer", "reviewer", "tidier",
             "approver", "tester", "giter", "devops",
+            "charter",
         ]
         for agent_id in expected_team:
             manager = _make_manager(spawn_result=(f"id-{agent_id}", None))
@@ -237,12 +238,12 @@ class TestTeamMembersAuthorization:
             result = await spawn2.coroutine(agent_id=target)
             assert isinstance(result, str)
             assert result.startswith("ERROR"), (
-                f"developer (team_members=['explorer']) should reject "
+                f"developer (team_members=['explorer', 'charter']) should reject "
                 f"spawn of '{target}'; got: {result!r}"
             )
             assert "not allowed to spawn" in result
-            assert "Allowed team members: ['explorer']" in result, (
-                f"developer.team_members must be shown as ['explorer']; "
+            assert "Allowed team members: ['charter', 'explorer']" in result, (
+                f"developer.team_members must be shown as ['charter', 'explorer']; "
                 f"got: {result!r}"
             )
             manager2.spawn_instance.assert_not_called()
@@ -265,7 +266,7 @@ class TestTeamMembersAuthorization:
         assert isinstance(result, str)
         assert result.startswith("ERROR")
         assert "not allowed to spawn" in result
-        assert "Allowed team members: ['explorer']" in result
+        assert "Allowed team members: ['charter', 'explorer']" in result
         manager.spawn_instance.assert_not_called()
 
     async def test_unknown_caller_agent_is_denied(self):
@@ -410,6 +411,7 @@ class TestTeamMembersRegistryParsing:
             "approver", "tester", "giter", "devops",
             "explorer",  # Added in W1 so leader can authorize explore()'s
                          # internal spawn_instance of the "explorer" agent.
+            "charter",
         ]
         assert set(leader.team_members) == set(expected), (
             f"leader.team_members mismatch: got {leader.team_members}"
@@ -425,21 +427,24 @@ class TestTeamMembersRegistryParsing:
 
         dev = get_registry().get("developer")
         assert dev is not None
-        assert dev.team_members == ["explorer"], (
-            f"developer.team_members should be ['explorer']; got {dev.team_members}"
+        assert dev.team_members == ["explorer", "charter"], (
+            f"developer.team_members should be ['explorer', 'charter']; got {dev.team_members}"
         )
 
     def test_planner_team_members_has_explorer(self):
-        """planner.meta.json has team_members = ["explorer"] (W1).
+        """planner.meta.json has team_members = ["explorer", "charter"] (W1).
 
         planner is knowledge-enabled, so it must be authorized to spawn
-        the 'explorer' agent that backs its ``explore()`` tool.
+        the 'explorer' agent that backs its ``explore()`` tool,
+        as well as 'charter' for planning workflows.
         """
         from daemon.registry import get_registry
 
         planner = get_registry().get("planner")
         assert planner is not None
-        assert planner.team_members == ["explorer"]
+        assert planner.team_members == ["explorer", "charter"], (
+            f"planner.team_members should be ['explorer', 'charter']; got {planner.team_members}"
+        )
 
     def test_all_agents_have_team_members_field(self):
         """Every registered agent exposes a team_members attribute (possibly empty)."""
@@ -491,8 +496,8 @@ class TestCheckTeamMembershipUnit:
         err = _check_team_membership("developer", "leader")
         assert err is not None
         assert "not allowed to spawn" in err
-        assert "Allowed team members: ['explorer']" in err, (
-            f"developer.team_members should be rendered as ['explorer']; "
+        assert "Allowed team members: ['charter', 'explorer']" in err, (
+            f"developer.team_members should be rendered as ['charter', 'explorer']; "
             f"got: {err!r}"
         )
 
