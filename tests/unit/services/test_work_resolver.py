@@ -656,6 +656,98 @@ class TestListWork:
         assert len(records) == 2
         assert {r.project_id for r in records} == {"proj-A"}
 
+    def test_active_orchestration_promotes_newest_completed_turn(
+        self, engine, resolver
+    ):
+        """A ``completed`` turn on an actively-orchestrating instance
+        (``running`` / ``waiting_children``) is promoted to
+        ``processing`` so the jober's "check running jobs" query
+        surfaces in-flight multi-turn work (e.g. a ``job_continue``
+        continuation whose single turn is done while children resolve).
+
+        Mirrors the jober's actual call path: ``job_list`` with
+        multiple statuses passes ``status=None`` to ``list_work`` (no
+        DB-level status filter) and post-filters, so the promotion —
+        which runs after the Task fetch — is what surfaces the
+        in-flight work.
+        """
+        # An instance actively orchestrating children (parent waiting).
+        _seed_instance(
+            engine, instance_id="inst-active", status="waiting_children"
+        )
+        # Older completed turn — keeps ``completed`` (history).
+        older_wid = _seed_task(
+            engine, instance_id="inst-active", status=TaskStatus.COMPLETED.value
+        )
+        # Newest completed turn — promoted to ``processing``.
+        newest_wid = _seed_task(
+            engine, instance_id="inst-active", status=TaskStatus.COMPLETED.value
+        )
+
+        records = resolver.list_work()
+        by_id = {r.work_id: r.status for r in records}
+
+        # The newest completed turn is surfaced as in-flight work.
+        assert by_id.get(newest_wid) == "processing", (
+            f"Newest completed turn on a waiting_children instance must "
+            f"be promoted to 'processing'. Got: {by_id}"
+        )
+        # The older completed turn keeps its per-turn status (history
+        # preserved — only the newest turn per instance inherits the
+        # orchestration status).
+        assert by_id.get(older_wid) == "completed", (
+            f"Older completed turn must NOT be promoted. Got: {by_id}"
+        )
+
+    def test_quiescent_instance_keeps_turn_status(self, engine, resolver):
+        """A ``completed`` turn on a quiescent instance (``idle``) is
+        NOT promoted — the work is genuinely done."""
+        _seed_instance(engine, instance_id="inst-idle", status="idle")
+        wid = _seed_task(
+            engine, instance_id="inst-idle", status=TaskStatus.COMPLETED.value
+        )
+
+        records = resolver.list_work(status="completed")
+
+        assert any(r.work_id == wid and r.status == "completed" for r in records), (
+            "Completed turn on an idle instance must stay 'completed' "
+            "(quiescent instance = work done, not orchestrating)."
+        )
+
+    def test_single_status_processing_surfaces_active_turn(
+        self, engine, resolver
+    ):
+        """A single-status ``list_work(status="processing")`` broadens
+        the Task fetch to include ``completed`` rows so the
+        active-orchestration promotion can flip an eligible completed
+        turn (instance ``waiting_children``) to ``processing`` and
+        surface it. Without the DB-fetch broadening the completed row
+        would be filtered out at SQL level before promotion."""
+        _seed_instance(
+            engine, instance_id="inst-active2", status="waiting_children"
+        )
+        wid = _seed_task(
+            engine, instance_id="inst-active2", status=TaskStatus.COMPLETED.value
+        )
+        # A genuinely completed turn on a quiescent instance — must NOT
+        # leak into the ``processing`` result.
+        _seed_instance(engine, instance_id="inst-done", status="idle")
+        done_wid = _seed_task(
+            engine, instance_id="inst-done", status=TaskStatus.COMPLETED.value
+        )
+
+        records = resolver.list_work(status="processing")
+        ids = {r.work_id for r in records}
+
+        assert wid in ids, (
+            "Active-orchestration promotion must surface the completed "
+            "turn on a waiting_children instance under status='processing'."
+        )
+        assert done_wid not in ids, (
+            "Completed turn on an idle instance must NOT appear under "
+            "status='processing' (no promotion for quiescent instances)."
+        )
+
     def test_list_work_filter_by_instance_id(self, engine, resolver):
         """``instance_id`` filter narrows results to one instance.
 

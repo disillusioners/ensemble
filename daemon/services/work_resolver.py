@@ -64,7 +64,20 @@ from daemon.repositories.instance.models import Instance
 from daemon.repositories.job_queue.models import AdmissionState, JobItem
 from daemon.repositories.task.models import Task
 
-from .work_status import _STATUS_CANONICAL_MAP, canonicalize_status
+from .work_status import (
+    _STATUS_CANONICAL_MAP,
+    canonicalize_status,
+)
+
+# Instance statuses that represent an ACTIVE multi-turn orchestration in
+# flight (the instance is doing work, not quiescent). Used by
+# ``list_work``'s active-orchestration status promotion (Option 3):
+# only these states promote a Task record's status to the instance's.
+# ``idle`` / ``waiting`` / ``queued`` are quiescent; terminal states
+# are handled by ``is_terminal``.
+_ACTIVE_ORCHESTRATION_STATUSES: frozenset[str] = frozenset(
+    {"running", "waiting_children"}
+)
 
 if TYPE_CHECKING:
     from daemon.repositories.instance.repository import SQLModelInstanceRepository
@@ -932,6 +945,7 @@ class WorkResolverService:
             descending (newest first). Empty list if nothing matches.
         """
         source_statuses: set[str] | None = None
+        canonical_statuses: list[str] = []
         # Bug F3 fix (Phase 2 of defer-seam bugfix, 2026-06-30): the
         # JobItem-side query now uses a structured per-token filter
         # (``_canonical_to_job_filters`` → ``JobStatusFilter``) instead
@@ -985,6 +999,13 @@ class WorkResolverService:
         # "all task rows" (turn + report).
         query_tasks_table = kind != "job"
         query_jobs_table = kind != "task" and kind != "turn" and kind != "report"
+        # ``task_postfilter`` is set inside ``query_tasks_table`` when the
+        # Task DB fetch is broadened to include ``completed`` (so the
+        # active-orchestration promotion can flip eligible rows). It is
+        # re-applied in Python AFTER the promotion. Initialised here so
+        # it is in scope for the post-promotion filter regardless of
+        # which table branch ran.
+        task_postfilter: set[str] | None = None
 
         # Map kind filter to a task_type set for the Task SELECT.
         # ``None`` means no task_type filter (query all task rows).
@@ -1008,7 +1029,26 @@ class WorkResolverService:
             # round-trip to evaluate the parent_id guard. The lookup
             # is reused by ``_task_to_record`` via the optional
             # ``instance=`` parameter.
-            tasks = self._query_tasks(instance_id, source_statuses, task_type_filter)
+            # Broaden the Task DB fetch when "processing" is requested
+            # to ALSO include ``completed`` rows: the
+            # active-orchestration promotion (applied later, after
+            # instance lookup) flips eligible completed turns on a
+            # ``running`` / ``waiting_children`` instance to
+            # ``processing``. Without broadening, those rows are
+            # filtered out at SQL level before the promotion can run,
+            # so a single-status ``list_work(status="processing")``
+            # would miss in-flight multi-turn work. The original
+            # status filter is re-applied in Python after the
+            # promotion (see ``_task_status_postfilter`` below).
+            db_task_statuses = source_statuses
+            if (
+                source_statuses is not None
+                and "processing" in canonical_statuses
+            ):
+                db_task_statuses = set(source_statuses) | {"completed"}
+                task_postfilter = source_statuses
+
+            tasks = self._query_tasks(instance_id, db_task_statuses, task_type_filter)
             for task in tasks:
                 instance = self._lookup_instance(task.instance_id)
                 # Reviewer S2: report tasks are parent-bound (their
@@ -1154,6 +1194,64 @@ class WorkResolverService:
                         continue
                     kept.append(r)
                 records = kept
+
+        # Active-orchestration status (Option 3): a Task row models ONE
+        # graph turn — it flips to ``completed`` the instant that turn
+        # ends, even when the instance is still orchestrating children
+        # (``waiting_children`` / ``running``). For each NON-terminal
+        # instance, promote its NEWEST Task record to the instance's
+        # orchestration status so ``job_list(statuses=["processing"])``
+        # surfaces in-flight work (e.g. a ``job_continue`` continuation
+        # whose turn is done while children resolve). Older completed
+        # turns keep their own per-turn status, preserving history.
+        # JobItem records already source status from the instance
+        # (``_job_to_record``), so only Task records (turn/report) need
+        # this promotion.
+        task_records = [r for r in records if r.kind in ("turn", "report")]
+        if task_records:
+            newest_by_instance: dict[str, WorkRecord] = {}
+            for r in task_records:
+                if not r.instance_id:
+                    continue
+                cur = newest_by_instance.get(r.instance_id)
+                if (
+                    cur is None
+                    or _normalize_sort_key(r.created_at)
+                    > _normalize_sort_key(cur.created_at)
+                ):
+                    newest_by_instance[r.instance_id] = r
+            for inst_id, rec in newest_by_instance.items():
+                inst = self._lookup_instance(inst_id)
+                if inst is None:
+                    continue
+                # Promote ONLY when the newest Task turn is itself
+                # ``completed`` (its single graph turn is done) but the
+                # instance is actively orchestrating children
+                # (``running`` / ``waiting_children``). Pending / running
+                # / failed turns keep their own status. ``idle`` /
+                # ``waiting`` / ``queued`` are quiescent (work done,
+                # awaiting input) — their newest turn stays
+                # ``completed``. This is exactly the ``job_continue``
+                # continuation case (turn done, children resolving).
+                if rec.status != "completed":
+                    continue
+                if inst.status not in _ACTIVE_ORCHESTRATION_STATUSES:
+                    continue
+                rec.status = canonicalize_status(inst.status)
+
+        # Re-apply the original Task status filter AFTER promotion. The
+        # DB fetch was broadened to include ``completed`` (so promotion
+        # could flip eligible rows to ``processing``); rows that were
+        # NOT promoted (older turns / quiescent instances) must now be
+        # dropped so the caller's filter is honoured. Only Task records
+        # (turn/report) are affected — JobItem rows were DB-filtered
+        # correctly on their own and need no post-filter.
+        if task_postfilter is not None:
+            allowed = {canonicalize_status(s) for s in task_postfilter}
+            records = [
+                r for r in records
+                if r.kind not in ("turn", "report") or r.status in allowed
+            ]
 
         # Sort newest-first. Use ``_normalize_sort_key`` to coerce
         # every key to tz-aware UTC — Task rows come back from SQLite
