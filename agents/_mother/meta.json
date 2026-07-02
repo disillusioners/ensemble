@@ -9,5 +9,5 @@
   "tools": {
     "allow": ["instance", "self", "help", "mother", "knowledge", "mcp", "context"]
   },
-  "team_members": []
+  "team_members": ["explorer"]
 }

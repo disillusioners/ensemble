@@ -6,5 +6,5 @@
   "color": "accent-gray",
   "version": "1.0.0",
   "tools": {"allow": ["knowledge", "mcp", "context"]},
-  "team_members": []
+  "team_members": ["explorer"]
 }

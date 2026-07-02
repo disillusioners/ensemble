@@ -10,5 +10,5 @@
   "tools": {
     "allow": ["job", "help", "self", "time", "project", "knowledge", "mcp", "context"]
   },
-  "team_members": []
+  "team_members": ["explorer"]
 }

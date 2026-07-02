@@ -10,5 +10,5 @@
   "tools": {
     "allow": ["bash", "filesystem", "time", "self", "help", "knowledge", "mcp", "context", "db", "infra", "project"]
   },
-  "team_members": []
+  "team_members": ["explorer"]
 }
