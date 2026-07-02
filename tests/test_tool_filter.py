@@ -717,6 +717,25 @@ class TestExpandAllowForInnateSkills:
         )
         assert result == ["bash"]
 
+    def test_chart_innate_skill_adds_chart_category_not_instance(self):
+        """SECURITY: chart skill must grant 'chart' tools, NOT 'instance' tools.
+
+        Regression test for the historical mis-mapping where ``chart`` was
+        registered against the ``["instance"]`` category, which would have
+        leaked spawn_instance / send_message / terminate_instance to any
+        agent declaring ``innate_skills: ["chart"]``. The contract is:
+        ``chart`` → ``["chart"]`` only.
+        """
+        result = expand_allow_for_innate_skills(["bash"], ["chart"])
+        assert "chart" in result
+        assert "instance" not in result, (
+            "chart innate skill must NOT grant instance management tools "
+            "(spawn_instance/send_message/terminate_instance/list_instances/"
+            "get_instance_info); granting them lets any chart-enabled agent "
+            "spawn and message arbitrary other instances."
+        )
+        assert "bash" in result
+
     def test_multiple_innate_skills(self):
         """If INNATE_SKILL_TOOL_CATEGORIES gains more entries, they merge."""
         # Pretend a new mapping exists, then call the helper and clean up.

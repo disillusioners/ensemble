@@ -62,7 +62,7 @@ class TestInnateSkillsSystemPromptIdentity:
             ("planner", ["opencode", "chart"], "OpenCode-Skill"),
             ("tidier", ["opencode", "chart"], "OpenCode-Skill"),
             ("approver", ["opencode", "chart"], "OpenCode-Skill"),
-            ("leader", ["coordination"], "Coordination Skill"),
+            ("leader", ["coordination", "chart"], "Coordination Skill"),
             ("jober", ["job-orchestration"], "Job Orchestration"),
             ("giter", [], None),  # giter has NO innate_skills
         ] 

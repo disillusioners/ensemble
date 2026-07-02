@@ -51,7 +51,7 @@ After delegating, just wait. The system will report back.
 # loader; this map only governs tool access.
 INNATE_SKILL_TOOL_CATEGORIES: dict[str, list[str]] = {
     "opencode": ["external_opencode"],
-    "chart": ["instance"],
+    "chart": ["chart"],
 }
 
 
@@ -104,6 +104,7 @@ from .project import create_project_tools
 from .job_queue import create_job_tools
 from .help import create_help_tool
 from .knowledge_tools import create_knowledge_tools
+from .chart_tools import create_chart_tools
 from .external_opencode import create_opencode_tools
 from .rag_tools import create_rag_tools
 from .critical_notes import create_critical_notes_tools
@@ -958,6 +959,13 @@ Returns:
     # NOTE: NOT inside the is_rag_enabled() block — these are always available.
     opencode_tool_list = create_opencode_tools(manager, current_instance_id)
     tools.extend(opencode_tool_list)
+
+    # ── Chart tools (delegates to Charter agent for Mermaid diagrams, always available) ──
+    # NOTE: NOT inside the is_rag_enabled() block — these are always available,
+    # matching the OpenCode pattern above. The chart category is auto-granted
+    # to agents with innate_skills:["chart"] via INNATE_SKILL_TOOL_CATEGORIES.
+    chart_tool_list = create_chart_tools(manager, current_instance_id)
+    tools.extend(chart_tool_list)
 
     # ── Database tools (external DB connection management, always available) ──
     # C3: Pass shared repository and pool_manager from the manager — these are
