@@ -5,7 +5,7 @@
   "icon": "👑",
   "color": "accent-amber",
   "version": "1.1.0",
-  "innate_skills": ["coordination"],
+  "innate_skills": ["coordination", "chart"],
   "no_force_explore": true,
   "tools": {
     "allow": ["instance", "self", "project", "help", "knowledge", "mcp", "critical_notes", "project_history"]
