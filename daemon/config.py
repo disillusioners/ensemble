@@ -350,11 +350,11 @@ class ServicesConfig(BaseSettings):
     # ``MaintenanceService._is_idle`` gate — drift appears *during*
     # active work, which is precisely when the idle-gated loop skips.
     drift_reconcile_interval_seconds: int = Field(
-        default=60,
+        default=300,
         description=(
             "Interval (seconds) for the periodic dual-table drift "
-            "reconciler (F5/F10). Default 60s — same cadence as "
-            "stale_task_recovery_interval."
+            "reconciler (F5/F10). Default 300s (5min) — drift is rare "
+            "so a slower cadence keeps the logs quiet."
         ),
     )
     drift_reconcile_min_pending_age_seconds: int = Field(

@@ -395,7 +395,7 @@ async def lifespan(app: FastAPI):
     # thread is plain ``threading.Thread`` (not asyncio), so we
     # cannot piggyback on its loop without a thread→asyncio bridge.
     # A dedicated ``asyncio.create_task`` is simpler and gives us
-    # configurable interval (default 60s) + clean shutdown.
+    # configurable interval (default 300s) + clean shutdown.
     # ─────────────────────────────────────────────────────────────
     drift_interval = config.services.drift_reconcile_interval_seconds
     min_pending_age = config.services.drift_reconcile_min_pending_age_seconds
@@ -635,7 +635,7 @@ async def _periodic_drift_reconcile_loop(
 ) -> None:
     """Periodic asyncio loop driving ``JobRecoveryService.reconcile_drift_states``.
 
-    Runs every ``interval_seconds`` (default 60s) until cancelled. The
+    Runs every ``interval_seconds`` (default 300s) until cancelled. The
     initial tick fires after a small startup delay so the very first
     reconcile happens AFTER the system has had a chance to register
     active work — running it at t=0 would just produce empty results

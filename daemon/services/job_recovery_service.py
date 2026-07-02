@@ -66,7 +66,7 @@ class JobRecoveryService:
       of crash. Iterates every active JobItem and reconciles against
       its instance's liveness.
 
-    - ``reconcile_drift_states`` — periodic (60s default) drift
+    - ``reconcile_drift_states`` — periodic (300s default) drift
       reconciler. Catches four classes of dual-table drift that
       ``recover_on_startup`` cannot see because they arise at
       runtime (post-startup):
@@ -1005,9 +1005,13 @@ class JobRecoveryService:
                     exc_info=True,
                 )
 
-        logger.info(
+        msg = (
             f"reconcile_drift_states: complete — "
             f"reconciled={reconciled}, "
             f"details={len(details)}"
         )
+        if reconciled == 0 and not details:
+            logger.debug(msg)
+        else:
+            logger.info(msg)
         return {"reconciled": reconciled, "details": details}
