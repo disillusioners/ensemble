@@ -50,7 +50,12 @@ The backend column (MessageQueue/Task/worker_pool/claim_pending_task/graph/SSE/d
 - The raw `enqueue_message` path — repurposed as **internal-only** (reports, nudges, `[JOB_EVENT]` delivery, compaction, system messages)
 
 **Changes — front (entry layer):**
-- `POST /messages`, `send_message` tool, telegram/scheduler sources → create a **Job** (against new or existing instance) that dispatches a driving message, instead of enqueuing a raw message
+- The fan-in entry points that today enqueue a raw message switch to **creating a Job** (against new or existing instance) that dispatches a driving message. The full inventory:
+  - `daemon/sources/registry.py:822` — **the single external-source chokepoint**. Every chat adapter (Slack, Telegram, Discord, …) routes here as `enqueue_message(source=f"{source_id}:{external_user_id}")`. Converting this one call covers *all* external chat sources at once; future adapters inherit the Job path automatically.
+  - `daemon/sources/adapters/scheduler.py:720` — scheduler (`source="scheduler"`).
+  - `daemon/routers/messages.py:129` — HTTP `POST /messages`.
+  - `daemon/tools/instance.py:594` — the `send_message` tool (agent-to-agent).
+  - `daemon/tools/job_queue.py:742` — `job_continue` (already job-shaped; aligns to the same model).
 - Two creation modes, one verb: `job_create` (new instance) / `job_continue` (existing instance). Both produce JobItem + driving Task.
 
 **Changes — facade (read layer):**
@@ -79,7 +84,7 @@ Ordered so each step is independently testable; the whole sequence ships togethe
 1. **Enforce `work_id == job_id` everywhere a Job dispatches.** Already done on the dispatch path this session; extend to any remaining JobItem-bearing entry. This is the prerequisite that makes the facade collapse safe.
 2. **Add the message-Job entry points behind a feature flag.** `POST /messages` and the `send_message` tool gain a "create a Job and dispatch" mode. Both modes (raw message / message-Job) coexist temporarily, selected per-route or per-flag. The Job fast-dispatch (inline enqueue + stream) lands here.
 3. **Wire per-instance serialization + retry policy** for message-Jobs (decision §4.3, §4.4). Test the no-double-execution invariant.
-4. **Convert each fan-in source** (HTTP message route, `send_message` tool, telegram, scheduler) to the message-Job path, one at a time, each validated.
+4. **Convert each fan-in entry point** to the message-Job path, one at a time, each validated: the external-source chokepoint (`sources/registry.py` — covers Slack/Telegram/Discord/… in one conversion), the scheduler adapter, the HTTP `POST /messages` route, the `send_message` tool. (`job_continue` already aligns.)
 5. **Flip the facade to JobItem-only** (`list_work` / `resolve_work`). Internal raw messages are invisible to it by construction.
 6. **Cut over** (flag default on), run the full E2E + regression suite, monitor.
 7. **Delete the old path**: raw-message fan-in code, the Task union in the resolver, the dedup, the promotion pass. This is the payoff — net deletion.
@@ -100,7 +105,7 @@ Ordered so each step is independently testable; the whole sequence ships togethe
 
 ## 7. Exit Criteria
 
-- Every public entry point (HTTP message, `send_message`, telegram, scheduler) creates a Job; no public path enqueues a raw message.
+- Every public entry point creates a Job; no public path enqueues a raw message. This includes the external-source chokepoint (`sources/registry.py` → Slack/Telegram/Discord/all adapters), the scheduler, HTTP `POST /messages`, and the `send_message` tool.
 - `WorkResolver` is JobItem-only; the Task union, dedup, and promotion pass are deleted.
 - Internal messages (reports/nudges/`[JOB_EVENT]`/compaction) still use the raw path and are invisible to the facade.
 - A parent mid-orchestration reports `processing` with no special-case code (instance-authoritative status).
