@@ -218,12 +218,17 @@ class JobRepository:
         """
         with SQLModelSession(self.engine) as db_session:
             job = JobItem(
-                # ``job_id`` flows through verbatim when supplied, so
-                # the linkage contract with Task.work_id is satisfied
-                # by construction. When ``None``, Pydantic's
-                # ``default_factory`` kicks in and mints a fresh
-                # UUID4 — identical to pre-linkage behaviour.
-                job_id=job_id if job_id is not None else str(uuid.uuid4()),
+                # W2 fix: pass ``job_id`` through verbatim — when the
+                # caller supplies ``None``, the model's
+                # ``default_factory=lambda: str(uuid.uuid4())``
+                # mints a fresh UUID4 (preserving the pre-linkage
+                # behaviour). The previous ``job_id if job_id is not
+                # None else str(uuid.uuid4())`` shadowed the
+                # ``default_factory`` and pre-minted a UUID even when
+                # a caller-supplied value was supplied downstream,
+                # creating two competing UUID sources for the
+                # linkage contract (``JobItem.job_id == Task.work_id``).
+                job_id=job_id,
                 agent_id=agent_id,
                 agent_dir=agent_dir,
                 message=message,

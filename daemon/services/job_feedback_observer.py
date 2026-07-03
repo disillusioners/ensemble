@@ -709,17 +709,36 @@ class JobFeedbackObserver:
         # loop / stale-recovery). Paused jobs are unaffected because
         # pause keeps the job in ``admission_state='active'`` (its
         # lock is held) — not ``queued``.
-        if job is not None and job.admission_state in (
-            AdmissionState.ACTIVE.value,
-            AdmissionState.QUEUED.value,
-        ):
-            # Happy path: PROCESSING-or-stuck-queued JobItem exists.
-            # Pre-D13 returned the JobItem directly; post-D13 we wrap
-            # it in the context so downstream code (which uses
-            # ``job_id`` not the whole JobItem) keeps working.
+        if job is not None and job.admission_state == AdmissionState.ACTIVE.value:
+            # Happy path: ACTIVE JobItem exists. Pre-D13 returned the
+            # JobItem directly; post-D13 we wrap it in the context so
+            # downstream code (which uses ``job_id`` not the whole
+            # JobItem) keeps working.
             return _ProcessingJobContext(
                 instance_id=instance_id, job_id=job.job_id
             )
+        if job is not None and job.admission_state == AdmissionState.QUEUED.value:
+            # C1 fix: only match ``queued`` JobItems whose Task row
+            # is actually RUNNING. Without this gate, a freshly-created
+            # ``queued`` JobItem whose message Task is still ``pending``
+            # (worker hasn't claimed it yet) can be found and finalized
+            # by ANY unrelated lifecycle event arriving for the same
+            # instance — the observer flips JobItem ``queued→done``,
+            # marks the instance terminal, and the message Task is
+            # silently dropped (data-loss bug). The Task's RUNNING
+            # status is the authoritative serialization gate.
+            #
+            # Access ``_task_repo`` via the instance manager — same
+            # pattern already used by ``_resolve_watchable_work_id``
+            # (line 1063) and the finalize post-commit watcher notify
+            # block (line 1546). The ``getattr`` + ``hasattr`` guard
+            # keeps the helper robust against test mocks that build
+            # a partial manager.
+            task_row = await self._get_task_row_by_work_id(job.job_id)
+            if task_row is not None and task_row.status == TaskStatus.RUNNING.value:
+                return _ProcessingJobContext(
+                    instance_id=instance_id, job_id=job.job_id
+                )
         # Defense-in-depth: future-proofing against manual DB operations or
         # synthetic test mocks where created_at ordering may not reflect the
         # active job. The real terminate→revive scenario is already covered
@@ -746,14 +765,29 @@ class JobFeedbackObserver:
             # queued row for finalization).
             if (
                 active_job is not None
-                and active_job.admission_state in (
-                    AdmissionState.ACTIVE.value,
-                    AdmissionState.QUEUED.value,
-                )
+                and active_job.admission_state == AdmissionState.ACTIVE.value
             ):
                 return _ProcessingJobContext(
                     instance_id=instance_id, job_id=active_job.job_id
                 )
+            if (
+                active_job is not None
+                and active_job.admission_state == AdmissionState.QUEUED.value
+            ):
+                # C1 fix (defense-in-depth re-query path): same
+                # Task-status gate as the first lookup. A queued
+                # JobItem only counts as "the active processing job"
+                # when its Task row is actually RUNNING — see the
+                # comment on the first-lookup ``QUEUED`` branch
+                # above for the full data-loss-bug rationale.
+                task_row = await self._get_task_row_by_work_id(active_job.job_id)
+                if (
+                    task_row is not None
+                    and task_row.status == TaskStatus.RUNNING.value
+                ):
+                    return _ProcessingJobContext(
+                        instance_id=instance_id, job_id=active_job.job_id
+                    )
 
         # Post-D13 MESSAGE path (Task 2.5.3): no JobItem exists for the
         # instance. The terminal chain must STILL run — Steps 2+3
@@ -762,6 +796,52 @@ class JobFeedbackObserver:
         # ``_finalize_job_db_sync`` to skip Step 1 (no JobItem to
         # UPDATE) and run Steps 2+3 unconditionally.
         return _ProcessingJobContext(instance_id=instance_id, job_id=None)
+
+    async def _get_task_row_by_work_id(self, work_id: str) -> Any | None:
+        """Look up a ``task`` row by its stable cross-system ``work_id``.
+
+        C1 helper — used by :meth:`_get_processing_job_for_instance`
+        to verify that a ``queued`` JobItem is paired with a Task
+        row that is actually RUNNING before treating the JobItem as
+        "the active processing job" for finalize. Without this gate,
+        a freshly-created ``queued`` JobItem whose message Task is
+        still ``pending`` (worker hasn't claimed it yet) can be found
+        and finalized by ANY unrelated lifecycle event arriving for
+        the same instance — the observer flips JobItem
+        ``queued→done``, marks the instance terminal, and the
+        message Task is silently dropped (data-loss bug).
+
+        Access pattern: ``self._instance_manager._task_repo``
+        (mirrors the existing access at line 1063
+        ``_resolve_watchable_work_id`` and line 1546 in the finalize
+        post-commit watcher notify block — same dependency, same
+        lifecycle).
+
+        Returns:
+            The ``Task`` row for ``work_id``, or ``None`` when the
+            manager / repository is unavailable, the repository has
+            no ``get_by_work_id`` method (older test fixtures), or
+            the lookup itself raises. ``None`` is treated by callers
+            as "no Task-row confirmation available" — they fall
+            through to the no-JobItem context and skip finalize,
+            which is the conservative behavior (avoiding the data-
+            loss bug is the priority; the C2 defense-in-depth
+            activation fence will close the race on the next worker
+            claim cycle).
+        """
+        task_repo = getattr(self._instance_manager, "_task_repo", None)
+        if task_repo is None or not hasattr(task_repo, "get_by_work_id"):
+            return None
+        try:
+            return await asyncio.to_thread(task_repo.get_by_work_id, work_id)
+        except Exception as e:  # noqa: BLE001 — never raise from a C1 safety gate
+            logger.warning(
+                f"_get_task_row_by_work_id failed for work_id="
+                f"{work_id[:8]}...: {type(e).__name__}: {e} — "
+                "treating as 'no Task-row confirmation' (conservative: "
+                "skip finalize to avoid the C1 data-loss bug)"
+            )
+            return None
 
     async def _process_event(self, event: dict) -> None:
         """Process a single instance_lifecycle event.

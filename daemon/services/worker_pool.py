@@ -358,22 +358,32 @@ class Worker(threading.Thread):
         }
     
     def _activate_message_jobitem_async(self, work_id: str) -> None:
-        """Fire-and-forget post-claim JobItem activation.
+        """Post-claim JobItem activation — blocking, with bounded wait.
 
-        Best-effort ``UPDATE job_queue_items SET admission_state='active'
-        WHERE job_id = :work_id AND admission_state = 'queued'`` that
-        runs on the main event loop via ``MainLoopBridge``. The
-        ``admission_state='queued'`` guard makes this idempotent — if
-        the observer finalize path already flipped it (e.g. a stuck
-        JobItem picked up by the deferred-finalize sweep), this is a
-        no-op. If the JobItem does not exist (legacy messages that
-        pre-date ``message_jobs_enabled``, or new ones with the flag
-        off), the UPDATE rowcount=0 and we silently skip.
+        C2 fix: was previously fire-and-forget via
+        ``MainLoopBridge.run_async_no_wait``. The fire-and-forget
+        path let the worker claim the Task and proceed immediately
+        while the ``queued→active`` UPDATE was scheduled at an
+        indeterminate later time. During that window a ``queued``
+        JobItem is observable to the observer's finalize path, and
+        (pre-C1) could be finalized by any unrelated lifecycle event
+        — the message Task's ``pending`` status meant nothing was
+        driving the work, and the data-loss bug fired.
 
-        The Task's ``running`` status is the authoritative serialization
-        gate — the JobItem is purely informational. A failed activation
-        is logged at debug level and never propagates; the message
-        continues to be processed normally.
+        Now we use :meth:`MainLoopBridge.run_async` (blocking) with
+        a small bounded timeout so the activation completes (and the
+        ``admission_state`` flip is durable) BEFORE the worker
+        continues. The single ``atomic_transition`` UPDATE is the
+        only thing on the wire, so the call returns within
+        milliseconds under normal load; we cap at 5s to bound the
+        worker-thread stall when the main loop is congested.
+
+        ``InvalidTransitionError`` (JobItem not in ``queued`` —
+        already finalized, or the legacy ``message_jobs_enabled``
+        path where no JobItem exists) is the common path; logged at
+        debug and swallowed — the activation is informational
+        mirroring, the Task row alone is sufficient to process the
+        message.
 
         Args:
             work_id: UUID4 of the Task row — same UUID as the JobItem's
@@ -383,13 +393,34 @@ class Worker(threading.Thread):
         if job_repo is None:
             return
         try:
-            MainLoopBridge.run_async_no_wait(
-                self._activate_message_jobitem_async_coro(job_repo, work_id)
+            MainLoopBridge.run_async(
+                self._activate_message_jobitem_async_coro(job_repo, work_id),
+                # Bounded wait — the activation is a single UPDATE so
+                # the call normally returns in milliseconds. 5s is
+                # generous enough that a busy main loop can still
+                # serve the call, while bounding the worker-thread
+                # stall under pathological load. The C1 Task-status
+                # guard is the safety net if the timeout fires.
+                timeout=5.0,
             )
-        except Exception as e:  # noqa: BLE001 — never raise from a fire-and-forget
+        except TimeoutError:
+            # Activation UPDATE did not complete within the timeout.
+            # The C1 Task-status guard in ``_get_processing_job_for_instance``
+            # is the safety net: a ``queued`` JobItem whose Task is
+            # already RUNNING will still be found by the observer via
+            # the gate, and a queued JobItem whose Task is still
+            # PENDING will be skipped (avoiding the data-loss bug).
+            # Logged at warning so persistent timeouts surface in
+            # observability without crashing the worker.
+            logger.warning(
+                f"Worker {self.worker_id}: JobItem activation for "
+                f"work_id={work_id[:8]}... timed out after 5s; "
+                "C1 Task-status guard will keep finalize safe."
+            )
+        except Exception as e:  # noqa: BLE001 — never raise from activation
             logger.debug(
-                f"Worker {self.worker_id}: failed to schedule JobItem "
-                f"activation for work_id={work_id[:8]}...: "
+                f"Worker {self.worker_id}: JobItem activation failed "
+                f"for work_id={work_id[:8]}...: "
                 f"{type(e).__name__}: {e}"
             )
 
