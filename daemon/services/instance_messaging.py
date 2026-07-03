@@ -1305,6 +1305,43 @@ class InstanceMessagingService:
                     job_id=job_id,
                 )
 
+                # Eagerly flip the mirror queued→active BEFORE stamping
+                # the message_id. The post-claim worker hook in
+                # ``_activate_message_jobitem_async`` would otherwise
+                # run AFTER ``claim_pending_task``, and Phase-2
+                # second messages were getting blocked by the cross-
+                # system guard carving out a still-queued JobItem as
+                # a "blocker" before the worker could flip the state.
+                # Eager activation aligns with the POC contract:
+                # "Task IS the dispatch primitive; JobItem is a
+                # derived mirror" — the mirror should be active as
+                # soon as it is created. ``atomic_transition`` is
+                # race-safe (single-statement UPDATE with
+                # ``WHERE admission_state='queued'`` guard) and is
+                # idempotent with the worker hook, which will see
+                # ``InvalidTransitionError`` when the row is no
+                # longer in ``queued`` and swallow it at debug.
+                try:
+                    await asyncio.to_thread(
+                        job_repo.atomic_transition,
+                        job_id,
+                        AdmissionState.QUEUED.value,
+                        AdmissionState.ACTIVE.value,
+                    )
+                except Exception as activate_exc:
+                    # Mirror activation is best-effort. The Task row
+                    # is the authoritative dispatch primitive; a
+                    # still-queued JobItem only delays the worker's
+                    # post-claim activation (which is itself a no-op
+                    # for the dispatch path). Log and continue.
+                    logger.debug(
+                        f"enqueue_message_job: eager JobItem "
+                        f"activation failed for "
+                        f"job_id={job_id[:8]}...: "
+                        f"{type(activate_exc).__name__}: "
+                        f"{activate_exc}"
+                    )
+
                 # Cross-system guard correlation — the observer finalize
                 # path and the worker claim path both resolve MESSAGE
                 # JobItems back to the originating message_id via
