@@ -729,9 +729,34 @@ class TaskRepository:
 
         Returns:
             SQL text with no leading ``AND``; the caller prefixes
-            ``AND``. References bind params ``:status_pending`` and
-            ``:status_running`` which the caller MUST supply in its
-            execute params.
+            ``AND``. The fragment references no bind parameters.
+
+        Note:
+            The predicate matches ANY Task with the same ``message_id``,
+            regardless of Task status. The previous filter
+            ``status IN ('pending', 'running')`` was correct for the
+            original TASK-type use case (the JobProcessor's
+            ``start_job_atomic_with_lock`` transitions the JobItem to
+            ``active`` on claim, so a stuck-queued JobItem was a
+            transient race). For MESSAGE-type mirror JobItems
+            (POC ``message_jobs_enabled`` path, post-D13), the
+            JobItem cannot transition to ``active`` because the
+            PostgreSQL ``trg_job_queue_items_active_lock_guard``
+            constraint requires a ``job_locks`` row that the message
+            flow never creates. The JobItem stays in ``queued``
+            after the Task completes — until the observer finalize
+            sweep catches it — so the original ``(pending,
+            running)`` filter would falsely identify the stuck mirror
+            as a blocker for the next message on the same instance.
+            Matching ANY Task state (pending, running, completed,
+            failed, cancelled) restores the carve-out's documented
+            intent: "if a matching Task row exists, the JobItem is
+            not actively blocking". The per-instance guard in
+            :meth:`claim_pending_task` (``instance_id NOT IN (...
+            status_running_guard)``) still prevents two concurrent
+            RUNNING tasks for the same instance, so dropping the
+            in-flight filter from the carve-out does not open a
+            race window.
         """
         json_extract = self._json_extract_text_sql(
             column=f"{job_alias}.metadata", key="message_id"
@@ -741,7 +766,6 @@ class TaskRepository:
             f"                AND NOT EXISTS (\n"
             f"                    SELECT 1 FROM task _admitted\n"
             f"                    WHERE _admitted.message_id = {json_extract}\n"
-            f"                      AND _admitted.status IN (:status_pending, :status_running)\n"
             f"                )"
         )
 
