@@ -51,6 +51,36 @@ from daemon.repositories.job_queue.models import JobLock  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
+# Cross-test trigger isolation
+# ---------------------------------------------------------------------------
+# ``test_jq_proxy_phase2_constraints._install_phase2_schema`` is a
+# session-scoped autouse fixture that installs ``trg_job_locks_active_guard``
+# (after-insert constraint trigger) on the ``job_locks`` table. That
+# trigger requires a matching ``admission_state='active'`` row in
+# ``job_queue_items`` — fine for the Phase 2 tests, but these tests
+# exercise ONLY the ``uq_job_locks_slot`` UNIQUE-constraint atomicity
+# primitive without any ``job_queue_items`` setup, so the trigger would
+# incorrectly fire on commit and break the suite.
+#
+# Drop the trigger in a function-scoped autouse fixture BEFORE each test
+# runs (the Phase 2 fixture installs it again on its next collection,
+# so the rest of the suite is unaffected).
+@pytest.fixture(autouse=True)
+def _drop_job_locks_active_guard_trigger(pg_engine):
+    """Drop the cross-test trigger from ``job_locks`` before each test.
+
+    Idempotent: ``DROP TRIGGER IF EXISTS`` succeeds whether or not the
+    trigger was previously installed by the session-scoped Phase 2
+    fixture.
+    """
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text("DROP TRIGGER IF EXISTS trg_job_locks_active_guard ON job_locks")
+        )
+    yield
+
+
+# ---------------------------------------------------------------------------
 # Test data: NOT NULL columns on ``job_locks``
 #
 #   lock_id      TEXT    PK, NOT NULL

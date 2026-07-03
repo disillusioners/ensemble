@@ -43,14 +43,49 @@ from sqlalchemy import text
 from daemon.repositories.job_queue.models import JobItem  # noqa: F401
 
 
+# ---------------------------------------------------------------------------
+# Cross-test trigger isolation
+# ---------------------------------------------------------------------------
+# ``test_jq_proxy_phase2_constraints._install_phase2_schema`` is a
+# session-scoped autouse fixture that installs
+# ``trg_job_queue_items_active_lock_guard`` (after-update-of-
+# admission_state constraint trigger) on the ``job_queue_items`` table.
+# That trigger fires whenever ``admission_state`` is flipped to
+# ``'active'`` and demands a matching ``job_locks`` row — fine for the
+# Phase 2 tests, but this test exercises ONLY the ``version_id_col``
+# optimistic-locking primitive without any ``job_locks`` setup, so the
+# trigger would incorrectly fire on commit and break the suite.
+#
+# Drop the trigger in a function-scoped autouse fixture BEFORE each
+# test runs (the Phase 2 fixture installs it again on its next
+# collection, so the rest of the suite is unaffected).
+@pytest.fixture(autouse=True)
+def _drop_job_queue_items_active_lock_guard_trigger(pg_engine):
+    """Drop the cross-test trigger from ``job_queue_items`` before each test.
+
+    Idempotent: ``DROP TRIGGER IF EXISTS`` succeeds whether or not the
+    trigger was previously installed by the session-scoped Phase 2
+    fixture.
+    """
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text(
+                "DROP TRIGGER IF EXISTS trg_job_queue_items_active_lock_guard "
+                "ON job_queue_items"
+            )
+        )
+    yield
+
+
 # The table that ``JobItem.__mapper_args__ = {"version_id_col": ...}`` is
 # configured for (see ``daemon/repositories/job_queue/models.py:220``).
 TABLE = "job_queue_items"
 PK_COL = "job_id"
 VERSION_COL = "version"
-STATUS_COL = "status"
-PENDING_STATUS = "pending"
-PROCESSING_STATUS = "processing"
+# Phase 5 cleanup: ``status`` was dropped in favor of ``admission_state``.
+STATUS_COL = "admission_state"
+PENDING_STATUS = "queued"
+PROCESSING_STATUS = "active"
 
 # Minimal INSERT — only NOT NULL columns plus a hard-coded empty JSONB
 # for the ``metadata`` column. The model defines several NOT NULL columns
@@ -94,7 +129,7 @@ def _insert_job_item(conn, *, job_id: str, version: int = 0) -> None:
     """Insert a minimal ``job_queue_items`` row at the given starting version.
 
     Only NOT NULL columns are populated; everything else falls through
-    to the column defaults (e.g. ``status='pending'``, ``priority=5``).
+    to the column defaults (e.g. ``admission_state='queued'``, ``priority=5``).
     """
     conn.execute(
         _INSERT_SQL,

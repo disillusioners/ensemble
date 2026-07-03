@@ -57,8 +57,8 @@ def _build_insert_sql() -> Any:
     raw SQL inserts must supply a value explicitly. The columns covered
     here match the NOT NULL constraints emitted by ``create_all`` for
     ``JobItem`` (verified against the failure row from a prior run:
-    ``source``, ``priority``, ``status``, ``created_at``, ``retry_count``,
-    ``job_type`` were all NOT NULL with no DEFAULT).
+    ``source``, ``priority``, ``admission_state``, ``created_at``,
+    ``retry_count``, ``job_type`` were all NOT NULL with no DEFAULT).
 
     Only ``version`` gets a server_default (``server_default="0"``,
     declared on ``_job_item_version_col``); we still pass it for
@@ -75,12 +75,12 @@ def _build_insert_sql() -> Any:
         f"""
         INSERT INTO {TABLE} (
             job_id, agent_id, agent_dir, message,
-            source, priority, status, created_at,
+            source, priority, admission_state, created_at,
             retry_count, version, job_type,
             idempotency_key, project_id, metadata
         ) VALUES (
             :job_id, :agent_id, :agent_dir, :message,
-            :source, :priority, :status, :created_at,
+            :source, :priority, :admission_state, :created_at,
             :retry_count, :version, :job_type,
             :idempotency_key, :project_id, '{{}}'::jsonb
         )
@@ -154,7 +154,7 @@ def test_concurrent_enqueue_unique_constraint_race(
                 "message": "race message",
                 "source": "api",
                 "priority": 5,
-                "status": "pending",
+                "admission_state": "queued",
                 "created_at": now,
                 "retry_count": 0,
                 "version": 0,
@@ -179,7 +179,7 @@ def test_concurrent_enqueue_unique_constraint_race(
                 "message": "race message",
                 "source": "api",
                 "priority": 5,
-                "status": "pending",
+                "admission_state": "queued",
                 "created_at": now,
                 "retry_count": 0,
                 "version": 0,

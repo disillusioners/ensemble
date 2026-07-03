@@ -2,7 +2,7 @@
 
 These tests validate that the WHERE-guard pattern in
 ``JobRepository.atomic_transition`` (and the underlying
-``UPDATE job_queue_items SET status = :to WHERE job_id = :id AND status = :from``
+``UPDATE job_queue_items SET admission_state = :to WHERE job_id = :id AND admission_state = :from``
 SQL) is genuinely safe under PostgreSQL READ COMMITTED + EvalPlanQual (EPQ).
 They run only via ``pytest -m postgres`` and exercise real cross-connection
 concurrency with raw ``sqlalchemy.text()`` statements.
@@ -26,7 +26,7 @@ Both scenarios are parametrised over ``range(5)`` to flush out flakiness
 from a single test execution.
 
 Status string values are pinned to the literals actually used by
-``JobStatus`` (``pending`` → ``processing``); the table name matches
+``AdmissionState`` (``queued`` → ``active``); the table name matches
 ``JobItem.__tablename__`` (``job_queue_items``).
 """
 from __future__ import annotations
@@ -43,11 +43,48 @@ from sqlalchemy import text
 # ``job_queue_items`` table would not exist in the test database.
 from daemon.repositories.job_queue.models import JobItem  # noqa: F401
 
-# Status literals — verbatim from ``JobStatus`` in
+
+# ---------------------------------------------------------------------------
+# Cross-test trigger isolation
+# ---------------------------------------------------------------------------
+# ``test_jq_proxy_phase2_constraints._install_phase2_schema`` is a
+# session-scoped autouse fixture that installs
+# ``trg_job_queue_items_active_lock_guard`` (after-update-of-
+# admission_state constraint trigger) on the ``job_queue_items`` table.
+# That trigger fires whenever ``admission_state`` is flipped to
+# ``'active'`` and demands a matching ``job_locks`` row — fine for the
+# Phase 2 tests, but these tests exercise ONLY the WHERE-guarded
+# UPDATE-atomicity and EvalPlanQual re-evaluation primitives without
+# any ``job_locks`` setup, so the trigger would incorrectly fire on
+# commit and break the suite.
+#
+# Drop the trigger in a function-scoped autouse fixture BEFORE each
+# test runs (the Phase 2 fixture installs it again on its next
+# collection, so the rest of the suite is unaffected).
+@pytest.fixture(autouse=True)
+def _drop_job_queue_items_active_lock_guard_trigger(pg_engine):
+    """Drop the cross-test trigger from ``job_queue_items`` before each test.
+
+    Idempotent: ``DROP TRIGGER IF EXISTS`` succeeds whether or not the
+    trigger was previously installed by the session-scoped Phase 2
+    fixture.
+    """
+    with pg_engine.begin() as conn:
+        conn.execute(
+            text(
+                "DROP TRIGGER IF EXISTS trg_job_queue_items_active_lock_guard "
+                "ON job_queue_items"
+            )
+        )
+    yield
+
+# Status literals — verbatim from ``AdmissionState`` in
 # ``daemon/repositories/job_queue/models.py``. Hard-coded here so this
 # test file is decoupled from the model module (raw SQL only).
-STATUS_PENDING = "pending"
-STATUS_PROCESSING = "processing"
+# Phase 5 cleanup: ``status`` was dropped in favor of ``admission_state``
+# (``queued`` / ``active`` / ``done`` / ``dead``).
+STATUS_QUEUED = "queued"
+STATUS_ACTIVE = "active"
 
 # Table name — verbatim from ``JobItem.__tablename__``.
 TABLE = "job_queue_items"
@@ -57,14 +94,14 @@ TABLE = "job_queue_items"
 # Helpers
 # --------------------------------------------------------
 
-def _insert_pending_job(conn, *, status: str = STATUS_PENDING) -> str:
+def _insert_pending_job(conn, *, status: str = STATUS_QUEUED) -> str:
     """Insert a single job row and return its freshly minted ``job_id``.
 
     Provides every NOT NULL column. The model defines Python-side
-    defaults for several columns (``source``, ``priority``, ``status``,
-    ``created_at``, ``job_type``, ``retry_count``) but **no
-    ``server_default``**, so the corresponding PostgreSQL columns are
-    declared NOT NULL with no DB-side fallback. A raw ``INSERT`` must
+    defaults for several columns (``source``, ``priority``,
+    ``admission_state``, ``created_at``, ``job_type``, ``retry_count``)
+    but **no ``server_default``**, so the corresponding PostgreSQL columns
+    are declared NOT NULL with no DB-side fallback. A raw ``INSERT`` must
     therefore supply every NOT NULL value explicitly — SQLAlchemy would
     normally apply the Python defaults, but raw ``text()`` does not.
 
@@ -77,10 +114,10 @@ def _insert_pending_job(conn, *, status: str = STATUS_PENDING) -> str:
         text(
             f"INSERT INTO {TABLE} "
             "(job_id, agent_id, agent_dir, message, source, priority, "
-            "status, created_at, job_type, retry_count, version) "
+            "admission_state, created_at, job_type, retry_count, version) "
             "VALUES (:job_id, :agent_id, :agent_dir, :message, :source, "
-            ":priority, :status, :created_at, :job_type, :retry_count, "
-            ":version)"
+            ":priority, :admission_state, :created_at, :job_type, "
+            ":retry_count, :version)"
         ),
         {
             "job_id": job_id,
@@ -89,7 +126,7 @@ def _insert_pending_job(conn, *, status: str = STATUS_PENDING) -> str:
             "message": "concurrent status transition test",
             "source": "api",
             "priority": 5,
-            "status": status,
+            "admission_state": status,
             "created_at": created_at,
             "job_type": "task",
             "retry_count": 0,
@@ -100,7 +137,7 @@ def _insert_pending_job(conn, *, status: str = STATUS_PENDING) -> str:
 
 
 def _current_status(conn, job_id: str) -> str | None:
-    """Read the current ``status`` of a job via the supplied connection.
+    """Read the current ``admission_state`` of a job via the supplied connection.
 
     Honours the caller's transaction state: if the connection has an
     open autobegun transaction, the SELECT will see that transaction's
@@ -108,7 +145,7 @@ def _current_status(conn, job_id: str) -> str | None:
     fresh post-commit read is required.
     """
     return conn.execute(
-        text(f"SELECT status FROM {TABLE} WHERE job_id = :job_id"),
+        text(f"SELECT admission_state FROM {TABLE} WHERE job_id = :job_id"),
         {"job_id": job_id},
     ).scalar()
 
@@ -125,8 +162,8 @@ def test_atomic_status_transition_where_guard(pg_two_connections, run):
         1. Insert a fresh pending job on conn1 and commit so both
            connections can see it.
         2. conn1 issues
-           ``UPDATE job_queue_items SET status='processing'
-            WHERE job_id = :id AND status = 'pending'``,
+           ``UPDATE job_queue_items SET admission_state='active'
+            WHERE job_id = :id AND admission_state = 'queued'``,
            commits.
         3. conn2 issues the *same* UPDATE. Because the row is no
            longer pending, the WHERE guard filters it out:
@@ -145,33 +182,33 @@ def test_atomic_status_transition_where_guard(pg_two_connections, run):
         result1 = conn1.execute(
             text(
                 f"UPDATE {TABLE} "
-                "SET status = :to_status "
-                "WHERE job_id = :job_id AND status = :from_status"
+                "SET admission_state = :to_status "
+                "WHERE job_id = :job_id AND admission_state = :from_status"
             ),
             {
-                "to_status": STATUS_PROCESSING,
+                "to_status": STATUS_ACTIVE,
                 "job_id": job_id,
-                "from_status": STATUS_PENDING,
+                "from_status": STATUS_QUEUED,
             },
         )
         conn1.commit()
         assert result1.rowcount == 1, (
-            f"run={run}: conn1 should have transitioned the pending job, "
+            f"run={run}: conn1 should have transitioned the queued job, "
             f"got rowcount={result1.rowcount}"
         )
 
         # Step 3: conn2 races the same guard. The row is already
-        # 'processing' so the WHERE no longer matches.
+        # 'active' so the WHERE no longer matches.
         result2 = conn2.execute(
             text(
                 f"UPDATE {TABLE} "
-                "SET status = :to_status "
-                "WHERE job_id = :job_id AND status = :from_status"
+                "SET admission_state = :to_status "
+                "WHERE job_id = :job_id AND admission_state = :from_status"
             ),
             {
-                "to_status": STATUS_PROCESSING,
+                "to_status": STATUS_ACTIVE,
                 "job_id": job_id,
-                "from_status": STATUS_PENDING,
+                "from_status": STATUS_QUEUED,
             },
         )
         # No commit needed — we're inspecting rowcount only. Roll back
@@ -184,10 +221,10 @@ def test_atomic_status_transition_where_guard(pg_two_connections, run):
             f"now-claimed row, got rowcount={result2.rowcount}"
         )
 
-        # Final state check: row is 'processing', not corrupted.
+        # Final state check: row is 'active', not corrupted.
         final = _current_status(conn2, job_id)
-        assert final == STATUS_PROCESSING, (
-            f"run={run}: final status should be '{STATUS_PROCESSING}', "
+        assert final == STATUS_ACTIVE, (
+            f"run={run}: final admission_state should be '{STATUS_ACTIVE}', "
             f"got '{final}'"
         )
 
@@ -202,47 +239,47 @@ def test_evalplanqual_re_evaluation(pg_two_connections, run):
 
     Sequence:
         1. conn1's autobegun transaction SELECTs the row and snapshots
-           ``status='pending'`` (the row's pre-update version, taken
+           ``admission_state='queued'`` (the row's pre-update version, taken
            under READ COMMITTED).
-        2. conn2 UPDATEs the row to ``processing`` and commits.
+        2. conn2 UPDATEs the row to ``active`` and commits.
         3. conn1 attempts the same guarded UPDATE. PostgreSQL's
            EvalPlanQual re-checks the WHERE clause against conn2's
-           now-committed row version; ``status='pending'`` no longer
-           matches → ``rowcount == 0``.
+           now-committed row version; ``admission_state='queued'`` no
+           longer matches → ``rowcount == 0``.
         4. conn1 rolls back its (now empty) transaction.
 
     This is the **critical** safety net. It proves that even if a
     caller was already mid-transaction with a stale snapshot of the
-    job's status, PostgreSQL's row-level recheck prevents the guarded
-    UPDATE from clobbering a peer's commit. Without EPQ, the original
-    TOCTOU bug (SELECT → Python check → UPDATE) could re-emerge any
-    time a caller does a non-trivial amount of work between the
-    status read and the status write.
+    job's admission_state, PostgreSQL's row-level recheck prevents the
+    guarded UPDATE from clobbering a peer's commit. Without EPQ, the
+    original TOCTOU bug (SELECT → Python check → UPDATE) could re-emerge
+    any time a caller does a non-trivial amount of work between the
+    state read and the state write.
     """
     with pg_two_connections() as (conn1, conn2):
         job_id = _insert_pending_job(conn1)
         conn1.commit()
 
-        # Step 1: conn1's autobegun transaction snapshots 'pending'.
+        # Step 1: conn1's autobegun transaction snapshots 'queued'.
         # A plain SELECT does NOT take a row lock, so conn2 is free
         # to proceed immediately.
         snapshot_status = _current_status(conn1, job_id)
-        assert snapshot_status == STATUS_PENDING, (
+        assert snapshot_status == STATUS_QUEUED, (
             f"run={run}: conn1's initial snapshot should be "
-            f"'{STATUS_PENDING}', got '{snapshot_status}'"
+            f"'{STATUS_QUEUED}', got '{snapshot_status}'"
         )
 
         # Step 2: conn2 wins the race and commits.
         result2 = conn2.execute(
             text(
                 f"UPDATE {TABLE} "
-                "SET status = :to_status "
-                "WHERE job_id = :job_id AND status = :from_status"
+                "SET admission_state = :to_status "
+                "WHERE job_id = :job_id AND admission_state = :from_status"
             ),
             {
-                "to_status": STATUS_PROCESSING,
+                "to_status": STATUS_ACTIVE,
                 "job_id": job_id,
-                "from_status": STATUS_PENDING,
+                "from_status": STATUS_QUEUED,
             },
         )
         conn2.commit()
@@ -254,18 +291,18 @@ def test_evalplanqual_re_evaluation(pg_two_connections, run):
         # Step 3: conn1 attempts the same guarded UPDATE. PostgreSQL
         # notices the row was modified since conn1's snapshot was
         # taken and runs EvalPlanQual to re-evaluate the WHERE clause
-        # against the post-commit version. ``status`` is no longer
-        # 'pending', so the UPDATE affects 0 rows.
+        # against the post-commit version. ``admission_state`` is no
+        # longer 'queued', so the UPDATE affects 0 rows.
         result1 = conn1.execute(
             text(
                 f"UPDATE {TABLE} "
-                "SET status = :to_status "
-                "WHERE job_id = :job_id AND status = :from_status"
+                "SET admission_state = :to_status "
+                "WHERE job_id = :job_id AND admission_state = :from_status"
             ),
             {
-                "to_status": STATUS_PROCESSING,
+                "to_status": STATUS_ACTIVE,
                 "job_id": job_id,
-                "from_status": STATUS_PENDING,
+                "from_status": STATUS_QUEUED,
             },
         )
         # Roll back conn1 — it has nothing to commit, but we must
@@ -282,7 +319,7 @@ def test_evalplanqual_re_evaluation(pg_two_connections, run):
         # Final state check: conn2's commit stands. Read via conn2
         # (now in a clean autobegun state after its prior commit).
         final = _current_status(conn2, job_id)
-        assert final == STATUS_PROCESSING, (
-            f"run={run}: final status should be '{STATUS_PROCESSING}', "
+        assert final == STATUS_ACTIVE, (
+            f"run={run}: final admission_state should be '{STATUS_ACTIVE}', "
             f"got '{final}'"
         )

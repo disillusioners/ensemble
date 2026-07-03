@@ -297,11 +297,11 @@ def _insert_job_queue_item(
             """
             INSERT INTO job_queue_items (
                 job_id, agent_id, agent_dir, message, source, priority,
-                status, admission_state, instance_id, deleted_at,
+                admission_state, instance_id, deleted_at,
                 created_at, job_type, retry_count
             ) VALUES (
                 :job_id, 'agent', 'agents/agent', 'm', 'api', 5,
-                'pending', :admission_state, :instance_id, :deleted_at,
+                :admission_state, :instance_id, :deleted_at,
                 :created_at, 'task', 0
             )
             """
