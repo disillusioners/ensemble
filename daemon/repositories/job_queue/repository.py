@@ -181,6 +181,7 @@ class JobRepository:
         idempotency_key: str | None = None,
         job_type: str = "task",
         instance_id: str | None = None,
+        job_id: str | None = None,
     ) -> JobItem:
         """Create a new job queue item.
 
@@ -196,12 +197,33 @@ class JobRepository:
             idempotency_key: Optional idempotency key for deduplication.
             job_type: Job type ("task" or "message", default "task").
             instance_id: Optional pre-set instance ID (for MESSAGE jobs).
+            job_id: Optional caller-supplied UUID4 string for the
+                JobItem primary key. When provided, this value is used
+                verbatim instead of the model's ``default_factory``.
+                Required by the POC ``enqueue_message_job`` path to
+                satisfy the linkage contract
+                (``JobItem.job_id == Task.work_id``): the caller mints
+                one shared UUID and passes it to both
+                ``_prepare_enqueued_message(work_id=...)`` and to this
+                method so the two rows share a single handle. When
+                ``None`` (the default — every existing caller), the
+                model's ``default_factory=lambda: str(uuid.uuid4())``
+                mints a fresh UUID, preserving prior behaviour. New
+                code that needs a stable cross-system handle should
+                always pass an explicit value rather than relying on
+                the implicit default.
 
         Returns:
             Created JobItem object.
         """
         with SQLModelSession(self.engine) as db_session:
             job = JobItem(
+                # ``job_id`` flows through verbatim when supplied, so
+                # the linkage contract with Task.work_id is satisfied
+                # by construction. When ``None``, Pydantic's
+                # ``default_factory`` kicks in and mints a fresh
+                # UUID4 — identical to pre-linkage behaviour.
+                job_id=job_id if job_id is not None else str(uuid.uuid4()),
                 agent_id=agent_id,
                 agent_dir=agent_dir,
                 message=message,
@@ -705,6 +727,11 @@ class JobRepository:
 
         Phase 3: queries admission_state='queued' instead of status='pending'.
 
+        Excludes ``job_type='message'`` JobItems, which are dispatched inline
+        (e.g. POST /messages) rather than via the JobProcessor poll loop.
+        Without this filter the poll loop would double-dispatch message jobs
+        and create a duplicate Task.
+
         Args:
             queue_id: Queue identifier.
 
@@ -716,6 +743,7 @@ class JobRepository:
                 select(JobItem)
                 .where(JobItem.queue_id == queue_id)
                 .where(JobItem.admission_state == AdmissionState.QUEUED.value)
+                .where(JobItem.job_type != "message")
                 .where(JobItem.deleted_at.is_(None))
                 .order_by(col(JobItem.priority).desc(), JobItem.created_at.asc())
             )

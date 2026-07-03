@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import logging
 import re
@@ -263,6 +264,30 @@ class Worker(threading.Thread):
                             f"(type={task.task_type}, instance={task.instance_id[:8]}...)"
                         )
 
+                        # Post-claim JobItem activation (POC,
+                        # ``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``).
+                        # When ``enqueue_message_job`` creates a JobItem
+                        # mirror alongside the Task, this flips the
+                        # mirror's ``admission_state`` from QUEUED to
+                        # ACTIVE as an informational mirror of the
+                        # Task's running state. The Task's running
+                        # state is the authoritative serialization
+                        # gate; the JobItem exists only so the
+                        # WorkResolver facade can read the
+                        # job_queue_items side of the union without a
+                        # divergent view.
+                        #
+                        # Best-effort by design — failure MUST NOT
+                        # break message processing. The observer
+                        # finalize fallback in ``job_feedback_observer``
+                        # picks up stuck-queued JobItems on the next
+                        # sweep, so a missed activation is recoverable.
+                        # All DB I/O is offloaded to a thread so the
+                        # worker thread is not blocked; the worker
+                        # does not await the result.
+                        if task.task_type == "process_message" and task.work_id:
+                            self._activate_message_jobitem_async(task.work_id)
+
                         # Tell the heartbeat which task is in flight. The
                         # set_task() call also does an eager first beat so
                         # the recovery service sees a fresh heartbeat
@@ -332,6 +357,98 @@ class Worker(threading.Thread):
             "is_alive": self.is_alive(),
         }
     
+    def _activate_message_jobitem_async(self, work_id: str) -> None:
+        """Fire-and-forget post-claim JobItem activation.
+
+        Best-effort ``UPDATE job_queue_items SET admission_state='active'
+        WHERE job_id = :work_id AND admission_state = 'queued'`` that
+        runs on the main event loop via ``MainLoopBridge``. The
+        ``admission_state='queued'`` guard makes this idempotent — if
+        the observer finalize path already flipped it (e.g. a stuck
+        JobItem picked up by the deferred-finalize sweep), this is a
+        no-op. If the JobItem does not exist (legacy messages that
+        pre-date ``message_jobs_enabled``, or new ones with the flag
+        off), the UPDATE rowcount=0 and we silently skip.
+
+        The Task's ``running`` status is the authoritative serialization
+        gate — the JobItem is purely informational. A failed activation
+        is logged at debug level and never propagates; the message
+        continues to be processed normally.
+
+        Args:
+            work_id: UUID4 of the Task row — same UUID as the JobItem's
+                ``job_id`` (set in :meth:`InstanceMessagingService.enqueue_message_job`).
+        """
+        job_repo = self._get_job_repository()
+        if job_repo is None:
+            return
+        try:
+            MainLoopBridge.run_async_no_wait(
+                self._activate_message_jobitem_async_coro(job_repo, work_id)
+            )
+        except Exception as e:  # noqa: BLE001 — never raise from a fire-and-forget
+            logger.debug(
+                f"Worker {self.worker_id}: failed to schedule JobItem "
+                f"activation for work_id={work_id[:8]}...: "
+                f"{type(e).__name__}: {e}"
+            )
+
+    @staticmethod
+    async def _activate_message_jobitem_async_coro(job_repo: Any, work_id: str) -> None:
+        """Coroutine body for :meth:`_activate_message_jobitem_async`.
+
+        Performs the guarded UPDATE off the worker thread. Errors are
+        logged at debug level and swallowed — this is informational
+        mirroring, not a serialization gate.
+        """
+        try:
+            # ``atomic_transition`` is the canonical path for admission
+            # state changes (race-safe, single-statement, with a state-
+            # machine pre-check). ``queued→active`` is a valid
+            # transition. The ``WHERE admission_state='queued'`` guard
+            # makes this idempotent against concurrent observer finalize.
+            await asyncio.to_thread(
+                job_repo.atomic_transition,
+                work_id,
+                "queued",
+                "active",
+            )
+        except Exception as e:
+            # ``atomic_transition`` raises ``InvalidTransitionError``
+            # when the row is not in ``queued`` — that's the common
+            # path for already-finalized JobItems. Log at debug; the
+            # row is already in the right state.
+            from daemon.services.job_state_machine import (
+                InvalidTransitionError,
+            )
+
+            if isinstance(e, InvalidTransitionError):
+                logger.debug(
+                    f"JobItem work_id={work_id[:8]}... not in 'queued' "
+                    "— already finalized or never existed (idempotent skip)."
+                )
+            else:
+                logger.debug(
+                    f"JobItem activation UPDATE failed for work_id="
+                    f"{work_id[:8]}...: {type(e).__name__}: {e}"
+                )
+
+    def _get_job_repository(self) -> Any:
+        """Resolve the JobRepository from the task processor's manager.
+
+        Returns ``None`` when the JobQueueService / repository chain has
+        not been wired yet (test fixtures, early bootstrap). Callers
+        MUST handle ``None`` — the activation is best-effort and the
+        Task row alone is sufficient to process the message.
+        """
+        manager = getattr(self._task_processor, "_manager", None)
+        if manager is None:
+            return None
+        job_queue_service = getattr(manager, "_job_queue_service", None)
+        if job_queue_service is None:
+            return None
+        return getattr(job_queue_service, "_repository", None)
+
     def _process_with_timeout(self, task: "Task") -> None:
         """Process a task with timeout monitoring and retry logic."""
         from daemon.cancellation import CancellationTokenSource

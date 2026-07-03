@@ -24,6 +24,7 @@ from ..utils import parse_think_tags, serialize_message
 from ..write_pause_guard import WriteGuardSession
 from .cancellation import CancellationService
 from .main_loop_bridge import MainLoopBridge
+from .messaging_types import AsyncMessageResult
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -845,9 +846,21 @@ class InstanceMessagingService:
         # that mints a UUID4 at construction, so the value is available
         # immediately after ``session.add(task)`` — no DB round-trip
         # needed to read it (unlike ``task.id``, which requires the
-        # post-commit ``refresh()``). Populated by ``default_factory``
-        # on row construction.
-        work_id: str | None = None
+        # post-commit ``refresh()``).
+        #
+        # Linkage contract (POC ``enqueue_message_job`` path):
+        # ``JobItem.job_id`` MUST equal ``Task.work_id``. The caller
+        # (``enqueue_message_job``) mints a single UUID and passes it
+        # here as ``work_id``; we forward it to the Task row so the
+        # two rows share one handle. Legacy callers (``enqueue_message``)
+        # pass ``work_id=None``; we mint a UUID here so the Task row
+        # has a non-null ``work_id`` regardless of path. Place the
+        # auto-generation ONCE, early, and do NOT re-bind ``work_id``
+        # later — a bare ``work_id: str | None = None`` re-declaration
+        # elsewhere in the method would shadow the parameter, dropping
+        # the caller's value on the floor and breaking the linkage.
+        if work_id is None:
+            work_id = str(uuid.uuid4())
 
         with WriteGuardSession(Session(self._manager.engine), self._manager.write_guard) as session:
             # 1. Insert the message
@@ -882,22 +895,26 @@ class InstanceMessagingService:
                 status=TaskStatus.PENDING.value,
                 created_at=datetime.now(timezone.utc),
                 is_deferred=is_deferred,
-                # Stamp a caller-supplied ``work_id`` when provided (the
-                # JobItem's ``job_id`` on the dispatch path) so the Task
-                # is explicitly linked to its driving JobItem. Without
-                # this the Task mints an unrelated UUID4 and drift
-                # detection (F10) has no way to tell a genuine zombie
-                # (the JobItem's own stuck Task) from a ``job_continue``
-                # continuation Task on the same instance.
-                **({"work_id": work_id} if work_id else {}),
+                # ``work_id`` is the linkage handle for the
+                # JobItem/Task pair (POC path) or a fresh UUID minted
+                # earlier in this method (legacy path). Always non-None
+                # at this point — see the early auto-generation
+                # immediately above this block. Passing it explicitly
+                # ensures ``task.work_id`` matches the value the caller
+                # intended (``enqueue_message_job``'s shared UUID); if
+                # we relied on ``default_factory`` alone the Task row
+                # would mint an unrelated UUID and the linkage contract
+                # (JobItem.job_id == Task.work_id) would be silently
+                # broken.
+                work_id=work_id,
             )
             session.add(task)
-            # ``task.work_id`` is populated by the model's
-            # ``default_factory`` at construction (UUID4 string,
-            # ``unique=True, index=True``). Capture it now so we don't
-            # have to wait for the post-commit ``refresh()`` to read it
-            # back from the DB. See feature/virtual-job-management-surface.
-            work_id = task.work_id
+            # ``task.work_id`` was either inherited from the caller
+            # (``enqueue_message_job``'s shared UUID, satisfying the
+            # linkage contract with JobItem.job_id) or minted above by
+            # ``default_factory`` (legacy ``enqueue_message`` path).
+            # No re-capture needed — the local ``work_id`` variable
+            # already holds the correct value either way.
 
             # 3. Update instance status to RUNNING for any state that is
             #    NOT already RUNNING and NOT PAUSED. A terminal instance
@@ -1043,8 +1060,6 @@ class InstanceMessagingService:
             from worker claim. INTENDED BEHAVIOUR: messages queue in
             PENDING and are claimed the moment the instance resumes.
         """
-        from ..manager import AsyncMessageResult
-
         # Wrap the sync DB prelude in asyncio.to_thread so the session.commit()
         # inside `_prepare_enqueued_message` cannot block the event loop. Under
         # SQLite WAL write contention (busy_timeout=30s) a sync commit on the
@@ -1097,6 +1112,238 @@ class InstanceMessagingService:
         logger.debug(
             f"Enqueued message {ctx.message_id} for instance {instance_id} "
             f"task_id={job_id}"
+        )
+
+        return AsyncMessageResult(
+            message_id=ctx.message_id,
+            instance_id=instance_id,
+            status="queued",
+            job_id=job_id,
+        )
+
+    @property
+    def _job_repository(self) -> Any:
+        """Access JobRepository through the manager's JobQueueService.
+
+        Resolves to ``manager._job_queue_service._repository``. Returns
+        ``None`` when the JobQueueService has not been wired yet (test
+        fixtures that build ``InstanceManager`` directly without
+        ``api.py`` lifespan). Callers MUST handle ``None`` gracefully —
+        the POC ``enqueue_message_job`` skips JobItem creation when the
+        repo is unavailable so the legacy ``enqueue_message`` path
+        remains the fallback.
+        """
+        try:
+            service = self._manager._job_queue_service
+        except AttributeError:
+            return None
+        if service is None:
+            return None
+        return getattr(service, "_repository", None)
+
+    async def enqueue_message_job(
+        self,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+        images: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        is_deferred: bool = False,
+    ) -> "AsyncMessageResult":
+        """POC variant of :meth:`enqueue_message` that also creates a JobItem.
+
+        Mirrors ``enqueue_message`` end-to-end, then additionally creates a
+        ``JobItem(job_type='message', job_id=task.work_id, admission_state='queued')``
+        in the same logical dispatch window. The JobItem is the
+        informational mirror of the Task's running state — the Task is
+        still the authoritative serialization gate.
+
+        Why a sibling method instead of a flag on ``enqueue_message``:
+
+        * The existing D13 flow (``enqueue_message`` only writes Task +
+          MessageQueue) is frozen. A parallel method keeps the diff
+          additive so a flag flip can A/B the two without one path
+          silently regressing.
+        * ``JobQueueService.enqueue_job`` rejects ``job_type='message'``
+          with ``ValueError`` (D13 defense-in-depth). This method calls
+          ``JobRepository.create`` directly — the lowest-level insert
+          that bypasses the service-layer guard.
+
+        JobItem ↔ Task linkage:
+
+        * ``job_id = task.work_id`` — the same UUID4 minted by the Task
+          model's ``default_factory`` in the prelude. The
+          ``stamp_message_id`` correlation key goes onto the JobItem's
+          ``metadata.message_id`` so the cross-system guard can resolve
+          a claimed MESSAGE JobItem back to the originating message.
+        * ``instance_id`` matches the Task row. The post-claim
+          activation in ``worker_pool`` flips the JobItem queued→active
+          as an informational mirror; the Task's running state remains
+          the authoritative gate.
+
+        Failure handling:
+
+        * If the JobRepository is unavailable (test fixtures), the
+          method logs and skips JobItem creation — ``enqueue_message``
+          semantics are preserved so callers don't see a regression.
+        * If ``JobRepository.create`` or ``stamp_message_id`` raises,
+          the exception is logged at warning level and the Task row
+          remains the sole dispatch primitive. The message still gets
+          processed (Task IS the dispatch primitive); the JobItem is a
+          derived mirror, not a gate.
+
+        Args:
+            instance_id: Target instance ID.
+            message: User content.
+            source: Source tag (e.g. ``"api"``, ``"telegram:user:1"``).
+            priority: 0=system, 1=user (matches ``enqueue_message``).
+            images: Optional base64 images for vision messages.
+            metadata: Optional metadata dict.
+            is_deferred: Forwarded to ``enqueue_message`` — stamps
+                ``Task.is_deferred=True`` so the worker pool's idle gate
+                holds the task until every non-defer queue is empty.
+
+        Returns:
+            ``AsyncMessageResult`` with ``message_id``, ``instance_id``,
+            ``status="queued"``, and ``job_id`` populated as the shared
+            UUID4 (Task.work_id == JobItem.job_id). HTTP callers discard
+            ``job_id``; tooling that needs the cross-system handle
+            receives a real one.
+        """
+        from ..registry import get_registry
+        from ..repositories.job_queue.models import AdmissionState
+
+        # Step 1: write MessageQueue + Task via the frozen prelude.
+        # This mints ``job_id = task.work_id`` (UUID4) inside the same
+        # transaction as the MessageQueue row.
+        job_id = str(uuid.uuid4())
+        ctx = await asyncio.to_thread(
+            self._prepare_enqueued_message,
+            instance_id=instance_id,
+            message=message,
+            source=source,
+            priority=priority,
+            images=images,
+            metadata=metadata,
+            is_deferred=is_deferred,
+            work_id=job_id,
+        )
+
+        # Step 2: emit status change if IDLE/WAITING_CHILDREN → RUNNING.
+        # Mirrors ``enqueue_message``'s post-prelude SSE emit so the
+        # frontend sees identical behavior on the wire.
+        if ctx.status_changed_to_running:
+            await self._manager._live_hub.stream_status_change(
+                instance_id, InstanceStatus.RUNNING.value, agent_id=ctx.instance_agent_id
+            )
+
+        # Step 3: fire-and-forget title generation for the first message.
+        self._maybe_trigger_title_generation(
+            instance_id, message, ctx.is_idle_to_running
+        )
+
+        # Step 4: create the JobItem mirror. Best-effort — the Task is
+        # the authoritative dispatch primitive, so a JobItem creation
+        # failure must not break message enqueue. When the JobRepository
+        # is unavailable (test fixtures, pre-wiring bootstrap) we
+        # quietly skip the mirror creation.
+        job_repo = self._job_repository
+        if job_repo is None:
+            logger.debug(
+                "enqueue_message_job: JobRepository unavailable for instance "
+                f"{instance_id[:8]}... — skipping JobItem mirror creation. "
+                "Task row remains the sole dispatch primitive."
+            )
+        else:
+            try:
+                # Resolve agent_dir from the registry. Same lookup
+                # JobQueueService.enqueue_job uses; we can't share the
+                # helper without dragging in the project_id resolution
+                # path that the message flow does not have.
+                agent_id_for_job = ctx.instance_agent_id or "default"
+                registry = get_registry()
+                agent_meta = registry.get_resolved(agent_id_for_job)
+                if agent_meta is None:
+                    # Fall back to the instance's stored agent_id if
+                    # registry lookup fails (e.g. unregistered agent).
+                    # The JobItem still gets a usable row; downstream
+                    # consumers can re-resolve.
+                    agent_dir_value = ""
+                    resolved_agent_id = agent_id_for_job
+                else:
+                    agent_dir_value = str(agent_meta.path)
+                    resolved_agent_id = (
+                        registry.resolve_pure_id(agent_id_for_job)
+                        or agent_id_for_job
+                    )
+
+                # Bypass JobQueueService.enqueue_job (D13 rejects
+                # job_type='message') and call the repository's low-level
+                # create() directly. The repository already sets
+                # admission_state=QUEUED by default — no need to override.
+                #
+                # ``job_id=job_id`` is the linkage handle: the same
+                # UUID4 we passed to ``_prepare_enqueued_message(work_id=...)``
+                # is forwarded to ``JobItem.job_id`` so the two rows
+                # share one handle (the linkage contract). Passing it
+                # explicitly suppresses ``JobItem``'s ``default_factory``
+                # for this row, which is what makes the equality hold.
+                await asyncio.to_thread(
+                    job_repo.create,
+                    agent_id=resolved_agent_id,
+                    agent_dir=agent_dir_value,
+                    message=message,
+                    source=source,
+                    priority=priority,
+                    job_metadata={},
+                    queue_id=None,
+                    idempotency_key=None,
+                    job_type="message",
+                    instance_id=instance_id,
+                    job_id=job_id,
+                )
+
+                # Cross-system guard correlation — the observer finalize
+                # path and the worker claim path both resolve MESSAGE
+                # JobItems back to the originating message_id via
+                # ``job_queue_items.metadata->>'message_id'``. Without
+                # this stamp, the correlation returns NULL and the
+                # cross-system guard cannot match.
+                await asyncio.to_thread(
+                    job_repo.stamp_message_id,
+                    job_id,
+                    ctx.message_id,
+                )
+
+                logger.debug(
+                    f"enqueue_message_job: created JobItem mirror "
+                    f"job_id={job_id[:8]}... for instance {instance_id[:8]}... "
+                    f"message_id={ctx.message_id[:8]}..."
+                )
+            except Exception as e:
+                # Mirror creation is best-effort. The Task row is the
+                # authoritative dispatch primitive; a missing JobItem
+                # just means the WorkResolver facade sees fewer rows,
+                # not that message processing breaks.
+                logger.warning(
+                    f"enqueue_message_job: JobItem mirror creation failed "
+                    f"for instance {instance_id[:8]}... message "
+                    f"{ctx.message_id[:8]}...: {type(e).__name__}: {e}. "
+                    "Task row remains the sole dispatch primitive."
+                )
+
+        # Step 5: notify the WorkerPool (Task row already written by
+        # the prelude). Same dispatch path as ``enqueue_message`` —
+        # the JobItem mirror is informational only and does not change
+        # which primitive drives worker claim.
+        if self._manager._worker_pool is not None:
+            self._manager._worker_pool.notify_work()
+
+        logger.debug(
+            f"Enqueued message {ctx.message_id} (job-mirror) for instance "
+            f"{instance_id} job_id={job_id[:8]}..."
         )
 
         return AsyncMessageResult(

@@ -61,6 +61,7 @@ from .services.job_queue_service import DemandState
 from .services.dependency_bus import get_dependency_bus
 from .services.instance_lifecycle import InstanceLifecycleService
 from .services.instance_messaging import InstanceMessagingService
+from .services.messaging_types import AsyncMessageResult  # re-exported for `from daemon.manager import AsyncMessageResult`
 from .services.child_reports import ChildReportsService
 from .services.error_reporting import ErrorReportingService
 from .services.cancellation import CancellationService
@@ -426,15 +427,6 @@ class MessageResult:
     thinking: str | None = None
     thinking_extracted: str | None = None  # Extracted from <think/> tags in content
     tool_calls: list[dict[str, Any]] | None = None
-
-
-@dataclass
-class AsyncMessageResult:
-    """Result of async message enqueue."""
-    message_id: str
-    instance_id: str
-    status: str = "queued"
-    job_id: str | None = None  # job_id of the enqueued MESSAGE job (None for non-JQ paths)
 
 
 class InstanceManager:
@@ -2815,6 +2807,49 @@ class InstanceManager:
             metadata=metadata,
             is_deferred=is_deferred,
             work_id=work_id,
+        )
+
+    async def enqueue_message_job(
+        self,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+        images: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        *,
+        is_deferred: bool = False,
+    ) -> AsyncMessageResult:
+        """POC variant of :meth:`enqueue_message` that also creates a JobItem mirror.
+
+        Wraps :meth:`InstanceMessagingService.enqueue_message_job`. See that
+        method for the full contract — Task row remains the authoritative
+        dispatch primitive; the JobItem is the informational mirror that
+        the WorkResolver facade can read.
+
+        Args:
+            instance_id: Target instance ID.
+            message: User content.
+            source: Source tag (e.g. ``"api"``, ``"telegram:user:1"``).
+            priority: 0=system, 1=user (matches ``enqueue_message``).
+            images: Optional base64 images for vision messages.
+            metadata: Optional metadata dict.
+            is_deferred: Forwarded to ``enqueue_message_job`` — stamps
+                ``Task.is_deferred=True``.
+
+        Returns:
+            ``AsyncMessageResult`` with ``message_id``, ``instance_id``,
+            ``status="queued"``, and ``job_id`` populated as the shared
+            UUID4 (Task.work_id == JobItem.job_id).
+        """
+        return await self._messaging_service.enqueue_message_job(
+            instance_id=instance_id,
+            message=message,
+            source=source,
+            priority=priority,
+            images=images,
+            metadata=metadata,
+            is_deferred=is_deferred,
         )
 
     async def _process_message_with_tracking(

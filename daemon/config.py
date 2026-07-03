@@ -428,6 +428,19 @@ class JobSystemConfig(BaseSettings):
     idempotency_key_ttl_hours: int = Field(default=24, description="TTL in hours for idempotency key deduplication")
     job_retry_scheduler_enabled: bool | None = Field(default=None, description="Enable background retry scheduler. None/empty = disabled.")
 
+    # POC feature flag — routes POST /messages NORMAL branch through the
+    # JobItem path alongside the existing Task row. When True, ``enqueue_message_job``
+    # creates a JobItem(job_type='message') with job_id == task.work_id so the
+    # post-claim activation in worker_pool can flip it queued→active as the
+    # informational mirror of the Task's running state. The observer finalize
+    # fallback in job_feedback_observer covers any stuck-queued JobItems, so
+    # a missed activation does not break message processing. Default False
+    # preserves the existing D13 single-writer (Task-only) flow.
+    message_jobs_enabled: bool = Field(
+        default=False,
+        description="When True, POST /messages NORMAL branch creates a JobItem(job_type='message') alongside Task+MessageQueue. POC flag."
+    )
+
     # Phase 7: the WorkResolverService is the only read path. Legacy
     # per-table primitives (``get_job`` / ``list_jobs`` / ``cancel_job``)
     # are retained for internal callers but no longer gated by a config

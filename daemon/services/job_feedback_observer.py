@@ -698,11 +698,25 @@ class JobFeedbackObserver:
         # — preserved as the service call so the existing test mock surface
         # (``mock_jqs.get_job_by_instance``) keeps working.
         job = await self._job_queue_service.get_job_by_instance(instance_id)
-        if job is not None and job.admission_state == AdmissionState.ACTIVE.value:
-            # Happy path: PROCESSING JobItem exists. Pre-D13
-            # returned the JobItem directly; post-D13 we wrap it in
-            # the context so downstream code (which uses ``job_id``
-            # not the whole JobItem) keeps working.
+        # Finalize-on-completion fallback: match BOTH ``queued`` and
+        # ``active``. A message-JobItem whose post-claim activation
+        # UPDATE (``queued`` → ``active``) missed (best-effort UPDATE
+        # failed or raced) stays in ``queued``. Without matching it
+        # here, the observer returns ``job_id=None`` (case 3 below)
+        # and the instance finalizes WITHOUT a JobItem transition —
+        # the row leaks as ``queued`` forever. ``done`` and ``dead``
+        # are still excluded (operator path is the JobProcessor poll
+        # loop / stale-recovery). Paused jobs are unaffected because
+        # pause keeps the job in ``admission_state='active'`` (its
+        # lock is held) — not ``queued``.
+        if job is not None and job.admission_state in (
+            AdmissionState.ACTIVE.value,
+            AdmissionState.QUEUED.value,
+        ):
+            # Happy path: PROCESSING-or-stuck-queued JobItem exists.
+            # Pre-D13 returned the JobItem directly; post-D13 we wrap
+            # it in the context so downstream code (which uses
+            # ``job_id`` not the whole JobItem) keeps working.
             return _ProcessingJobContext(
                 instance_id=instance_id, job_id=job.job_id
             )
@@ -724,9 +738,18 @@ class JobFeedbackObserver:
             active_job = await asyncio.to_thread(
                 self._job_repo.get_active_by_instance, instance_id, job_id
             )
+            # Finalize-on-completion fallback: mirror the first check
+            # above. Match both ``queued`` and ``active`` so a stuck-
+            # queued JobItem is still found via the defense-in-depth
+            # re-query (e.g. when ``get_by_instance`` returned a
+            # terminal sibling and we need the still-active / still-
+            # queued row for finalization).
             if (
                 active_job is not None
-                and active_job.admission_state == AdmissionState.ACTIVE.value
+                and active_job.admission_state in (
+                    AdmissionState.ACTIVE.value,
+                    AdmissionState.QUEUED.value,
+                )
             ):
                 return _ProcessingJobContext(
                     instance_id=instance_id, job_id=active_job.job_id
@@ -2923,6 +2946,23 @@ class JobFeedbackObserver:
                 # ``instance_lifecycle._terminate_instance_db_sync``).
                 update_values["terminal_reason"] = to_status
 
+                # Finalize-on-completion fallback: snapshot the
+                # previous ``admission_state`` BEFORE the UPDATE so
+                # we can detect the stuck-queued case below. This is
+                # only used for observability (a WARNING log); the
+                # UPDATE itself is gated by the WHERE clause below
+                # which matches both ``active`` and ``queued``.
+                # ``session.get`` runs inside the same
+                # ``WriteGuardSession`` (same transaction under
+                # SQLite full write lock; PostgreSQL READ COMMITTED
+                # within one transaction).
+                _prev_job = session.get(JobItem, job_id)
+                _prev_admission_state = (
+                    _prev_job.admission_state
+                    if _prev_job is not None
+                    else None
+                )
+
                 stmt = (
                     sqlmodel_update(JobItem)
                     .where(JobItem.job_id == job_id)
@@ -2938,7 +2978,27 @@ class JobFeedbackObserver:
                     # admission_state to 'done' cause rowcount=0 here
                     # and the helper falls through to the disambiguation
                     # SELECT below.
-                    .where(JobItem.admission_state == AdmissionState.ACTIVE.value)
+                    #
+                    # Finalize-on-completion fallback: match BOTH
+                    # ``active`` AND ``queued`` so a message-JobItem
+                    # whose post-claim activation UPDATE
+                    # (``queued`` → ``active``) missed — best-effort
+                    # UPDATE failed or raced — is still finalizable.
+                    # Without this, Part A's
+                    # ``_get_processing_job_for_instance`` finds the
+                    # JobItem (matched ``queued``) but the UPDATE
+                    # rowcount-drops to 0 → ``InvalidTransitionError``
+                    # → silently caught by the async caller → the
+                    # JobItem leaks as ``queued`` forever. ``done``
+                    # and ``dead`` rows are still excluded (they were
+                    # already filtered upstream / by prior
+                    # finalization).
+                    .where(
+                        JobItem.admission_state.in_([
+                            AdmissionState.ACTIVE.value,
+                            AdmissionState.QUEUED.value,
+                        ])
+                    )
                     .values(**update_values)
                 )
                 result = session.exec(stmt)
@@ -2972,6 +3032,27 @@ class JobFeedbackObserver:
                         from_state=existing.status,
                         to_state=to_status,
                     )
+                else:
+                    # UPDATE succeeded (rowcount > 0). If the row was
+                    # previously in ``admission_state='queued'`` (not
+                    # the normal ``active``), the post-claim
+                    # activation UPDATE (``queued`` → ``active``)
+                    # missed somewhere — surface a WARNING so
+                    # operators can spot stuck-activation bugs in the
+                    # worker claim path. ``active`` is the normal
+                    # path (no warning). The pre-UPDATE snapshot read
+                    # above is the only way to observe this — the
+                    # UPDATE itself doesn't expose the previous
+                    # state.
+                    if _prev_admission_state == AdmissionState.QUEUED.value:
+                        logger.warning(
+                            f"Observer: finalized JobItem "
+                            f"{job_id[:8]}... from "
+                            f"admission_state='queued' (post-claim "
+                            f"activation UPDATE missed) — instance "
+                            f"{instance_id[:8]}..., terminal_reason="
+                            f"{to_status}"
+                        )
             else:
                 # Phase 2.5 (Task 2.5.4): no JobItem to update.
                 # Fall through to Steps 2+3 unconditionally.

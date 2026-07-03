@@ -125,13 +125,31 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
         }
     
     # --- NORMAL PATH: Not paused, enqueue message ---
+    # POC feature flag (``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``):
+    # when ON, route through ``enqueue_message_job`` so the JobItem
+    # mirror is created alongside the Task row (WorkResolver facade
+    # reads both sides of the union). When OFF, the existing D13
+    # flow writes Task+MessageQueue only — the frozen baseline.
+    # Both paths return an ``AsyncMessageResult`` with the same
+    # shape, so callers see no API-level difference.
+    use_message_jobs = bool(
+        getattr(manager.config.job_system, "message_jobs_enabled", False)
+    )
     try:
-        result = await manager.enqueue_message(
-            instance_id=instance_id,
-            message=message.content,
-            source="api",
-            images=message.images,
-        )
+        if use_message_jobs:
+            result = await manager.enqueue_message_job(
+                instance_id=instance_id,
+                message=message.content,
+                source="api",
+                images=message.images,
+            )
+        else:
+            result = await manager.enqueue_message(
+                instance_id=instance_id,
+                message=message.content,
+                source="api",
+                images=message.images,
+            )
     except Exception as e:
         raise HTTPException(
             status_code=500,
