@@ -282,9 +282,12 @@ class Worker(threading.Thread):
                         # finalize fallback in ``job_feedback_observer``
                         # picks up stuck-queued JobItems on the next
                         # sweep, so a missed activation is recoverable.
-                        # All DB I/O is offloaded to a thread so the
-                        # worker thread is not blocked; the worker
-                        # does not await the result.
+                        # Activation runs via ``run_async`` — a blocking
+                        # call with a 5-second timeout. The worker
+                        # thread blocks until the activation UPDATE
+                        # completes or the timeout fires. Safe because
+                        # the activation is a single DB UPDATE
+                        # (millisecond-scale).
                         if task.task_type == "process_message" and task.work_id:
                             self._activate_message_jobitem_async(task.work_id)
 
