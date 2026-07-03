@@ -1240,8 +1240,11 @@ def test_parent_child_workflow_happy_path():
         # 2. job_list returns UNION: both jobs and turns should exist for this instance
         instance_work = _get_work_by_instance(leader_id)
         kinds_present = {w["kind"] for w in instance_work}
-        assert "turn" in kinds_present, (
-            f"Expected 'turn' kind in work list for instance, got "
+        # With ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED=true, message-driven work
+        # surfaces as kind="job" (JobItem mirror) instead of kind="turn" (Task).
+        # VJM dedup keys on (instance_id, message_id) and prefers JobItem when both exist.
+        assert "turn" in kinds_present or "job" in kinds_present, (
+            f"Expected 'turn' or 'job' kind in work list for instance, got "
             f"kinds={kinds_present}"
         )
         logger.info(
@@ -2323,8 +2326,11 @@ def test_wave_spawn_with_defer_queue():
             )
             # The leader processed the wave message → there should be
             # at least one "turn" record for this instance.
-            assert "turn" in kinds_in_union, (
-                f"Expected 'turn' in work UNION for leader, got "
+            # With ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED=true, message-driven work
+            # surfaces as kind="job" (JobItem mirror) instead of kind="turn" (Task).
+            # VJM dedup keys on (instance_id, message_id) and prefers JobItem when both exist.
+            assert "turn" in kinds_in_union or "job" in kinds_in_union, (
+                f"Expected 'turn' or 'job' in work UNION for leader, got "
                 f"kinds={kinds_in_union}"
             )
         else:

@@ -932,6 +932,11 @@ class InstanceLifecycleService:
                     instance_id, job_type=None
                 )
                 for remaining_job in all_jobs:
+                    # MESSAGE JobItems are informational mirrors (D13 contract), not lifecycle-managed jobs.
+                    # They are created by enqueue_message_job as a derived view; the Task row is authoritative.
+                    # terminate cleanup must NOT cancel them — the Task lifecycle owns their visibility.
+                    if remaining_job.job_type == "message":
+                        continue
                     if remaining_job.admission_state in (AdmissionState.DONE.value, AdmissionState.DEAD.value):
                         continue
                     try:
