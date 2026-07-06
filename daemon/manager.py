@@ -3393,15 +3393,16 @@ class InstanceManager:
             logger.info(f"No PAUSED/RUNNING PROCESS_MESSAGE task for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
             # Enqueue a message via WorkerPool path with resume_mode metadata.
-            # Phase 5 (cutover): the public message-Job path is the only
-            # path — every external/user-facing message creates a JobItem
-            # mirror alongside the Task row so the WorkResolver facade
-            # can read both sides of the union. The
-            # ``source="cascade_resume"`` tag and ``resume_mode`` metadata
+            # Cascade-resume is INTERNAL orchestration (the user's message
+            # propagates to children) — therefore MUST NOT create a JobItem
+            # mirror on the child path. The principle: child instances never
+            # have their own job; only root-instance external traffic
+            # (POST /messages, chat adapters, scheduler) creates JobItems.
+            # The ``source="cascade_resume"`` tag and ``resume_mode`` metadata
             # MUST survive the round-trip so downstream observers can
             # distinguish cascade-resume traffic.
             try:
-                result = await self.enqueue_message_job(
+                result = await self.enqueue_message(
                     instance_id=instance_id,
                     message=message,
                     source="cascade_resume",

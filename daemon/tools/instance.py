@@ -699,12 +699,13 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 "Please wait for the current message to complete before sending another."
             )
 
-        # Enqueue the message via worker pool (creates MessageQueue + Task + JobItem atomically).
-        # Phase 5 (cutover): the public message-Job path is the only path.
-        # Every agent ``send_message`` tool call creates a JobItem mirror
-        # alongside the Task row so the WorkResolver facade can read both
-        # sides of the union.
-        result = await manager.enqueue_message_job(
+        # Enqueue the message via worker pool (creates MessageQueue + Task atomically).
+        # send_message is ALWAYS agent-to-agent (internal orchestration) and
+        # therefore MUST NOT create a JobItem mirror — only external entry
+        # points (POST /messages, chat adapters, scheduler) create JobItems.
+        # The 06f500af-class bugs were caused by letting internal traffic
+        # mint JobItems.
+        result = await manager.enqueue_message(
             instance_id=instance_id,
             message=message,
             source=f"internal_agent:{current_instance_id}"
