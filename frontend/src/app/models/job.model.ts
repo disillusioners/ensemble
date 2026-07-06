@@ -1,6 +1,6 @@
 // Job Queue Models for Frontend
 
-export type JobStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'dead_letter';
+export type JobStatus = 'pending' | 'processing' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'dead_letter';
 
 export type JobSource = 'api' | 'telegram' | 'scheduler' | 'webhook';
 
@@ -89,6 +89,25 @@ export function isTerminalStatus(status: JobStatus): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'dead_letter';
 }
 
+/**
+ * Paused jobs are non-terminal but suspended (instance paused). The
+ * Jobs UI treats ``paused`` as an active state — a paused job can be
+ * resumed (via its instance) or cancelled, so it must stay visible in
+ * the default list and be selectable as a status filter.
+ */
+export function isPausedStatus(status: JobStatus): boolean {
+  return status === 'paused';
+}
+
+/**
+ * Whether a job is in an active (non-terminal) state the operator may
+ * want to monitor: pending, processing, or paused. Used to decide
+ * whether a status filter selection should keep the row visible.
+ */
+export function isActiveStatus(status: JobStatus): boolean {
+  return status === 'pending' || status === 'processing' || status === 'paused';
+}
+
 export function isJobDeleted(job: Job): boolean {
   return !!job.deleted_at;
 }
@@ -99,6 +118,8 @@ export function getStatusColor(status: JobStatus): string {
       return '#9CA3AF'; // gray-400
     case 'processing':
       return '#3B82F6'; // blue-500
+    case 'paused':
+      return '#F59E0B'; // amber-500 — suspended, non-terminal
     case 'completed':
       return '#22C55E'; // green-500
     case 'failed':

@@ -69,6 +69,7 @@ export class JobCardComponent {
     switch (status) {
       case 'pending': return 'schedule';
       case 'processing': return 'sync';
+      case 'paused': return 'pause_circle';
       case 'completed': return 'check_circle';
       case 'failed': return 'error';
       case 'cancelled': return 'cancel';
@@ -143,7 +144,10 @@ export class JobCardComponent {
 
   canCancel = computed(() => {
     const status = this.job().status;
-    return status === 'pending' || status === 'processing';
+    // A paused job is non-terminal (its instance is suspended); the
+    // operator may still want to cancel it outright, so keep Cancel
+    // available alongside the active processing/pending states.
+    return status === 'pending' || status === 'processing' || status === 'paused';
   });
 
   canRetry = computed(() => this.job().status === 'failed' || this.job().status === 'dead_letter');

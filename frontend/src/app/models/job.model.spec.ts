@@ -18,8 +18,8 @@ import {
 describe('Job Model', () => {
   describe('JobStatus type', () => {
     it('should have all expected status values', () => {
-      const statuses: JobStatus[] = ['pending', 'processing', 'completed', 'failed', 'cancelled', 'dead_letter'];
-      expect(statuses).toHaveLength(6);
+      const statuses: JobStatus[] = ['pending', 'processing', 'paused', 'completed', 'failed', 'cancelled', 'dead_letter'];
+      expect(statuses).toHaveLength(7);
     });
   });
 
@@ -37,6 +37,10 @@ describe('Job Model', () => {
 
     it('should return false for processing status', () => {
       expect(isTerminalStatus('processing')).toBe(false);
+    });
+
+    it('should return false for paused status (suspended, resumable)', () => {
+      expect(isTerminalStatus('paused')).toBe(false);
     });
 
     it('should return true for completed status', () => {
@@ -155,7 +159,7 @@ describe('Job Model', () => {
     });
 
     it('should correctly identify deleted job regardless of status', () => {
-      const statuses: JobStatus[] = ['pending', 'processing', 'completed', 'failed', 'cancelled', 'dead_letter'];
+      const statuses: JobStatus[] = ['pending', 'processing', 'paused', 'completed', 'failed', 'cancelled', 'dead_letter'];
       const deletedAt = '2024-01-15T10:30:00Z';
 
       for (const status of statuses) {
@@ -186,6 +190,10 @@ describe('Job Model', () => {
 
     it('should return blue-500 for processing status', () => {
       expect(getStatusColor('processing')).toBe('#3B82F6');
+    });
+
+    it('should return amber-500 for paused status', () => {
+      expect(getStatusColor('paused')).toBe('#F59E0B');
     });
 
     it('should return green-500 for completed status', () => {

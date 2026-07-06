@@ -270,6 +270,7 @@ export class JobsComponent implements OnInit, OnDestroy {
   readonly statusOptions: { value: JobStatus; label: string }[] = [
     { value: 'pending', label: 'Pending' },
     { value: 'processing', label: 'Processing' },
+    { value: 'paused', label: 'Paused' },
     { value: 'completed', label: 'Completed' },
     { value: 'failed', label: 'Failed' },
     { value: 'cancelled', label: 'Cancelled' },
