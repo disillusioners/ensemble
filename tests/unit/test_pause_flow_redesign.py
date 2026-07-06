@@ -313,8 +313,10 @@ def test_pause_transitions_job_to_paused(
     assert result.updated_ids == [iid]
     job = _read_jobs(engine, iid)
     assert len(job) == 1
-    assert job[0].status == AdmissionState.ACTIVE.value, (
-        f"expected job {jid} to be PAUSED, got {job[0].status}"
+    # Phase 5 (Job-as-Queue-Proxy): JobItem no longer carries a
+    # ``status`` column — the cascade writes ``admission_state``.
+    assert job[0].admission_state == AdmissionState.ACTIVE.value, (
+        f"expected job {jid} to be PAUSED, got {job[0].admission_state}"
     )
 
 
@@ -334,7 +336,9 @@ def test_pause_skips_non_processing_jobs(lifecycle_service, engine, write_guard)
     )
 
     jobs = _read_jobs(engine, iid)
-    statuses = sorted(j.status for j in jobs)
+    # Phase 5: JobItem lifecycle is tracked via ``admission_state``
+    # (``status`` was removed in the Job-as-Queue-Proxy refactor).
+    statuses = sorted(j.admission_state for j in jobs)
     # COMPLETED/FAILED preserved; PENDING preserved (only PROCESSING → PAUSED)
     assert statuses == sorted([
         AdmissionState.DONE.value,
