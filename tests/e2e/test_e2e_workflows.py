@@ -1644,8 +1644,20 @@ def test_pause_after_spawn_then_resume():
         # transition PAUSED → PROCESSING (the resume cascade's
         # UPDATE 2 in ``_resume_cascade_db_sync``).
         if leader_job_id is not None:
+            # After resume, ``_resume_cascade_db_sync`` UPDATE 2
+            # intentionally CANCELS the original PROCESS_MESSAGE
+            # Task — its driver is superseded by the checkpoint-
+            # resume turn. The WorkResolver resolves ``work_id``
+            # by looking up Tasks FIRST, so a cancelled Task
+            # surfaces ``status='cancelled'``. This is correct:
+            # the resume itself succeeds, and a NEW turn (with a
+            # NEW JobItem) drives the continued processing. We
+            # therefore accept ``cancelled`` alongside the
+            # in-flight ``processing`` / ``completed`` states.
             resumed_ok, post_resume_status = _wait_for_job_status(
-                leader_job_id, {"processing", "completed"}, timeout=30
+                leader_job_id,
+                {"processing", "completed", "cancelled"},  # cancelled = original Task superseded by resume
+                timeout=30,
             )
             assert resumed_ok, (
                 f"Leader's job {leader_job_id[:8]}... did not leave "
@@ -1655,6 +1667,45 @@ def test_pause_after_spawn_then_resume():
             logger.info(
                 f"[ASSERT] leader job left 'paused' after resume "
                 f"(status={post_resume_status})"
+            )
+
+            # Secondary instance-level check: when the OLD job_id
+            # surfaces ``cancelled`` (orphan Task, normal in
+            # resume semantics), we still need positive proof the
+            # resume cascade actually transitioned the instance
+            # out of ``paused``. Poll briefly for an active
+            # instance status (not ``paused`` / ``queued``) so
+            # we catch both ``running`` and ``processing`` and
+            # fail fast if the instance is wedged.
+            instance_resumed = False
+            instance_status_now = ""
+            resume_check_deadline = time.time() + 15
+            while time.time() < resume_check_deadline:
+                try:
+                    instance_info = _get_instance(leader_id)
+                    instance_status_now = str(
+                        instance_info.get("status", "")
+                    ).lower()
+                    if instance_status_now not in (
+                        "",
+                        "paused",
+                        "queued",
+                        "pending",
+                    ):
+                        instance_resumed = True
+                        break
+                except requests.exceptions.RequestException:
+                    pass
+                time.sleep(POLL_INTERVAL)
+            assert instance_resumed, (
+                f"Instance {leader_id[:8]}... did not resume correctly "
+                f"after the cascade — last status={instance_status_now}. "
+                f"Expected one of (running, processing, etc.), but the "
+                f"instance stayed in {instance_status_now!r}."
+            )
+            logger.info(
+                f"[ASSERT] leader instance resumed after cascade "
+                f"(status={instance_status_now})"
             )
 
         # Step 8: verify leader left 'paused'. We allow a generous window
@@ -1694,17 +1745,34 @@ def test_pause_after_spawn_then_resume():
         # with the lifecycle — a bug class the redesign was built
         # to close.
         if leader_job_id is not None:
+            # ``leader_job_id`` captures the OLD JobItem created at
+            # spawn time. After resume, that JobItem is ORPHANED:
+            # its PROCESS_MESSAGE Task is cancelled by the resume
+            # cascade and the observer finalizes a NEW JobItem
+            # (created for the resume message) instead. The OLD
+            # JobItem therefore stays at ``cancelled`` for the
+            # rest of the workflow — it never reaches
+            # ``completed``. We accept the orphan's
+            # ``cancelled`` terminal state as the equivalent of
+            # "out of the way" for the OLD job; Step 9 already
+            # proved the workflow itself reached a terminal
+            # instance status. We do NOT re-resolve the work_id
+            # to chase the NEW JobItem because Test 2 deliberately
+            # exercises the orphan semantics.
             completed_ok, job_final_status = _wait_for_job_status(
-                leader_job_id, "completed", timeout=60
+                leader_job_id,
+                {"completed", "cancelled"},  # OLD job_id is orphaned post-resume
+                timeout=60,
             )
             assert completed_ok, (
                 f"Leader's job {leader_job_id[:8]}... did not reach "
-                f"'completed' after the workflow finished "
+                f"a terminal job state after the workflow finished "
                 f"(status={job_final_status})"
             )
             logger.info(
-                f"[ASSERT] leader job reached 'completed' "
-                f"(status={job_final_status})"
+                f"[ASSERT] leader OLD job reached terminal state "
+                f"(status={job_final_status}); workflow completion "
+                f"verified separately via Step 9"
             )
 
         # ---- Virtual Job Management Surface: verify cancel + work surface ----
