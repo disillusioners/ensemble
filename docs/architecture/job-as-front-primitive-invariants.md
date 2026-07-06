@@ -7,7 +7,7 @@
 > the `job_queue_items_active_lock_guard` constraint trigger and the resulting dev-vs-prod
 > blind spot. It does **not** re-document the broader Job-as-Queue-Proxy invariants covered in
 > `job-as-queue-proxy-invariants.md` (read that first).
-> **Companion plan**: `.agents/shared/planning/job-as-front-primitive-full/plan.md`
+> **Companion plan**: `.agents/shared/planning/archive/job-as-front-primitive/plan-overview.md`
 > **Source-of-truth for the trigger body**: `daemon/manager.py:2146–2151`.
 
 ---
