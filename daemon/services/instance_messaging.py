@@ -1303,6 +1303,7 @@ class InstanceMessagingService:
                     job_type="message",
                     instance_id=instance_id,
                     job_id=job_id,
+                    max_retries=0,  # message Jobs do not retry — observer finalizes them
                 )
 
                 # Eagerly flip the mirror queued→active BEFORE stamping

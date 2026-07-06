@@ -182,6 +182,7 @@ class JobRepository:
         job_type: str = "task",
         instance_id: str | None = None,
         job_id: str | None = None,
+        max_retries: int | None = None,
     ) -> JobItem:
         """Create a new job queue item.
 
@@ -212,6 +213,12 @@ class JobRepository:
                 code that needs a stable cross-system handle should
                 always pass an explicit value rather than relying on
                 the implicit default.
+            max_retries: Maximum retry attempts for this JobItem. ``None``
+                (default) defers to the queue-level / config fallback chain
+                (``JobRetryEngine.get_max_retries``). The
+                ``enqueue_message_job`` POC path passes ``0`` so message-
+                type JobItems are not picked up by the retry sweeper
+                (they are finalized via the observer instead).
 
         Returns:
             Created JobItem object.
@@ -245,6 +252,7 @@ class JobRepository:
                 idempotency_key=idempotency_key,
                 job_type=job_type,
                 instance_id=instance_id,
+                max_retries=max_retries,
             )
 
             db_session.add(job)
