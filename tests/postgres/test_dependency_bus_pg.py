@@ -34,6 +34,7 @@ from daemon.repositories.dependency_bus import (
     DependencyWatcherRepository,
     DependencyWatcherState,
 )
+from daemon.repositories.task.models import Task, TaskStatus
 from daemon.services.dependency_bus import (
     DependencyBus,
     FollowUp,
@@ -156,15 +157,35 @@ async def test_pg_concurrent_emit_atomicity(bus):
 
 
 @pytest.mark.asyncio
-async def test_pg_restart_survival(bus, bus_repo):
-    """After stop+new bus+start on same engine, the watcher still fires."""
-    await bus.watch("pg-task-restart", make_fu(target_id="parent-pg-restart"))
+async def test_pg_restart_survival(bus, bus_repo, pg_engine):
+    """After stop+new bus+start on same engine, the watcher still fires.
+
+    Insert a real ``Task`` row first so the bus's startup orphan sweep
+    (see :meth:`DependencyBus._sweep_orphan_watchers`) sees a valid
+    source_task_id and preserves the PENDING watcher across the restart.
+    The orphan sweep filters on ``task.id CAST AS TEXT``, so we pin the
+    task id to ``1`` and use ``str(task.id)`` as the source_task_id.
+    """
+    with Session(pg_engine) as session:
+        task = Task(
+            id=1,
+            work_id="pg-task-restart-work",
+            instance_id="pg-restart-instance",
+            status=TaskStatus.PENDING.value,
+        )
+        session.add(task)
+        session.commit()
+        # Capture id while the session is still open to avoid a
+        # DetachedInstanceError on access after ``with`` exit.
+        task_id = task.id
+
+    await bus.watch(str(task_id), make_fu(target_id="parent-pg-restart"))
     await bus.stop()
 
     new_bus = fresh_bus(bus_repo)
     await new_bus.start()
     try:
-        fired = await new_bus.emit_terminal("pg-task-restart", make_outcome())
+        fired = await new_bus.emit_terminal(str(task_id), make_outcome())
         assert len(fired) == 1
         assert fired[0].target_instance_id == "parent-pg-restart"
     finally:
