@@ -2852,6 +2852,66 @@ class InstanceManager:
             is_deferred=is_deferred,
         )
 
+    async def _enqueue_message_with_flag(
+        self,
+        instance_id: str,
+        message: str,
+        source: str = "api",
+        priority: int = 1,
+        images: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> AsyncMessageResult:
+        """Centralized flag check so public entry points don't repeat it.
+
+        When ``message_jobs_enabled`` is ON, dispatches via
+        :meth:`enqueue_message_job` which creates a ``JobItem`` mirror
+        alongside the ``Task`` row. When OFF, falls back to the raw
+        :meth:`enqueue_message` (Task-only) path so behavior is
+        byte-identical to the pre-Phase-3 baseline.
+
+        Used by all public/external entry points (HTTP POST /messages,
+        external source chokepoint, agent send_message tool, job_continue
+        tool, scheduler, PAUSED cascade-resume). Internal callers
+        (reports, nudges, ``[JOB_EVENT]`` delivery, compaction,
+        ``invoke_and_wait``) continue calling :meth:`enqueue_message`
+        directly and intentionally stay on the Task-only path.
+
+        Extra kwargs (e.g. ``is_deferred``) are forwarded to whichever
+        underlying method is selected.
+
+        Args:
+            instance_id: Target instance ID.
+            message: User content.
+            source: Source tag (e.g. ``"api"``, ``"telegram:user:1"``).
+            priority: 0=system, 1=user.
+            images: Optional base64 images for vision messages.
+            metadata: Optional metadata dict.
+            **kwargs: Forwarded to the selected enqueue method.
+
+        Returns:
+            ``AsyncMessageResult`` from the selected enqueue path.
+        """
+        if self.config.job_system.message_jobs_enabled:
+            return await self.enqueue_message_job(
+                instance_id=instance_id,
+                message=message,
+                source=source,
+                priority=priority,
+                images=images,
+                metadata=metadata,
+                **kwargs,
+            )
+        return await self.enqueue_message(
+            instance_id=instance_id,
+            message=message,
+            source=source,
+            priority=priority,
+            images=images,
+            metadata=metadata,
+            **kwargs,
+        )
+
     async def _process_message_with_tracking(
         self, 
         instance_id: str, 
@@ -3385,10 +3445,16 @@ class InstanceManager:
 
             logger.info(f"No PAUSED/RUNNING PROCESS_MESSAGE task for instance {instance_id[:8]}... (child instance), enqueuing via WorkerPool")
 
-            # Enqueue a message via WorkerPool path with resume_mode metadata
-            logger.info(f"[RESUME] instance={instance_id[:8]} branch=child, enqueuing message={repr(message)}, silent={silent}")
+            # Enqueue a message via WorkerPool path with resume_mode metadata.
+            # Phase 3 (2026-07-06): route through the flag-checked
+            # dispatcher so the JobItem mirror is created when
+            # ``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED`` is ON. Flag
+            # OFF preserves the pre-Phase-3 Task-only path. The
+            # ``source="cascade_resume"`` tag and ``resume_mode``
+            # metadata MUST survive the round-trip so downstream
+            # observers can distinguish cascade-resume traffic.
             try:
-                result = await self.enqueue_message(
+                result = await self._enqueue_message_with_flag(
                     instance_id=instance_id,
                     message=message,
                     source="cascade_resume",

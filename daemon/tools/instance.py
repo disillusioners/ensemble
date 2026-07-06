@@ -699,8 +699,11 @@ def create_instance_tools(manager: "InstanceManager", current_instance_id: str, 
                 "Please wait for the current message to complete before sending another."
             )
 
-        # Enqueue the message via worker pool (creates MessageQueue + Task atomically)
-        result = await manager.enqueue_message(
+        # Enqueue the message via worker pool (creates MessageQueue + Task atomically).
+        # Phase 3: route through the flag-checked dispatcher so the
+        # JobItem mirror is created when ``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``
+        # is ON. Flag OFF preserves the pre-Phase-3 Task-only path.
+        result = await manager._enqueue_message_with_flag(
             instance_id=instance_id,
             message=message,
             source=f"internal_agent:{current_instance_id}"

@@ -125,31 +125,23 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
         }
     
     # --- NORMAL PATH: Not paused, enqueue message ---
-    # POC feature flag (``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``):
-    # when ON, route through ``enqueue_message_job`` so the JobItem
-    # mirror is created alongside the Task row (WorkResolver facade
-    # reads both sides of the union). When OFF, the existing D13
-    # flow writes Task+MessageQueue only — the frozen baseline.
-    # Both paths return an ``AsyncMessageResult`` with the same
-    # shape, so callers see no API-level difference.
-    use_message_jobs = bool(
-        getattr(manager.config.job_system, "message_jobs_enabled", False)
-    )
+    # Phase 3: the POC feature-flag check
+    # (``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``) lives in the
+    # centralized :meth:`InstanceManager._enqueue_message_with_flag`
+    # helper. When ON, the helper routes through
+    # :meth:`enqueue_message_job` so the JobItem mirror is created
+    # alongside the Task row (WorkResolver facade reads both sides
+    # of the union). When OFF, the existing D13 flow writes
+    # Task+MessageQueue only — the frozen baseline. Both paths return
+    # an ``AsyncMessageResult`` with the same shape, so callers see
+    # no API-level difference.
     try:
-        if use_message_jobs:
-            result = await manager.enqueue_message_job(
-                instance_id=instance_id,
-                message=message.content,
-                source="api",
-                images=message.images,
-            )
-        else:
-            result = await manager.enqueue_message(
-                instance_id=instance_id,
-                message=message.content,
-                source="api",
-                images=message.images,
-            )
+        result = await manager._enqueue_message_with_flag(
+            instance_id=instance_id,
+            message=message.content,
+            source="api",
+            images=message.images,
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -168,6 +160,11 @@ async def send_message(instance_id: str, message: MessageCreate, request: Reques
         tool_calls=None,
         images=None,  # Images are stored in message_queue, not in response
         created_at=datetime.now(timezone.utc),
+        # Phase 3: propagate the dispatch work unit id so callers can track
+        # the job through the WorkResolver facade. ``AsyncMessageResult.job_id``
+        # is set to the JobItem mirror (when the flag is ON) or to the shared
+        # Task work_id (flag OFF). Both are opaque UUID4 strings.
+        job_id=result.job_id,
     ).model_dump()
     
     response_data["auto_resumed"] = False

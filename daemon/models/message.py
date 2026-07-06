@@ -73,6 +73,15 @@ class MessageResponse(BaseModel):
     tool_calls: list[dict[str, Any]] | None = Field(default=None, description="Tool calls made by the agent")
     images: list[str] | None = Field(default=None, description="Images in the message (for vision messages)")
     created_at: datetime = Field(..., description="Message creation timestamp")
+    job_id: str | None = Field(
+        default=None,
+        description=(
+            "Phase 3: identifier for the dispatch work unit (JobItem when "
+            "ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED is ON; otherwise the "
+            "Task work_id). Allows callers to track the job through the "
+            "WorkResolver facade."
+        ),
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -84,7 +93,8 @@ class MessageResponse(BaseModel):
                 "thinking_extracted": None,
                 "tool_calls": None,
                 "images": None,
-                "created_at": "2024-01-01T00:00:00Z"
+                "created_at": "2024-01-01T00:00:00Z",
+                "job_id": "11111111-2222-3333-4444-555555555555",
             }
         }
     )

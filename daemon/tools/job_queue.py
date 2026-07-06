@@ -738,8 +738,11 @@ def create_job_tools(
                 if has_inflight:
                     return {"error": f"Instance {instance_id} has a task still in flight — wait for it to complete first"}
 
-            # 6. Send message via the unified dispatcher (same as FE "send message")
-            result = await manager.enqueue_message(
+            # 6. Send message via the flag-checked dispatcher (Phase 3) — creates
+            # a JobItem mirror when ``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED`` is ON
+            # so ``new_job_id`` below is a real JobItem, not just a Task.
+            # Flag OFF preserves the pre-Phase-3 Task-only behavior.
+            result = await manager._enqueue_message_with_flag(
                 instance_id=instance_id,
                 message=message,
                 source=f"agent:{caller_agent_id}" if caller_agent_id else "api",

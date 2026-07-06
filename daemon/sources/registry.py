@@ -400,7 +400,8 @@ class SourceRegistry:
                 except Exception as e:
                     logger.error(f"Failed to disable scheduler {source_id}: {e}")
             
-            # Pass JobQueueService, SourceRepository, and InstanceRepository for queue routing and instance mode (Tasks 5.4 & 6)
+            # Pass JobQueueService, SourceRepository, InstanceRepository, and InstanceManager (Phase 3)
+            # for queue routing, instance mode, and the message_jobs_enabled inline dispatch path.
             adapter = SchedulerAdapter(
                 config,
                 on_message,
@@ -409,6 +410,7 @@ class SourceRegistry:
                 job_queue_service=self._job_queue_service,
                 source_repo=self._source_repo,
                 instance_repo=self._instance_repo,
+                manager=self._manager,
             )
             logger.info(f"SchedulerAdapter created: type={adapter._schedule_type}, agent={adapter._agent}")
             return adapter
@@ -818,8 +820,10 @@ class SourceRegistry:
             # Format source as "{source_id}:{external_user_id}"
             source = f"{source_id}:{msg.external_user_id}"
             
-            # Queue the message for processing with correct parameters
-            await self._manager.enqueue_message(
+            # Phase 3: route through the flag-checked dispatcher so the
+            # JobItem mirror is created when ``ENSEMBLE_JOB_SYSTEM_MESSAGE_JOBS_ENABLED``
+            # is ON. Flag OFF preserves the pre-Phase-3 Task-only path.
+            await self._manager._enqueue_message_with_flag(
                 instance_id=instance_id,
                 message=msg.content,
                 source=source,
